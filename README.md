@@ -17,3 +17,28 @@ The goal for this pattern is to:
 * Use a GitOps approach to manage hybrid and multi-cloud deployments across both public and private clouds.
 * Enable cross-cluster governance and application lifecycle management.
 * Securely manage secrets across the deployment.
+
+
+## Deployment
+
+The steps are the next:
+
+* Copy the secrets:
+
+    ```bash
+    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
+    ```
+
+* Install the pattern:
+
+    ```bash
+    ./pattern.sh make install
+    ```
+
+* If secrets are added/modified after installation then:
+
+    ```bash
+    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
+    ./pattern.sh make load-secrets
+    ```
+
