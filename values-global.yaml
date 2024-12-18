@@ -5,8 +5,14 @@ global:
     useCSV: false
     syncPolicy: Automatic
     installPlanApproval: Automatic
+    #autoApproveManualInstallPlans: true
 main:
+  #clusterGroupName: hub
+  #multiSourceConfig:
+  #  enabled: true
+  #  clusterGroupChartVersion: "0.9.*"
   clusterGroupName: hub
   multiSourceConfig:
     enabled: true
-    clusterGroupChartVersion: "0.9.*"
+    clusterGroupGitRepoUrl: https://github.com/mbaldessari/clustergroup-chart
+    clusterGroupChartGitRevision: backstage
