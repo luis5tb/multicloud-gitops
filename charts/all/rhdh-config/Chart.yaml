@@ -1,0 +1,6 @@
+apiVersion: v2
+description: A Helm chart to configure RHDH CR
+keywords:
+- pattern
+name: rhdh-config
+version: 0.0.1
