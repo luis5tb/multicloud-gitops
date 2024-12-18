@@ -13,7 +13,7 @@ clusterGroup:
     - vault
     - golang-external-secrets
     - minio-ns
-    - ds-project-ns:
+    - demo-ds-project:
         annotations:
           openshift.io/description: 'Demo DS Workspace'
           openshift.io/display-name: 'Demo DS Workspace'
@@ -55,7 +55,7 @@ clusterGroup:
     - hub
     - openshift-ai
     - s3
-    - ds-project
+    - ds-projects
   applications:
     vault:
       name: vault
@@ -91,6 +91,10 @@ clusterGroup:
       path: charts/all/minio
     ds-project:
       name: ds-project
-      namespace: ds-project-ns
-      project: ds-project
+      namespace: demo-ds-project
+      project: ds-projects
       path: charts/all/ds-project
+
+vars:
+  minio:
+    bucket_name: localdocs
