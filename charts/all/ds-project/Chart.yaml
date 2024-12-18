@@ -1,0 +1,6 @@
+apiVersion: v2
+description: A Helm chart to deploy a OpenShift AI Data Science project
+keywords:
+- pattern
+name: ds-project
+version: 0.0.1

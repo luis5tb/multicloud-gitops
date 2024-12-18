@@ -1,0 +1,7 @@
+---
+image:
+  name: quay.io/minio/minio:RELEASE.2024-03-26T22-10-45Z
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore

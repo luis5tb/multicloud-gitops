@@ -1,0 +1,6 @@
+apiVersion: v2
+description: A Helm chart to configure RHOAI CR
+keywords:
+- pattern
+name: rhoai-config
+version: 0.0.1

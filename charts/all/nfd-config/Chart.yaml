@@ -1,0 +1,6 @@
+apiVersion: v2
+description: A Helm chart to configure a Node Feature Discovery CR
+keywords:
+- pattern
+name: nfd-config
+version: 0.0.1

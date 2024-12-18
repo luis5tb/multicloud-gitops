@@ -17,3 +17,35 @@ The goal for this pattern is to:
 * Use a GitOps approach to manage hybrid and multi-cloud deployments across both public and private clouds.
 * Enable cross-cluster governance and application lifecycle management.
 * Securely manage secrets across the deployment.
+
+
+## Deployment
+
+The steps are the next:
+
+* Copy the secrets:
+
+    ```bash
+    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-rhdh-pattern-demo.yaml
+    ```
+
+* Install the pattern:
+
+    ```bash
+    ./pattern.sh make install
+    ```
+
+* If secrets are added/modified after installation then:
+
+    ```bash
+    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-rhdh-pattern-demo.yaml
+    ./pattern.sh make load-secrets
+    ```
+
+* If your admin user do not have access to the Cluster ArgoCD, then ensure that
+  the ArgoCD object have `default_policy: role:admin`, or configure the specific
+  group policies as needed:
+
+    ```bash
+    oc -n openshift-gitops edit argocd  openshift-gitops
+    ```
