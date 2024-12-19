@@ -11,10 +11,10 @@ data:
 #      github:
 #        - host: github.com
 #          token: {YOUR ACCESS_TOKEN}
-#    auth:
-#      allowGuestAccess: true
-#      environment: development
-#      providers:
+    auth:
+      allowGuestAccess: true
+      environment: development
+      providers: {}
 #        github:
 #          development:
 #            clientId: {YOUR CLIENT_ID}

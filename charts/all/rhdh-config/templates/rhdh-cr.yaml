@@ -8,6 +8,7 @@ spec:
       mountPath: /opt/app-root/src
       configMaps:
         - name: app-config-rhdh
+    dynamicPluginsConfigMapName: dynamic-plugins-rhdh
     extraFiles:
       mountPath: /opt/app-root/src
     replicas: 1
