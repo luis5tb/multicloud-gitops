@@ -4,13 +4,13 @@ metadata:
   name: app-config-rhdh
 data:
   app-config-rhdh.yaml: |
-    app:
-      title: My Red Hat Developer Hub
-      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
     auth:
       allowGuestAccess: true
       environment: development
-      providers: {}
+#    app:
+#      title: My Red Hat Developer Hub
+#      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
+#      providers: {}
 #    integrations:
 #      github:
 #        - host: github.com
