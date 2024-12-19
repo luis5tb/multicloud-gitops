@@ -7,14 +7,14 @@ data:
     app:
       title: My Red Hat Developer Hub
       baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
-#    integrations:
-#      github:
-#        - host: github.com
-#          token: {YOUR ACCESS_TOKEN}
     auth:
       allowGuestAccess: true
       environment: development
       providers: {}
+#    integrations:
+#      github:
+#        - host: github.com
+#          token: {YOUR ACCESS_TOKEN}
 #        github:
 #          development:
 #            clientId: {YOUR CLIENT_ID}
