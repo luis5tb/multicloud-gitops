@@ -1,0 +1,11 @@
+---
+apiVersion: console.openshift.io/v1
+kind: ConsoleLink
+metadata:
+  name: developerhub-link
+spec:
+  applicationMenu:
+    section: DeveloperHub
+  href: 'https://backstate-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}'
+  location: ApplicationMenu
+  text: 'DeveloperHub with AI templates'
