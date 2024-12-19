@@ -26,7 +26,7 @@ The steps are the next:
 * Copy the secrets:
 
     ```bash
-    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-rhdh-pattern-demo.yaml
+    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
     ```
 
 * Install the pattern:
@@ -38,7 +38,7 @@ The steps are the next:
 * If secrets are added/modified after installation then:
 
     ```bash
-    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-rhdh-pattern-demo.yaml
+    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
     ./pattern.sh make load-secrets
     ```
 
