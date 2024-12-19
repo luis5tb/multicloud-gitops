@@ -16,3 +16,13 @@ spec:
       enabled: true
   database:
     enableLocalDb: true
+  deployment:
+    patch:
+      spec:
+        template:
+          spec:
+            volumes:
+              - $patch: replace
+                name: dynamic-plugins-root
+                persistentVolumeClaim:
+                  claimName: dynamic-plugins-root

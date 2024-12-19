@@ -5,8 +5,10 @@ metadata:
 data:
   app-config-rhdh.yaml: |
     auth:
-      allowGuestAccess: true
       environment: development
+      providers:
+        guest:
+          dangerouslyAllowOutsideDevelopment: true
 #    app:
 #      title: My Red Hat Developer Hub
 #      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
