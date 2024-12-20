@@ -9,11 +9,8 @@ data:
       baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
     backend:
       auth:
-        externalAccess:
-            - type: legacy
-              options:
-                subject: legacy-default-config
-                secret: "${BACKEND_SECRET}"
+        keys:
+          - secret: "${BACKEND_SECRET}"
       baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
       cors:
         origin: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
