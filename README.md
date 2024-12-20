@@ -49,3 +49,11 @@ The steps are the next:
     ```bash
     oc -n openshift-gitops edit argocd  openshift-gitops
     ```
+
+
+* At the Red Hat Developerhub, click on the Create, register an existing
+  component and use the next url:
+
+    ```
+    https://github.com/redhat-ai-dev/ai-lab-template/blob/main/all.yaml
+    ```
