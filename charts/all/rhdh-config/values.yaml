@@ -1,3 +1,7 @@
 ---
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+
 developerhub:
   namespace: developerhub-ns

@@ -17,7 +17,6 @@ data:
       baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
       cors:
         origin: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
-
 #    auth:
 #      environment: development
 #      providers:
