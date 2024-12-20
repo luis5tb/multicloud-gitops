@@ -4,15 +4,25 @@ metadata:
   name: app-config-rhdh
 data:
   app-config-rhdh.yaml: |
-    auth:
-      environment: development
-      providers:
-        guest:
-          dangerouslyAllowOutsideDevelopment: true
     app:
-      title: My Red Hat Developer Hub
+      title: Red Hat Developer Hub
       baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
-#      providers: {}
+    backend:
+      auth:
+        externalAccess:
+            - type: legacy
+              options:
+                subject: legacy-default-config
+                secret: "${BACKEND_SECRET}"
+      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
+      cors:
+        origin: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.vars.developerhub.clustername }}
+
+#    auth:
+#      environment: development
+#      providers:
+#        guest:
+#          dangerouslyAllowOutsideDevelopment: true
 #    integrations:
 #      github:
 #        - host: github.com
