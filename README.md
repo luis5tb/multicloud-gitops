@@ -56,4 +56,6 @@ The steps are the next:
 
     ```
     https://github.com/redhat-ai-dev/ai-lab-template/blob/main/all.yaml
+    https://github.com/redhat-ai-dev/model-catalog-example/blob/v0.1/ollama-model-service/catalog-info.yaml
+    https://github.com/redhat-ai-dev/model-catalog-example/blob/v0.1/developer-model-service/catalog-info.yaml
     ```
