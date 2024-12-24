@@ -35,7 +35,7 @@ data:
       appLocatorMethods:
         - type: 'config'
           instances:
-            - name: hub
+            - name: default
               url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .Values.vars.developerhub.clustername }}
               username: ${ARGOCD_USERNAME}
               password: ${ARGOCD_PASSWORD}
