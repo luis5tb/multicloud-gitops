@@ -12,6 +12,7 @@ data:
       - package: './dynamic-plugins/dist/roadiehq-backstage-plugin-argo-cd'
         disabled: false
       - package: './dynamic-plugins/dist/roadiehq-backstage-plugin-argo-cd-backend-dynamic'
+        # documentation: https://docs.redhat.com/en/documentation/red_hat_developer_hub/1.2/html/configuring_plugins_in_red_hat_developer_hub/rhdh-installing-dynamic-plugins#enabling-argo-cd-plugin
         disabled: false
-      - package: './dynamic-plugins/dist/roadiehq-backstage-plugin-argo-cd-backend-dynamic'
+      - package: './dynamic-plugins/dist/roadiehq-scaffolder-backend-argocd-dynamic'
         disabled: false
