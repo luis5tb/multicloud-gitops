@@ -34,6 +34,10 @@ clusterGroup:
       name: servicemeshoperator
       namespace: openshift-operators
       channel: stable
+    pipelines:
+      name: openshift-pipelines-operator-rh
+      namespace: openshift-operators
+      channel: latest
     nfd:
       name: nfd
       namespace: openshift-nfd
