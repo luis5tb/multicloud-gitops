@@ -38,6 +38,10 @@ clusterGroup:
       name: openshift-pipelines-operator-rh
       namespace: openshift-operators
       channel: latest
+    devspaces:
+      name: devspaces
+      namespace: openshift-operators
+      channel: stable
     nfd:
       name: nfd
       namespace: openshift-nfd
