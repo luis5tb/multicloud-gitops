@@ -1,0 +1,6 @@
+apiVersion: v2
+description: A Helm chart to configure DevSpaces
+keywords:
+- pattern
+name: devspaces-config
+version: 0.0.1

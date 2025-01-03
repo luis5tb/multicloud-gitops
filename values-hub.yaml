@@ -74,6 +74,7 @@ clusterGroup:
     - s3
     - ds-projects
     - developerhub
+    - devspaces
   applications:
     vault:
       name: vault
@@ -117,10 +118,15 @@ clusterGroup:
       namespace: developerhub-ns
       project: developerhub
       path: charts/all/rhdh-config
+    devspaces:
+      name: devspaces-config
+      namespace: openshift-operators
+      project: devspaces
+      path: charts/all/devspaces-config
 
 vars:
   minio:
     bucket_name: localdocs
 
   developerhub:
-    clustername: cluster-jfhfr.jfhfr.sandbox413.opentlc.com
+    clustername: cluster-clws6.clws6.sandbox2418.opentlc.com
