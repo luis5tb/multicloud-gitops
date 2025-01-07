@@ -47,10 +47,12 @@ data:
               password: ${ARGOCD_PASSWORD}
     catalog:
       locations:
+        #- type: url
+        #  target: 'https://github.com/redhat-ai-dev/ai-lab-template/blob/release-v0.9.x/all.yaml'
+        #- type: url
+        #  target: 'https://github.com/WindTurbineInc/software-templates/blob/master/scaffolder-templates/wheres-teddy/template.yaml'
         - type: url
-          target: 'https://github.com/redhat-ai-dev/ai-lab-template/blob/release-v0.9.x/all.yaml'
-        - type: url
-          target: 'https://github.com/WindTurbineInc/software-templates/blob/master/scaffolder-templates/wheres-teddy/template.yaml'
+          target: 'https://github.com/luis5tb/developerhub-agentic-demo/blob/main/template.yaml'
         - type: url
           target: 'https://github.com/redhat-ai-dev/model-catalog-example/blob/v0.1/ollama-model-service/catalog-info.yaml'
         - type: url
