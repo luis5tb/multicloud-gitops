@@ -16,3 +16,11 @@ data:
         disabled: false
       - package: './dynamic-plugins/dist/roadiehq-scaffolder-backend-argocd-dynamic'
         disabled: false
+      - package: './dynamic-plugins/dist/backstage-plugin-kubernetes-backend-dynamic'
+        disabled: false
+      - package: './dynamic-plugins/dist/backstage-plugin-kubernetes'
+        disabled: false
+      - package: './dynamic-plugins/dist/backstage-community-plugin-topology'
+        disabled: false
+      - package: './dynamic-plugins/dist/backstage-community-plugin-tekton'
+        disabled: false

@@ -45,6 +45,27 @@ data:
               url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .Values.vars.developerhub.clustername }}
               username: ${ARGOCD_USERNAME}
               password: ${ARGOCD_PASSWORD}
+    kubernetes:
+      serviceLocatorMethod:
+        type: 'multiTenant'
+      clusterLocatorMethods:
+        - clusters:
+            - authProvider: serviceAccount
+              name: ocp-cluster
+              serviceAccountToken: ${RHDH_TEKTON_SERVICE_ACCOUNT_TOKEN}
+              skipTLSVerify: true
+              url: https://api.{{ .Values.vars.developerhub.clustername }}:6443
+          type: config
+      customResources:
+        - apiVersion: v1
+          group: tekton.dev
+          plural: pipelineruns
+        - apiVersion: v1
+          group: tekton.dev
+          plural: taskruns
+        - apiVersion: v1
+          group: route.openshift.io
+          plural: routes
     catalog:
       locations:
         #- type: url
