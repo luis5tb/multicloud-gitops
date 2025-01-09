@@ -123,6 +123,9 @@ clusterGroup:
       namespace: openshift-operators
       project: devspaces
       path: charts/all/devspaces-config
+  argocd:
+    resourceTrackingMethod: annotations
+    resourceExclusions: null
 
 vars:
   minio:
