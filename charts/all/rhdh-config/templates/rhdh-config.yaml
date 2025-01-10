@@ -6,14 +6,14 @@ data:
   app-config-rhdh.yaml: |
     app:
       title: Red Hat Developer Hub
-      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .global.clusterDomain }}
+      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.global.clusterDomain }}
     backend:
       auth:
         keys:
           - secret: "${BACKEND_SECRET}"
-      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .global.clusterDomain }}
+      baseUrl: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.global.clusterDomain }}
       cors:
-        origin: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .global.clusterDomain }}
+        origin: https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.global.clusterDomain }}
     auth:
       environment: development
       allowGuestAccess: true
@@ -36,13 +36,13 @@ data:
         - type: 'config'
           instances:
             - name: default
-              url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .global.clusterDomain }}
+              url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .Values.global.clusterDomain }}
               username: ${ARGOCD_USERNAME}
               password: ${ARGOCD_PASSWORD}
         - type: 'config'
           instances:
             - name: main
-              url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .global.clusterDomain }}
+              url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .Values.global.clusterDomain }}
               username: ${ARGOCD_USERNAME}
               password: ${ARGOCD_PASSWORD}
     kubernetes:
@@ -51,10 +51,10 @@ data:
       clusterLocatorMethods:
         - clusters:
             - authProvider: serviceAccount
-              name: api.{{ .global.clusterDomain }}
+              name: api.{{ .Values.global.clusterDomain }}
               serviceAccountToken: ${RHDH_TEKTON_SERVICE_ACCOUNT_TOKEN}
               skipTLSVerify: true
-              url: https://api.{{ .global.clusterDomain }}:6443
+              url: https://api.{{ .Values.global.clusterDomain }}:6443
           type: config
       customResources:
         - apiVersion: v1

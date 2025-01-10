@@ -6,6 +6,6 @@ metadata:
 spec:
   applicationMenu:
     section: DeveloperHub
-  href: 'https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .global.clusterDomain }}'
+  href: 'https://backstage-developer-hub-{{ .Values.developerhub.namespace }}.apps.{{ .Values.global.clusterDomain }}'
   location: ApplicationMenu
   text: 'DeveloperHub with AI templates'
