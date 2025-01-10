@@ -124,7 +124,7 @@ clusterGroup:
       project: devspaces
       path: charts/all/devspaces-config
   argoCD:
-    resourceTrackingMethod: annotations
+    resourceTrackingMethod: annotation
     resourceExclusions: null
 
 vars:
