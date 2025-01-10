@@ -51,7 +51,7 @@ data:
       clusterLocatorMethods:
         - clusters:
             - authProvider: serviceAccount
-              name: ocp-cluster
+              name: api.{{ .Values.vars.developerhub.clustername }}
               serviceAccountToken: ${RHDH_TEKTON_SERVICE_ACCOUNT_TOKEN}
               skipTLSVerify: true
               url: https://api.{{ .Values.vars.developerhub.clustername }}:6443
