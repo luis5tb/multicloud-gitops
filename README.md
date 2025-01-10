@@ -42,14 +42,9 @@ The steps are the next:
     ./pattern.sh make load-secrets
     ```
 
-* Create a secret for RHDH and added to the values-secret.yaml.template and
-  reload it
+* Update the secrets to include the GitHub credentials and reload it:
 
   ```bash
-  $ oc -n developerhub-ns create token default
-
-  # Copy output to values-secret.yaml.template
-  # Also update the other values accordingly, you can get ARGOCD_PASSWORD from hub-gitops-cluster secret at namespace multicloud-gitops-hub
   $ cat values-secret.yaml.template
     - name: rhdh-keys
       fields:
@@ -61,12 +56,6 @@ The steps are the next:
         value: XXX
       - name: GH_CLIENT_SECRET
         value: XXX
-      - name: ARGOCD_USERNAME
-        value: admin
-      - name: ARGOCD_PASSWORD
-        value: XXX
-      - name: RHDH_TEKTON_SERVICE_ACCOUNT_TOKEN
-        value: XXXX
 
   # Regenerate the vault with the secrets
     cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml

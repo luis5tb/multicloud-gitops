@@ -14,7 +14,9 @@ spec:
         - name: NODE_TLS_REJECT_UNAUTHORIZED
           value: '0'
       secrets:
-        - name: secrets-rhdh
+        - name: rhdh-github-secret
+        - name: rhdh-argo-secret
+        - name: rhdh-tekton-secret
     extraFiles:
       mountPath: /opt/app-root/src
     replicas: 1
