@@ -1,3 +1,5 @@
+{{ $ns := printf "%s-%s" $.Values.global.pattern $.Values.clusterGroup.name }}
+---
 kind: ConfigMap
 apiVersion: v1
 metadata:
@@ -35,14 +37,8 @@ data:
       appLocatorMethods:
         - type: 'config'
           instances:
-            - name: default
-              url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .Values.global.clusterDomain }}
-              username: ${ARGOCD_USERNAME}
-              password: ${ARGOCD_PASSWORD}
-        - type: 'config'
-          instances:
             - name: main
-              url: https://hub-gitops-server-multicloud-gitops-hub.apps.{{ .Values.global.clusterDomain }}
+              url: https://hub-gitops-server-{{ $ns }}.apps.{{ .Values.global.clusterDomain }}
               username: ${ARGOCD_USERNAME}
               password: ${ARGOCD_PASSWORD}
     kubernetes:
