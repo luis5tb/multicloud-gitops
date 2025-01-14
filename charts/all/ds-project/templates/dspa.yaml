@@ -6,21 +6,12 @@ metadata:
   name: dspa
 spec:
   apiServer:
-    applyTektonCustomResource: true
-    archiveLogs: false
     artifactSignedURLExpirySeconds: 60
-    autoUpdatePipelineDefaultVersion: true
     caBundleFileMountPath: ""
     caBundleFileName: ""
-    collectMetrics: true
-    dbConfigConMaxLifetimeSec: 120
     deploy: true
     enableOauth: true
     enableSamplePipeline: false
-    injectDefaultScript: true
-    stripEOF: true
-    terminateStatus: Cancelled
-    trackArtifacts: true
   database:
     disableHealthCheck: false
     mariaDB:
