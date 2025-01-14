@@ -9,3 +9,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: rhdh-k8s-sa
+    namespace: {{ .Values.developerhub.namespace }}
