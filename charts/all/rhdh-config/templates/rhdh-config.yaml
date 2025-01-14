@@ -50,10 +50,10 @@ data:
         type: 'multiTenant'
       clusterLocatorMethods:
         - clusters:
-            - authProvider: serviceAccount
-              name: api.{{ .Values.global.clusterDomain }}
+            - authProvider: 'serviceAccount'
+              name: openshift
               serviceAccountToken: ${RHDH_TEKTON_SERVICE_ACCOUNT_TOKEN}
-              skipTLSVerify: true
+              skipTLSVerify: false
               url: https://api.{{ .Values.global.clusterDomain }}:6443
           type: config
       customResources:
@@ -67,6 +67,20 @@ data:
           group: route.openshift.io
           plural: routes
     catalog:
+      rules:
+        - allow: [Component, System, API, Resource, Location]
+      providers:
+        kubernetes:
+          openshift:
+            cluster: openshift
+            processor:
+              namespaceOverride: default
+              defaultOwner: guests
+            schedule:
+              frequency:
+                seconds: 30
+              timeout:
+                seconds: 5
       locations:
         #- type: url
         #  target: 'https://github.com/redhat-ai-dev/ai-lab-template/blob/release-v0.9.x/all.yaml'
