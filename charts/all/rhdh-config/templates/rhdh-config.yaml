@@ -68,7 +68,7 @@ data:
           plural: routes
     catalog:
       rules:
-        - allow: [Component, System, API, Resource, Location]
+        - allow: [Component, System, API, Resource, Location, Template]
       providers:
         kubernetes:
           openshift:
