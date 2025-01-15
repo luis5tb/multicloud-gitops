@@ -21,6 +21,8 @@ rules:
       - routes
       - taskruns
       - pipelineruns
+      - inferenceservice
+      - servingruntime
     verbs:
       - get
       - list
