@@ -26,3 +26,5 @@ spec:
             type: OpenshiftDefaultIngress
         managementState: Managed
         name: knative-serving
+    trustyai:
+      managementState: Managed
