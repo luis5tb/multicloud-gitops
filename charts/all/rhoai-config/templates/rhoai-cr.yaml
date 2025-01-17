@@ -28,3 +28,6 @@ spec:
         name: knative-serving
     trustyai:
       managementState: Managed
+    modelregistry:
+        managementState: Managed
+        registriesNamespace: rhoai-model-registries
