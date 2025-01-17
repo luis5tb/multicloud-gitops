@@ -41,6 +41,12 @@ data:
               url: https://hub-gitops-server-{{ $ns }}.apps.{{ .Values.global.clusterDomain }}
               username: ${ARGOCD_USERNAME}
               password: ${ARGOCD_PASSWORD}
+        - type: 'config'
+          instances:
+            - name: default
+              url: https://hub-gitops-server-{{ $ns }}.apps.{{ .Values.global.clusterDomain }}
+              username: ${ARGOCD_USERNAME}
+              password: ${ARGOCD_PASSWORD}
     kubernetes:
       serviceLocatorMethod:
         type: 'multiTenant'
