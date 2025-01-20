@@ -25,6 +25,9 @@ clusterGroup:
         operatorGroup: true
         targetNamespaces: []
     - developerhub-ns
+    - gitwebhook-operator:
+        operatorGroup: true
+        targetNamespaces: []
   subscriptions:
     serverless:
       name: serverless-operator
@@ -68,6 +71,11 @@ clusterGroup:
       namespace: rhdh-operator
       channel: fast
       source: redhat-operators
+    gitwebhook:
+      name: gitwebhook-operator
+      namespace: gitwebhook-operator
+      channel: alpha
+      source: community-operators
   projects:
     - hub
     - openshift-ai
