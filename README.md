@@ -62,6 +62,33 @@ The steps are the next:
     ./pattern.sh make load-secrets
   ```
 
+* And also to add the Database desired credentials for the model registry:
+
+  ```bash
+  $ cat values-secret.yaml.template
+  # Database login credentials and configuration
+  - name: modelregistry-keys
+    fields:
+    - name: database-user
+      value: modelregistry_user
+    - name: database-host
+      value: modelregistrydb
+    - name: database-db
+      value: modelregistrydb
+    - name: database-master-user
+      value: modelregistry_user
+    - name: database-password
+      value: model-registry-user-123
+    - name: database-root-password
+      value: model-registry-user-123
+    - name: database-master-password
+      value: model-registry-user-123
+
+  # Regenerate the vault with the secrets
+    cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
+    ./pattern.sh make load-secrets
+  ```
+
 * If your admin user do not have access to the Cluster ArgoCD, then ensure that
   the ArgoCD object have `default_policy: role:admin`, or configure the specific
   group policies as needed:

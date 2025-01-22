@@ -1,6 +1,9 @@
 database:
   name: modelregistrydb
+  namespace: model-registry-db-ns
   image: registry.redhat.io/rhel8/mariadb-103:latest
+  host: modelregistrydb.model-registry-db-ns.svc.cluster.local
+  user: modelregistry_user
 
 secretStore:
   name: vault-backend
@@ -8,3 +11,7 @@ secretStore:
 
 dbsecret:
   key: secret/data/hub/modelregistry-keys
+
+registry:
+  name: model-registry
+  namespace: rhoai-model-registries

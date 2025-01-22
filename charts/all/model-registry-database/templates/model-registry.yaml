@@ -1,0 +1,38 @@
+apiVersion: modelregistry.opendatahub.io/v1alpha1
+kind: ModelRegistry
+metadata:
+  annotations:
+    openshift.io/display-name: {{ .Values.registry.name }}
+  name: {{ .Values.registry.name }}
+  namespace: {{ .Values.registry.namespace }}
+  finalizers:
+    - modelregistry.opendatahub.io/finalizer
+spec:
+  grpc:
+    port: 9090
+  istio:
+    gateway:
+      grpc:
+        gatewayRoute: enabled
+        port: 443
+        tls:
+          mode: SIMPLE
+      istioIngress: ingressgateway
+      rest:
+        gatewayRoute: enabled
+        port: 443
+        tls:
+          mode: SIMPLE
+    tlsMode: ISTIO_MUTUAL
+  mysql:
+    database: {{ .Values.database.name }}
+    host: {{ .Values.database.host }}
+    passwordSecret:
+      key: database-password
+      name: {{ .Values.registry.name }}-secret
+    port: 3306
+    skipDBCreation: false
+    username: {{ .Values.database.user }}
+  rest:
+    port: 8080
+    serviceRoute: disabled
