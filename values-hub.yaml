@@ -28,6 +28,7 @@ clusterGroup:
     - gitwebhook-operator:
         operatorGroup: true
         targetNamespaces: []
+    - model-registry-db-ns
   subscriptions:
     serverless:
       name: serverless-operator
@@ -83,6 +84,7 @@ clusterGroup:
     - ds-projects
     - developerhub
     - devspaces
+    - model-registry
   applications:
     vault:
       name: vault
@@ -131,6 +133,11 @@ clusterGroup:
       namespace: openshift-operators
       project: devspaces
       path: charts/all/devspaces-config
+    model-registry:
+      name: model-registry-db
+      namespace: model-registry-db-ns
+      project: model-registry
+      path: charts/all/model-registry-database
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null

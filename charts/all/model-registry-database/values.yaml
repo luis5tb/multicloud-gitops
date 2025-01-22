@@ -1,0 +1,10 @@
+database:
+  name: modelregistrydb
+  image: registry.redhat.io/rhel8/mariadb-103:latest
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+
+dbsecret:
+  key: secret/data/hub/modelregistry-keys
