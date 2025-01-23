@@ -53,7 +53,7 @@ clusterGroup:
     nvidia:
       name: gpu-operator-certified
       namespace: nvidia-gpu-operator
-      channel: v24.6
+      channel: v24.9
       source: certified-operators
     authorino:
       name: authorino-operator
