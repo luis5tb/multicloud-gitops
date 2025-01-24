@@ -5,6 +5,7 @@ metadata:
   namespace: redhat-ods-applications
   annotations:
     argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   displayName: nvidia-gpu
   enabled: true
