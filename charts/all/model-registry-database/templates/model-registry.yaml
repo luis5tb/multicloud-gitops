@@ -3,6 +3,8 @@ kind: ModelRegistry
 metadata:
   annotations:
     openshift.io/display-name: {{ .Values.registry.name }}
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
   name: {{ .Values.registry.name }}
   namespace: {{ .Values.registry.namespace }}
   finalizers:
