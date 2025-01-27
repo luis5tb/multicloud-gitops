@@ -28,6 +28,12 @@ spec:
         name: knative-serving
     trustyai:
       managementState: Managed
+      # issue with trustyai being OOMKilled, can be dropped in the next RHOAI release
+      devFlags:
+        manifests:
+        - contextDir: config
+          sourcePath: ''
+          uri: https://api.github.com/repos/trustyai-explainability/trustyai-service-operator/tarball/main
     modelregistry:
         managementState: Managed
         registriesNamespace: rhoai-model-registries
