@@ -114,3 +114,28 @@ The steps are the next:
     https://github.com/redhat-ai-dev/model-catalog-example/blob/v0.1/ollama-model-service/catalog-info.yaml
     https://github.com/redhat-ai-dev/model-catalog-example/blob/v0.1/developer-model-service/catalog-info.yaml
     ```
+
+* **How to enable RHDH GitHub Authentication (GH Access token, cliend_id and client_secret)**
+
+  There are two ways you can approach setting up GitHub authentication. The simplest way (which is not recommended for production because you would not normally put tokens and secrets directly into the config) is quick and easy, but doesn’t show you how to set up a GitHub organization, which will be needed for groups of people accessing Developer Hub. To use this method, do the following:
+
+  - Go to https://github.com and log in with your GitHub credentials.
+  - Visit https://github.com/settings/tokens/new to generate a new "classic" token.
+  - Now give the Token a name you will remember in the Note box.
+  - Tick the Repo box to allow this token access to the repositories. Doing this allows Developer Hub to write a repo.
+  - Select Generate Token and Copy the token details and save them. You will not see them again. This is your ACCESS_TOKEN.
+  - Now visit https://github.com/settings/applications/new to register a new OAuth App. Make sure you have created an OAuth App, not a Github App.
+  - Enter your developer hub application route URL in the Homepage URL input. This value is the default URL you are taken to when you enter Red Hat Developer Hub.
+  - In the OAuth App creation page, enter a memorable name.
+  - Ensure that the Callback URL in your GitHub application is configured as follows: https://redhat-developer-hub-<NAMESPACE_NAME\>.<OPENSHIFT_ROUTE_HOST\>/api/auth/github/handler/frame
+  - Under Webhook, uncheck the Active box.
+  - Click Create GitHub App to create the app. This will take you to the About screen.
+  - Under Client Secrets, click Generate a new client secret.
+  - Copy and save both CLIENT_ID and Client Secrets.
+
+* **How to create Webhook secret and github_pat**
+
+  - Visit https://github.com/settings/tokens/new to generate a new "classic" token.
+  - Now give the Token a name you will remember in the Note box.
+  - Tick the admin:redpo_hook to allow this token to manage webhooks
+  - Select Generate Token and Copy the token details and save them. You will not see them again. This is your github_pat and webhook_token.
