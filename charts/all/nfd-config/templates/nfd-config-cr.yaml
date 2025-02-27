@@ -4,10 +4,11 @@ metadata:
   name: nfd-config
   namespace: openshift-nfd
 spec:
+  enableTaints: false
   instance: ""
   operand:
-    image: "registry.redhat.io/openshift4/ose-node-feature-discovery-rhel9:latest"
-    #servicePort: 12000
+    image: "registry.redhat.io/openshift4/ose-node-feature-discovery-rhel9@sha256:7c13438d67bb046d565b1115c89db3dbc8f4f3d9bfc73a5d3800db9f44a701db"
+    servicePort: 12000
   prunerOnDelete: false
   topologyUpdater: false
   workerConfig:
