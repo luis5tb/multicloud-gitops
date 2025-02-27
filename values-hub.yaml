@@ -50,8 +50,8 @@ clusterGroup:
       name: nfd
       namespace: openshift-nfd
       channel: stable
-      csv: nfd.4.17.0-202501271440
-      installPlanApproval: Manual
+      #csv: nfd.4.17.0-202501271440
+      #installPlanApproval: Manual
     nvidia:
       name: gpu-operator-certified
       namespace: nvidia-gpu-operator
