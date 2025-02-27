@@ -7,7 +7,7 @@ spec:
   instance: ""
   operand:
     image: "registry.redhat.io/openshift4/ose-node-feature-discovery-rhel9:latest"
-    servicePort: 12000
+    #servicePort: 12000
   prunerOnDelete: false
   topologyUpdater: false
   workerConfig:
