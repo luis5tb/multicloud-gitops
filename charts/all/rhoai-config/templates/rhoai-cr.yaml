@@ -2,38 +2,54 @@ apiVersion: datasciencecluster.opendatahub.io/v1
 kind: DataScienceCluster
 metadata:
   name: default-dsc
+  labels:
+    app.kubernetes.io/name: datasciencecluster
+    app.kubernetes.io/instance: default-dsc
+    app.kubernetes.io/part-of: rhods-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: rhods-operator
 spec:
   components:
-    dashboard:
-      managementState: Managed
-    workbenches:
-      managementState: Managed
-    datasciencepipelines:
-      managementState: Managed
-    kueue:
-      managementState: Managed
     codeflare:
       managementState: Managed
-    ray:
-      managementState: Managed
-    modelmeshserving:
-      managementState: Managed
     kserve:
-      managementState: Managed
+      nim:
+        managementState: Managed
+      rawDeploymentServiceConfig: Headless
       serving:
         ingressGateway:
           certificate:
             type: OpenshiftDefaultIngress
-        managementState: Managed
+        managementState: Removed
         name: knative-serving
+      managementState: Managed
+    modelregistry:
+      registriesNamespace: rhoai-model-registries
+      managementState: Removed
+    feastoperator:
+      managementState: Removed
     trustyai:
       managementState: Managed
-      # issue with trustyai being OOMKilled, can be dropped in the next RHOAI release
-      devFlags:
-        manifests:
-        - contextDir: config
-          sourcePath: ''
-          uri: https://api.github.com/repos/trustyai-explainability/trustyai-service-operator/tarball/main
-    modelregistry:
-        managementState: Managed
-        registriesNamespace: rhoai-model-registries
+      # # issue with trustyai being OOMKilled, can be dropped in the next RHOAI release
+      # devFlags:
+      #   manifests:
+      #   - contextDir: config
+      #     sourcePath: ''
+      #     uri: https://api.github.com/repos/trustyai-explainability/trustyai-service-operator/tarball/main
+    ray:
+      managementState: Managed
+    kueue:
+      managementState: Managed
+    workbenches:
+      workbenchNamespace: rhods-notebooks
+      managementState: Managed
+    dashboard:
+      managementState: Managed
+    modelmeshserving:
+      managementState: Removed
+    datasciencepipelines:
+      managementState: Managed
+    trainingoperator:
+      managementState: Managed
+    llamastackoperator:
+      managementState: Managed
