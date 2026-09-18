@@ -13,6 +13,7 @@ clusterGroup:
       operatorGroup: true
     keycloak-system:
       operatorGroup: true
+    lightspeed-agentic-operator:
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -91,6 +92,11 @@ clusterGroup:
           value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local
         - name: keycloak.spiffeIdentityProvider.config.config.jwksUrl
           value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
+    lightspeed-agentic-operator:
+      name: lightspeed-agentic-operator
+      namespace: lightspeed-agentic-operator
+      argoProject: hub
+      path: charts/all/lightspeed-agentic-operator
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null

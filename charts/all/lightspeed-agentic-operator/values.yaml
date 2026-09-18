@@ -1,0 +1,12 @@
+namespace: lightspeed-agentic-operator
+
+image:
+  # Konflux floating tags -- upstream has no versioned/OLM release yet.
+  operator: quay.io/redhat-user-workloads/crt-nshift-lightspeed-tenant/lightspeed-agentic-operator:main
+  sandbox: quay.io/redhat-user-workloads/crt-nshift-lightspeed-tenant/lightspeed-agentic-sandbox:main
+
+approvalPolicy:
+  maxConcurrentRuns: 5
+
+global:
+  clusterPlatform: aws

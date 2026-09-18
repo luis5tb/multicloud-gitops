@@ -1,0 +1,20 @@
+apiVersion: agentic.openshift.io/v1alpha1
+kind: ApprovalPolicy
+metadata:
+  name: cluster
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  maxConcurrentRuns: {{ .Values.approvalPolicy.maxConcurrentRuns }}
+  stages:
+    - name: Analysis
+      approval: Automatic
+    - name: Execution
+      approval: Manual
+    - name: Verification
+      approval: Automatic
+    # Escalation is triggered by a verification failure and only produces a
+    # report; keep it Automatic so a failure is not stranded at the gate.
+    - name: Escalation
+      approval: Automatic
