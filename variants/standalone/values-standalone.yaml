@@ -11,6 +11,8 @@ clusterGroup:
       targetNamespaces: []
     zero-trust-workload-identity-manager:
       operatorGroup: true
+    keycloak-system:
+      operatorGroup: true
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -33,6 +35,10 @@ clusterGroup:
       name: openshift-zero-trust-workload-identity-manager
       namespace: zero-trust-workload-identity-manager
       channel: stable-v1
+    rhbk:
+      name: rhbk-operator
+      namespace: keycloak-system
+      channel: stable-v26.4
   argoProjects:
     - hub
     - openshift-ai
@@ -64,6 +70,27 @@ clusterGroup:
       argoProject: hub
       chart: ztwim
       chartVersion: 0.1.*
+    keycloak:
+      name: keycloak
+      namespace: keycloak-system
+      argoProject: hub
+      chart: rhbk
+      chartVersion: 0.1.*
+      overrides:
+        # Vault paths for the admin/DB passwords defined in values-secret.yaml.template
+        - name: keycloak.adminUser.passwordVaultKey
+          value: secret/data/global/rhbk
+        - name: keycloak.postgresqlDb.passwordVaultKey
+          value: secret/data/global/rhbk
+        # Federate Keycloak client auth against SPIRE's OIDC discovery provider so
+        # SPIFFE-identified workloads (e.g. agents) can authenticate without a static secret.
+        # See: https://www.keycloak.org/2026/01/federated-client-authentication
+        - name: keycloak.spiffeIdentityProvider.enabled
+          value: "true"
+        - name: keycloak.spiffeIdentityProvider.config.config.issuer
+          value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local
+        - name: keycloak.spiffeIdentityProvider.config.config.jwksUrl
+          value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null
