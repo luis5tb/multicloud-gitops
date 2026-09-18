@@ -6,12 +6,11 @@ clusterGroup:
       operatorGroup: true
       targetNamespaces: []
     external-secrets:
-    openshift-serverless:
-      operatorGroup: true
-      targetNamespaces: []
     redhat-ods-operator:
       operatorGroup: true
       targetNamespaces: []
+    zero-trust-workload-identity-manager:
+      operatorGroup: true
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -30,6 +29,10 @@ clusterGroup:
     rhoai:
       name: rhods-operator
       namespace: redhat-ods-operator
+    ztwim:
+      name: openshift-zero-trust-workload-identity-manager
+      namespace: zero-trust-workload-identity-manager
+      channel: stable-v1
   argoProjects:
     - hub
     - openshift-ai
@@ -55,6 +58,12 @@ clusterGroup:
       namespace: redhat-ods-operator
       project: openshift-ai
       path: charts/all/rhoai-config
+    zero-trust-workload-identity-manager:
+      name: zero-trust-workload-identity-manager
+      namespace: zero-trust-workload-identity-manager
+      argoProject: hub
+      chart: ztwim
+      chartVersion: 0.1.*
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null
