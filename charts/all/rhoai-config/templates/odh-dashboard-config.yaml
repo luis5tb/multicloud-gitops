@@ -1,0 +1,25 @@
+# Read the README before modifying
+apiVersion: opendatahub.io/v1alpha
+kind: OdhDashboardConfig
+metadata:
+  name: odh-dashboard-config
+  namespace: redhat-ods-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  dashboardConfig:
+    # Tech Preview flags for the GenAI Studio / agent-building surface (agents, MCP, A2A groundwork).
+    # These are overrides only -- unlisted flags keep whatever value the operator/dashboard defaults to.
+    genAiStudio: true
+    genAiTracing: true
+    autorag: true
+    guardrails: true
+    agentConfigManagement: true
+    promptManagement: true
+    globalProjectPrompts: true
+    connectionTest: true
+    mcpCatalog: true
+    agentsCatalog: true
+    llmdTemplates: true
+    vLLMDeploymentOnMaaS: true
