@@ -105,9 +105,86 @@ oc-agentic run create --request="Fix crashloop in my-app namespace" \
 oc-agentic run list -n lightspeed-agentic-operator
 ```
 
-`oc-agentic` is a separate CLI plugin -- see the
-[install instructions](https://github.com/openshift/lightspeed-agentic-operator#install)
-in the upstream README.
+`oc-agentic` is a separate CLI plugin that runs on your machine, not the
+cluster -- this chart doesn't install it. Grab it from the
+[upstream releases](https://github.com/openshift/lightspeed-agentic-operator#install):
+
+```bash
+# Linux amd64
+curl -L https://github.com/openshift/lightspeed-agentic-operator/releases/latest/download/oc-agentic_linux_amd64.tar.gz | tar xz
+sudo mv oc-agentic /usr/local/bin/
+
+# macOS Apple Silicon
+curl -L https://github.com/openshift/lightspeed-agentic-operator/releases/latest/download/oc-agentic_darwin_arm64.tar.gz | tar xz
+sudo mv oc-agentic /usr/local/bin/
+```
+
+Once it's on `$PATH`, `oc` auto-discovers it as `oc agentic <subcommand>` (it
+also works standalone as `oc-agentic`). Default namespace is
+`openshift-lightspeed` unless overridden with `-n` -- since this chart uses
+`lightspeed-agentic-operator` instead, pass `-n lightspeed-agentic-operator`
+on every command (as in the examples above and below).
+
+## How to run a test AgenticRun
+
+### Break the cluster
+
+Deploy a deliberately broken workload from
+[rhobs/troubleshooting-scenarios](https://github.com/rhobs/troubleshooting-scenarios)
+so there's something real for the agent to investigate:
+
+```bash
+git clone https://github.com/rhobs/troubleshooting-scenarios.git
+cd troubleshooting-scenarios/generic/01-payments-api-failure
+make deploy SINGLE_NAMESPACE=1  # =1 until OLS-3463 is fixed
+make break
+```
+
+### Submit a proposal
+
+```bash
+oc delete agenticrun test-run -n lightspeed-agentic-operator --ignore-not-found
+oc apply -f - << EOF
+apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: test-run
+  namespace: lightspeed-agentic-operator
+spec:
+  request: |
+    Alert: PaymentErrorRateHigh (critical)
+    Namespace: payments
+    Description: Payment error rate is 100.00%, which exceeds the 15% threshold.
+    Labels:
+      alertname: PaymentErrorRateHigh
+      namespace: payments
+      severity: critical
+
+    Investigate using the skill at /app/skills/cluster-troubleshoot/investigate-alert
+  targetNamespaces:
+  - payments
+  tools:
+     skills:
+       - image: quay.io/openshiftanalytics/agentic-skills:latest
+         paths:
+           - /skills/cluster-troubleshoot/investigate-alert
+  analysis:
+    agent: default
+  execution:
+    agent: default
+  verification:
+    agent: default
+EOF
+```
+
+`agent: default` matches `llmProvider.agent.name` above, so this works
+against whichever provider (`vertexAnthropic` or `openai`) is currently
+active. Then watch/approve it:
+
+```bash
+oc-agentic run watch test-run -n lightspeed-agentic-operator
+oc-agentic run approve test-run --stage=execution --option=0 -n lightspeed-agentic-operator
+```
 
 ## Out of scope
 

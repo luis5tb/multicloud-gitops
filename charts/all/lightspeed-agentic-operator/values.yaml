@@ -33,9 +33,9 @@ llmProvider:
   agent:
     name: default
     timeouts:
-      analysisSeconds: 300
-      executionSeconds: 300
-      verificationSeconds: 300
+      analysisSeconds: 1200
+      executionSeconds: 1200
+      verificationSeconds: 1200
 
 secretStore:
   name: vault-backend
