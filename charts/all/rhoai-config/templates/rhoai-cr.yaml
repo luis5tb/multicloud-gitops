@@ -1,4 +1,4 @@
-apiVersion: datasciencecluster.opendatahub.io/v1
+apiVersion: datasciencecluster.opendatahub.io/v2
 kind: DataScienceCluster
 metadata:
   name: default-dsc
@@ -10,34 +10,14 @@ metadata:
     app.kubernetes.io/created-by: rhods-operator
 spec:
   components:
-    codeflare:
-      managementState: Managed
     kserve:
       nim:
         managementState: Managed
       rawDeploymentServiceConfig: Headless
-      serving:
-        ingressGateway:
-          certificate:
-            type: OpenshiftDefaultIngress
-        managementState: Removed
-        name: knative-serving
       managementState: Managed
     modelregistry:
       registriesNamespace: rhoai-model-registries
       managementState: Removed
-    feastoperator:
-      managementState: Removed
-    trustyai:
-      managementState: Managed
-      # # issue with trustyai being OOMKilled, can be dropped in the next RHOAI release
-      # devFlags:
-      #   manifests:
-      #   - contextDir: config
-      #     sourcePath: ''
-      #     uri: https://api.github.com/repos/trustyai-explainability/trustyai-service-operator/tarball/main
-    ray:
-      managementState: Managed
     kueue:
       managementState: Managed
     workbenches:
@@ -45,11 +25,9 @@ spec:
       managementState: Managed
     dashboard:
       managementState: Managed
-    modelmeshserving:
-      managementState: Removed
-    datasciencepipelines:
+    aipipelines:
       managementState: Managed
-    trainingoperator:
+    trainer:
       managementState: Managed
-    llamastackoperator:
+    mlflowoperator:
       managementState: Managed
