@@ -8,5 +8,39 @@ image:
 approvalPolicy:
   maxConcurrentRuns: 5
 
+# Optional LLMProvider + Agent, disabled by default. Only one provider is
+# active at a time, picked by llmProvider.type; its credentialsSecret must
+# exist (via the matching ExternalSecret below) before the LLMProvider can
+# go Ready.
+llmProvider:
+  enabled: false
+  type: vertexAnthropic # vertexAnthropic | openai
+
+  vertexAnthropic:
+    name: vertex-anthropic
+    projectID: ""
+    region: ""
+    credentialsSecretName: llm-creds-vertex
+    vaultKey: secret/data/global/llm-creds-vertex
+    model: "claude-opus-4-6"
+
+  openai:
+    name: openai
+    credentialsSecretName: llm-creds-openai
+    vaultKey: secret/data/global/llm-creds-openai
+    model: "gpt-5.4"
+
+  agent:
+    name: default
+    timeouts:
+      analysisSeconds: 300
+      executionSeconds: 300
+      verificationSeconds: 300
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
 global:
   clusterPlatform: aws

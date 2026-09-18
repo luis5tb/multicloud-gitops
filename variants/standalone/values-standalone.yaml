@@ -97,6 +97,15 @@ clusterGroup:
       namespace: lightspeed-agentic-operator
       argoProject: hub
       path: charts/all/lightspeed-agentic-operator
+      overrides:
+        - name: llmProvider.enabled
+          value: "true"
+        - name: llmProvider.type
+          value: vertexAnthropic
+        - name: llmProvider.vertexAnthropic.projectID
+          value: my-project-id
+        - name: llmProvider.vertexAnthropic.region
+          value: global
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null
