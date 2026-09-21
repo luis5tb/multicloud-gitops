@@ -1,0 +1,91 @@
+replicaCount: 1
+
+image:
+  repository: quay.io/your-org/rca-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+route:
+  enabled: false
+  host: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+google:
+  apiKey:
+    value: ""
+    existingSecret: ""
+    existingSecretKey: GOOGLE_API_KEY
+  vertexAI:
+    enabled: false
+    project: ""
+    location: us-central1
+
+identity:
+  # ZTWIM/SPIRE identity is mandatory for A2A requests.
+  enabled: true
+  workloadApiSocket: unix:///spiffe-workload-api/socket
+  workloadApiMountPath: /spiffe-workload-api
+  workloadApiAudience: rca-agent
+  timeoutSeconds: 5
+  keycloak:
+    # Set this to the deployed realm issuer, for example:
+    # https://keycloak.keycloak-system.svc.cluster.local/realms/<realm>
+    issuerUrl: ""
+    audience: rca-agent
+    # Existing path inside the container, if the CA is supplied by another
+    # volume. Prefer caBundleSecret or caBundleConfigMap below.
+    caBundle: ""
+    caBundleSecret:
+      name: ""
+      key: ca.crt
+    caBundleConfigMap:
+      name: ""
+      key: ca.crt
+
+  # ZTWIM must have a matching ClusterSPIFFEID registration. This optional
+  # object is disabled by default because the cluster trust domain is an
+  # installation-specific value.
+  clusterSpiffeID:
+    enabled: false
+    name: rca-agent
+    trustDomain: ""
+
+agenticRun:
+  namespace: ""
+  analysisAgent: default
+  timeoutSeconds: 900
+  pollIntervalSeconds: 5
+
+adk:
+  model: gemini-2.5-flash
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

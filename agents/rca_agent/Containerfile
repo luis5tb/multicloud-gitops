@@ -1,0 +1,15 @@
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+WORKDIR /opt/app-root/src
+
+COPY pyproject.toml ./
+COPY rca_agent ./rca_agent
+
+RUN pip install --no-cache-dir .
+
+ENV PORT=8000
+EXPOSE 8000
+
+USER 1001
+CMD ["uvicorn", "rca_agent.main:a2a_app", "--host", "0.0.0.0", "--port", "8000"]
+

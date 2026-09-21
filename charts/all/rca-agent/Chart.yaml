@@ -1,0 +1,12 @@
+apiVersion: v2
+name: rca-agent
+description: A Google ADK A2A wrapper for analysis-only OpenShift AgenticRuns
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - agent
+  - a2a
+  - openshift
+  - root-cause-analysis
+

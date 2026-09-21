@@ -1,0 +1,147 @@
+{{- if and .Values.identity.keycloak.caBundle (or .Values.identity.keycloak.caBundleSecret.name .Values.identity.keycloak.caBundleConfigMap.name) }}
+{{- fail "configure only one of identity.keycloak.caBundle, caBundleSecret, or caBundleConfigMap" }}
+{{- end }}
+{{- if and .Values.identity.keycloak.caBundleSecret.name .Values.identity.keycloak.caBundleConfigMap.name }}
+{{- fail "configure only one of identity.keycloak.caBundleSecret or caBundleConfigMap" }}
+{{- end }}
+{{- if not .Values.identity.enabled }}
+{{- fail "identity.enabled must remain true: the RCA agent requires ZTWIM/SPIRE workload identity" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rca-agent.fullname" . }}
+  labels:
+    {{- include "rca-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "rca-agent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "rca-agent.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "rca-agent.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: rca-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8000"
+            - name: ADK_MODEL
+              value: {{ .Values.adk.model | quote }}
+            - name: AGENTIC_RUN_NAMESPACE
+              value: {{ default .Release.Namespace .Values.agenticRun.namespace | quote }}
+            - name: AGENTIC_RUN_ANALYSIS_AGENT
+              value: {{ .Values.agenticRun.analysisAgent | quote }}
+            - name: AGENTIC_RUN_TIMEOUT_SECONDS
+              value: {{ .Values.agenticRun.timeoutSeconds | quote }}
+            - name: AGENTIC_RUN_POLL_INTERVAL_SECONDS
+              value: {{ .Values.agenticRun.pollIntervalSeconds | quote }}
+            - name: GOOGLE_GENAI_USE_VERTEXAI
+              value: {{ .Values.google.vertexAI.enabled | quote }}
+            - name: KEYCLOAK_ISSUER_URL
+              value: {{ .Values.identity.keycloak.issuerUrl | quote }}
+            - name: KEYCLOAK_AUDIENCE
+              value: {{ .Values.identity.keycloak.audience | quote }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: {{ .Values.identity.workloadApiSocket | quote }}
+            - name: SPIFFE_JWT_AUDIENCE
+              value: {{ .Values.identity.workloadApiAudience | quote }}
+            - name: KEYCLOAK_TIMEOUT_SECONDS
+              value: {{ .Values.identity.timeoutSeconds | quote }}
+            - name: SPIFFE_TIMEOUT_SECONDS
+              value: {{ .Values.identity.timeoutSeconds | quote }}
+            {{- if .Values.identity.keycloak.caBundle }}
+            - name: KEYCLOAK_CA_BUNDLE
+              value: {{ .Values.identity.keycloak.caBundle | quote }}
+            {{- else if .Values.identity.keycloak.caBundleSecret.name }}
+            - name: KEYCLOAK_CA_BUNDLE
+              value: /etc/rca-agent/keycloak-ca/ca.crt
+            {{- else if .Values.identity.keycloak.caBundleConfigMap.name }}
+            - name: KEYCLOAK_CA_BUNDLE
+              value: /etc/rca-agent/keycloak-ca/ca.crt
+            {{- end }}
+            {{- if .Values.google.vertexAI.enabled }}
+            - name: GOOGLE_CLOUD_PROJECT
+              value: {{ .Values.google.vertexAI.project | quote }}
+            - name: GOOGLE_CLOUD_LOCATION
+              value: {{ .Values.google.vertexAI.location | quote }}
+            {{- else if or .Values.google.apiKey.value .Values.google.apiKey.existingSecret }}
+            - name: GOOGLE_API_KEY
+              {{- if .Values.google.apiKey.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.google.apiKey.existingSecret }}
+                  key: {{ .Values.google.apiKey.existingSecretKey }}
+              {{- else }}
+              value: {{ .Values.google.apiKey.value | quote }}
+              {{- end }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.identity.enabled }}
+            - name: spiffe-workload-api
+              mountPath: {{ .Values.identity.workloadApiMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if or .Values.identity.keycloak.caBundleSecret.name .Values.identity.keycloak.caBundleConfigMap.name }}
+            - name: keycloak-ca
+              mountPath: /etc/rca-agent/keycloak-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.identity.enabled }}
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        {{- end }}
+        {{- if .Values.identity.keycloak.caBundleSecret.name }}
+        - name: keycloak-ca
+          secret:
+            secretName: {{ .Values.identity.keycloak.caBundleSecret.name }}
+            items:
+              - key: {{ .Values.identity.keycloak.caBundleSecret.key }}
+                path: ca.crt
+        {{- else if .Values.identity.keycloak.caBundleConfigMap.name }}
+        - name: keycloak-ca
+          configMap:
+            name: {{ .Values.identity.keycloak.caBundleConfigMap.name }}
+            items:
+              - key: {{ .Values.identity.keycloak.caBundleConfigMap.key }}
+                path: ca.crt
+        {{- end }}

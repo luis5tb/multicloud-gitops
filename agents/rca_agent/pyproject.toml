@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rca-agent"
+version = "0.1.0"
+description = "A Google ADK A2A wrapper for analysis-only OpenShift AgenticRuns"
+requires-python = ">=3.12"
+dependencies = [
+  "google-adk[a2a]==2.9.2",
+  "kubernetes>=32.0.0,<35.0.0",
+  "PyJWT[crypto]>=2.10.0,<3.0.0",
+  "httpx>=0.28.0,<1.0.0",
+  "spiffe==0.3.1",
+  "uvicorn>=0.35.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0,<10.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["rca_agent*"]
