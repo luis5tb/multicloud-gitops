@@ -3,9 +3,9 @@
 fullnameOverride: mas-mongodb
 
 image:
-  registry: "images.paas.redhat.com/genie"
-  repository: mongo
-  tag: "8.0.3"
+  registry: "quay.io/mongodb"
+  repository: mongodb-community-server
+  tag: "8.0.32-ubi9-slim"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
