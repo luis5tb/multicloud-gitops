@@ -1,0 +1,11 @@
+apiVersion: v2
+name: ericsson-agent
+description: Google ADK A2A routing agent with a browser UI
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - google-adk
+  - a2a
+  - agent
+

@@ -6,10 +6,30 @@ ZTWIM/SPIRE workload identity, creates an analysis-only `AgenticRun` through
 the upstream `openshift/openshift-mcp-server`, polls it, and returns the
 diagnosis plus remediation proposals from the `AnalysisResult`.
 
-It never creates an approval, execution, or verification step. The caller
-token is kept in memory for the request only and is forwarded in the MCP HTTP
-`Authorization` header. It is not placed in the AgenticRun CR and is not given
-to the asynchronous analysis sandbox.
+It never creates an approval, execution, or verification step. The inbound
+caller token is validated and kept in memory for the request only. RCA then
+uses its own short-lived ZTWIM/SPIRE JWT-SVID to perform a Keycloak OAuth token
+exchange, with the caller token as the subject, and sends only the exchanged
+MCP-scoped token to OpenShift MCP. The original token is never forwarded to
+MCP, placed in the AgenticRun CR, or given to the asynchronous analysis
+sandbox.
+
+The delegated flow is:
+
+```text
+User/UI -> Ericsson A2A --validated Keycloak JWT--> RCA A2A
+                                                   RCA validates caller JWT
+                                                   RCA gets its SPIFFE JWT-SVID
+                                                   RCA exchanges caller JWT at Keycloak
+                                                   RCA --MCP-scoped JWT--> OpenShift MCP
+                                                   AgenticRun: RCA executing on behalf of caller
+```
+
+The exchanged token must be issued for the `openshift-mcp` audience (or the
+configured equivalent). Keycloak must grant the RCA client token-exchange
+permission and map the RCA workload identity to that client. The MCP request
+and AgenticRun metadata derive the on-behalf-of principal from the validated
+incoming JWT; the RCA identity is recorded separately as the executing agent.
 
 ## Prerequisites
 
@@ -43,6 +63,9 @@ export KEYCLOAK_ISSUER_URL='https://keycloak.example/realms/rca'
 export KEYCLOAK_AUDIENCES='rca-agent,openshift'
 export SPIFFE_ENDPOINT_SOCKET='unix:///tmp/spire-agent/public/api.sock'
 export SPIFFE_JWT_AUDIENCE='rca-agent'
+export KEYCLOAK_TOKEN_EXCHANGE_CLIENT_ID='rca-agent'
+export KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE='openshift-mcp'
+export KEYCLOAK_CLIENT_ASSERTION_TYPE='urn:ietf:params:oauth:client-assertion-type:jwt-spiffe'
 
 uvicorn rca_agent.main:a2a_app --app-dir agents/rca_agent --host 0.0.0.0 --port 8000
 ```
@@ -126,6 +149,8 @@ helm upgrade --install rca-agent charts/all/rca-agent \
   --set identity.keycloak.issuerUrl='https://keycloak.apps.example.com/realms/rca' \
   --set identity.keycloak.audiences[0]=rca-agent \
   --set identity.keycloak.audiences[1]=openshift \
+  --set identity.keycloak.tokenExchange.clientId=rca-agent \
+  --set identity.keycloak.tokenExchange.audience=openshift-mcp \
   --set litellm.vaultKey='secret/data/global/rca-agent-litellm'
 ```
 

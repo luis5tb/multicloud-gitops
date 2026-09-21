@@ -87,6 +87,16 @@ spec:
               value: {{ .Values.identity.keycloak.issuerUrl | quote }}
             - name: KEYCLOAK_AUDIENCES
               value: {{ join "," .Values.identity.keycloak.audiences | quote }}
+            - name: KEYCLOAK_TOKEN_URL
+              value: {{ .Values.identity.keycloak.tokenExchange.tokenUrl | quote }}
+            - name: KEYCLOAK_TOKEN_EXCHANGE_CLIENT_ID
+              value: {{ .Values.identity.keycloak.tokenExchange.clientId | quote }}
+            - name: KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE
+              value: {{ .Values.identity.keycloak.tokenExchange.audience | quote }}
+            - name: KEYCLOAK_TOKEN_EXCHANGE_SCOPE
+              value: {{ .Values.identity.keycloak.tokenExchange.scope | quote }}
+            - name: KEYCLOAK_CLIENT_ASSERTION_TYPE
+              value: {{ .Values.identity.keycloak.tokenExchange.clientAssertionType | quote }}
             - name: SPIFFE_ENDPOINT_SOCKET
               value: {{ .Values.identity.workloadApiSocket | quote }}
             - name: SPIFFE_JWT_AUDIENCE

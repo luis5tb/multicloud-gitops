@@ -14,7 +14,7 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from .identity import current_caller_token
+from .identity import KeycloakTokenExchanger, RequestIdentity, current_request_identity
 
 GROUP = "agentic.openshift.io"
 VERSION = "v1alpha1"
@@ -63,8 +63,9 @@ def build_analysis_only_run(
     request: str,
     analysis_agent: str,
     target_namespaces: Optional[list[str]] = None,
+    identity: Optional[RequestIdentity] = None,
 ) -> dict[str, Any]:
-    """Build a CR with analysis only; no execution, verification, or token."""
+    """Build an analysis-only CR with explicit delegated-operation audit data."""
 
     if not request or not request.strip():
         raise ValueError("request must not be empty")
@@ -82,12 +83,29 @@ def build_analysis_only_run(
             _valid_dns_label(namespace, "target namespace") for namespace in target_namespaces
         ]
 
+    annotations = {
+        "agentic.openshift.io/executing-agent": "rca_agent",
+        "agentic.openshift.io/on-behalf-of": identity.on_behalf_of if identity else "unknown-caller",
+    }
+    if identity is not None:
+        annotations.update(
+            {
+                "agentic.openshift.io/request-id": identity.request_id,
+                "agentic.openshift.io/caller-subject": str(
+                    identity.caller_claims.get("sub", "unknown")
+                ),
+            }
+        )
+        if identity.actor:
+            annotations["agentic.openshift.io/previous-actor"] = identity.actor
+
     return {
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "AgenticRun",
         "metadata": {
             "generateName": "rca-agent-",
             "labels": {"app.kubernetes.io/managed-by": "rca-agent"},
+            "annotations": annotations,
         },
         "spec": spec,
     }
@@ -117,9 +135,9 @@ def _result_value(result: Any) -> dict[str, Any]:
 
 
 class OpenShiftMcpClient:
-    """Short-lived MCP client that forwards only the current request token."""
+    """Short-lived MCP client using an exchanged, MCP-scoped access token."""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, identity: RequestIdentity) -> None:
         self.url = os.getenv(
             "OPENSHIFT_MCP_URL",
             "http://openshift-mcp-server.openshift-mcp-server.svc.cluster.local:8080/mcp",
@@ -127,12 +145,33 @@ class OpenShiftMcpClient:
         self.create_tool = os.getenv("OPENSHIFT_MCP_CREATE_TOOL", "resources_create_or_update")
         self.get_tool = os.getenv("OPENSHIFT_MCP_GET_TOOL", "resources_get")
         self.timeout_seconds = float(os.getenv("OPENSHIFT_MCP_TIMEOUT_SECONDS", "30"))
-        self.token = token
+        self.identity = identity
+        self.token = KeycloakTokenExchanger(
+            issuer_url=os.getenv("KEYCLOAK_ISSUER_URL", ""),
+            token_url=os.getenv("KEYCLOAK_TOKEN_URL", ""),
+            client_id=os.getenv("KEYCLOAK_TOKEN_EXCHANGE_CLIENT_ID", "rca-agent"),
+            audience=os.getenv("KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE", "openshift-mcp"),
+            scope=os.getenv("KEYCLOAK_TOKEN_EXCHANGE_SCOPE", ""),
+            client_assertion_type=os.getenv(
+                "KEYCLOAK_CLIENT_ASSERTION_TYPE",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
+            ),
+            ca_bundle=os.getenv("KEYCLOAK_CA_BUNDLE"),
+            timeout_seconds=float(os.getenv("KEYCLOAK_TIMEOUT_SECONDS", "5")),
+        ).exchange(identity)
+        self.headers = {
+            "Authorization": f"Bearer {self.token}",
+            "X-Request-ID": identity.request_id,
+            "X-Agent-Executing": "rca_agent",
+            "X-Agent-On-Behalf-Of": identity.on_behalf_of,
+        }
+        if identity.actor:
+            self.headers["X-Agent-Previous-Actor"] = identity.actor
 
     async def _call(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
         timeout = httpx.Timeout(self.timeout_seconds, read=self.timeout_seconds)
         async with httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {self.token}"}, timeout=timeout
+            headers=self.headers, timeout=timeout
         ) as http_client:
             async with streamable_http_client(self.url, http_client=http_client) as (
                 read_stream,
@@ -213,9 +252,10 @@ def create_and_wait_for_analysis(
     if poll_interval_seconds <= 0:
         raise ValueError("AGENTIC_RUN_POLL_INTERVAL_SECONDS must be positive")
 
-    mcp_client = OpenShiftMcpClient(current_caller_token())
+    identity = current_request_identity()
+    mcp_client = OpenShiftMcpClient(identity)
     run = mcp_client.create_or_update(
-        build_analysis_only_run(request, selected_agent, target_namespaces)
+        build_analysis_only_run(request, selected_agent, target_namespaces, identity)
     )
     run_name = run["metadata"]["name"]
     deadline = time.monotonic() + timeout_seconds

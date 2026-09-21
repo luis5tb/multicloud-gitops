@@ -1,0 +1,13 @@
+Ericsson A2A agent deployed.
+
+Downstream A2A endpoint: {{ .Values.a2a.downstreamEndpoint }}
+
+{{- if .Values.route.enabled }}
+UI and A2A endpoint:
+  oc get route {{ include "ericsson-agent.fullname" . }}
+{{- else }}
+Port-forward the UI and A2A endpoint:
+  oc port-forward svc/{{ include "ericsson-agent.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  Open http://localhost:{{ .Values.service.port }}/ui
+{{- end }}
+

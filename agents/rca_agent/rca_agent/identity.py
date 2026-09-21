@@ -13,7 +13,9 @@ import os
 import threading
 import time
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Optional
+from uuid import uuid4
 
 import httpx
 import jwt
@@ -32,16 +34,54 @@ class IdentityConfigurationError(Exception):
     """Raised when required identity configuration is missing."""
 
 
-_caller_token: ContextVar[Optional[str]] = ContextVar("rca_agent_caller_token", default=None)
+@dataclass(frozen=True)
+class RequestIdentity:
+    """Validated caller and RCA workload identity for one A2A request."""
+
+    caller_token: str
+    caller_claims: dict[str, Any]
+    workload_identity: dict[str, str]
+    request_id: str
+
+    @property
+    def on_behalf_of(self) -> str:
+        """Stable caller identity derived only from validated JWT claims."""
+
+        for claim in ("sub", "client_id", "azp", "preferred_username"):
+            value = self.caller_claims.get(claim)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return "unknown-caller"
+
+    @property
+    def actor(self) -> str:
+        """The previous actor in a delegated token-exchange chain, if present."""
+
+        act = self.caller_claims.get("act")
+        if isinstance(act, dict):
+            for claim in ("sub", "client_id"):
+                value = act.get(claim)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+
+_request_identity: ContextVar[Optional[RequestIdentity]] = ContextVar(
+    "rca_agent_request_identity", default=None
+)
+
+
+def current_request_identity() -> RequestIdentity:
+    identity = _request_identity.get()
+    if identity is None:
+        raise AuthenticationError("No authenticated request identity is available")
+    return identity
 
 
 def current_caller_token() -> str:
     """Return the current request's bearer token without persisting it."""
 
-    token = _caller_token.get()
-    if not token:
-        raise AuthenticationError("No authenticated caller token is available")
-    return token
+    return current_request_identity().caller_token
 
 
 class WorkloadIdentityProvider:
@@ -172,6 +212,83 @@ class KeycloakTokenValidator:
         self._get_discovery()
 
 
+class KeycloakTokenExchangeError(AuthenticationError):
+    """Raised when the RCA cannot exchange a caller token for MCP access."""
+
+
+class KeycloakTokenExchanger:
+    """Exchange the validated caller token for a token scoped to OpenShift MCP.
+
+    The client authenticates with the RCA pod's JWT-SVID. The caller token is
+    only the subject of the exchange and is never forwarded to MCP.
+    """
+
+    def __init__(
+        self,
+        issuer_url: str,
+        client_id: str,
+        audience: str,
+        token_url: str = "",
+        scope: str = "",
+        client_assertion_type: str = "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
+        ca_bundle: Optional[str] = None,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        if not issuer_url:
+            raise IdentityConfigurationError("KEYCLOAK_ISSUER_URL must be configured")
+        if not client_id:
+            raise IdentityConfigurationError("KEYCLOAK_TOKEN_EXCHANGE_CLIENT_ID must be configured")
+        if not audience:
+            raise IdentityConfigurationError("KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE must be configured")
+        self.issuer_url = issuer_url.rstrip("/")
+        self.client_id = client_id
+        self.audience = audience
+        self.token_url = token_url.rstrip("/")
+        self.scope = scope
+        self.client_assertion_type = client_assertion_type
+        self.verify = ca_bundle or True
+        self.timeout_seconds = timeout_seconds
+
+    def _token_endpoint(self) -> str:
+        if self.token_url:
+            return self.token_url
+        url = f"{self.issuer_url}/.well-known/openid-configuration"
+        try:
+            with httpx.Client(verify=self.verify, timeout=self.timeout_seconds) as http:
+                response = http.get(url)
+                response.raise_for_status()
+                endpoint = response.json().get("token_endpoint", "")
+        except Exception as error:
+            raise KeycloakTokenExchangeError("Keycloak token endpoint discovery failed") from error
+        if not endpoint:
+            raise KeycloakTokenExchangeError("Keycloak discovery does not contain token_endpoint")
+        return endpoint
+
+    def exchange(self, identity: RequestIdentity) -> str:
+        data = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": identity.caller_token,
+            "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "client_id": self.client_id,
+            "client_assertion_type": self.client_assertion_type,
+            "client_assertion": identity.workload_identity["jwt_svid"],
+            "audience": self.audience,
+        }
+        if self.scope:
+            data["scope"] = self.scope
+        try:
+            with httpx.Client(verify=self.verify, timeout=self.timeout_seconds) as http:
+                response = http.post(self._token_endpoint(), data=data)
+                response.raise_for_status()
+                token = response.json().get("access_token")
+        except Exception as error:
+            raise KeycloakTokenExchangeError("Keycloak token exchange for OpenShift MCP failed") from error
+        if not token:
+            raise KeycloakTokenExchangeError("Keycloak token exchange did not return access_token")
+        return str(token)
+
+
 def _bearer_token(scope: dict[str, Any]) -> Optional[str]:
     for name, value in scope.get("headers", []):
         if name.lower() == b"authorization":
@@ -225,11 +342,27 @@ class A2AAuthenticationMiddleware:
         except (AuthenticationError, WorkloadIdentityError, IdentityConfigurationError):
             await self._send_error(send, 401, "A valid Keycloak bearer token and workload identity are required")
             return
-        token_context = _caller_token.set(token)
+        request_id = next(
+            (value.decode("latin-1").strip() for name, value in scope.get("headers", [])
+             if name.lower() == b"x-request-id" and value.strip()),
+            "",
+        ) or str(uuid4())
+        identity = RequestIdentity(
+            caller_token=token or "",
+            caller_claims=claims,
+            workload_identity=workload_identity,
+            request_id=request_id,
+        )
+        scope["rca_agent.identity"] = {
+            "caller": claims,
+            "workload": workload_identity,
+            "request_id": request_id,
+        }
+        token_context = _request_identity.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
-            _caller_token.reset(token_context)
+            _request_identity.reset(token_context)
 
     @staticmethod
     async def _send_error(send: Any, status: int, message: str) -> None:

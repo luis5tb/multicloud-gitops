@@ -1,0 +1,152 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ericsson-agent.fullname" . }}
+  labels:
+    {{- include "ericsson-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ericsson-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ericsson-agent.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ericsson-agent.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ericsson-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: ADK_MODEL
+              value: {{ .Values.a2a.model | quote }}
+            {{- if .Values.a2a.remoteAgents }}
+            - name: REMOTE_A2A_AGENTS_JSON
+              value: {{ .Values.a2a.remoteAgents | toJson | quote }}
+            {{- end }}
+            - name: DOWNSTREAM_A2A_ENDPOINT
+              value: {{ .Values.a2a.downstreamEndpoint | quote }}
+            - name: DOWNSTREAM_A2A_AGENT_NAME
+              value: {{ .Values.a2a.downstreamAgentName | quote }}
+            - name: DOWNSTREAM_A2A_AGENT_DESCRIPTION
+              value: {{ .Values.a2a.downstreamAgentDescription | quote }}
+            - name: A2A_USE_LEGACY
+              value: {{ .Values.a2a.useLegacy | quote }}
+            - name: A2A_REQUEST_TIMEOUT
+              value: {{ .Values.a2a.requestTimeout | quote }}
+            - name: A2A_PUBLIC_HOST
+              value: {{ .Values.a2a.publicHost | quote }}
+            - name: A2A_PUBLIC_PORT
+              value: {{ .Values.a2a.publicPort | quote }}
+            - name: A2A_PUBLIC_PROTOCOL
+              value: {{ .Values.a2a.publicProtocol | quote }}
+            - name: A2A_AUTH_MODE
+              value: {{ .Values.auth.mode | quote }}
+            - name: A2A_TLS_VERIFY
+              value: {{ .Values.auth.tlsVerify | quote }}
+            - name: A2A_CA_BUNDLE
+              value: {{ .Values.auth.caBundle | quote }}
+            - name: ZTO_FORWARD_IDENTITY
+              value: {{ .Values.auth.forwardZtoIdentity | quote }}
+            - name: ZTO_IDENTITY_HEADER
+              value: {{ .Values.auth.ztoIdentityHeader | quote }}
+            - name: ZTO_IDENTITY_TOKEN_FILE
+              value: {{ printf "%s/identity-token" .Values.ztoIdentity.mountPath | quote }}
+            - name: KEYCLOAK_TOKEN_URL
+              value: {{ .Values.auth.keycloak.tokenUrl | quote }}
+            - name: KEYCLOAK_CLIENT_ID
+              value: {{ .Values.auth.keycloak.clientId | quote }}
+            - name: KEYCLOAK_CLIENT_AUTH_METHOD
+              value: {{ .Values.auth.keycloak.clientAuthMethod | quote }}
+            - name: KEYCLOAK_CLIENT_ASSERTION_TYPE
+              value: {{ .Values.auth.keycloak.clientAssertionType | quote }}
+            - name: KEYCLOAK_SCOPE
+              value: {{ .Values.auth.keycloak.scope | quote }}
+            - name: KEYCLOAK_TOKEN_REFRESH_SKEW
+              value: {{ .Values.auth.keycloak.tokenRefreshSkew | quote }}
+            {{- if .Values.auth.staticTokenSecret.name }}
+            - name: A2A_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.staticTokenSecret.name }}
+                  key: {{ .Values.auth.staticTokenSecret.key }}
+            {{- end }}
+            {{- if .Values.auth.keycloak.clientSecretSecret.name }}
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.keycloak.clientSecretSecret.name }}
+                  key: {{ .Values.auth.keycloak.clientSecretSecret.key }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.ztoIdentity.enabled }}
+            - name: zto-identity
+              mountPath: {{ .Values.ztoIdentity.mountPath }}
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.ztoIdentity.enabled }}
+        - name: zto-identity
+          {{- if .Values.ztoIdentity.projectedServiceAccountToken.enabled }}
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: identity-token
+                  {{- if .Values.ztoIdentity.projectedServiceAccountToken.audience }}
+                  audience: {{ .Values.ztoIdentity.projectedServiceAccountToken.audience | quote }}
+                  {{- end }}
+                  expirationSeconds: {{ .Values.ztoIdentity.projectedServiceAccountToken.expirationSeconds }}
+          {{- else }}
+          secret:
+            secretName: {{ required "ztoIdentity.secretName is required when the ZTO identity Secret is enabled" .Values.ztoIdentity.secretName }}
+            items:
+              - key: {{ .Values.ztoIdentity.secretKey }}
+                path: identity-token
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -53,6 +53,13 @@ identity:
     audiences:
       - rca-agent
       - openshift
+    tokenExchange:
+      # The RCA client must be allowed to exchange an inbound caller token in Keycloak.
+      clientId: rca-agent
+      tokenUrl: ""
+      audience: openshift-mcp
+      scope: ""
+      clientAssertionType: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
     # Existing path inside the container, if the CA is supplied by another
     # volume. Prefer caBundleSecret or caBundleConfigMap below.
     caBundle: ""

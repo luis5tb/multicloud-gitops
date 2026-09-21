@@ -1,0 +1,123 @@
+fullnameOverride: ericsson-agent
+
+image:
+  repository: quay.io/your-org/ericsson-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+a2a:
+  # Preferred multi-agent configuration. Each item becomes a RemoteA2aAgent
+  # sub-agent of the local Ericsson ADK router.
+  remoteAgents: []
+  # Backwards-compatible one-agent shorthand, used when remoteAgents is empty.
+  downstreamEndpoint: http://localhost:8001
+  downstreamAgentName: downstream_agent
+  downstreamAgentDescription: The configured downstream A2A agent.
+  model: gemini-flash-latest
+  # Request ADK's newer A2A executor from downstream agents by default.
+  # Set true only for a downstream peer that requires the legacy path.
+  useLegacy: false
+  requestTimeout: 60
+  publicHost: ericsson-agent
+  publicPort: 8080
+  publicProtocol: http
+
+auth:
+  # none, static, or keycloak
+  mode: none
+  tlsVerify: true
+  caBundle: ""
+  forwardZtoIdentity: false
+  ztoIdentityHeader: X-ZTO-Identity
+  staticTokenSecret:
+    name: ""
+    key: token
+  keycloak:
+    tokenUrl: ""
+    clientId: ""
+    clientAuthMethod: client_assertion_post
+    clientAssertionType: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+    scope: ""
+    clientSecretSecret:
+      name: ""
+      key: client-secret
+    tokenRefreshSkew: 30
+
+# Optional model settings, for example GOOGLE_GENAI_USE_VERTEXAI or a
+# valueFrom reference to a Secret containing GOOGLE_API_KEY.
+extraEnv: []
+
+ztoIdentity:
+  # Enable when ZTO injects an identity token through a Secret or projection.
+  enabled: false
+  mountPath: /var/run/secrets/zto
+  secretName: ""
+  secretKey: identity-token
+  projectedServiceAccountToken:
+    enabled: false
+    audience: ""
+    expirationSeconds: 3600
+
+route:
+  enabled: false
+  host: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,19 @@
+FROM registry.access.redhat.com/ubi9/python-311
+
+WORKDIR /opt/app-root/src
+
+COPY pyproject.toml requirements.txt ./
+COPY src ./src
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir . \
+    && rm -rf /root/.cache/pip
+
+ENV PYTHONUNBUFFERED=1 \
+    AGENT_BIND_HOST=0.0.0.0 \
+    AGENT_BIND_PORT=8080
+
+EXPOSE 8080
+
+CMD ["uvicorn", "ericsson_agent.agent:a2a_app", "--host", "0.0.0.0", "--port", "8080"]
+
