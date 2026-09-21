@@ -1,0 +1,47 @@
+replicaCount: 1
+
+image:
+  repository: quay.io/containers/kubernetes_mcp_server
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  automountToken: false
+
+service:
+  port: 8080
+
+server:
+  openshift: true
+  enabledTools:
+    - resources_create_or_update
+    - resources_get
+  readOnly: false
+  requireOAuth: true
+  skipJWTVerification: true
+  clusterAuthMode: passthrough
+  stateless: true
+  logLevel: 2
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

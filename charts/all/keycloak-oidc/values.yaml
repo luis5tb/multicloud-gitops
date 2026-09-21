@@ -1,0 +1,34 @@
+keycloak:
+  namespace: keycloak-system
+  name: keycloak
+  realm: rca
+  displayName: RCA
+  clientId: rca-agent
+  clientName: RCA Agent
+  groupName: rca-users
+
+openshiftOIDC:
+  enabled: false
+  providerName: keycloak
+  issuerURL: ""
+  audiences:
+    - rca-agent
+    - openshift
+  usernameClaim: sub
+  usernamePrefix: "keycloak:"
+  groupsClaim: groups
+  groupsPrefix: "keycloak:"
+  caConfigMapName: ""
+
+agenticRun:
+  namespace: lightspeed-agentic-operator
+  roleName: rca-agent-user
+  groupName: keycloak:rca-users
+
+realmImport:
+  enabled: true
+  syncWave: "5"
+
+rbac:
+  enabled: true
+  syncWave: "10"

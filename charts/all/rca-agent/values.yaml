@@ -21,15 +21,23 @@ route:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
 
-google:
-  apiKey:
-    value: ""
-    existingSecret: ""
-    existingSecretKey: GOOGLE_API_KEY
-  vertexAI:
-    enabled: false
-    project: ""
-    location: us-central1
+litellm:
+  # The ADK agent always calls LiteLLM. The proxy can route to Gemini,
+  # Anthropic, OpenAI, or another approved provider without changing this pod.
+  enabled: true
+  model: openai/rca-agent
+  apiBase: http://litellm.litellm.svc.cluster.local:4000
+  credentialsSecretName: rca-agent-litellm
+  vaultKey: secret/data/global/rca-agent-litellm
+  vaultProperty: api-key
+  existingSecret:
+    name: ""
+    key: LITELLM_API_KEY
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
 
 identity:
   # ZTWIM/SPIRE identity is mandatory for A2A requests.
@@ -42,7 +50,9 @@ identity:
     # Set this to the deployed realm issuer, for example:
     # https://keycloak.keycloak-system.svc.cluster.local/realms/<realm>
     issuerUrl: ""
-    audience: rca-agent
+    audiences:
+      - rca-agent
+      - openshift
     # Existing path inside the container, if the CA is supplied by another
     # volume. Prefer caBundleSecret or caBundleConfigMap below.
     caBundle: ""
@@ -68,7 +78,20 @@ agenticRun:
   pollIntervalSeconds: 5
 
 adk:
-  model: gemini-2.5-flash
+  model: openai/rca-agent
+
+openshiftMcp:
+  enabled: true
+  url: http://openshift-mcp-server.openshift-mcp-server.svc.cluster.local:8080/mcp
+  transport: streamable-http
+  createTool: resources_create_or_update
+  getTool: resources_get
+  timeoutSeconds: 30
+
+rbac:
+  # The agent uses the caller's bearer token through OpenShift MCP. It must
+  # not receive a service-account Role for AgenticRuns by default.
+  enabled: false
 
 resources:
   requests:

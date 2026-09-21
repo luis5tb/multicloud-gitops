@@ -1,0 +1,35 @@
+{{- if .Values.openshiftOIDC.enabled }}
+{{- if not .Values.openshiftOIDC.issuerURL }}
+{{- fail "openshiftOIDC.issuerURL must exactly match the Keycloak token iss claim when openshiftOIDC.enabled is true" }}
+{{- end }}
+apiVersion: config.openshift.io/v1
+kind: Authentication
+metadata:
+  name: cluster
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "20"
+spec:
+  type: OIDC
+  webhookTokenAuthenticator: null
+  oidcProviders:
+    - name: {{ .Values.openshiftOIDC.providerName | quote }}
+      issuer:
+        issuerURL: {{ .Values.openshiftOIDC.issuerURL | quote }}
+        audiences:
+          {{- toYaml .Values.openshiftOIDC.audiences | nindent 10 }}
+        {{- if .Values.openshiftOIDC.caConfigMapName }}
+        issuerCertificateAuthority:
+          name: {{ .Values.openshiftOIDC.caConfigMapName | quote }}
+        {{- end }}
+      claimMappings:
+        username:
+          claim: {{ .Values.openshiftOIDC.usernameClaim | quote }}
+          prefixPolicy: Prefix
+          prefix:
+            prefixString: {{ .Values.openshiftOIDC.usernamePrefix | quote }}
+        groups:
+          claim: {{ .Values.openshiftOIDC.groupsClaim | quote }}
+          prefix: {{ .Values.openshiftOIDC.groupsPrefix | quote }}
+{{- end }}

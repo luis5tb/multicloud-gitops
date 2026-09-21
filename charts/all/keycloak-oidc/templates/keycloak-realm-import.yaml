@@ -1,0 +1,45 @@
+{{- if .Values.realmImport.enabled }}
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: {{ .Values.keycloak.realm }}
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.realmImport.syncWave | quote }}
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  keycloakCRName: {{ .Values.keycloak.name }}
+  realm:
+    realm: {{ .Values.keycloak.realm | quote }}
+    enabled: true
+    displayName: {{ .Values.keycloak.displayName | quote }}
+    groups:
+      - name: {{ .Values.keycloak.groupName | quote }}
+    clients:
+      - clientId: {{ .Values.keycloak.clientId | quote }}
+        name: {{ .Values.keycloak.clientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: true
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        protocolMappers:
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
+          - name: openshift-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: openshift
+              access.token.claim: "true"
+{{- end }}

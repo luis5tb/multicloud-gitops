@@ -12,7 +12,13 @@ a2a_app = A2AAuthenticationMiddleware(
     _a2a_app,
     keycloak=KeycloakTokenValidator(
         issuer_url=os.getenv("KEYCLOAK_ISSUER_URL", ""),
-        audience=os.getenv("KEYCLOAK_AUDIENCE", "rca-agent"),
+        audience=[
+            item.strip()
+            for item in os.getenv(
+                "KEYCLOAK_AUDIENCES", os.getenv("KEYCLOAK_AUDIENCE", "rca-agent")
+            ).split(",")
+            if item.strip()
+        ],
         ca_bundle=os.getenv("KEYCLOAK_CA_BUNDLE"),
         timeout_seconds=float(os.getenv("KEYCLOAK_TIMEOUT_SECONDS", "5")),
     ),

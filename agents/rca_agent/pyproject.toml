@@ -8,8 +8,9 @@ version = "0.1.0"
 description = "A Google ADK A2A wrapper for analysis-only OpenShift AgenticRuns"
 requires-python = ">=3.12"
 dependencies = [
-  "google-adk[a2a]==2.9.2",
-  "kubernetes>=32.0.0,<35.0.0",
+  "google-adk[a2a,extensions]==2.9.2",
+  "mcp>=1.24.0,<2.0.0",
+  "litellm>=1.84.0,<1.103.0",
   "PyJWT[crypto]>=2.10.0,<3.0.0",
   "httpx>=0.28.0,<1.0.0",
   "spiffe==0.3.1",

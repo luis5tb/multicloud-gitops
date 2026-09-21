@@ -14,6 +14,7 @@ clusterGroup:
     keycloak-system:
       operatorGroup: true
     lightspeed-agentic-operator:
+    openshift-mcp-server:
     mao:
   subscriptions:
     eso:
@@ -93,6 +94,20 @@ clusterGroup:
           value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local
         - name: keycloak.spiffeIdentityProvider.config.config.jwksUrl
           value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
+    keycloak-oidc:
+      name: keycloak-oidc
+      namespace: keycloak-system
+      argoProject: hub
+      path: charts/all/keycloak-oidc
+      overrides:
+        - name: keycloak.namespace
+          value: keycloak-system
+        - name: keycloak.name
+          value: keycloak
+        - name: keycloak.realm
+          value: rca
+        - name: agenticRun.namespace
+          value: lightspeed-agentic-operator
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
@@ -107,6 +122,11 @@ clusterGroup:
           value: my-project-id
         - name: llmProvider.vertexAnthropic.region
           value: global
+    openshift-mcp-server:
+      name: openshift-mcp-server
+      namespace: openshift-mcp-server
+      argoProject: hub
+      path: charts/all/openshift-mcp-server
     mao-mongo:
       name: mao-mongo
       namespace: mao

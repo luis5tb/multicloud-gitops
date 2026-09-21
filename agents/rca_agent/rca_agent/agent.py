@@ -3,8 +3,9 @@
 import os
 
 from google.adk.agents import Agent
+from google.adk.models.lite_llm import LiteLlm
 
-from .kubernetes import create_and_wait_for_analysis
+from .mcp_agentic_run import create_and_wait_for_analysis
 
 ROOT_AGENT_INSTRUCTION = """
 You are the OpenShift Root Cause Analysis agent.
@@ -29,9 +30,18 @@ run name, namespace, current status, and failure information so the caller can
 inspect it.
 """
 
+def _model() -> LiteLlm:
+    """Build the ADK model through the configured LiteLLM proxy."""
+
+    # LiteLlm reads LITELLM_API_BASE/LITELLM_API_KEY from the process
+    # environment. The chart injects those values from a Secret/ExternalSecret;
+    # they are intentionally not passed through the Agent constructor.
+    return LiteLlm(model=os.getenv("ADK_MODEL", "openai/rca-agent"))
+
+
 root_agent = Agent(
     name="rca_agent",
-    model=os.getenv("ADK_MODEL", "gemini-2.5-flash"),
+    model=_model(),
     description=(
         "Creates analysis-only OpenShift AgenticRuns and returns root-cause "
         "analysis with remediation proposals. It never executes or verifies changes."
@@ -39,4 +49,3 @@ root_agent = Agent(
     instruction=ROOT_AGENT_INSTRUCTION,
     tools=[create_and_wait_for_analysis],
 )
-

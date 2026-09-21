@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openshift-mcp-server.fullname" . }}
+  labels:
+    {{- include "openshift-mcp-server.labels" . | nindent 4 }}
+data:
+  config.toml: |
+    port = "{{ .Values.service.port }}"
+    bind_address = "0.0.0.0"
+    stateless = {{ .Values.server.stateless }}
+    log_level = {{ .Values.server.logLevel }}
+    openshift = {{ .Values.server.openshift }}
+    toolsets = ["core"]
+    enabled_tools = [{{ range $index, $tool := .Values.server.enabledTools }}{{ if $index }}, {{ end }}"{{ $tool }}"{{ end }}]
+    read_only = {{ .Values.server.readOnly }}
+    require_oauth = {{ .Values.server.requireOAuth }}
+    skip_jwt_verification = {{ .Values.server.skipJWTVerification }}
+    cluster_auth_mode = "{{ .Values.server.clusterAuthMode }}"
+    server_instructions = "This endpoint is restricted to the RCA agent. Only create/get AgenticRun and get AnalysisResult resources are intended. Never use it for execution or verification."

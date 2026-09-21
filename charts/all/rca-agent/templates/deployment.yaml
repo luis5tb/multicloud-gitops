@@ -4,6 +4,18 @@
 {{- if and .Values.identity.keycloak.caBundleSecret.name .Values.identity.keycloak.caBundleConfigMap.name }}
 {{- fail "configure only one of identity.keycloak.caBundleSecret or caBundleConfigMap" }}
 {{- end }}
+{{- if not .Values.litellm.enabled }}
+{{- fail "litellm.enabled must remain true: the RCA agent model is configured through LiteLLM" }}
+{{- end }}
+{{- if not .Values.openshiftMcp.enabled }}
+{{- fail "openshiftMcp.enabled must remain true: AgenticRuns are managed through OpenShift MCP" }}
+{{- end }}
+{{- if and .Values.litellm.existingSecret.name .Values.litellm.vaultKey }}
+{{- fail "configure either litellm.existingSecret.name or litellm.vaultKey, not both" }}
+{{- end }}
+{{- if and (not .Values.litellm.existingSecret.name) (not .Values.litellm.vaultKey) }}
+{{- fail "configure litellm.existingSecret.name or litellm.vaultKey" }}
+{{- end }}
 {{- if not .Values.identity.enabled }}
 {{- fail "identity.enabled must remain true: the RCA agent requires ZTWIM/SPIRE workload identity" }}
 {{- end }}
@@ -46,6 +58,13 @@ spec:
               value: "8000"
             - name: ADK_MODEL
               value: {{ .Values.adk.model | quote }}
+            - name: LITELLM_API_BASE
+              value: {{ .Values.litellm.apiBase | quote }}
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.litellm.credentialsSecretName .Values.litellm.existingSecret.name }}
+                  key: {{ if .Values.litellm.existingSecret.name }}{{ .Values.litellm.existingSecret.key }}{{ else }}LITELLM_API_KEY{{ end }}
             - name: AGENTIC_RUN_NAMESPACE
               value: {{ default .Release.Namespace .Values.agenticRun.namespace | quote }}
             - name: AGENTIC_RUN_ANALYSIS_AGENT
@@ -54,12 +73,20 @@ spec:
               value: {{ .Values.agenticRun.timeoutSeconds | quote }}
             - name: AGENTIC_RUN_POLL_INTERVAL_SECONDS
               value: {{ .Values.agenticRun.pollIntervalSeconds | quote }}
-            - name: GOOGLE_GENAI_USE_VERTEXAI
-              value: {{ .Values.google.vertexAI.enabled | quote }}
+            - name: OPENSHIFT_MCP_URL
+              value: {{ .Values.openshiftMcp.url | quote }}
+            - name: OPENSHIFT_MCP_TRANSPORT
+              value: {{ .Values.openshiftMcp.transport | quote }}
+            - name: OPENSHIFT_MCP_CREATE_TOOL
+              value: {{ .Values.openshiftMcp.createTool | quote }}
+            - name: OPENSHIFT_MCP_GET_TOOL
+              value: {{ .Values.openshiftMcp.getTool | quote }}
+            - name: OPENSHIFT_MCP_TIMEOUT_SECONDS
+              value: {{ .Values.openshiftMcp.timeoutSeconds | quote }}
             - name: KEYCLOAK_ISSUER_URL
               value: {{ .Values.identity.keycloak.issuerUrl | quote }}
-            - name: KEYCLOAK_AUDIENCE
-              value: {{ .Values.identity.keycloak.audience | quote }}
+            - name: KEYCLOAK_AUDIENCES
+              value: {{ join "," .Values.identity.keycloak.audiences | quote }}
             - name: SPIFFE_ENDPOINT_SOCKET
               value: {{ .Values.identity.workloadApiSocket | quote }}
             - name: SPIFFE_JWT_AUDIENCE
@@ -77,22 +104,6 @@ spec:
             {{- else if .Values.identity.keycloak.caBundleConfigMap.name }}
             - name: KEYCLOAK_CA_BUNDLE
               value: /etc/rca-agent/keycloak-ca/ca.crt
-            {{- end }}
-            {{- if .Values.google.vertexAI.enabled }}
-            - name: GOOGLE_CLOUD_PROJECT
-              value: {{ .Values.google.vertexAI.project | quote }}
-            - name: GOOGLE_CLOUD_LOCATION
-              value: {{ .Values.google.vertexAI.location | quote }}
-            {{- else if or .Values.google.apiKey.value .Values.google.apiKey.existingSecret }}
-            - name: GOOGLE_API_KEY
-              {{- if .Values.google.apiKey.existingSecret }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.google.apiKey.existingSecret }}
-                  key: {{ .Values.google.apiKey.existingSecretKey }}
-              {{- else }}
-              value: {{ .Values.google.apiKey.value | quote }}
-              {{- end }}
             {{- end }}
           readinessProbe:
             httpGet:

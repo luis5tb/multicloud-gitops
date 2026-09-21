@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+from contextvars import ContextVar
 from typing import Any, Optional
 
 import httpx
@@ -29,6 +30,18 @@ class WorkloadIdentityError(Exception):
 
 class IdentityConfigurationError(Exception):
     """Raised when required identity configuration is missing."""
+
+
+_caller_token: ContextVar[Optional[str]] = ContextVar("rca_agent_caller_token", default=None)
+
+
+def current_caller_token() -> str:
+    """Return the current request's bearer token without persisting it."""
+
+    token = _caller_token.get()
+    if not token:
+        raise AuthenticationError("No authenticated caller token is available")
+    return token
 
 
 class WorkloadIdentityProvider:
@@ -65,17 +78,18 @@ class KeycloakTokenValidator:
     def __init__(
         self,
         issuer_url: str,
-        audience: str,
+        audience: str | list[str] | tuple[str, ...],
         ca_bundle: Optional[str] = None,
         timeout_seconds: float = 5.0,
         jwks_cache_seconds: int = 300,
     ) -> None:
         if not issuer_url:
             raise IdentityConfigurationError("KEYCLOAK_ISSUER_URL must be configured")
-        if not audience:
+        audiences = [audience] if isinstance(audience, str) else list(audience)
+        if not audiences or any(not item for item in audiences):
             raise IdentityConfigurationError("KEYCLOAK_AUDIENCE must be configured")
         self.issuer_url = issuer_url.rstrip("/")
-        self.audience = audience
+        self.audiences = tuple(audiences)
         self.verify = ca_bundle or True
         self.timeout_seconds = timeout_seconds
         self.jwks_cache_seconds = jwks_cache_seconds
@@ -144,7 +158,7 @@ class KeycloakTokenValidator:
                 token,
                 key=key,
                 algorithms=["RS256"],
-                audience=self.audience,
+                audience=list(self.audiences),
                 issuer=self.issuer_url,
                 options={"require": ["exp", "iat", "iss", "sub"]},
             )
@@ -198,9 +212,10 @@ class A2AAuthenticationMiddleware:
             await self._send_json(send, 200, {"status": "ready"})
             return
 
+        token = _bearer_token(scope)
         try:
             claims, workload_identity = await asyncio.gather(
-                asyncio.to_thread(self.keycloak.validate, _bearer_token(scope)),
+                asyncio.to_thread(self.keycloak.validate, token),
                 asyncio.to_thread(self.workload.get_identity),
             )
             scope["rca_agent.identity"] = {
@@ -210,7 +225,11 @@ class A2AAuthenticationMiddleware:
         except (AuthenticationError, WorkloadIdentityError, IdentityConfigurationError):
             await self._send_error(send, 401, "A valid Keycloak bearer token and workload identity are required")
             return
-        await self.app(scope, receive, send)
+        token_context = _caller_token.set(token)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _caller_token.reset(token_context)
 
     @staticmethod
     async def _send_error(send: Any, status: int, message: str) -> None:

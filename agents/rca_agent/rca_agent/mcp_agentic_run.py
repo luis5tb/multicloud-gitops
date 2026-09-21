@@ -1,34 +1,28 @@
-"""Small, intentionally scoped client for the AgenticRun API.
-
-The client can create and read only the resources required by the RCA agent.
-It never approves, executes, verifies, or mutates a run after creation.
-"""
+"""Analysis-only AgenticRun lifecycle through the OpenShift MCP server."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import re
+import threading
 import time
 from typing import Any, Optional
 
-from kubernetes import client, config
-from kubernetes.config.config_exception import ConfigException
-from kubernetes.client.rest import ApiException
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+from .identity import current_caller_token
 
 GROUP = "agentic.openshift.io"
 VERSION = "v1alpha1"
-RUN_PLURAL = "agenticruns"
-ANALYSIS_RESULT_PLURAL = "analysisresults"
 ANALYZED_CONDITION = "Analyzed"
 
 
-def _load_kubernetes_config() -> None:
-    """Load in-cluster configuration, falling back to the local kubeconfig."""
-
-    try:
-        config.load_incluster_config()
-    except ConfigException:
-        config.load_kube_config()
+class OpenShiftMcpError(RuntimeError):
+    """Raised when the OpenShift MCP tool call fails."""
 
 
 def _valid_dns_label(value: str, field: str) -> str:
@@ -70,11 +64,7 @@ def build_analysis_only_run(
     analysis_agent: str,
     target_namespaces: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """Build an analysis-only AgenticRun manifest.
-
-    Keeping this construction separate makes the no-execution/no-verification
-    guarantee explicit and easy to test.
-    """
+    """Build a CR with analysis only; no execution, verification, or token."""
 
     if not request or not request.strip():
         raise ValueError("request must not be empty")
@@ -89,8 +79,7 @@ def build_analysis_only_run(
     }
     if target_namespaces:
         spec["targetNamespaces"] = [
-            _valid_dns_label(namespace, "target namespace")
-            for namespace in target_namespaces
+            _valid_dns_label(namespace, "target namespace") for namespace in target_namespaces
         ]
 
     return {
@@ -104,41 +93,99 @@ def build_analysis_only_run(
     }
 
 
-class AgenticRunClient:
-    """Kubernetes client restricted to the RCA agent's read/write surface."""
+def _result_value(result: Any) -> dict[str, Any]:
+    if getattr(result, "isError", False):
+        details = " ".join(
+            str(content.text)
+            for content in getattr(result, "content", [])
+            if getattr(content, "type", None) == "text"
+        )
+        raise OpenShiftMcpError(details or "OpenShift MCP returned an error")
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        return structured
+    for content in getattr(result, "content", []):
+        if getattr(content, "type", None) != "text":
+            continue
+        try:
+            decoded = json.loads(content.text)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+    raise RuntimeError("OpenShift MCP returned no structured Kubernetes resource")
 
-    def __init__(self, api: Any = None) -> None:
-        if api is None:
-            _load_kubernetes_config()
-            api = client.CustomObjectsApi()
-        self.api = api
 
-    def create_run(self, namespace: str, body: dict[str, Any]) -> dict[str, Any]:
-        return self.api.create_namespaced_custom_object(
-            group=GROUP,
-            version=VERSION,
-            namespace=namespace,
-            plural=RUN_PLURAL,
-            body=body,
+class OpenShiftMcpClient:
+    """Short-lived MCP client that forwards only the current request token."""
+
+    def __init__(self, token: str) -> None:
+        self.url = os.getenv(
+            "OPENSHIFT_MCP_URL",
+            "http://openshift-mcp-server.openshift-mcp-server.svc.cluster.local:8080/mcp",
+        )
+        self.create_tool = os.getenv("OPENSHIFT_MCP_CREATE_TOOL", "resources_create_or_update")
+        self.get_tool = os.getenv("OPENSHIFT_MCP_GET_TOOL", "resources_get")
+        self.timeout_seconds = float(os.getenv("OPENSHIFT_MCP_TIMEOUT_SECONDS", "30"))
+        self.token = token
+
+    async def _call(self, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        timeout = httpx.Timeout(self.timeout_seconds, read=self.timeout_seconds)
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {self.token}"}, timeout=timeout
+        ) as http_client:
+            async with streamable_http_client(self.url, http_client=http_client) as (
+                read_stream,
+                write_stream,
+                _,
+            ):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    result = await session.call_tool(operation, arguments=arguments)
+                    return _result_value(result)
+
+    def create_or_update(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        return _run_async(
+            self._call(self.create_tool, {"resource": json.dumps(manifest, separators=(",", ":"))})
         )
 
-    def get_run(self, namespace: str, name: str) -> dict[str, Any]:
-        return self.api.get_namespaced_custom_object(
-            group=GROUP,
-            version=VERSION,
-            namespace=namespace,
-            plural=RUN_PLURAL,
-            name=name,
+    def get(self, namespace: str, kind: str, name: str) -> dict[str, Any]:
+        return _run_async(
+            self._call(
+                self.get_tool,
+                {
+                    "apiVersion": f"{GROUP}/{VERSION}",
+                    "kind": kind,
+                    "namespace": namespace,
+                    "name": name,
+                },
+            )
         )
 
-    def get_analysis_result(self, namespace: str, name: str) -> dict[str, Any]:
-        return self.api.get_namespaced_custom_object(
-            group=GROUP,
-            version=VERSION,
-            namespace=namespace,
-            plural=ANALYSIS_RESULT_PLURAL,
-            name=name,
-        )
+
+def _run_async(coroutine: Any) -> Any:
+    """Run an async MCP call from ADK's synchronous function-tool boundary."""
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+
+    result: list[Any] = []
+    error: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            result.append(asyncio.run(coroutine))
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if error:
+        raise error[0]
+    return result[0]
 
 
 def _analysis_result_name(run: dict[str, Any]) -> Optional[str]:
@@ -153,11 +200,7 @@ def create_and_wait_for_analysis(
     target_namespaces: Optional[list[str]] = None,
     analysis_agent: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Create an analysis-only AgenticRun and return its analysis proposals.
-
-    This is the only tool exposed to the ADK agent. It never supplies execution
-    or verification fields and only waits for the Analyzed condition.
-    """
+    """Create and poll an analysis-only AgenticRun through OpenShift MCP."""
 
     namespace = _valid_dns_label(
         os.getenv("AGENTIC_RUN_NAMESPACE", "default"), "AGENTIC_RUN_NAMESPACE"
@@ -170,10 +213,9 @@ def create_and_wait_for_analysis(
     if poll_interval_seconds <= 0:
         raise ValueError("AGENTIC_RUN_POLL_INTERVAL_SECONDS must be positive")
 
-    run_client = AgenticRunClient()
-    run = run_client.create_run(
-        namespace,
-        build_analysis_only_run(request, selected_agent, target_namespaces),
+    mcp_client = OpenShiftMcpClient(current_caller_token())
+    run = mcp_client.create_or_update(
+        build_analysis_only_run(request, selected_agent, target_namespaces)
     )
     run_name = run["metadata"]["name"]
     deadline = time.monotonic() + timeout_seconds
@@ -181,19 +223,18 @@ def create_and_wait_for_analysis(
     analysis_result: Optional[dict[str, Any]] = None
 
     while time.monotonic() < deadline:
-        latest_run = run_client.get_run(namespace, run_name)
+        latest_run = mcp_client.get(namespace, "AgenticRun", run_name)
         condition = _condition(latest_run, ANALYZED_CONDITION)
         result_name = _analysis_result_name(latest_run)
         if condition and condition.get("status") == "False" and not result_name:
             break
         if condition and condition.get("status") in {"True", "False"} and result_name:
             try:
-                analysis_result = run_client.get_analysis_result(namespace, result_name)
-            except ApiException as error:
-                if error.status != 404:
+                analysis_result = mcp_client.get(namespace, "AnalysisResult", result_name)
+            except OpenShiftMcpError as error:
+                # MCP servers may race the operator while the result is created.
+                if "not found" not in str(error).lower() and "404" not in str(error):
                     raise
-                # The operator can update the run reference just before the
-                # result object becomes readable. Poll again in that case.
                 analysis_result = None
             if analysis_result is not None:
                 break
