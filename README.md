@@ -73,7 +73,61 @@ The default Pattern configuration is intended for development:
   connect to a plaintext server with TLS and fail.
 - MAO uses `providerMode: dev`, which accepts bearer tokens permissively. Do
   not use this mode for an internet-facing deployment.
+- The standalone development override allows the synthetic `dev` identity to
+  use protected MAO API endpoints. This is configured on the `mao-api`
+  application as `identity.adminAllowedUsers: '["dev"]'`; replace it with
+  real users when switching to production authentication.
 - Langfuse is disabled unless its Secret is configured.
+
+### Using the MAO API
+
+Only `mas-api` is exposed through an OpenShift Route. The Route root (`/`) is
+not an API endpoint and returns 404. Get the usable URL with:
+
+```bash
+export MAO_API="https://$(oc get route mas-api -n mao -o jsonpath='{.spec.host}')"
+curl -ksS "$MAO_API/api/health/"
+```
+
+The health request should return `{"status":"ok",...}`. In the development
+configuration, use any non-empty bearer token; the example below uses
+`dev-token`:
+
+```bash
+curl -ksS -H 'Authorization: Bearer dev-token' \
+  "$MAO_API/api/catalog/elements.list.get"
+```
+
+To run a workflow, first save a YAML blueprint, then create and submit a
+session. The API returns the blueprint and session IDs needed by the next
+requests:
+
+```bash
+BLUEPRINT_ID=$(curl -ksS -X POST "$MAO_API/api/blueprints/blueprint.save" \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'Content-Type: application/x-yaml' \
+  --data-binary @uie-mas-hosted/run/fixtures/blueprint_llm_agent.yml \
+  | jq -r '.blueprint_id')
+
+SESSION_ID=$(curl -ksS -X POST "$MAO_API/api/sessions/user.session.create" \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'Content-Type: application/json' \
+  -d "{\"blueprintId\":\"$BLUEPRINT_ID\"}" \
+  | jq -r '.')
+
+curl -ksS -X POST "$MAO_API/api/sessions/user.session.submit" \
+  -H 'Authorization: Bearer dev-token' \
+  -H 'Content-Type: application/json' \
+  -d "{\"sessionId\":\"$SESSION_ID\",\"inputs\":{\"user_prompt\":\"Hello\"}}"
+
+curl -ksS -H 'Authorization: Bearer dev-token' \
+  "$MAO_API/api/sessions/session.chat.get?sessionId=$SESSION_ID"
+```
+
+The example LLM blueprint requires a working model configuration. MongoDB,
+Redis, and Temporal are internal services. The Temporal UI is not routed by
+default; use `oc -n mao port-forward svc/temporal 8233:8233` and open
+`http://localhost:8233` when needed.
 
 For a production deployment, override the MAS API and worker values in
 `variants/standalone/values-standalone.yaml` or with an application-specific

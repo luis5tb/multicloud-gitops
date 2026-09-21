@@ -136,6 +136,11 @@ clusterGroup:
       namespace: mao
       argoProject: hub
       path: charts/all/mao/mas-api
+      overrides:
+        # DevTokenValidator supplies the synthetic username "dev". Keep this
+        # development-only allow-list in sync with the dev authentication mode.
+        - name: identity.adminAllowedUsers
+          value: '["dev"]'
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null
