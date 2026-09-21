@@ -27,6 +27,8 @@ spec:
       managementState: Managed
     dashboard:
       managementState: Managed
+    mcplifecycleoperator:
+      managementState: Managed
     aipipelines:
       managementState: Managed
     trainer:
