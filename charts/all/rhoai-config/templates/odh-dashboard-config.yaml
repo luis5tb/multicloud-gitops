@@ -20,6 +20,10 @@ spec:
     globalProjectPrompts: true
     connectionTest: true
     mcpCatalog: true
+    agentOps: true
+    externalModels: true
+    disableLMEval: false
+    mcpRegistry: true
     agentsCatalog: true
     llmdTemplates: true
     vLLMDeploymentOnMaaS: true
