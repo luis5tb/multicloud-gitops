@@ -1,0 +1,25 @@
+{{- if .Values.route.enabled }}
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: {{ include "mas-api.fullname" . }}
+  labels:
+    {{- include "mas-api.labels" . | nindent 4 }}
+  annotations:
+    haproxy.router.openshift.io/timeout: {{ printf "%ss" .Values.api.gunicornTimeout }}
+spec:
+  {{- if .Values.route.host }}
+  host: {{ .Values.route.host | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "mas-api.fullname" . }}
+    weight: 100
+  port:
+    targetPort: http
+  {{- with .Values.route.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}

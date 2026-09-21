@@ -1,0 +1,86 @@
+# Matches docker-compose `mas-worker`: same image as mas-api, ROLE=temporal-worker, no ports.
+
+fullnameOverride: mas-worker
+
+image:
+  registry: ""
+  repository: quay.io/redhat-services-prod/mas-tenant/mas-api
+  tag: latest
+  pullPolicy: Always
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  # Token needed for oc_exec tool inside the worker.
+  automount: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+securityContext: {}
+
+worker:
+  threads: "10"
+
+mongo:
+  secretName: mao-secret-mongo
+  tls: "false"
+  database: unifaidb
+
+redis:
+#  secretName: in-memory-db
+  secretName: mao-secret-redis
+
+temporal:
+  host: temporal
+  port: "7233"
+  namespace: default
+
+identity:
+  # The Pattern can override this to prod and provide the SSO settings below.
+  providerMode: dev
+  ssoIssuerUri: "https://sso.stage.redhat.com/auth/realms/redhat-external"
+  ssoAudience: ""
+  adminAllowedUsers: '[]'
+
+langfuse:
+  enabled: "false"
+  secretName: mao-secret-langfuse
+
+sharedStorage:
+  mountPath: /app/shared
+  existingClaim: ""
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+livenessProbe:
+  exec:
+    command: ["pgrep", "-f", "temporal-worker"]
+  initialDelaySeconds: 20
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command: ["pgrep", "-f", "temporal-worker"]
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

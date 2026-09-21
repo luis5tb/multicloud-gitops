@@ -1,0 +1,89 @@
+# Matches docker-compose `mongo` service: single mongo:8, ClusterIP only, no replica set.
+
+fullnameOverride: mas-mongodb
+
+image:
+  registry: "images.paas.redhat.com/genie"
+  repository: mongo
+  tag: "8.0.3"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# Leave empty so OpenShift restricted SCC can inject UID / fsGroup.
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 27017
+
+persistence:
+  enabled: true
+  size: 10Gi
+  # Leave empty to use the cluster's default StorageClass. Override this for
+  # clusters with more than one storage class.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  mountPath: /data/db
+  annotations:
+    kubernetes.io/reclaimPolicy: Delete
+  labels:
+    paas.redhat.com/appcode: TAG-001
+
+auth:
+  enabled: false
+  rootUsername: root
+  rootPassword: changeme
+  database: unifaidb
+
+# Secret consumed by mas-api / mas-worker (same keys as openshift/mas-api.yml).
+connectionSecret:
+  name: mao-secret-mongo
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+livenessProbe:
+  exec:
+    command: ["mongosh", "--eval", "db.runCommand('ping').ok", "--quiet"]
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command: ["mongosh", "--eval", "db.runCommand('ping').ok", "--quiet"]
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+startupProbe:
+  exec:
+    command: ["mongosh", "--eval", "db.runCommand('ping').ok", "--quiet"]
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

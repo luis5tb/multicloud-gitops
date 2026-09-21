@@ -1,0 +1,7 @@
+Redis is internal-only (ClusterIP {{ include "redis.fullname" . }}:{{ .Values.service.port }}).
+
+Connection secret: {{ .Values.connectionSecret.name }}
+  db.endpoint / db.port / db.auth_token
+
+Port-forward for local redis-cli:
+  oc port-forward svc/{{ include "redis.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}

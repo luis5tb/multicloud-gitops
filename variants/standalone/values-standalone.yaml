@@ -14,6 +14,7 @@ clusterGroup:
     keycloak-system:
       operatorGroup: true
     lightspeed-agentic-operator:
+    mao:
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -106,6 +107,35 @@ clusterGroup:
           value: my-project-id
         - name: llmProvider.vertexAnthropic.region
           value: global
+    mao-mongo:
+      name: mao-mongo
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/mongo
+    mao-redis:
+      name: mao-redis
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/redis
+      overrides:
+        # Keep this in sync with the connection secret consumed by the API and worker.
+        - name: connectionSecret.name
+          value: mao-secret-redis
+    mao-temporal:
+      name: mao-temporal
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/temporal
+    mao-worker:
+      name: mao-worker
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/mas-worker
+    mao-api:
+      name: mao-api
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/mas-api
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null

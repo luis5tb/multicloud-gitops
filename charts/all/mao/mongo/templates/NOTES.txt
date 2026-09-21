@@ -1,0 +1,7 @@
+MongoDB is internal-only (ClusterIP {{ include "mongo.fullname" . }}:{{ .Values.service.port }}).
+
+Connection secret: {{ .Values.connectionSecret.name }}
+  db.host / db.port / db.uri{{- if .Values.auth.enabled }} / db.username / db.password{{ end }}
+
+Port-forward for local mongosh:
+  oc port-forward svc/{{ include "mongo.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
