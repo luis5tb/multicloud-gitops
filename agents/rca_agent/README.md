@@ -31,6 +31,12 @@ permission and map the RCA workload identity to that client. The MCP request
 and AgenticRun metadata derive the on-behalf-of principal from the validated
 incoming JWT; the RCA identity is recorded separately as the executing agent.
 
+The token-exchange client (`identity.keycloak.tokenExchange.clientId`,
+default `rca-agent-mcp`) must be a separate, confidential client from the
+public `rca-agent` login client used for Native OIDC -- a public client
+cannot authenticate itself to perform a token exchange. See
+`charts/all/keycloak-oidc` for both client definitions.
+
 ## Prerequisites
 
 - Python 3.12+ for local development.
@@ -63,7 +69,7 @@ export KEYCLOAK_ISSUER_URL='https://keycloak.example/realms/rca'
 export KEYCLOAK_AUDIENCES='rca-agent,openshift'
 export SPIFFE_ENDPOINT_SOCKET='unix:///tmp/spire-agent/public/api.sock'
 export SPIFFE_JWT_AUDIENCE='rca-agent'
-export KEYCLOAK_TOKEN_EXCHANGE_CLIENT_ID='rca-agent'
+export KEYCLOAK_TOKEN_EXCHANGE_CLIENT_ID='rca-agent-mcp'
 export KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE='openshift-mcp'
 export KEYCLOAK_CLIENT_ASSERTION_TYPE='urn:ietf:params:oauth:client-assertion-type:jwt-spiffe'
 
@@ -129,6 +135,16 @@ helm upgrade --install keycloak-oidc charts/all/keycloak-oidc \
   --set agenticRun.namespace=lightspeed-agentic-operator
 ```
 
+This creates three Keycloak clients in the `rca` realm: the public
+`rca-agent` login client (Native OIDC), the confidential `rca-agent-mcp`
+client this agent uses for token exchange, and the confidential
+`ericsson-agent` client used by the Ericsson A2A agent. The two confidential
+clients still need federated client authentication configured against the
+`spiffe` identity provider in the Keycloak Admin Console -- see
+`charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml` for details,
+since the exact fields are Keycloak-version-specific and cannot be templated
+blindly.
+
 If enabling Native OIDC, set a stable Keycloak route reachable by the
 OpenShift control plane. It must exactly match the JWT `iss` claim:
 
@@ -149,7 +165,7 @@ helm upgrade --install rca-agent charts/all/rca-agent \
   --set identity.keycloak.issuerUrl='https://keycloak.apps.example.com/realms/rca' \
   --set identity.keycloak.audiences[0]=rca-agent \
   --set identity.keycloak.audiences[1]=openshift \
-  --set identity.keycloak.tokenExchange.clientId=rca-agent \
+  --set identity.keycloak.tokenExchange.clientId=rca-agent-mcp \
   --set identity.keycloak.tokenExchange.audience=openshift-mcp \
   --set litellm.vaultKey='secret/data/global/rca-agent-litellm'
 ```

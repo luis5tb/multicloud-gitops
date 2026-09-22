@@ -1,0 +1,19 @@
+{{- if .Values.identity.clusterSpiffeID.enabled }}
+{{- if not .Values.identity.clusterSpiffeID.trustDomain }}
+{{- fail "identity.clusterSpiffeID.trustDomain must be set when identity.clusterSpiffeID.enabled is true" }}
+{{- end }}
+{{- $serviceAccountName := include "ericsson-agent.serviceAccountName" . }}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ .Values.identity.clusterSpiffeID.name }}
+spec:
+  spiffeIDTemplate: "spiffe://{{ .Values.identity.clusterSpiffeID.trustDomain }}/ns/{{ .Release.Namespace }}/sa/{{ $serviceAccountName }}"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  podSelector:
+    matchLabels:
+      {{- include "ericsson-agent.selectorLabels" . | nindent 6 }}
+  jwtTtl: 300
+{{- end }}

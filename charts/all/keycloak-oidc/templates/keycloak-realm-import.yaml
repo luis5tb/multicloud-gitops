@@ -42,4 +42,39 @@ spec:
             config:
               included.custom.audience: openshift
               access.token.claim: "true"
+      # Confidential client used only for the OpenShift MCP token exchange.
+      # It must NOT be the public login client above: token exchange
+      # authenticates the client itself, which a public client cannot do.
+      #
+      # MANUAL STEP: this client must be switched to Keycloak's federated
+      # client authentication (see
+      # https://www.keycloak.org/2026/01/federated-client-authentication),
+      # referencing the "spiffe" identity provider configured by the
+      # "keycloak" application's spiffeIdentityProvider override, so the
+      # jwt-spiffe assertion from rca-agent's SPIRE JWT-SVID authenticates
+      # this client with no static secret. The exact client-authenticator
+      # field is version-specific and cannot be templated blindly here;
+      # configure it in the Keycloak Admin Console under this client's
+      # Credentials tab, then grant it token-exchange permission for the
+      # openshift-mcp audience (Fine-Grained Admin Permissions).
+      - clientId: {{ .Values.keycloak.mcpClientId | quote }}
+        name: {{ .Values.keycloak.mcpClientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+      # Confidential client used by ericsson-agent's client-credentials call.
+      #
+      # MANUAL STEP: same federated client authentication caveat as above
+      # applies here.
+      - clientId: {{ .Values.keycloak.ericssonClientId | quote }}
+        name: {{ .Values.keycloak.ericssonClientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
 {{- end }}

@@ -19,11 +19,13 @@ agents/ericsson_agent/
 │   ├── auth.py        # Keycloak token exchange and ZTO identity handling
 │   ├── config.py      # Environment configuration helpers
 │   └── ui.py          # Small browser client
-├── chart/ericsson-agent/  # Self-contained Helm chart
 ├── Containerfile
 ├── pyproject.toml
 └── tests/
 ```
+
+The Helm chart is at [`charts/all/ericsson-agent`](../../charts/all/ericsson-agent),
+alongside every other component in this pattern.
 
 ## Local setup
 
@@ -101,16 +103,24 @@ The application supports three downstream authentication modes:
 * `keycloak`: obtain and cache a JWT from `KEYCLOAK_TOKEN_URL` using the
   client-credentials grant.
 
-For the OpenShift deployment, configure `keycloak` and let ZTO provide the
-workload identity token at `ZTO_IDENTITY_TOKEN_FILE`. The chart supports both a
-Secret-backed file and a projected service-account token volume. The identity
-token can be submitted to Keycloak as a JWT client assertion using
-`KEYCLOAK_CLIENT_AUTH_METHOD=client_assertion_post`. For a SPIFFE/ZTWIM
-JWT-SVID, the default assertion type is
-`urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`; set
-`KEYCLOAK_CLIENT_ASSERTION_TYPE` to the JWT-bearer URI only for a realm that
-explicitly expects that profile. A normal Keycloak client-secret method can
-also be selected when appropriate for the target realm.
+For the OpenShift deployment, configure `keycloak` and set
+`identity.spiffe.enabled=true` (chart value) so the agent fetches its own
+short-lived JWT-SVID directly from ZTWIM/SPIRE through the Workload API
+(`csi.spiffe.io`, the same mechanism `charts/all/rca-agent` uses) instead of
+reading a static token file. This is the "ZTO" identity used as the JWT
+client assertion (`KEYCLOAK_CLIENT_ASSERTION_TYPE`, default
+`urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) when calling
+Keycloak with `KEYCLOAK_CLIENT_AUTH_METHOD=client_assertion_post`. This
+requires a matching `ClusterSPIFFEID` (`identity.clusterSpiffeID.enabled=true`
+with the cluster's trust domain) and a Keycloak client configured for
+federated client authentication against the SPIFFE identity provider (see
+`charts/all/keycloak-oidc`).
+
+A static Secret or plain projected ServiceAccount token
+(`ztoIdentity.enabled=true`) remains available as a fallback for a "ZTO" that
+is a separate system from ZTWIM/SPIRE; it is mutually exclusive with
+`identity.spiffe.enabled`. A normal Keycloak client-secret method can also be
+selected when appropriate for the target realm.
 
 The following settings are supported:
 
@@ -127,15 +137,17 @@ The following settings are supported:
 | `KEYCLOAK_SCOPE` | Optional space-separated OAuth scopes |
 | `KEYCLOAK_CLIENT_AUTH_METHOD` | `client_assertion_post`, `client_secret_basic`, or `client_secret_post` |
 | `KEYCLOAK_CLIENT_ASSERTION_TYPE` | OAuth client assertion type; defaults to the SPIFFE JWT-SVID type |
-| `ZTO_IDENTITY_TOKEN_FILE` | File containing the ZTO-issued identity token |
+| `SPIFFE_ENABLED` | When `true`, fetch the client assertion fresh from ZTWIM/SPIRE instead of `ZTO_IDENTITY_TOKEN_FILE` |
+| `SPIFFE_ENDPOINT_SOCKET` | SPIRE Workload API socket, e.g. `unix:///spiffe-workload-api/socket` |
+| `SPIFFE_JWT_AUDIENCE` | JWT-SVID audience requested from SPIRE |
+| `ZTO_IDENTITY_TOKEN_FILE` | File containing the ZTO-issued identity token (ignored when `SPIFFE_ENABLED=true`) |
 | `ZTO_IDENTITY_TOKEN` | Optional environment fallback for the identity token |
 | `ZTO_FORWARD_IDENTITY` | Also forward the identity in `ZTO_IDENTITY_HEADER` |
 | `A2A_TLS_VERIFY` | Set to `false` only for local development with test certificates |
 
-The exact Keycloak client policy and ZTO audience are deployment-specific, so
-the chart exposes the token URL, client-auth method, token-file path, audience,
-and service-account annotations as values rather than assuming a fixed ZTO
-installation.
+The exact Keycloak client policy is deployment-specific, so the chart exposes
+the token URL, client-auth method, and SPIFFE/ZTO settings as values rather
+than assuming a fixed installation.
 
 ## Build the image
 
@@ -162,11 +174,12 @@ uses the UBI Python base image and installs the dependencies from
 
 ## Deploy with Helm
 
-The chart is kept with the project so it can be added to the validated pattern
-as an Argo CD application later. Deploy it directly with:
+The chart lives at `charts/all/ericsson-agent` and is wired into
+`variants/standalone/values-standalone.yaml` as an Argo CD application. To
+deploy it standalone (outside the pattern) instead:
 
 ```bash
-helm upgrade --install ericsson-agent ./chart/ericsson-agent \
+helm upgrade --install ericsson-agent ../../charts/all/ericsson-agent \
   --namespace ericsson-agent --create-namespace \
   --set image.repository="${IMAGE_REPOSITORY}" \
   --set image.tag="${IMAGE_TAG}" \
@@ -199,18 +212,39 @@ a2a:
       endpoint: https://orders.example.com/a2a
 ```
 
-For a cluster deployment, put the Keycloak client secret in a Kubernetes
-Secret and configure `auth.keycloak.clientSecretSecret`. Do not put the secret
-value in Git or in Helm values committed to the repository. A typical pattern
-application entry will be:
+For a cluster deployment authenticating with a static client secret, put it
+in a Kubernetes Secret and configure `auth.keycloak.clientSecretSecret`. Do
+not put the secret value in Git or in Helm values committed to the
+repository. Prefer `identity.spiffe.enabled=true` (see above) so no secret is
+needed at all. This repo wires the application into
+`variants/standalone/values-standalone.yaml` as:
 
 ```yaml
 ericsson-agent:
   name: ericsson-agent
   namespace: ericsson-agent
   argoProject: hub
-  path: agents/ericsson_agent/chart/ericsson-agent
+  path: charts/all/ericsson-agent
+  overrides:
+    - name: image.repository
+      value: quay.io/<your-quay-org>/ericsson-agent
+    - name: image.tag
+      value: <immutable-tag>
+    - name: a2a.downstreamEndpoint
+      value: http://rca-agent.lightspeed-agentic-operator.svc.cluster.local:8000
+    - name: auth.mode
+      value: keycloak
+    - name: auth.keycloak.tokenUrl
+      value: https://<keycloak-route>/realms/rca/protocol/openid-connect/token
+    - name: auth.keycloak.clientId
+      value: ericsson-agent
+    - name: identity.spiffe.enabled
+      value: "true"
+    - name: identity.clusterSpiffeID.enabled
+      value: "true"
+    - name: identity.clusterSpiffeID.trustDomain
+      value: <cluster trust domain>
 ```
 
-See `chart/ericsson-agent/values.yaml` for all deployment options, including
-route settings, resource limits, ZTO token volumes, and Keycloak settings.
+See `charts/all/ericsson-agent/values.yaml` for all deployment options, including
+route settings, resource limits, ZTO/SPIFFE identity, and Keycloak settings.

@@ -64,6 +64,8 @@ extraEnv: []
 
 ztoIdentity:
   # Enable when ZTO injects an identity token through a Secret or projection.
+  # Ignored when identity.spiffe.enabled is true: the SPIFFE JWT-SVID fetched
+  # directly from ZTWIM/SPIRE takes precedence over a file-based token.
   enabled: false
   mountPath: /var/run/secrets/zto
   secretName: ""
@@ -72,6 +74,27 @@ ztoIdentity:
     enabled: false
     audience: ""
     expirationSeconds: 3600
+
+identity:
+  spiffe:
+    # When enabled, the agent fetches its own short-lived JWT-SVID directly
+    # from ZTWIM/SPIRE through the Workload API (csi.spiffe.io), the same
+    # mechanism used by charts/all/rca-agent. This is the "ZTO" identity used
+    # as the jwt-spiffe client assertion when calling Keycloak, and takes
+    # precedence over ztoIdentity's file/Secret-based token.
+    enabled: false
+    workloadApiSocket: unix:///spiffe-workload-api/socket
+    workloadApiMountPath: /spiffe-workload-api
+    workloadApiAudience: ericsson-agent
+    timeoutSeconds: 5
+
+  # ZTWIM must have a matching ClusterSPIFFEID registration. This optional
+  # object is disabled by default because the cluster trust domain is an
+  # installation-specific value.
+  clusterSpiffeID:
+    enabled: false
+    name: ericsson-agent
+    trustDomain: ""
 
 route:
   enabled: false

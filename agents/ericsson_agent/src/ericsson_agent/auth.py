@@ -13,6 +13,10 @@ import httpx
 from .config import env_bool
 
 
+class SpiffeIdentityError(RuntimeError):
+    """Raised when ZTWIM/SPIRE cannot issue this pod a JWT-SVID."""
+
+
 @dataclass(frozen=True)
 class AuthSettings:
     mode: str
@@ -26,6 +30,10 @@ class AuthSettings:
     zto_identity_token: str
     zto_forward_identity: bool
     zto_identity_header: str
+    spiffe_enabled: bool
+    spiffe_endpoint_socket: str
+    spiffe_jwt_audience: str
+    spiffe_timeout: float
     tls_verify: bool | str
     timeout: float
     token_refresh_skew: int
@@ -57,6 +65,10 @@ class AuthSettings:
             zto_identity_header=os.getenv(
                 "ZTO_IDENTITY_HEADER", "X-ZTO-Identity"
             ).strip(),
+            spiffe_enabled=env_bool(os.getenv("SPIFFE_ENABLED")),
+            spiffe_endpoint_socket=os.getenv("SPIFFE_ENDPOINT_SOCKET", "").strip(),
+            spiffe_jwt_audience=os.getenv("SPIFFE_JWT_AUDIENCE", "").strip(),
+            spiffe_timeout=float(os.getenv("SPIFFE_TIMEOUT_SECONDS", "5")),
             tls_verify=tls_verify,
             timeout=float(os.getenv("A2A_REQUEST_TIMEOUT", "60")),
             token_refresh_skew=int(os.getenv("KEYCLOAK_TOKEN_REFRESH_SKEW", "30")),
@@ -76,7 +88,15 @@ class DownstreamAuth:
         )
 
     def _identity_token(self, *, required: bool = False) -> str:
-        """Read the ZTO identity, preferring the projected file over env."""
+        """Fetch the ZTO identity, preferring a fresh SPIFFE JWT-SVID.
+
+        A JWT-SVID is short-lived (minutes), so it is fetched fresh from
+        ZTWIM/SPIRE on every call rather than cached like the file/env
+        fallback below.
+        """
+
+        if self.settings.spiffe_enabled:
+            return self._spiffe_jwt_svid()
 
         token = ""
         if self.settings.zto_identity_token_file:
@@ -92,6 +112,30 @@ class DownstreamAuth:
                 "Keycloak client assertion authentication requires a ZTO identity "
                 "token in ZTO_IDENTITY_TOKEN_FILE or ZTO_IDENTITY_TOKEN"
             )
+        return token
+
+    def _spiffe_jwt_svid(self) -> str:
+        """Fetch a short-lived JWT-SVID from ZTWIM/SPIRE's Workload API."""
+
+        from spiffe import WorkloadApiClient
+
+        if not self.settings.spiffe_jwt_audience:
+            raise SpiffeIdentityError("SPIFFE_JWT_AUDIENCE must be configured")
+        try:
+            with WorkloadApiClient(
+                socket_path=self.settings.spiffe_endpoint_socket or None,
+                default_timeout=self.settings.spiffe_timeout,
+            ) as client:
+                svid = client.fetch_jwt_svid(
+                    audience={self.settings.spiffe_jwt_audience}
+                )
+        except Exception as error:
+            raise SpiffeIdentityError(
+                "ZTWIM/SPIRE did not issue a JWT-SVID"
+            ) from error
+        token = str(getattr(svid, "token", "") or getattr(svid, "jwt_svid", "") or "")
+        if not token:
+            raise SpiffeIdentityError("ZTWIM/SPIRE returned an empty JWT-SVID")
         return token
 
     async def _keycloak_token(self) -> str:

@@ -3,9 +3,22 @@ keycloak:
   name: keycloak
   realm: rca
   displayName: RCA
+  # Public client used only for browser/oc-login OIDC flows (Native OIDC).
+  # It cannot authenticate itself, so it must never be used for the
+  # confidential clients below.
   clientId: rca-agent
   clientName: RCA Agent
   groupName: rca-users
+  # Confidential client rca-agent uses to exchange a caller's token for one
+  # scoped to OpenShift MCP (identity.keycloak.tokenExchange.clientId in
+  # charts/all/rca-agent). Must NOT be a public client.
+  mcpClientId: rca-agent-mcp
+  mcpClientName: RCA Agent (OpenShift MCP token exchange)
+  # Confidential client ericsson-agent uses for its client-credentials call
+  # to Keycloak (auth.keycloak.clientId in
+  # charts/all/ericsson-agent).
+  ericssonClientId: ericsson-agent
+  ericssonClientName: Ericsson A2A agent
 
 openshiftOIDC:
   enabled: false

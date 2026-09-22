@@ -16,6 +16,7 @@ clusterGroup:
     lightspeed-agentic-operator:
     openshift-mcp-server:
     mao:
+    ericsson-agent:
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -73,6 +74,12 @@ clusterGroup:
       argoProject: hub
       chart: ztwim
       chartVersion: 0.1.*
+      overrides:
+        # SPIFFE trust domain for this cluster. rca-agent's
+        # identity.clusterSpiffeID.trustDomain and ericsson-agent's
+        # identity.clusterSpiffeID.trustDomain must use this same value.
+        - name: spire.trustDomain
+          value: multicloud-gitops.example
     keycloak:
       name: keycloak
       namespace: keycloak-system
@@ -108,6 +115,16 @@ clusterGroup:
           value: rca
         - name: agenticRun.namespace
           value: lightspeed-agentic-operator
+        # Native OIDC is cluster-wide, so it is opt-in. Enable it once Keycloak
+        # is up and you know its public route (`oc get route keycloak -n
+        # keycloak-system`). issuerURL must exactly match the JWT `iss` claim,
+        # and the same URL + /realms/rca must be used for
+        # rca-agent's identity.keycloak.issuerUrl and ericsson-agent's
+        # auth.keycloak.tokenUrl below.
+        - name: openshiftOIDC.enabled
+          value: "true"
+        - name: openshiftOIDC.issuerURL
+          value: https://keycloak-keycloak-system.apps.CHANGEME.example.com/realms/rca
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
@@ -127,6 +144,69 @@ clusterGroup:
       namespace: openshift-mcp-server
       argoProject: hub
       path: charts/all/openshift-mcp-server
+    rca-agent:
+      name: rca-agent
+      # Same namespace as lightspeed-agentic-operator: the operator only
+      # watches AgenticRuns/Agents in its own namespace (see
+      # --namespace={{ .Values.namespace }} in that chart's Deployment), so
+      # this is also where AgenticRuns created by this agent must live.
+      namespace: lightspeed-agentic-operator
+      argoProject: hub
+      path: charts/all/rca-agent
+      overrides:
+        - name: image.repository
+          value: quay.io/your-quay-org/rca-agent
+        - name: image.tag
+          value: CHANGEME-immutable-tag
+        - name: identity.keycloak.issuerUrl
+          value: https://keycloak-keycloak-system.apps.CHANGEME.example.com/realms/rca
+        - name: identity.keycloak.tokenExchange.clientId
+          value: rca-agent-mcp
+        - name: identity.keycloak.tokenExchange.audience
+          value: openshift-mcp
+        - name: identity.clusterSpiffeID.enabled
+          value: "true"
+        # Must match the spire.trustDomain override on the
+        # zero-trust-workload-identity-manager application above.
+        - name: identity.clusterSpiffeID.trustDomain
+          value: multicloud-gitops.example
+    ericsson-agent:
+      name: ericsson-agent
+      namespace: ericsson-agent
+      argoProject: hub
+      path: charts/all/ericsson-agent
+      overrides:
+        - name: image.repository
+          value: quay.io/your-quay-org/ericsson-agent
+        - name: image.tag
+          value: CHANGEME-immutable-tag
+        # In-cluster DNS name for the rca-agent Service (fullnameOverride:
+        # rca-agent, deployed in the lightspeed-agentic-operator namespace).
+        - name: a2a.downstreamEndpoint
+          value: http://rca-agent.lightspeed-agentic-operator.svc.cluster.local:8000
+        - name: a2a.downstreamAgentName
+          value: rca_agent
+        - name: a2a.downstreamAgentDescription
+          value: Investigates OpenShift incidents and returns root-cause analysis with remediation proposals.
+        - name: auth.mode
+          value: keycloak
+        - name: auth.keycloak.tokenUrl
+          value: https://keycloak-keycloak-system.apps.CHANGEME.example.com/realms/rca/protocol/openid-connect/token
+        # This Keycloak client (jwt-spiffe federated client auth) must exist
+        # in the "rca" realm before enabling this. See the deployment
+        # instructions for the manual Keycloak admin step this needs.
+        - name: auth.keycloak.clientId
+          value: ericsson-agent
+        - name: identity.spiffe.enabled
+          value: "true"
+        - name: identity.clusterSpiffeID.enabled
+          value: "true"
+        # Must match the spire.trustDomain override on the
+        # zero-trust-workload-identity-manager application above.
+        - name: identity.clusterSpiffeID.trustDomain
+          value: multicloud-gitops.example
+        - name: route.enabled
+          value: "true"
     mao-mongo:
       name: mao-mongo
       namespace: mao

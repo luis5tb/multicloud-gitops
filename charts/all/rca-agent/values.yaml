@@ -1,3 +1,5 @@
+fullnameOverride: rca-agent
+
 replicaCount: 1
 
 image:
@@ -54,8 +56,12 @@ identity:
       - rca-agent
       - openshift
     tokenExchange:
-      # The RCA client must be allowed to exchange an inbound caller token in Keycloak.
-      clientId: rca-agent
+      # The RCA client must be allowed to exchange an inbound caller token in
+      # Keycloak. This must be a confidential client distinct from the public
+      # login client used for Native OIDC (see charts/all/keycloak-oidc,
+      # keycloak.mcpClientId) -- a public client cannot authenticate itself
+      # to perform a token exchange.
+      clientId: rca-agent-mcp
       tokenUrl: ""
       audience: openshift-mcp
       scope: ""

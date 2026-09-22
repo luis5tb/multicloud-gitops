@@ -1,3 +1,6 @@
+{{- if and .Values.ztoIdentity.enabled .Values.identity.spiffe.enabled }}
+{{- fail "configure only one of ztoIdentity.enabled or identity.spiffe.enabled" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -73,6 +76,16 @@ spec:
               value: {{ .Values.auth.ztoIdentityHeader | quote }}
             - name: ZTO_IDENTITY_TOKEN_FILE
               value: {{ printf "%s/identity-token" .Values.ztoIdentity.mountPath | quote }}
+            {{- if .Values.identity.spiffe.enabled }}
+            - name: SPIFFE_ENABLED
+              value: "true"
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: {{ .Values.identity.spiffe.workloadApiSocket | quote }}
+            - name: SPIFFE_JWT_AUDIENCE
+              value: {{ .Values.identity.spiffe.workloadApiAudience | quote }}
+            - name: SPIFFE_TIMEOUT_SECONDS
+              value: {{ .Values.identity.spiffe.timeoutSeconds | quote }}
+            {{- end }}
             - name: KEYCLOAK_TOKEN_URL
               value: {{ .Values.auth.keycloak.tokenUrl | quote }}
             - name: KEYCLOAK_CLIENT_ID
@@ -110,6 +123,11 @@ spec:
               mountPath: {{ .Values.ztoIdentity.mountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.identity.spiffe.enabled }}
+            - name: spiffe-workload-api
+              mountPath: {{ .Values.identity.spiffe.workloadApiMountPath }}
+              readOnly: true
+            {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -138,6 +156,12 @@ spec:
                 path: identity-token
         {{- end }}
       {{- end }}
+        {{- if .Values.identity.spiffe.enabled }}
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
