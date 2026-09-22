@@ -74,12 +74,12 @@ clusterGroup:
       argoProject: hub
       chart: ztwim
       chartVersion: 0.1.*
-      overrides:
-        # SPIFFE trust domain for this cluster. rca-agent's
-        # identity.clusterSpiffeID.trustDomain and ericsson-agent's
-        # identity.clusterSpiffeID.trustDomain must use this same value.
-        - name: spire.trustDomain
-          value: multicloud-gitops.example
+      # No trustDomain override needed: the chart defaults spire.trustDomain
+      # to global.localClusterDomain (this cluster's apps domain), which is
+      # exactly the value rca-agent's and ericsson-agent's
+      # identity.clusterSpiffeID.trustDomain overrides below must match.
+      # Look it up after install with:
+      #   oc get zerotrustworkloadidentitymanager cluster -o jsonpath='{.spec.trustDomain}'
     keycloak:
       name: keycloak
       namespace: keycloak-system
@@ -124,7 +124,7 @@ clusterGroup:
         - name: openshiftOIDC.enabled
           value: "true"
         - name: openshiftOIDC.issuerURL
-          value: https://keycloak-keycloak-system.apps.CHANGEME.example.com/realms/rca
+          value: https://keycloak.apps.CHANGEME-cluster-domain/realms/rca
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
@@ -159,17 +159,17 @@ clusterGroup:
         - name: image.tag
           value: CHANGEME-immutable-tag
         - name: identity.keycloak.issuerUrl
-          value: https://keycloak-keycloak-system.apps.CHANGEME.example.com/realms/rca
+          value: https://keycloak.apps.CHANGEME-cluster-domain/realms/rca
         - name: identity.keycloak.tokenExchange.clientId
           value: rca-agent-mcp
         - name: identity.keycloak.tokenExchange.audience
           value: openshift-mcp
         - name: identity.clusterSpiffeID.enabled
           value: "true"
-        # Must match the spire.trustDomain override on the
-        # zero-trust-workload-identity-manager application above.
+        # Must match the cluster's trust domain (see the
+        # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
-          value: multicloud-gitops.example
+          value: CHANGEME-trust-domain
     ericsson-agent:
       name: ericsson-agent
       namespace: ericsson-agent
@@ -191,7 +191,7 @@ clusterGroup:
         - name: auth.mode
           value: keycloak
         - name: auth.keycloak.tokenUrl
-          value: https://keycloak-keycloak-system.apps.CHANGEME.example.com/realms/rca/protocol/openid-connect/token
+          value: https://keycloak.apps.CHANGEME-cluster-domain/realms/rca/protocol/openid-connect/token
         # This Keycloak client (jwt-spiffe federated client auth) must exist
         # in the "rca" realm before enabling this. See the deployment
         # instructions for the manual Keycloak admin step this needs.
@@ -201,10 +201,10 @@ clusterGroup:
           value: "true"
         - name: identity.clusterSpiffeID.enabled
           value: "true"
-        # Must match the spire.trustDomain override on the
-        # zero-trust-workload-identity-manager application above.
+        # Must match the cluster's trust domain (see the
+        # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
-          value: multicloud-gitops.example
+          value: CHANGEME-trust-domain
         - name: route.enabled
           value: "true"
     mao-mongo:
