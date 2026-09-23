@@ -1,0 +1,17 @@
+{{- if .Values.keycloak.adminGroupName }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.keycloak.adminGroupName }}-cluster-admin
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.rbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ printf "%s%s" .Values.openshiftOIDC.groupsPrefix .Values.keycloak.adminGroupName | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+{{- end }}

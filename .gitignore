@@ -9,3 +9,4 @@ super-linter.log
 common/pattern-vault.init
 **/.venv/
 *.egg-info/
+*.kubeconfig

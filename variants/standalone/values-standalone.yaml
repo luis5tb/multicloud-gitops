@@ -133,6 +133,20 @@ clusterGroup:
         # client. Required once openshiftOIDC.enabled is "true".
         - name: openshiftOIDC.consoleRoute
           value: https://console-openshift-console.apps.ocp.rvnmn.sandbox2284.opentlc.com
+        # Cluster-admin ServiceAccount + non-expiring token Secret in
+        # openshift-config, independent of openshiftOIDC.enabled. Safe to
+        # enable any time; run `make admin-break-glass-kubeconfig` after
+        # this syncs. See charts/all/keycloak-oidc/README.md.
+        - name: breakGlass.enabled
+          value: "true"
+        # Keycloak group bound to cluster-admin once openshiftOIDC.enabled
+        # is true. NOTE: the realm import on this cluster already succeeded
+        # before this override existed, so it won't retroactively create
+        # this group -- create it once manually in the Admin Console
+        # (Groups -> New group -> "rca-admins"), then add your user to it,
+        # before enabling openshiftOIDC.
+        - name: keycloak.adminGroupName
+          value: rca-admins
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator

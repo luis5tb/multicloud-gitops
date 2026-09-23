@@ -17,6 +17,9 @@ spec:
     displayName: {{ .Values.keycloak.displayName | quote }}
     groups:
       - name: {{ .Values.keycloak.groupName | quote }}
+      {{- if .Values.keycloak.adminGroupName }}
+      - name: {{ .Values.keycloak.adminGroupName | quote }}
+      {{- end }}
     clients:
       - clientId: {{ .Values.keycloak.clientId | quote }}
         name: {{ .Values.keycloak.clientName | quote }}

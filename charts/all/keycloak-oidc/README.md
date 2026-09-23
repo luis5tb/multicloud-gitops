@@ -70,7 +70,62 @@ Two things must both be correct, not just the issuer:
    as the confidential `console` client), but the console client's secret
    still needs the one manual step below.
 
+### Keeping admin access after enabling OIDC
+
+CLI and console need two separate answers here -- OIDC replaces the login
+*flow*, not the API server's ability to accept other credentials, but the
+console has no other credential path while the CLI does.
+
+**CLI break-glass (do this first, before touching anything else below):** set
+`breakGlass.enabled=true` on the `keycloak-oidc` application and sync -- this
+templates a cluster-admin ServiceAccount, a `ClusterRoleBinding`, and a
+non-expiring, legacy-style token Secret, all in `openshift-config`. This is
+part of `make install`'s normal GitOps flow like everything else in this
+chart, so it's in place before you ever touch `openshiftOIDC.enabled`.
+ServiceAccount tokens are validated by the API server directly and never go
+through `Authentication/cluster`'s OAuth/OIDC flow at all, so this keeps
+working no matter what `spec.type` is set to -- it is what makes "Recovering
+if it breaks anyway" below actually possible.
+
+What can't be automated as part of the GitOps sync is turning that token
+into a local kubeconfig file -- Helm/ArgoCD only create in-cluster objects,
+they can't write to your workstation's disk. Do that once, separately, with:
+
+```bash
+make admin-break-glass-kubeconfig
+```
+
+This reads the Secret created above and writes `admin-break-glass.kubeconfig`
+in the repo root (already `.gitignore`d). Move it somewhere safe outside the
+repo -- a password manager or offline vault -- and verify it works
+(`oc --kubeconfig=admin-break-glass.kubeconfig whoami`) before you rely on
+it.
+
+**Console:** the web console only ever authenticates through the active
+OAuth/OIDC flow -- there is no client-certificate or ServiceAccount-token
+login path for a browser. So once `openshiftOIDC.enabled=true`, the only way
+to reach the console as an administrator is through a Keycloak identity that
+Kubernetes RBAC recognizes as `cluster-admin`. Set `keycloak.adminGroupName`
+(for example `rca-admins`) to have this chart create that group in the realm
+and bind it to `cluster-admin` via a `ClusterRoleBinding`, then add your own
+Keycloak user to that group (Admin Console → Users → your user → Groups →
+Join Group) *before* enabling OIDC. This binding is created unconditionally
+whenever `keycloak.adminGroupName` is set, independent of
+`openshiftOIDC.enabled`, so it's ready by the time you flip the switch.
+
+Note the same one-shot limitation as the rest of the realm import: setting
+`keycloak.adminGroupName` after the realm has already reached `Done: True`
+will not retroactively create the group (see the checklist below and the
+note at the end of this file). If that's already happened, create the group
+manually once in the Admin Console with the same name instead -- the
+`ClusterRoleBinding` itself is a normal, always-reconciled resource and
+doesn't have this limitation.
+
 ### Pre-flight checklist (do this before setting `openshiftOIDC.enabled=true`)
+
+0. Complete "Keeping admin access after enabling OIDC" above: have a
+   verified CLI break-glass kubeconfig, and a Keycloak user already in
+   `keycloak.adminGroupName` if you set one.
 
 1. Confirm the realm import actually succeeded -- it is applied only once,
    and if it raced the `Keycloak` CR's own creation on a fresh install it can

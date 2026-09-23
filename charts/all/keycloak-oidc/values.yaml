@@ -25,6 +25,14 @@ keycloak:
   # manual step to copy it into openshiftOIDC.consoleClientSecretName.
   consoleClientId: openshift-console
   consoleClientName: OpenShift Console (Native OIDC)
+  # Optional realm group. Members get cluster-admin (via the ClusterRoleBinding
+  # below) once openshiftOIDC.enabled is true, so there is at least one way to
+  # reach the console as an administrator through Keycloak itself. Empty
+  # disables the group and binding entirely. See the README section
+  # "Keeping admin access after enabling OIDC" -- this is deliberately opt-in
+  # and separate from the CLI break-glass credential, which this cannot
+  # replace: it only helps once Keycloak/OIDC is already working correctly.
+  adminGroupName: ""
 
 openshiftOIDC:
   enabled: false
@@ -50,6 +58,19 @@ openshiftOIDC:
   groupsClaim: groups
   groupsPrefix: "keycloak:"
   caConfigMapName: ""
+
+# Cluster-admin ServiceAccount + non-expiring token Secret in
+# openshift-config, independent of Authentication/cluster's spec.type: it
+# keeps working no matter what openshiftOIDC.enabled is set to, since
+# ServiceAccount tokens never go through the OAuth/OIDC login flow. Run
+# `make admin-break-glass-kubeconfig` (Makefile) to turn the token into a
+# local kubeconfig file once this is deployed. See the README section
+# "Keeping admin access after enabling OIDC". Off by default -- a standing
+# cluster-admin credential is a permanent addition to the cluster's attack
+# surface, so opt in deliberately rather than getting it for free.
+breakGlass:
+  enabled: false
+  serviceAccountName: admin-break-glass
 
 agenticRun:
   namespace: lightspeed-agentic-operator
