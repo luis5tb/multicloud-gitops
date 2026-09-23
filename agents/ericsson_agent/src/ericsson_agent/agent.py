@@ -54,10 +54,17 @@ remote_agents = [
 def _model() -> LiteLlm:
     """Build the ADK model through the configured LiteLLM proxy."""
 
-    # LiteLlm reads LITELLM_API_BASE/LITELLM_API_KEY from the process
-    # environment. The chart injects those values from a Secret/ExternalSecret;
-    # they are intentionally not passed through the Agent constructor.
-    return LiteLlm(model=os.getenv("ADK_MODEL", "openai/ericsson-agent"))
+    # LiteLlm forwards **kwargs to litellm.completion(), which does not read
+    # LITELLM_API_BASE/LITELLM_API_KEY on its own -- those are this chart's
+    # own env var names, not something litellm auto-detects for the
+    # "openai/" model prefix (it only auto-reads OPENAI_API_KEY). Pass them
+    # through explicitly; litellm.completion's base URL kwarg is base_url,
+    # not api_base.
+    return LiteLlm(
+        model=os.getenv("ADK_MODEL", "openai/ericsson-agent"),
+        base_url=os.getenv("LITELLM_API_BASE") or None,
+        api_key=os.getenv("LITELLM_API_KEY") or None,
+    )
 
 
 # This local ADK agent is the public entrypoint. The RemoteA2aAgent instances
