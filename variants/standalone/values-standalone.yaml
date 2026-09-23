@@ -124,7 +124,7 @@ clusterGroup:
         - name: openshiftOIDC.enabled
           value: "true"
         - name: openshiftOIDC.issuerURL
-          value: https://keycloak.apps.CHANGEME-cluster-domain/realms/rca
+          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
@@ -159,7 +159,7 @@ clusterGroup:
         - name: image.tag
           value: 520adc8b
         - name: identity.keycloak.issuerUrl
-          value: https://keycloak.apps.CHANGEME-cluster-domain/realms/rca
+          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
         - name: identity.keycloak.tokenExchange.clientId
           value: rca-agent-mcp
         - name: identity.keycloak.tokenExchange.audience
@@ -169,7 +169,7 @@ clusterGroup:
         # Must match the cluster's trust domain (see the
         # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
-          value: CHANGEME-trust-domain
+          value: apps.ocp.rvnmn.sandbox2284.opentlc.com
     ericsson-agent:
       name: ericsson-agent
       namespace: ericsson-agent
@@ -191,7 +191,7 @@ clusterGroup:
         - name: auth.mode
           value: keycloak
         - name: auth.keycloak.tokenUrl
-          value: https://keycloak.apps.CHANGEME-cluster-domain/realms/rca/protocol/openid-connect/token
+          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca/protocol/openid-connect/token
         # This Keycloak client (jwt-spiffe federated client auth) must exist
         # in the "rca" realm before enabling this. See the deployment
         # instructions for the manual Keycloak admin step this needs.
@@ -204,7 +204,7 @@ clusterGroup:
         # Must match the cluster's trust domain (see the
         # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
-          value: CHANGEME-trust-domain
+          value: apps.ocp.rvnmn.sandbox2284.opentlc.com
         - name: route.enabled
           value: "true"
     mao-mongo:
