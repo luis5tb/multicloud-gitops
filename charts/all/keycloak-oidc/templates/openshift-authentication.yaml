@@ -2,6 +2,9 @@
 {{- if not .Values.openshiftOIDC.issuerURL }}
 {{- fail "openshiftOIDC.issuerURL must exactly match the Keycloak token iss claim when openshiftOIDC.enabled is true" }}
 {{- end }}
+{{- if not .Values.openshiftOIDC.consoleRoute }}
+{{- fail "openshiftOIDC.consoleRoute must be set to the web console's public route when openshiftOIDC.enabled is true, e.g. https://console-openshift-console.apps.<cluster-domain> (find it with `oc whoami --show-console`)" }}
+{{- end }}
 apiVersion: config.openshift.io/v1
 kind: Authentication
 metadata:
@@ -17,8 +20,15 @@ spec:
     - name: {{ .Values.openshiftOIDC.providerName | quote }}
       issuer:
         issuerURL: {{ .Values.openshiftOIDC.issuerURL | quote }}
+        # Must include every clientID referenced by oidcClients below --
+        # OpenShift rejects tokens issued to a platform client whose ID
+        # isn't also a trusted audience of this provider.
         audiences:
-          {{- toYaml .Values.openshiftOIDC.audiences | nindent 10 }}
+          - {{ .Values.keycloak.clientId | quote }}
+          - {{ .Values.keycloak.consoleClientId | quote }}
+          {{- range .Values.openshiftOIDC.extraAudiences }}
+          - {{ . | quote }}
+          {{- end }}
         {{- if .Values.openshiftOIDC.caConfigMapName }}
         issuerCertificateAuthority:
           name: {{ .Values.openshiftOIDC.caConfigMapName | quote }}
@@ -32,4 +42,17 @@ spec:
         groups:
           claim: {{ .Values.openshiftOIDC.groupsClaim | quote }}
           prefix: {{ .Values.openshiftOIDC.groupsPrefix | quote }}
+      # Without these, OpenShift switches to OIDC but reports "no OIDC
+      # client found" for both cli and console, breaking login entirely --
+      # the API server's own token validation works, but nothing can
+      # actually obtain a token through the browser or `oc login`.
+      oidcClients:
+        - componentName: cli
+          componentNamespace: openshift-console
+          clientID: {{ .Values.keycloak.clientId | quote }}
+        - componentName: console
+          componentNamespace: openshift-console
+          clientID: {{ .Values.keycloak.consoleClientId | quote }}
+          clientSecret:
+            name: {{ .Values.openshiftOIDC.consoleClientSecretName | quote }}
 {{- end }}

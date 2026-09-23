@@ -19,14 +19,32 @@ keycloak:
   # charts/all/ericsson-agent).
   ericssonClientId: ericsson-agent
   ericssonClientName: Ericsson A2A agent
+  # Confidential client registered as the web console's OIDC platform client
+  # when openshiftOIDC.enabled is true. Keycloak generates its secret at
+  # import time -- see charts/all/keycloak-oidc/README.md for the one-time
+  # manual step to copy it into openshiftOIDC.consoleClientSecretName.
+  consoleClientId: openshift-console
+  consoleClientName: OpenShift Console (Native OIDC)
 
 openshiftOIDC:
   enabled: false
   providerName: keycloak
   issuerURL: ""
-  audiences:
-    - rca-agent
-    - openshift
+  # The web console's public route, e.g.
+  # https://console-openshift-console.apps.<cluster-domain>. Used both as
+  # the redirect URI Keycloak accepts for keycloak.consoleClientId and to
+  # register the console as an OIDC platform client below. Find it with:
+  #   oc whoami --show-console
+  consoleRoute: ""
+  # Name of a Secret in the openshift-config namespace, key "clientSecret",
+  # holding keycloak.consoleClientId's Keycloak-generated secret. See the
+  # README for the one-time manual step to create it.
+  consoleClientSecretName: openshift-console-oidc
+  # Extra token audiences to accept beyond the required platform client IDs
+  # (keycloak.clientId for the CLI, keycloak.consoleClientId for the
+  # console) -- for example, if some other integration validates tokens
+  # issued by this realm against a different audience.
+  extraAudiences: []
   usernameClaim: sub
   usernamePrefix: "keycloak:"
   groupsClaim: groups

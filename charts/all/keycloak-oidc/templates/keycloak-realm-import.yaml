@@ -26,6 +26,12 @@ spec:
         standardFlowEnabled: true
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: false
+        # Needed for `oc login` when openshiftOIDC.enabled registers this
+        # client as the "cli" OIDC platform client (public, no secret).
+        # OpenShift's built-in external-OIDC CLI flow listens on localhost:8080.
+        redirectUris:
+          - "http://localhost:8080"
+          - "http://localhost:8080/callback"
         protocolMappers:
           - name: groups
             protocol: openid-connect
@@ -77,4 +83,23 @@ spec:
         standardFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
+      # Confidential client registered as the web console's OIDC platform
+      # client when openshiftOIDC.enabled is true.
+      #
+      # MANUAL STEP: Keycloak generates this client's secret at import time.
+      # Copy it into a Secret in the openshift-config namespace (see the
+      # README) before setting openshiftOIDC.enabled=true, or the console
+      # will fail to log in with "no OIDC client found" / invalid_client.
+      - clientId: {{ .Values.keycloak.consoleClientId | quote }}
+        name: {{ .Values.keycloak.consoleClientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        {{- if .Values.openshiftOIDC.consoleRoute }}
+        redirectUris:
+          - "{{ .Values.openshiftOIDC.consoleRoute }}/auth/callback"
+        {{- end }}
 {{- end }}

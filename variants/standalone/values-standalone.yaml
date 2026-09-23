@@ -115,16 +115,24 @@ clusterGroup:
           value: rca
         - name: agenticRun.namespace
           value: lightspeed-agentic-operator
-        # Native OIDC is cluster-wide, so it is opt-in. Enable it once Keycloak
-        # is up and you know its public route (`oc get route keycloak -n
-        # keycloak-system`). issuerURL must exactly match the JWT `iss` claim,
-        # and the same URL + /realms/rca must be used for
-        # rca-agent's identity.keycloak.issuerUrl and ericsson-agent's
-        # auth.keycloak.tokenUrl below.
+        # Native OIDC is cluster-wide and switches Authentication/cluster's
+        # spec.type for the ENTIRE cluster at once (console, oc login,
+        # everything) -- so it is opt-in, and must stay "false" here until
+        # the pre-flight checklist in charts/all/keycloak-oidc/README.md has
+        # been walked start to finish. Enabling it before the realm import
+        # has actually succeeded and the console client's Secret exists
+        # locks out console AND CLI login cluster-wide with
+        # ExternalOIDCControllerDegraded (this has happened -- recovery
+        # command is in that README too).
         - name: openshiftOIDC.enabled
-          value: "true"
+          value: "false"
         - name: openshiftOIDC.issuerURL
           value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
+        # The web console's public route (`oc whoami --show-console`), used
+        # as the redirect URI Keycloak accepts for the console's OIDC
+        # client. Required once openshiftOIDC.enabled is "true".
+        - name: openshiftOIDC.consoleRoute
+          value: https://console-openshift-console.apps.ocp.rvnmn.sandbox2284.opentlc.com
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
