@@ -2,11 +2,11 @@ FROM registry.access.redhat.com/ubi9/python-312:latest
 
 WORKDIR /opt/app-root/src
 
-COPY requirements.txt ./
+COPY --chown=1001:0 requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY pyproject.toml ./
-COPY rca_agent ./rca_agent
+COPY --chown=1001:0 pyproject.toml ./
+COPY --chown=1001:0 rca_agent ./rca_agent
 RUN pip install --no-cache-dir --no-deps .
 
 ENV PORT=8000
