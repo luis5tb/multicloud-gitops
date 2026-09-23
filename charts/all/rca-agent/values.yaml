@@ -44,7 +44,10 @@ secretStore:
 identity:
   # ZTWIM/SPIRE identity is mandatory for A2A requests.
   enabled: true
-  workloadApiSocket: unix:///spiffe-workload-api/socket
+  # The SPIFFE CSI driver always names this file spire-agent.sock -- it is
+  # not configurable server-side, so this must match regardless of the mount
+  # path chosen below.
+  workloadApiSocket: unix:///spiffe-workload-api/spire-agent.sock
   workloadApiMountPath: /spiffe-workload-api
   workloadApiAudience: rca-agent
   timeoutSeconds: 5

@@ -15,5 +15,5 @@ spec:
   podSelector:
     matchLabels:
       {{- include "ericsson-agent.selectorLabels" . | nindent 6 }}
-  jwtTtl: 300
+  jwtTtl: "300s"
 {{- end }}

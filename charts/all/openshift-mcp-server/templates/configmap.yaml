@@ -10,11 +10,14 @@ data:
     bind_address = "0.0.0.0"
     stateless = {{ .Values.server.stateless }}
     log_level = {{ .Values.server.logLevel }}
-    openshift = {{ .Values.server.openshift }}
     toolsets = ["core"]
     enabled_tools = [{{ range $index, $tool := .Values.server.enabledTools }}{{ if $index }}, {{ end }}"{{ $tool }}"{{ end }}]
     read_only = {{ .Values.server.readOnly }}
     require_oauth = {{ .Values.server.requireOAuth }}
     skip_jwt_verification = {{ .Values.server.skipJWTVerification }}
     cluster_auth_mode = "{{ .Values.server.clusterAuthMode }}"
+    # Without this, the server defaults to "auto-detect", which fails over to
+    # looking for a kubeconfig file instead of using the pod's mounted
+    # ServiceAccount token, and crashes with "no current-context is set".
+    cluster_provider_strategy = "in-cluster"
     server_instructions = "This endpoint is restricted to the RCA agent. Only create/get AgenticRun and get AnalysisResult resources are intended. Never use it for execution or verification."

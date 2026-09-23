@@ -16,5 +16,5 @@ spec:
     matchLabels:
       app.kubernetes.io/name: {{ include "rca-agent.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
-  jwtTtl: 300
+  jwtTtl: "300s"
 {{- end }}

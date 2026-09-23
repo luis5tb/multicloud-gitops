@@ -83,7 +83,10 @@ identity:
     # as the jwt-spiffe client assertion when calling Keycloak, and takes
     # precedence over ztoIdentity's file/Secret-based token.
     enabled: false
-    workloadApiSocket: unix:///spiffe-workload-api/socket
+    # The SPIFFE CSI driver always names this file spire-agent.sock -- it is
+    # not configurable server-side, so this must match regardless of the
+    # mount path chosen below.
+    workloadApiSocket: unix:///spiffe-workload-api/spire-agent.sock
     workloadApiMountPath: /spiffe-workload-api
     workloadApiAudience: ericsson-agent
     timeoutSeconds: 5

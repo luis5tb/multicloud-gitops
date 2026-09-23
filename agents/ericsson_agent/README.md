@@ -138,7 +138,7 @@ The following settings are supported:
 | `KEYCLOAK_CLIENT_AUTH_METHOD` | `client_assertion_post`, `client_secret_basic`, or `client_secret_post` |
 | `KEYCLOAK_CLIENT_ASSERTION_TYPE` | OAuth client assertion type; defaults to the SPIFFE JWT-SVID type |
 | `SPIFFE_ENABLED` | When `true`, fetch the client assertion fresh from ZTWIM/SPIRE instead of `ZTO_IDENTITY_TOKEN_FILE` |
-| `SPIFFE_ENDPOINT_SOCKET` | SPIRE Workload API socket, e.g. `unix:///spiffe-workload-api/socket` |
+| `SPIFFE_ENDPOINT_SOCKET` | SPIRE Workload API socket, e.g. `unix:///spiffe-workload-api/spire-agent.sock` (the SPIFFE CSI driver always names the file `spire-agent.sock`) |
 | `SPIFFE_JWT_AUDIENCE` | JWT-SVID audience requested from SPIRE |
 | `ZTO_IDENTITY_TOKEN_FILE` | File containing the ZTO-issued identity token (ignored when `SPIFFE_ENABLED=true`) |
 | `ZTO_IDENTITY_TOKEN` | Optional environment fallback for the identity token |

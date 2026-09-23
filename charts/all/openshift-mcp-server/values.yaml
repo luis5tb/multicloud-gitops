@@ -9,13 +9,18 @@ image:
 serviceAccount:
   create: true
   name: ""
-  automountToken: false
+  # server.clusterAuthMode=passthrough gets its security from replacing this
+  # SA's own token with the caller's forwarded token per request in code, not
+  # from denying the mount -- the client library still needs it to construct
+  # any in-cluster connection at all (host/port/CA come from the same
+  # projected volume). Disabling this breaks startup entirely: "in-cluster
+  # manager cannot be used outside of a cluster".
+  automountToken: true
 
 service:
   port: 8080
 
 server:
-  openshift: true
   enabledTools:
     - resources_create_or_update
     - resources_get
