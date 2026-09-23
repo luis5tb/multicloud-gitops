@@ -179,7 +179,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/rca-agent
         - name: image.tag
-          value: 520adc8b
+          value: 1cba81f7
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
         - name: identity.keycloak.tokenExchange.clientId
@@ -205,7 +205,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/ericsson-agent
         - name: image.tag
-          value: c0bd67cb
+          value: 1cba81f7
         # In-cluster DNS name for the rca-agent Service (fullnameOverride:
         # rca-agent, deployed in the lightspeed-agentic-operator namespace).
         - name: a2a.downstreamEndpoint
