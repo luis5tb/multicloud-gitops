@@ -205,7 +205,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/ericsson-agent
         - name: image.tag
-          value: 520adc8b
+          value: c0bd67cb
         # In-cluster DNS name for the rca-agent Service (fullnameOverride:
         # rca-agent, deployed in the lightspeed-agentic-operator namespace).
         - name: a2a.downstreamEndpoint
