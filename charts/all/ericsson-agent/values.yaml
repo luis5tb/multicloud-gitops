@@ -28,7 +28,6 @@ a2a:
   downstreamEndpoint: http://localhost:8001
   downstreamAgentName: downstream_agent
   downstreamAgentDescription: The configured downstream A2A agent.
-  model: gemini-flash-latest
   # Request ADK's newer A2A executor from downstream agents by default.
   # Set true only for a downstream peer that requires the legacy path.
   useLegacy: false
@@ -36,6 +35,27 @@ a2a:
   publicHost: ericsson-agent
   publicPort: 8080
   publicProtocol: http
+
+litellm:
+  # The local ADK coordinator (the router that picks a downstream sub-agent)
+  # always calls LiteLLM, same as charts/all/rca-agent -- never Google's
+  # Gemini API directly, so no GOOGLE_API_KEY/Vertex credentials are needed
+  # here. The proxy can route to Gemini, Anthropic, OpenAI, or another
+  # approved provider without changing this pod.
+  enabled: true
+  model: openai/ericsson-agent
+  apiBase: http://litellm.litellm.svc.cluster.local:4000
+  credentialsSecretName: ericsson-agent-litellm
+  vaultKey: secret/data/global/ericsson-agent-litellm
+  vaultProperty: api-key
+  existingSecret:
+    name: ""
+    key: LITELLM_API_KEY
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
 
 auth:
   # none, static, or keycloak
@@ -58,8 +78,8 @@ auth:
       key: client-secret
     tokenRefreshSkew: 30
 
-# Optional model settings, for example GOOGLE_GENAI_USE_VERTEXAI or a
-# valueFrom reference to a Secret containing GOOGLE_API_KEY.
+# Escape hatch for additional container env vars not covered by another
+# value above.
 extraEnv: []
 
 ztoIdentity:

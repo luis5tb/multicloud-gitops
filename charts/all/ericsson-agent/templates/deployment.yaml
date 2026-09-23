@@ -1,6 +1,15 @@
 {{- if and .Values.ztoIdentity.enabled .Values.identity.spiffe.enabled }}
 {{- fail "configure only one of ztoIdentity.enabled or identity.spiffe.enabled" }}
 {{- end }}
+{{- if not .Values.litellm.enabled }}
+{{- fail "litellm.enabled must remain true: the local coordinator's model is configured through LiteLLM" }}
+{{- end }}
+{{- if and .Values.litellm.existingSecret.name .Values.litellm.vaultKey }}
+{{- fail "configure either litellm.existingSecret.name or litellm.vaultKey, not both" }}
+{{- end }}
+{{- if and (not .Values.litellm.existingSecret.name) (not .Values.litellm.vaultKey) }}
+{{- fail "configure litellm.existingSecret.name or litellm.vaultKey" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,7 +52,14 @@ spec:
               protocol: TCP
           env:
             - name: ADK_MODEL
-              value: {{ .Values.a2a.model | quote }}
+              value: {{ .Values.litellm.model | quote }}
+            - name: LITELLM_API_BASE
+              value: {{ .Values.litellm.apiBase | quote }}
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.litellm.credentialsSecretName .Values.litellm.existingSecret.name }}
+                  key: {{ if .Values.litellm.existingSecret.name }}{{ .Values.litellm.existingSecret.key }}{{ else }}LITELLM_API_KEY{{ end }}
             {{- if .Values.a2a.remoteAgents }}
             - name: REMOTE_A2A_AGENTS_JSON
               value: {{ .Values.a2a.remoteAgents | toJson | quote }}

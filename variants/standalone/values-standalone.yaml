@@ -192,6 +192,10 @@ clusterGroup:
         # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
           value: apps.ocp.rvnmn.sandbox2284.opentlc.com
+        - name: litellm.apiBase
+          value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
+        - name: litellm.model
+          value: openai/gpt-oss-120b
     ericsson-agent:
       name: ericsson-agent
       namespace: ericsson-agent
@@ -229,6 +233,10 @@ clusterGroup:
           value: apps.ocp.rvnmn.sandbox2284.opentlc.com
         - name: route.enabled
           value: "true"
+        - name: litellm.apiBase
+          value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
+        - name: litellm.model
+          value: openai/gpt-oss-120b
     mao-mongo:
       name: mao-mongo
       namespace: mao

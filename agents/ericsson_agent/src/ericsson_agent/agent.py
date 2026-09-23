@@ -13,6 +13,7 @@ from google.adk.agents.remote_a2a_agent import (
     AGENT_CARD_WELL_KNOWN_PATH,
     RemoteA2aAgent,
 )
+from google.adk.models.lite_llm import LiteLlm
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
@@ -50,10 +51,19 @@ remote_agents = [
     for remote in remote_agents_from_env()
 ]
 
+def _model() -> LiteLlm:
+    """Build the ADK model through the configured LiteLLM proxy."""
+
+    # LiteLlm reads LITELLM_API_BASE/LITELLM_API_KEY from the process
+    # environment. The chart injects those values from a Secret/ExternalSecret;
+    # they are intentionally not passed through the Agent constructor.
+    return LiteLlm(model=os.getenv("ADK_MODEL", "openai/ericsson-agent"))
+
+
 # This local ADK agent is the public entrypoint. The RemoteA2aAgent instances
 # above are configured downstream sub-agents, not the public endpoint.
 root_agent = Agent(
-    model=os.getenv("ADK_MODEL", "gemini-flash-latest"),
+    model=_model(),
     name=os.getenv("AGENT_NAME", "ericsson_agent"),
     description=(
         "A local A2A entrypoint that routes requests to configured downstream "

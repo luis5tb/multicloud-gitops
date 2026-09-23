@@ -43,10 +43,15 @@ Set the endpoint of the downstream A2A service. The value can be either its
 base URL or its agent-card URL. When a base URL is supplied, the agent appends
 ADK's well-known agent-card path automatically.
 
+The local coordinator's model always goes through LiteLLM (never Google's
+Gemini API directly), same as `agents/rca_agent`:
+
 ```bash
 export DOWNSTREAM_A2A_ENDPOINT=http://localhost:8001
 export A2A_AUTH_MODE=none
-export GOOGLE_API_KEY=your-google-api-key
+export ADK_MODEL='openai/ericsson-agent'
+export LITELLM_API_BASE='http://localhost:4000'
+export LITELLM_API_KEY='replace-me'
 uvicorn ericsson_agent.agent:a2a_app --host 0.0.0.0 --port 8080
 ```
 
@@ -128,8 +133,9 @@ The following settings are supported:
 | --- | --- |
 | `DOWNSTREAM_A2A_ENDPOINT` | Single downstream A2A base URL or agent-card URL shorthand |
 | `REMOTE_A2A_AGENTS_JSON` | Preferred JSON list of downstream `{name, description, endpoint}` objects |
-| `ADK_MODEL` | Model used by the local coordinator to select a sub-agent |
-| `GOOGLE_API_KEY` | Google model credential for local development |
+| `ADK_MODEL` | LiteLLM model string used by the local coordinator to select a sub-agent, e.g. `openai/ericsson-agent` |
+| `LITELLM_API_BASE` | LiteLLM proxy base URL |
+| `LITELLM_API_KEY` | LiteLLM proxy API key |
 | `A2A_AUTH_MODE` | `none`, `static`, or `keycloak` |
 | `KEYCLOAK_TOKEN_URL` | Keycloak token endpoint |
 | `KEYCLOAK_CLIENT_ID` | Keycloak client ID |
@@ -202,7 +208,6 @@ file:
 
 ```yaml
 a2a:
-  model: gemini-flash-latest
   remoteAgents:
     - name: inventory_agent
       description: Answers inventory questions
@@ -245,6 +250,12 @@ ericsson-agent:
     - name: identity.clusterSpiffeID.trustDomain
       value: <cluster trust domain>
 ```
+
+The chart creates an `ExternalSecret` for `litellm.vaultKey` (default
+`secret/data/global/ericsson-agent-litellm`), same as `charts/all/rca-agent`.
+To use a pre-existing Secret instead, set `litellm.existingSecret.name` and
+leave `litellm.vaultKey` empty. No raw API key value is accepted by the
+chart.
 
 See `charts/all/ericsson-agent/values.yaml` for all deployment options, including
 route settings, resource limits, ZTO/SPIFFE identity, and Keycloak settings.
