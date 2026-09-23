@@ -155,9 +155,9 @@ clusterGroup:
       path: charts/all/rca-agent
       overrides:
         - name: image.repository
-          value: quay.io/your-quay-org/rca-agent
+          value: quay.io/ltomasbo/rca-agent
         - name: image.tag
-          value: CHANGEME-immutable-tag
+          value: 520adc8b
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.CHANGEME-cluster-domain/realms/rca
         - name: identity.keycloak.tokenExchange.clientId
@@ -177,9 +177,9 @@ clusterGroup:
       path: charts/all/ericsson-agent
       overrides:
         - name: image.repository
-          value: quay.io/your-quay-org/ericsson-agent
+          value: quay.io/ltomasbo/ericsson-agent
         - name: image.tag
-          value: CHANGEME-immutable-tag
+          value: 520adc8b
         # In-cluster DNS name for the rca-agent Service (fullnameOverride:
         # rca-agent, deployed in the lightspeed-agentic-operator namespace).
         - name: a2a.downstreamEndpoint
