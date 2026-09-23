@@ -50,9 +50,15 @@ openshiftOIDC:
   consoleClientSecretName: openshift-console-oidc
   # Extra token audiences to accept beyond the required platform client IDs
   # (keycloak.clientId for the CLI, keycloak.consoleClientId for the
-  # console) -- for example, if some other integration validates tokens
-  # issued by this realm against a different audience.
-  extraAudiences: []
+  # console). openshift-mcp must always be included here: it is the
+  # audience rca-agent's identity.keycloak.tokenExchange.audience
+  # (charts/all/rca-agent) exchanges the caller's token for, and
+  # openshift-mcp-server forwards that exchanged token straight to this API
+  # server (cluster_auth_mode=passthrough) -- without it in this list, the
+  # API server's OIDC authenticator rejects every AgenticRun call RCA makes,
+  # even though the exchange itself succeeds.
+  extraAudiences:
+    - openshift-mcp
   usernameClaim: sub
   usernamePrefix: "keycloak:"
   groupsClaim: groups
