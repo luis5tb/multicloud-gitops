@@ -34,6 +34,45 @@ keycloak:
   # replace: it only helps once Keycloak/OIDC is already working correctly.
   adminGroupName: ""
 
+  # SPIFFE identity provider the two confidential agent clients below
+  # authenticate against instead of a static secret (federated client
+  # authentication -- see https://www.keycloak.org/2026/01/federated-client-authentication).
+  # Both the identity provider and the per-client federated-jwt config are
+  # fully templated: no manual Admin Console step is required.
+  spiffeIdentityProvider:
+    enabled: true
+    alias: spiffe
+    # Bare SPIFFE trust domain, e.g. apps.<cluster-domain> -- same value and
+    # format as identity.clusterSpiffeID.trustDomain in charts/all/rca-agent
+    # and charts/all/ericsson-agent (see the zero-trust-workload-identity-manager
+    # application's comment in values-standalone.yaml). This template adds
+    # the "spiffe://" scheme itself.
+    trustDomain: ""
+    # SPIRE's OIDC discovery provider JWKS endpoint, e.g.
+    # https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
+    bundleEndpoint: ""
+  # Confidential client that exists only so rca-agent-mcp's RFC 8693 token
+  # exchange has a real client_id to request as its `audience` parameter --
+  # Keycloak's standard (V2) token exchange requires the audience parameter
+  # to name an actual client in the realm, it cannot be an arbitrary string.
+  # This client never itself authenticates. Must match
+  # identity.keycloak.tokenExchange.audience in charts/all/rca-agent and
+  # openshiftOIDC.extraAudiences below.
+  mcpAudienceClientId: openshift-mcp
+  mcpAudienceClientName: OpenShift MCP (token-exchange audience)
+  # The namespace/ServiceAccount pair ZTWIM/SPIRE issues ericsson-agent's and
+  # rca-agent's JWT-SVIDs for, used to compute each confidential client's
+  # expected federated subject (spiffe://<trustDomain>/ns/<namespace>/sa/<serviceAccount>).
+  # Must match charts/all/ericsson-agent's and charts/all/rca-agent's own
+  # Deployment/ServiceAccount namespaces exactly, or Keycloak will reject the
+  # client assertion with "Invalid client or Invalid client credentials".
+  ericssonWorkload:
+    namespace: ericsson-agent
+    serviceAccount: ericsson-agent
+  mcpWorkload:
+    namespace: lightspeed-agentic-operator
+    serviceAccount: rca-agent
+
 openshiftOIDC:
   enabled: false
   providerName: keycloak

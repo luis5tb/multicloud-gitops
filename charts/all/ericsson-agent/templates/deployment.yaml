@@ -10,6 +10,9 @@
 {{- if and (not .Values.litellm.existingSecret.name) (not .Values.litellm.vaultKey) }}
 {{- fail "configure litellm.existingSecret.name or litellm.vaultKey" }}
 {{- end }}
+{{- if and (eq .Values.auth.mode "keycloak") .Values.identity.spiffe.enabled (not .Values.auth.keycloak.issuerUrl) }}
+{{- fail "auth.keycloak.issuerUrl must be set when auth.mode is keycloak and identity.spiffe.enabled is true: it is the audience Keycloak's federated-jwt client validator expects on the SPIFFE JWT-SVID client_assertion" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -97,8 +100,13 @@ spec:
               value: "true"
             - name: SPIFFE_ENDPOINT_SOCKET
               value: {{ .Values.identity.spiffe.workloadApiSocket | quote }}
+            # This JWT-SVID is used only as the client_assertion authenticating
+            # to Keycloak (auth.py's _keycloak_token), so its audience must be
+            # the Keycloak realm issuer -- that's what Keycloak's federated-jwt
+            # client validator checks it against by default, not an arbitrary
+            # workload name.
             - name: SPIFFE_JWT_AUDIENCE
-              value: {{ .Values.identity.spiffe.workloadApiAudience | quote }}
+              value: {{ .Values.auth.keycloak.issuerUrl | quote }}
             - name: SPIFFE_TIMEOUT_SECONDS
               value: {{ .Values.identity.spiffe.timeoutSeconds | quote }}
             {{- end }}

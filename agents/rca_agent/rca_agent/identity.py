@@ -265,12 +265,17 @@ class KeycloakTokenExchanger:
         return endpoint
 
     def exchange(self, identity: RequestIdentity) -> str:
+        # No client_id: Keycloak's JWT client validators reject the request
+        # outright ("client_id parameter does not match sub claim") whenever
+        # a client_id form parameter is present and differs from the
+        # assertion's sub -- and for federated (SPIFFE) assertions sub is a
+        # SPIFFE ID, never the Keycloak client_id. The client is resolved
+        # from the assertion's sub instead.
         data = {
             "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
             "subject_token": identity.caller_token,
             "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
             "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
-            "client_id": self.client_id,
             "client_assertion_type": self.client_assertion_type,
             "client_assertion": identity.workload_identity["jwt_svid"],
             "audience": self.audience,

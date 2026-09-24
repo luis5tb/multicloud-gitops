@@ -1,4 +1,9 @@
 {{- if .Values.realmImport.enabled }}
+{{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+{{- if or (not .Values.keycloak.spiffeIdentityProvider.trustDomain) (not .Values.keycloak.spiffeIdentityProvider.bundleEndpoint) }}
+{{- fail "keycloak.spiffeIdentityProvider.trustDomain and .bundleEndpoint must be set when keycloak.spiffeIdentityProvider.enabled is true" }}
+{{- end }}
+{{- end }}
 apiVersion: k8s.keycloak.org/v2alpha1
 kind: KeycloakRealmImport
 metadata:
@@ -55,17 +60,16 @@ spec:
       # It must NOT be the public login client above: token exchange
       # authenticates the client itself, which a public client cannot do.
       #
-      # MANUAL STEP: this client must be switched to Keycloak's federated
-      # client authentication (see
-      # https://www.keycloak.org/2026/01/federated-client-authentication),
-      # referencing the "spiffe" identity provider configured by the
-      # "keycloak" application's spiffeIdentityProvider override, so the
-      # jwt-spiffe assertion from rca-agent's SPIRE JWT-SVID authenticates
-      # this client with no static secret. The exact client-authenticator
-      # field is version-specific and cannot be templated blindly here;
-      # configure it in the Keycloak Admin Console under this client's
-      # Credentials tab, then grant it token-exchange permission for the
-      # openshift-mcp audience (Fine-Grained Admin Permissions).
+      # Authenticates via Keycloak's federated client authentication (see
+      # https://www.keycloak.org/2026/01/federated-client-authentication)
+      # against the "spiffe" identity provider below, using rca-agent's own
+      # SPIRE JWT-SVID as client_assertion -- no static secret.
+      # standard.token.exchange.enabled and the openshift-mcp-audience
+      # protocol mapper are both required for the RFC 8693 exchange itself:
+      # Keycloak's standard (V2) token exchange requires the exchanging
+      # client to explicitly opt in, and the `audience` request parameter
+      # only *filters* audiences already resolvable from the client's own
+      # protocol mappers -- it never adds one that isn't already there.
       - clientId: {{ .Values.keycloak.mcpClientId | quote }}
         name: {{ .Values.keycloak.mcpClientName | quote }}
         enabled: true
@@ -74,10 +78,46 @@ spec:
         standardFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: false
+        {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+        clientAuthenticatorType: federated-jwt
+        {{- end }}
+        attributes:
+          {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+          jwt.credential.issuer: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
+          jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" .Values.keycloak.spiffeIdentityProvider.trustDomain .Values.keycloak.mcpWorkload.namespace .Values.keycloak.mcpWorkload.serviceAccount | quote }}
+          {{- end }}
+          standard.token.exchange.enabled: "true"
+        protocolMappers:
+          - name: {{ printf "%s-audience" .Values.keycloak.mcpAudienceClientId }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: {{ .Values.keycloak.mcpAudienceClientId | quote }}
+              access.token.claim: "true"
+      # Confidential client that exists only as a valid `audience` target for
+      # rca-agent-mcp's token exchange above -- it never itself authenticates
+      # to Keycloak. openshift-mcp-server forwards the resulting token
+      # straight to the OpenShift API server (cluster_auth_mode=passthrough),
+      # so this client id must also be in openshiftOIDC.extraAudiences or
+      # the API server rejects every AgenticRun call even though the
+      # exchange itself succeeds.
+      - clientId: {{ .Values.keycloak.mcpAudienceClientId | quote }}
+        name: {{ .Values.keycloak.mcpAudienceClientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
       # Confidential client used by ericsson-agent's client-credentials call.
       #
-      # MANUAL STEP: same federated client authentication caveat as above
-      # applies here.
+      # Same federated client authentication as rca-agent-mcp above, using
+      # ericsson-agent's own SPIRE JWT-SVID. The audience mappers exist
+      # because the token this client mints has to satisfy two independent
+      # checks: rca-agent's own inbound audience check (identity.keycloak.audiences,
+      # charts/all/rca-agent) needs `rca-agent`, and Keycloak's standard
+      # token exchange requires the *subject_token* passed to it to already
+      # carry the exchanging client (rca-agent-mcp) as an audience.
       - clientId: {{ .Values.keycloak.ericssonClientId | quote }}
         name: {{ .Values.keycloak.ericssonClientName | quote }}
         enabled: true
@@ -86,6 +126,25 @@ spec:
         standardFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
+        {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+        clientAuthenticatorType: federated-jwt
+        attributes:
+          jwt.credential.issuer: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
+          jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" .Values.keycloak.spiffeIdentityProvider.trustDomain .Values.keycloak.ericssonWorkload.namespace .Values.keycloak.ericssonWorkload.serviceAccount | quote }}
+        {{- end }}
+        protocolMappers:
+          - name: {{ printf "%s-audience" .Values.keycloak.clientId }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: {{ .Values.keycloak.clientId | quote }}
+              access.token.claim: "true"
+          - name: {{ printf "%s-audience" .Values.keycloak.mcpClientId }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: {{ .Values.keycloak.mcpClientId | quote }}
+              access.token.claim: "true"
       # Confidential client registered as the web console's OIDC platform
       # client when openshiftOIDC.enabled is true.
       #
@@ -119,4 +178,19 @@ spec:
               access.token.claim: "true"
               id.token.claim: "true"
               userinfo.token.claim: "true"
+    {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+    # Backs the two confidential agent clients' federated-jwt authentication
+    # above. Config key names are this Keycloak build's actual internal
+    # field names (verified against the running server), not the field
+    # labels shown in the Admin Console -- "issuer" holds the SPIFFE trust
+    # domain, not an OIDC issuer URL, because Keycloak's SpiffeIdentityProviderConfig
+    # reuses the generic IdentityProviderModel.ISSUER config key for it.
+    identityProviders:
+      - alias: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
+        providerId: spiffe
+        enabled: true
+        config:
+          issuer: {{ printf "spiffe://%s" .Values.keycloak.spiffeIdentityProvider.trustDomain | quote }}
+          bundleEndpoint: {{ .Values.keycloak.spiffeIdentityProvider.bundleEndpoint | quote }}
+    {{- end }}
 {{- end }}

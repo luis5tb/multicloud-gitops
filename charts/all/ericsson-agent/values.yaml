@@ -68,6 +68,11 @@ auth:
     name: ""
     key: token
   keycloak:
+    # The realm issuer, e.g. https://keycloak.example/realms/rca -- distinct
+    # from tokenUrl below. Also used as the audience of the SPIFFE JWT-SVID
+    # sent as client_assertion (identity.spiffe.*): Keycloak's federated-jwt
+    # client validator checks the assertion's aud against this by default.
+    issuerUrl: ""
     tokenUrl: ""
     clientId: ""
     clientAuthMethod: client_assertion_post
@@ -108,7 +113,6 @@ identity:
     # mount path chosen below.
     workloadApiSocket: unix:///spiffe-workload-api/spire-agent.sock
     workloadApiMountPath: /spiffe-workload-api
-    workloadApiAudience: ericsson-agent
     timeoutSeconds: 5
 
   # ZTWIM must have a matching ClusterSPIFFEID registration. This optional

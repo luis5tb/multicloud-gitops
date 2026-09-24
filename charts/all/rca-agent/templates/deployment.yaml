@@ -110,8 +110,13 @@ spec:
               value: {{ .Values.identity.keycloak.tokenExchange.clientAssertionType | quote }}
             - name: SPIFFE_ENDPOINT_SOCKET
               value: {{ .Values.identity.workloadApiSocket | quote }}
+            # This JWT-SVID is used only as the client_assertion authenticating
+            # rca-agent-mcp to Keycloak (identity.py's KeycloakTokenExchanger),
+            # so its audience must be the Keycloak realm issuer -- that's what
+            # Keycloak's federated-jwt client validator checks it against by
+            # default, not an arbitrary workload name.
             - name: SPIFFE_JWT_AUDIENCE
-              value: {{ .Values.identity.workloadApiAudience | quote }}
+              value: {{ .Values.identity.keycloak.issuerUrl | quote }}
             - name: KEYCLOAK_TIMEOUT_SECONDS
               value: {{ .Values.identity.timeoutSeconds | quote }}
             - name: SPIFFE_TIMEOUT_SECONDS

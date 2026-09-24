@@ -163,8 +163,13 @@ class DownstreamAuth:
                 client_secret=self.settings.client_secret,
             )
         elif method == "client_assertion_post":
+            # No client_id here: Keycloak's JWT client validators reject the
+            # request outright ("client_id parameter does not match sub
+            # claim") whenever a client_id form parameter is present and
+            # differs from the assertion's sub -- and for federated (SPIFFE)
+            # assertions sub is a SPIFFE ID, never the Keycloak client_id.
+            # The client is resolved from the assertion's sub instead.
             data.update(
-                client_id=self.settings.client_id,
                 client_assertion_type=self.settings.client_assertion_type,
                 client_assertion=self._identity_token(required=True),
             )

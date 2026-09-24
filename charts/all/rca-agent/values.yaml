@@ -62,7 +62,6 @@ identity:
   # path chosen below.
   workloadApiSocket: unix:///spiffe-workload-api/spire-agent.sock
   workloadApiMountPath: /spiffe-workload-api
-  workloadApiAudience: rca-agent
   timeoutSeconds: 5
   keycloak:
     # Set this to the deployed realm issuer, for example:

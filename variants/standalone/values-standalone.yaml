@@ -92,15 +92,6 @@ clusterGroup:
           value: secret/data/global/rhbk
         - name: keycloak.postgresqlDb.passwordVaultKey
           value: secret/data/global/rhbk
-        # Federate Keycloak client auth against SPIRE's OIDC discovery provider so
-        # SPIFFE-identified workloads (e.g. agents) can authenticate without a static secret.
-        # See: https://www.keycloak.org/2026/01/federated-client-authentication
-        - name: keycloak.spiffeIdentityProvider.enabled
-          value: "true"
-        - name: keycloak.spiffeIdentityProvider.config.config.issuer
-          value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local
-        - name: keycloak.spiffeIdentityProvider.config.config.jwksUrl
-          value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
     keycloak-oidc:
       name: keycloak-oidc
       namespace: keycloak-system
@@ -147,6 +138,26 @@ clusterGroup:
         # before enabling openshiftOIDC.
         - name: keycloak.adminGroupName
           value: rca-admins
+        # Federate the ericsson-agent/rca-agent-mcp confidential clients'
+        # authentication against SPIRE's OIDC discovery provider, so
+        # SPIFFE-identified workloads authenticate to Keycloak without a
+        # static secret. See:
+        # https://www.keycloak.org/2026/01/federated-client-authentication
+        - name: keycloak.spiffeIdentityProvider.trustDomain
+          value: apps.ocp.rvnmn.sandbox2284.opentlc.com
+        - name: keycloak.spiffeIdentityProvider.bundleEndpoint
+          value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
+        # Namespace/ServiceAccount pairs ZTWIM/SPIRE issues each agent's
+        # JWT-SVID for. Must match charts/all/ericsson-agent's and
+        # charts/all/rca-agent's own Deployments below exactly.
+        - name: keycloak.ericssonWorkload.namespace
+          value: ericsson-agent
+        - name: keycloak.ericssonWorkload.serviceAccount
+          value: ericsson-agent
+        - name: keycloak.mcpWorkload.namespace
+          value: lightspeed-agentic-operator
+        - name: keycloak.mcpWorkload.serviceAccount
+          value: rca-agent
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
@@ -234,11 +245,10 @@ clusterGroup:
           value: Investigates OpenShift incidents and returns root-cause analysis with remediation proposals.
         - name: auth.mode
           value: keycloak
+        - name: auth.keycloak.issuerUrl
+          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
         - name: auth.keycloak.tokenUrl
           value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca/protocol/openid-connect/token
-        # This Keycloak client (jwt-spiffe federated client auth) must exist
-        # in the "rca" realm before enabling this. See the deployment
-        # instructions for the manual Keycloak admin step this needs.
         - name: auth.keycloak.clientId
           value: ericsson-agent
         - name: identity.spiffe.enabled
