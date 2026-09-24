@@ -1,11 +1,11 @@
 # Keycloak/OIDC integration for the RCA and Ericsson A2A agents
 
 This companion chart is installed after the validated pattern's `rhbk` chart.
-It imports the RCA realm, four clients, and a group into the deployed
-Keycloak, and creates the least-privilege AgenticRun RoleBinding for the
-OpenShift group emitted by the Keycloak `groups` claim.
+It imports the RCA realm, its five clients, a SPIFFE identity provider, and a
+group into the deployed Keycloak, and creates the least-privilege AgenticRun
+RoleBinding for the OpenShift group emitted by the Keycloak `groups` claim.
 
-The four clients serve distinct purposes and must not be conflated:
+The five clients serve distinct purposes and must not be conflated:
 
 - `keycloak.clientId` (default `rca-agent`): public client for browser/`oc
   login` OIDC flows (Native OIDC). Cannot authenticate itself. Also
@@ -14,6 +14,11 @@ The four clients serve distinct purposes and must not be conflated:
 - `keycloak.mcpClientId` (default `rca-agent-mcp`): confidential client
   `charts/all/rca-agent` uses to exchange a caller's token for one scoped to
   OpenShift MCP.
+- `keycloak.mcpAudienceClientId` (default `openshift-mcp`): confidential
+  client that exists only so `rca-agent-mcp`'s token exchange has a real
+  `client_id` to name as its `audience` parameter -- Keycloak's standard (V2)
+  token exchange requires that parameter to be an actual client in the
+  realm, not an arbitrary string. Never authenticates itself.
 - `keycloak.ericssonClientId` (default `ericsson-agent`): confidential client
   `charts/all/ericsson-agent` uses for its client-credentials
   call to Keycloak.
@@ -21,15 +26,44 @@ The four clients serve distinct purposes and must not be conflated:
   client registered as the `console` OIDC platform client when
   `openshiftOIDC.enabled` is true. See "OpenShift Native OIDC" below.
 
-The two confidential clients are intended to authenticate with a SPIFFE
-JWT-SVID (no static secret) via Keycloak's federated client authentication
-feature, against the `spiffe` identity provider configured by the `keycloak`
-application's `spiffeIdentityProvider` override
-(`variants/standalone/values-standalone.yaml`). That feature's exact
-client-side fields are Keycloak-version-specific and not yet declarative in
-this chart's `KeycloakRealmImport`; configure it once in the Keycloak Admin
-Console under each confidential client's Credentials tab, then grant
-`rca-agent-mcp` token-exchange permission for the `openshift-mcp` audience.
+`rca-agent-mcp` and `ericsson-agent` authenticate with a SPIFFE JWT-SVID (no
+static secret) via Keycloak's federated client authentication feature
+(`clientAuthenticatorType: federated-jwt`), against the `spiffe` identity
+provider this chart also creates (`keycloak.spiffeIdentityProvider.*`). This
+is fully declarative -- no manual Admin Console step is required for it, and
+the `jwt.credential.sub` value each client expects is computed from
+`keycloak.ericssonWorkload`/`keycloak.mcpWorkload` (the namespace/ServiceAccount
+pair ZTWIM/SPIRE issues that workload's JWT-SVID for) and
+`keycloak.spiffeIdentityProvider.trustDomain`. Get any of those three values
+wrong and Keycloak rejects the assertion with a generic "Invalid client or
+Invalid client credentials" -- there is no more specific error surfaced to
+the caller.
+
+Two related gotchas, both baked into this chart's templates already but
+worth knowing when debugging directly against Keycloak:
+
+- Keycloak's JWT client validators reject the token request outright
+  ("client_id parameter does not match sub claim") if a `client_id` form
+  parameter is present and differs from the assertion's `sub` -- which it
+  always will for a SPIFFE assertion, since `sub` is a SPIFFE ID, never the
+  Keycloak client_id. Both agents' code omits `client_id` from these
+  requests entirely; the client is resolved from the assertion's `sub`.
+- The SPIFFE JWT-SVID used as `client_assertion` must itself be requested
+  with the Keycloak realm issuer URL as its audience (`SPIFFE_JWT_AUDIENCE`
+  in both agent charts) -- that is what Keycloak's federated-jwt validator
+  checks the assertion's `aud` claim against by default, not the workload's
+  own name.
+- `rca-agent-mcp`'s actual RFC 8693 exchange additionally needs
+  `standard.token.exchange.enabled: "true"` (a client attribute this chart
+  sets) plus a protocol mapper adding `keycloak.mcpAudienceClientId` as an
+  audience on `rca-agent-mcp` itself, and a protocol mapper on
+  `ericsson-agent` adding both `keycloak.clientId` and `keycloak.mcpClientId`
+  as audiences to the tokens it mints -- Keycloak's standard token exchange
+  requires the *subject_token* to already carry the exchanging client as an
+  audience, and the `audience` request parameter only ever narrows audiences
+  a client scope already resolves, it never adds a new one. All of this is
+  templated already; it's listed here because it is not obvious from
+  Keycloak's own error messages if you ever need to debug it directly.
 
 ## OpenShift Native OIDC
 

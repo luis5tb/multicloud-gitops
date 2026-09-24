@@ -79,7 +79,10 @@ export AGENTIC_RUN_SKILLS='[{"image":"quay.io/openshiftanalytics/agentic-skills:
 export KEYCLOAK_ISSUER_URL='https://keycloak.example/realms/rca'
 export KEYCLOAK_AUDIENCES='rca-agent,openshift'
 export SPIFFE_ENDPOINT_SOCKET='unix:///tmp/spire-agent/public/api.sock'
-export SPIFFE_JWT_AUDIENCE='rca-agent'
+# Must be the Keycloak realm issuer (KEYCLOAK_ISSUER_URL above), not this
+# workload's own name -- Keycloak's federated-jwt client validator checks
+# the client_assertion's aud against the realm issuer by default.
+export SPIFFE_JWT_AUDIENCE='https://keycloak.example/realms/rca'
 export KEYCLOAK_TOKEN_EXCHANGE_CLIENT_ID='rca-agent-mcp'
 export KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE='openshift-mcp'
 export KEYCLOAK_CLIENT_ASSERTION_TYPE='urn:ietf:params:oauth:client-assertion-type:jwt-spiffe'

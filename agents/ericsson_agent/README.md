@@ -137,7 +137,7 @@ The following settings are supported:
 | `LITELLM_API_BASE` | LiteLLM proxy base URL |
 | `LITELLM_API_KEY` | LiteLLM proxy API key |
 | `A2A_AUTH_MODE` | `none`, `static`, or `keycloak` |
-| `KEYCLOAK_TOKEN_URL` | Keycloak token endpoint |
+| `KEYCLOAK_TOKEN_URL` | Keycloak token endpoint (e.g. `https://keycloak.example/realms/rca/protocol/openid-connect/token`) |
 | `KEYCLOAK_CLIENT_ID` | Keycloak client ID |
 | `KEYCLOAK_CLIENT_SECRET` | Optional secret for `client_secret_*` methods |
 | `KEYCLOAK_SCOPE` | Optional space-separated OAuth scopes |
@@ -145,7 +145,7 @@ The following settings are supported:
 | `KEYCLOAK_CLIENT_ASSERTION_TYPE` | OAuth client assertion type; defaults to the SPIFFE JWT-SVID type |
 | `SPIFFE_ENABLED` | When `true`, fetch the client assertion fresh from ZTWIM/SPIRE instead of `ZTO_IDENTITY_TOKEN_FILE` |
 | `SPIFFE_ENDPOINT_SOCKET` | SPIRE Workload API socket, e.g. `unix:///spiffe-workload-api/spire-agent.sock` (the SPIFFE CSI driver always names the file `spire-agent.sock`) |
-| `SPIFFE_JWT_AUDIENCE` | JWT-SVID audience requested from SPIRE |
+| `SPIFFE_JWT_AUDIENCE` | JWT-SVID audience requested from SPIRE. Must be the Keycloak realm issuer URL (e.g. `https://keycloak.example/realms/rca`), not this workload's own name -- Keycloak's federated-jwt client validator checks the client_assertion's `aud` against the realm issuer by default |
 | `ZTO_IDENTITY_TOKEN_FILE` | File containing the ZTO-issued identity token (ignored when `SPIFFE_ENABLED=true`) |
 | `ZTO_IDENTITY_TOKEN` | Optional environment fallback for the identity token |
 | `ZTO_FORWARD_IDENTITY` | Also forward the identity in `ZTO_IDENTITY_HEADER` |
@@ -235,10 +235,15 @@ ericsson-agent:
       value: quay.io/<your-quay-org>/ericsson-agent
     - name: image.tag
       value: <immutable-tag>
+    # rca-agent's edge-TLS Route, not its in-cluster Service DNS name --
+    # google-adk's RemoteA2aAgent requires https (or loopback) for any
+    # agent card it fetches. See rca-agent's own README/AUTHENTICATION.md.
     - name: a2a.downstreamEndpoint
-      value: http://rca-agent.lightspeed-agentic-operator.svc.cluster.local:8000
+      value: https://<rca-agent-route>
     - name: auth.mode
       value: keycloak
+    - name: auth.keycloak.issuerUrl
+      value: https://<keycloak-route>/realms/rca
     - name: auth.keycloak.tokenUrl
       value: https://<keycloak-route>/realms/rca/protocol/openid-connect/token
     - name: auth.keycloak.clientId

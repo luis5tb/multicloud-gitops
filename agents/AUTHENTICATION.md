@@ -147,7 +147,7 @@ group (e.g. `rca-admins`) and adding users to it. Everything downstream of
 that -- the claim appearing in tokens, the API server trusting it, and RBAC
 resolving it -- is what steps 1-3 above wire up automatically.
 
-## The four Keycloak clients
+## The five Keycloak clients
 
 Defined by `charts/all/keycloak-oidc`, in the `rca` realm. Conflating any of
 these breaks the flow -- see that chart's README for the exact rationale.
@@ -158,12 +158,18 @@ these breaks the flow -- see that chart's README for the exact rationale.
 | `openshift-console` | confidential | Web console | Registered as the `console` OIDC platform client. Needs the `groups` protocol mapper (see Troubleshooting) or RBAC group membership never reaches the console. |
 | `ericsson-agent` | confidential | ericsson-agent | Client-credentials-style grant authenticated with ericsson-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. |
 | `rca-agent-mcp` | confidential | rca-agent | RFC 8693 token exchange: takes the caller's token as `subject_token`, authenticates itself with its own SPIFFE JWT-SVID, and requests a token scoped to the `openshift-mcp` audience. |
+| `openshift-mcp` | confidential | (never authenticates) | Exists only so `rca-agent-mcp`'s exchange has a real `client_id` to name as its `audience` -- Keycloak's standard token exchange requires that parameter to be an actual client. |
 
-The two confidential agent clients (`ericsson-agent`, `rca-agent-mcp`) both
-need Keycloak's federated client authentication feature configured against
-the `spiffe` identity provider -- this is a manual, one-time Admin Console
-step (see `charts/all/keycloak-oidc/README.md`); it cannot be templated
-because the exact fields are Keycloak-version-specific.
+`ericsson-agent` and `rca-agent-mcp` authenticate via Keycloak's federated
+client authentication feature against the `spiffe` identity provider this
+chart also creates -- fully declarative
+(`keycloak.spiffeIdentityProvider.*`/`clientAuthenticatorType: federated-jwt`
+in `charts/all/keycloak-oidc`), no manual Admin Console step required. See
+that chart's README for the exact mechanics, including two non-obvious
+requirements this doc's Troubleshooting section below also covers: the
+`client_id` form parameter must be omitted from these requests, and the
+SPIFFE JWT-SVID used as `client_assertion` must be requested with the
+Keycloak realm issuer URL as its audience, not the workload's own name.
 
 ## Per-hop identity and validation
 
@@ -193,20 +199,26 @@ whose behalf" story in one column.
    *deployment*, not any caller; the same value is sent for every request.
 3. **ericsson-agent to rca-agent** (`agents/ericsson_agent/src/ericsson_agent/auth.py`,
    `DownstreamAuth`): fetches a JWT-SVID from the SPIFFE Workload API for
-   audience `ericsson-agent`, uses it as `client_assertion` in a Keycloak
-   `client_credentials` token request for the confidential `ericsson-agent`
-   client, and attaches the resulting access token as `Authorization: Bearer`
-   on every outbound A2A request (`httpx` `event_hooks`).
+   audience `identity.keycloak.issuerUrl` (the Keycloak realm issuer --
+   *not* `ericsson-agent`; see Troubleshooting), uses it as `client_assertion`
+   in a Keycloak `client_credentials` token request for the confidential
+   `ericsson-agent` client (with no `client_id` form parameter -- also see
+   Troubleshooting), and attaches the resulting access token as
+   `Authorization: Bearer` on every outbound A2A request (`httpx`
+   `event_hooks`).
+
+   Real captured shape (irrelevant claims trimmed):
 
    ```json
    {
      "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
-     "sub": "service-account-ericsson-agent",
+     "sub": "0e844946-0456-475b-9265-e17532b362c9",
      "azp": "ericsson-agent",
-     "aud": ["rca-agent"],
+     "aud": ["rca-agent", "rca-agent-mcp", "account"],
+     "preferred_username": "service-account-ericsson-agent",
      "scope": "email profile",
-     "exp": 1732000300,
-     "iat": 1732000000
+     "exp": 1790256558,
+     "iat": 1790256258
    }
    ```
 
@@ -214,10 +226,19 @@ whose behalf" story in one column.
    chain.** Because step 1 authenticates no one, `sub` here is
    ericsson-agent's own service account, not the human using the UI --
    everything downstream is attributable to ericsson-agent-as-caller, not to
-   an end user. If per-user attribution is ever needed, a user identity has
-   to be captured before this hop and folded into this token (e.g. a second
-   token exchange), or `on_behalf_of` will keep reading `service-account-ericsson-agent`
-   regardless of who typed the message.
+   an end user. Note `sub` is an opaque internal user id, not the readable
+   `service-account-ericsson-agent` string (that only appears in
+   `preferred_username`) -- `identity.py`'s `sub -> client_id -> azp ->
+   preferred_username` fallback picks `sub` first, so
+   `agentic.openshift.io/on-behalf-of` on the AgenticRun will actually read
+   that opaque id, not a human-readable name. If per-user attribution is
+   ever needed, a user identity has to be captured before this hop and
+   folded into this token (e.g. a second token exchange).
+   `rca-agent`/`rca-agent-mcp` both appear in `aud` because rca-agent's own
+   inbound check needs `rca-agent`, and Keycloak's standard token exchange
+   (step 6) separately requires the subject_token to already carry the
+   exchanging client (`rca-agent-mcp`) as an audience -- both are protocol
+   mappers on the `ericsson-agent` client, see `charts/all/keycloak-oidc`.
 4. **rca-agent validates the inbound token** (`agents/rca_agent/rca_agent/identity.py`,
    `A2AAuthenticationMiddleware`): every path except `/.well-known/agent-card.json`
    and `/health/ready` requires both (a) `KeycloakTokenValidator.validate` --
@@ -236,12 +257,14 @@ whose behalf" story in one column.
                    preferred_username to build on_behalf_of)
    ```
 
-   RCA's own JWT-SVID, fetched independently of the caller token:
+   RCA's own JWT-SVID, fetched independently of the caller token. `aud` is
+   the Keycloak realm issuer, same reasoning as step 3 -- this JWT-SVID's
+   only consumer is the `client_assertion` on the exchange in step 6 below:
 
    ```json
    {
      "sub": "spiffe://apps.<cluster-domain>/ns/lightspeed-agentic-operator/sa/rca-agent",
-     "aud": ["rca-agent"],
+     "aud": ["https://keycloak.apps.<cluster-domain>/realms/rca"],
      "exp": 1732000300
    }
    ```
@@ -270,57 +293,45 @@ whose behalf" story in one column.
      subject_token=<step 3's access token>
      subject_token_type=urn:ietf:params:oauth:token-type:access_token
      requested_token_type=urn:ietf:params:oauth:token-type:access_token
-     client_id=rca-agent-mcp
      client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
      client_assertion=<rca-agent's own JWT-SVID from step 4>
      audience=openshift-mcp
    ```
 
+   No `client_id` here either, same reason as step 3. Real captured shape:
+
    ```json
    {
      "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
-     "sub": "service-account-ericsson-agent",
+     "sub": "0e844946-0456-475b-9265-e17532b362c9",
      "aud": ["openshift-mcp"],
      "azp": "rca-agent-mcp",
-     "act": {"sub": "rca-agent-mcp"},
-     "exp": 1732000600
+     "preferred_username": "service-account-ericsson-agent",
+     "exp": 1790256632
    }
    ```
 
-   Three claims here answer three different questions, and it is easy to
-   mix them up because two of them happen to have the same value in this
-   single-hop exchange:
-
    - **`sub` -- whose authority is this?** Carried over unchanged from the
-     subject token (step 3): ericsson-agent's service account. This is *not*
-     rca-agent -- rca-agent never puts its own identity in `sub`. `sub` is
-     what `identity.py` reads (with the `sub -> client_id -> azp` fallback
-     from step 4) into `on_behalf_of`, annotated on the AgenticRun as
+     subject token (step 3): ericsson-agent's service account (the same
+     opaque id, not rca-agent's). `sub` is what `identity.py` reads (with the
+     `sub -> client_id -> azp -> preferred_username` fallback from step 4)
+     into `on_behalf_of`, annotated on the AgenticRun as
      `agentic.openshift.io/on-behalf-of`. So "on behalf of X" means **X is
      the subject being represented**, not the agent doing the representing --
      the naming is backwards from how it reads at first glance.
-   - **`act.sub` -- who is exercising that authority?** `rca-agent-mcp`: the
-     client that authenticated the exchange call. RFC 8693's actor claim
-     exists specifically so a resource server can tell "the token says
-     ericsson-agent, but it was actually rca-agent-mcp that presented it,
-     acting *for* ericsson-agent" -- i.e. **rca-agent is the one acting on
-     behalf of the `sub`**, the reverse direction from what the phrase
-     initially suggests. This is exactly what `identity.py`'s `actor`
-     property reads back out as `agentic.openshift.io/previous-actor` on the
-     AgenticRun -- a separate annotation from `on-behalf-of` precisely
-     because they name two different parties in the same delegation.
    - **`azp` -- who is this specific token issued to / allowed to present
-     it?** Also `rca-agent-mcp` here, but for an unrelated reason: it is the
-     client that called the token endpoint, so it is the party the resulting
-     token is handed to. `azp` is a token-transport concept (which client may
-     legitimately hold and use this bearer token); `act` is a delegation
-     concept (whose authority is being exercised versus whose authority is
-     merely being invoked). They coincide in a single-hop exchange like this
-     one only because the same client both requested the token and is the
-     sole actor. They would diverge in a longer chain: another exchange
-     further downstream would move `azp` to the next requesting client while
-     nesting the actor history as `act.act.sub`, preserving every actor `sub`
-     ever saw along the way.
+     it?** `rca-agent-mcp`: the client that called the token endpoint, so it
+     is the party the resulting token is handed to.
+   - **No `act` claim.** RFC 8693 defines an `act` (actor) claim for exactly
+     this "X's authority, exercised by Y" case, and an earlier version of
+     this doc described one -- but Keycloak's *standard* (V2) token exchange,
+     which is what's enabled on this cluster, does not populate it. Keycloak
+     has a separate, additional "Token Exchange Delegation" feature
+     (`delegation:client` client scope, its own Fine-Grained Admin
+     Permissions v2 grant) that adds an `act`/`may_act` claim -- this repo
+     does not enable it, so `identity.py`'s `actor` property will not find
+     one and `agentic.openshift.io/previous-actor` will not be set on the
+     AgenticRun. The only actor information available in practice is `azp`.
 7. **openshift-mcp-server to the API server**: `cluster_auth_mode=passthrough`
    means MCP does no authorization decision itself -- it forwards the
    MCP-scoped bearer token straight through to the Kubernetes API server as
@@ -422,8 +433,62 @@ oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=lightspeed-agen
   at the same https origin instead of the in-cluster Service DNS name. The
   chart's `deployment.yaml` fails the template if `route.enabled` is true
   while `a2a.publicProtocol` is left at `http` to catch this early.
-- **Confidential client authentication fails with no useful error**: the
-  federated client authentication (jwt-spiffe) manual Admin Console step
-  (see `charts/all/keycloak-oidc/README.md`) wasn't done, or `rca-agent-mcp`
-  wasn't separately granted token-exchange permission for the
-  `openshift-mcp` audience under Fine-Grained Admin Permissions.
+- **ericsson-agent logs a 401 from Keycloak's `/token` endpoint while fetching
+  rca-agent's agent card** (`Agent card URL must use https...` is fixed, but
+  the fetch itself then 401s): the agent card fetch is unauthenticated, but
+  ericsson-agent's httpx client attaches its Keycloak bearer token to *every*
+  outbound request via an event hook -- so this is actually the
+  client_credentials + jwt-spiffe grant failing, not the card fetch. Reproduce
+  directly against Keycloak's token endpoint from inside the pod (fetch a
+  JWT-SVID via `spiffe.WorkloadApiClient`, POST it as `client_assertion`) to
+  see the real Keycloak error body instead of a generic httpx exception. In
+  order encountered, debugging this surfaced three separate, unrelated causes
+  -- all now fixed in the charts, but worth knowing if this ever regresses:
+  - `{"errorMessage":"Invalid trust domain name"}` when creating the `spiffe`
+    identity provider via the Admin REST API with `config.trustDomain` set:
+    on Keycloak 26.4.16 (RHBK), `SpiffeIdentityProviderConfig.getTrustDomain()`
+    actually reads the generic `config.issuer` key, not `config.trustDomain`
+    -- upstream `main` renamed this field, but this repo's Keycloak build
+    predates that rename. `charts/all/keycloak-oidc` now emits `issuer`.
+  - `{"error":"unauthorized_client","error_description":"Invalid client or
+    Invalid client credentials"}`: the `spiffe` identity provider referenced
+    by `jwt.credential.issuer` didn't exist in the realm at all -- it was
+    never actually templated anywhere (the `keycloak` application's
+    `spiffeIdentityProvider` override targeted the `rhbk` chart, which
+    doesn't consume it for realm-level identity providers; `rca` realm's
+    `KeycloakRealmImport` is entirely owned by `charts/all/keycloak-oidc`,
+    which didn't declare one). Now templated in
+    `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml`'s
+    `identityProviders` list.
+  - `{"error":"invalid_client","error_description":"client_id parameter does
+    not match sub claim"}`: both agents' code sent a `client_id` form
+    parameter alongside `client_assertion`. Keycloak's generic JWT client
+    validator (`AbstractJWTClientValidator.validateClient`) rejects the
+    request outright whenever `client_id` is present and differs from the
+    assertion's `sub` -- and for a SPIFFE assertion `sub` is always a SPIFFE
+    ID, never the Keycloak client_id, by design. Fixed by omitting `client_id`
+    entirely in `ericsson_agent/auth.py`'s `_keycloak_token()` and
+    `rca_agent/identity.py`'s `KeycloakTokenExchanger.exchange()` -- the
+    client is resolved from the assertion's `sub` instead.
+  - Also relevant once the above three are fixed: the SPIFFE JWT-SVID used as
+    `client_assertion` must be requested with **the Keycloak realm issuer
+    URL** as its audience (`SPIFFE_JWT_AUDIENCE` in both charts) --
+    `FederatedJWTClientValidator.getExpectedAudiences()` defaults to
+    `Urls.realmIssuer(...)` when no explicit audience list is configured.
+    Requesting an audience like `ericsson-agent` (the workload's own name,
+    what both charts defaulted to) fails this check.
+- **RCA's token exchange succeeds but the resulting token's `aud` doesn't
+  contain the requested audience** (or the exchange is rejected as
+  unavailable): Keycloak's *standard* (V2) token exchange audience parameter
+  only **filters** audiences the exchanging client's own protocol mappers
+  already resolve -- it never adds one that wasn't already resolvable. Three
+  things must all be true, and this repo's chart templates them together so
+  they don't drift apart: (1) `rca-agent-mcp` needs the client attribute
+  `standard.token.exchange.enabled: "true"` (V2 exchange is opt-in per
+  client), (2) `rca-agent-mcp` needs its own protocol mapper adding
+  `openshift-mcp` as an audience (`included.client.audience: openshift-mcp`),
+  and (3) `openshift-mcp` must exist as an actual client in the realm -- the
+  `audience` request parameter must name a real `client_id`, it cannot be an
+  arbitrary string. Separately, (4) the *subject_token* being exchanged
+  (ericsson-agent's token from step 3) must already carry `rca-agent-mcp` as
+  an audience, or the exchange is rejected outright regardless of the above.
