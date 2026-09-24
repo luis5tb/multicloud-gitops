@@ -49,6 +49,13 @@ cannot authenticate itself to perform a token exchange. See
 - ZTWIM/SPIRE configured with a `ClusterSPIFFEID` for this Deployment's
   ServiceAccount and the `rca-agent` JWT audience.
 - A LiteLLM-compatible endpoint and an API key delivered through a Secret.
+- When another agent (e.g. `ericsson-agent`) calls this one over the network,
+  it must be reachable over https, or over http only on a loopback host --
+  google-adk's `RemoteA2aAgent` refuses both the agent-card fetch and the
+  card's own advertised RPC url otherwise. Enable `route.enabled` (edge TLS)
+  and set `a2a.publicHost`/`a2a.publicPort`/`a2a.publicProtocol` to that
+  route's https origin; do not point callers at the in-cluster Service DNS
+  name. See `AUTHENTICATION.md`'s Troubleshooting section.
 
 ## Local setup
 
@@ -57,6 +64,9 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e 'agents/rca_agent[dev]'
 
+export A2A_PUBLIC_HOST='localhost'
+export A2A_PUBLIC_PORT='8000'
+export A2A_PUBLIC_PROTOCOL='http'
 export ADK_MODEL='openai/rca-agent'
 export LITELLM_API_BASE='http://localhost:4000'
 export LITELLM_API_KEY='replace-me'

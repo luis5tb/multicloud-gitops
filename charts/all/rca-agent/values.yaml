@@ -23,6 +23,19 @@ route:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
 
+a2a:
+  # The A2A agent card this Deployment advertises must point at a reachable,
+  # https-or-loopback origin -- google-adk's RemoteA2aAgent refuses to fetch
+  # (and, once fetched, refuses to trust the RPC url inside) a card served
+  # over plain http on a non-loopback host. In-cluster Service DNS is
+  # non-loopback plain http, so calling agents (e.g. ericsson-agent) need
+  # this Deployment reachable over TLS -- set these three to match
+  # route.enabled/route.host once that's turned on, rather than the
+  # in-cluster Service DNS name.
+  publicHost: localhost
+  publicPort: 8000
+  publicProtocol: http
+
 litellm:
   # The ADK agent always calls LiteLLM. The proxy can route to Gemini,
   # Anthropic, OpenAI, or another approved provider without changing this pod.

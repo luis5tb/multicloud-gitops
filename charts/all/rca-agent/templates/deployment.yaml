@@ -19,6 +19,9 @@
 {{- if not .Values.identity.enabled }}
 {{- fail "identity.enabled must remain true: the RCA agent requires ZTWIM/SPIRE workload identity" }}
 {{- end }}
+{{- if and .Values.route.enabled (ne .Values.a2a.publicProtocol "https") }}
+{{- fail "a2a.publicProtocol must be \"https\" when route.enabled is true: google-adk's RemoteA2aAgent refuses a card advertising a non-loopback http RPC url, so callers outside this pod need the route's TLS origin advertised here, not the in-cluster Service DNS name" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,6 +59,12 @@ spec:
           env:
             - name: PORT
               value: "8000"
+            - name: A2A_PUBLIC_HOST
+              value: {{ .Values.a2a.publicHost | quote }}
+            - name: A2A_PUBLIC_PORT
+              value: {{ .Values.a2a.publicPort | quote }}
+            - name: A2A_PUBLIC_PROTOCOL
+              value: {{ .Values.a2a.publicProtocol | quote }}
             - name: ADK_MODEL
               value: {{ .Values.adk.model | quote }}
             - name: LITELLM_API_BASE

@@ -196,6 +196,22 @@ clusterGroup:
           value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
         - name: litellm.model
           value: openai/gpt-oss-120b
+        # google-adk's RemoteA2aAgent (used by ericsson-agent to call this
+        # agent) refuses to fetch or trust an agent card advertising a
+        # non-loopback plain-http RPC url -- the in-cluster Service DNS name
+        # no longer qualifies once a real caller (ericsson-agent, a different
+        # pod) resolves it. Route this agent behind an edge-TLS Route instead
+        # and advertise that origin in the agent card.
+        - name: route.enabled
+          value: "true"
+        - name: route.host
+          value: rca-agent.apps.ocp.rvnmn.sandbox2284.opentlc.com
+        - name: a2a.publicHost
+          value: rca-agent.apps.ocp.rvnmn.sandbox2284.opentlc.com
+        - name: a2a.publicPort
+          value: "443"
+        - name: a2a.publicProtocol
+          value: https
     ericsson-agent:
       name: ericsson-agent
       namespace: ericsson-agent
@@ -206,10 +222,12 @@ clusterGroup:
           value: quay.io/ltomasbo/ericsson-agent
         - name: image.tag
           value: 1cba81f7
-        # In-cluster DNS name for the rca-agent Service (fullnameOverride:
-        # rca-agent, deployed in the lightspeed-agentic-operator namespace).
+        # rca-agent's edge-TLS Route, not its in-cluster Service DNS name --
+        # google-adk's RemoteA2aAgent requires https (or loopback) for any
+        # agent card it fetches and for every RPC url advertised inside it.
+        # Must match rca-agent's route.host / a2a.publicHost overrides.
         - name: a2a.downstreamEndpoint
-          value: http://rca-agent.lightspeed-agentic-operator.svc.cluster.local:8000
+          value: https://rca-agent.apps.ocp.rvnmn.sandbox2284.opentlc.com
         - name: a2a.downstreamAgentName
           value: rca_agent
         - name: a2a.downstreamAgentDescription

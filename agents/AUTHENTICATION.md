@@ -211,6 +211,20 @@ oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=lightspeed-agen
   SPIFFE Workload API socket. The CSI driver always names the file
   `spire-agent.sock`, not `socket` -- check `identity.workloadApiSocket` /
   `identity.spiffe.workloadApiSocket` matches exactly what's mounted.
+- **ericsson-agent logs `Failed to resolve remote A2A agent rca_agent: Agent
+  card URL must use https, or http on a loopback host: http://rca-agent...`**:
+  this is neither Keycloak nor SPIFFE -- google-adk's `RemoteA2aAgent` refuses
+  to fetch an agent card (and, separately, refuses to trust the RPC url
+  *inside* a card it did fetch) over plain http on a non-loopback host. The
+  in-cluster Service DNS name is non-loopback plain http, so it no longer
+  qualifies once a real caller in a different pod resolves it. Fix: put
+  rca-agent behind its Route (`route.enabled`, edge TLS) and set
+  `a2a.publicHost`/`a2a.publicPort`/`a2a.publicProtocol` (which control the
+  RPC url the agent card itself advertises, in `rca_agent/main.py`) to that
+  route's https origin, then point ericsson-agent's `a2a.downstreamEndpoint`
+  at the same https origin instead of the in-cluster Service DNS name. The
+  chart's `deployment.yaml` fails the template if `route.enabled` is true
+  while `a2a.publicProtocol` is left at `http` to catch this early.
 - **Confidential client authentication fails with no useful error**: the
   federated client authentication (jwt-spiffe) manual Admin Console step
   (see `charts/all/keycloak-oidc/README.md`) wasn't done, or `rca-agent-mcp`
