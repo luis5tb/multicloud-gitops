@@ -179,7 +179,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/rca-agent
         - name: image.tag
-          value: 1cba81f7
+          value: 008c11d0
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
         - name: identity.keycloak.tokenExchange.clientId
