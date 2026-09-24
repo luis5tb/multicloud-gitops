@@ -73,6 +73,8 @@ spec:
               value: {{ .Values.agenticRun.timeoutSeconds | quote }}
             - name: AGENTIC_RUN_POLL_INTERVAL_SECONDS
               value: {{ .Values.agenticRun.pollIntervalSeconds | quote }}
+            - name: AGENTIC_RUN_SKILLS
+              value: {{ toJson .Values.agenticRun.skills | quote }}
             - name: OPENSHIFT_MCP_URL
               value: {{ .Values.openshiftMcp.url | quote }}
             - name: OPENSHIFT_MCP_TRANSPORT

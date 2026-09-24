@@ -92,6 +92,13 @@ agenticRun:
   analysisAgent: default
   timeoutSeconds: 900
   pollIntervalSeconds: 5
+  # Skills bundle attached to every AgenticRun this agent creates. Static
+  # across requests -- override per-deployment if a different skills image or
+  # set of paths is needed.
+  skills:
+    - image: quay.io/openshiftanalytics/agentic-skills:latest
+      paths:
+        - /skills/cluster-troubleshoot/investigate-alert
 
 adk:
   model: openai/rca-agent

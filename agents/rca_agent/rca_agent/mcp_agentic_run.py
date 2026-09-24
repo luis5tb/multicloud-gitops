@@ -20,6 +20,16 @@ GROUP = "agentic.openshift.io"
 VERSION = "v1alpha1"
 ANALYZED_CONDITION = "Analyzed"
 
+# Skills bundle attached to every AgenticRun this agent creates. Overridable
+# via AGENTIC_RUN_SKILLS (JSON list of {"image": ..., "paths": [...]}) from
+# the Helm chart; this is the static default used when that env var is unset.
+_DEFAULT_SKILLS: list[dict[str, Any]] = [
+    {
+        "image": "quay.io/openshiftanalytics/agentic-skills:latest",
+        "paths": ["/skills/cluster-troubleshoot/investigate-alert"],
+    }
+]
+
 
 class OpenShiftMcpError(RuntimeError):
     """Raised when the OpenShift MCP tool call fails."""
@@ -59,6 +69,19 @@ def _run_status(run: dict[str, Any]) -> str:
     return "Analyzing"
 
 
+def _configured_skills() -> list[dict[str, Any]]:
+    raw = os.getenv("AGENTIC_RUN_SKILLS", "").strip()
+    if not raw:
+        return _DEFAULT_SKILLS
+    try:
+        skills = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("AGENTIC_RUN_SKILLS must be a JSON list") from error
+    if not isinstance(skills, list):
+        raise ValueError("AGENTIC_RUN_SKILLS must be a JSON list")
+    return skills
+
+
 def build_analysis_only_run(
     request: str,
     analysis_agent: str,
@@ -82,6 +105,9 @@ def build_analysis_only_run(
         spec["targetNamespaces"] = [
             _valid_dns_label(namespace, "target namespace") for namespace in target_namespaces
         ]
+    skills = _configured_skills()
+    if skills:
+        spec["tools"] = {"skills": skills}
 
     annotations = {
         "agentic.openshift.io/executing-agent": "rca_agent",
