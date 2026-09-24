@@ -167,22 +167,57 @@ because the exact fields are Keycloak-version-specific.
 
 ## Per-hop identity and validation
 
+Every JWT sample below is illustrative -- field names and the exact claim set
+depend on this realm's protocol mappers, not a spec all Keycloak realms share
+-- but the shapes match what this repo's charts actually configure. Watch
+`sub`/`azp`/`aud` change hop to hop; that's the whole "who, calling what, on
+whose behalf" story in one column.
+
 1. **User to ericsson-agent**: no authentication by default (`auth.mode` on
    the caller-facing side is out of scope here -- this doc covers the
    *downstream* auth ericsson-agent performs, not who's allowed to open the
-   UI).
+   UI). No token exists yet, which matters below: nothing upstream of step 3
+   ever identifies the human at the keyboard.
 2. **ericsson-agent to LiteLLM** (`agents/ericsson_agent/src/ericsson_agent/agent.py`,
    `_model()`): every reasoning step of the local ADK coordinator (including
    the decision to route to `rca_agent`) goes through `LiteLlm(base_url=...,
    api_key=...)`, populated from `LITELLM_API_BASE`/`LITELLM_API_KEY` -- a
    static credential from ericsson-agent's own `litellm.credentialsSecretName`
    Secret, unrelated to the caller and to steps 3-8 below.
+
+   ```
+   Authorization: Bearer sk-litellm-REDACTED
+   ```
+
+   Opaque, not a JWT -- there is nothing to decode. This key identifies the
+   *deployment*, not any caller; the same value is sent for every request.
 3. **ericsson-agent to rca-agent** (`agents/ericsson_agent/src/ericsson_agent/auth.py`,
    `DownstreamAuth`): fetches a JWT-SVID from the SPIFFE Workload API for
    audience `ericsson-agent`, uses it as `client_assertion` in a Keycloak
-   token request for the confidential `ericsson-agent` client, and attaches
-   the resulting access token as `Authorization: Bearer` on every outbound
-   A2A request (`httpx` `event_hooks`).
+   `client_credentials` token request for the confidential `ericsson-agent`
+   client, and attaches the resulting access token as `Authorization: Bearer`
+   on every outbound A2A request (`httpx` `event_hooks`).
+
+   ```json
+   {
+     "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
+     "sub": "service-account-ericsson-agent",
+     "azp": "ericsson-agent",
+     "aud": ["rca-agent"],
+     "scope": "email profile",
+     "exp": 1732000300,
+     "iat": 1732000000
+   }
+   ```
+
+   **This is the token that ends up as "on behalf of" for the rest of the
+   chain.** Because step 1 authenticates no one, `sub` here is
+   ericsson-agent's own service account, not the human using the UI --
+   everything downstream is attributable to ericsson-agent-as-caller, not to
+   an end user. If per-user attribution is ever needed, a user identity has
+   to be captured before this hop and folded into this token (e.g. a second
+   token exchange), or `on_behalf_of` will keep reading `service-account-ericsson-agent`
+   regardless of who typed the message.
 4. **rca-agent validates the inbound token** (`agents/rca_agent/rca_agent/identity.py`,
    `A2AAuthenticationMiddleware`): every path except `/.well-known/agent-card.json`
    and `/health/ready` requires both (a) `KeycloakTokenValidator.validate` --
@@ -191,11 +226,35 @@ because the exact fields are Keycloak-version-specific.
    RCA's own JWT-SVID must be obtainable at all, independent of the caller's
    token. Either failing returns a generic `401` (the specific cause is only
    in the pod logs, deliberately -- see Troubleshooting).
+
+   ```
+   Checks run against the step-3 token by KeycloakTokenValidator.validate():
+     iss == KEYCLOAK_ISSUER_URL        (https://keycloak.../realms/rca)
+     aud ∩ KEYCLOAK_AUDIENCES != {}    ({"rca-agent", "openshift"})
+     exp/iat within tolerance, signature verified via JWKS
+     sub required (identity.py falls back sub -> client_id -> azp ->
+                   preferred_username to build on_behalf_of)
+   ```
+
+   RCA's own JWT-SVID, fetched independently of the caller token:
+
+   ```json
+   {
+     "sub": "spiffe://apps.<cluster-domain>/ns/lightspeed-agentic-operator/sa/rca-agent",
+     "aud": ["rca-agent"],
+     "exp": 1732000300
+   }
+   ```
 5. **rca-agent to LiteLLM** (`agents/rca_agent/rca_agent/agent.py`, `_model()`):
    same pattern as step 2, a *different* static credential from rca-agent's
    own `litellm.credentialsSecretName` Secret, used when its `LlmAgent`
    decides whether/how to call the `create_and_wait_for_analysis` tool. Never
    the caller's Keycloak token.
+
+   ```
+   Authorization: Bearer sk-litellm-REDACTED   (rca-agent's own key, different
+                                                 value from step 2's)
+   ```
 6. **rca-agent to OpenShift MCP** (`agents/rca_agent/rca_agent/mcp_agentic_run.py`
    + `identity.py`'s `KeycloakTokenExchanger`): the caller's *validated*
    token is used only as the `subject_token` of an RFC 8693 exchange -- it is
@@ -204,6 +263,36 @@ because the exact fields are Keycloak-version-specific.
    client, requesting the `openshift-mcp` audience
    (`identity.keycloak.tokenExchange.audience`). The resulting MCP-scoped
    token is what actually gets sent to `openshift-mcp-server`.
+
+   ```
+   Token-exchange request (KeycloakTokenExchanger.exchange):
+     grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+     subject_token=<step 3's access token>
+     subject_token_type=urn:ietf:params:oauth:token-type:access_token
+     requested_token_type=urn:ietf:params:oauth:token-type:access_token
+     client_id=rca-agent-mcp
+     client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+     client_assertion=<rca-agent's own JWT-SVID from step 4>
+     audience=openshift-mcp
+   ```
+
+   ```json
+   {
+     "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
+     "sub": "service-account-ericsson-agent",
+     "aud": ["openshift-mcp"],
+     "azp": "rca-agent-mcp",
+     "act": {"sub": "rca-agent-mcp"},
+     "exp": 1732000600
+   }
+   ```
+
+   `sub` is carried over unchanged from the subject token (step 3) -- Keycloak
+   token exchange preserves *whose* request this is. `aud` switches to the
+   new resource (`openshift-mcp`). `act.sub` is the actor performing the
+   exchange, i.e. rca-agent-mcp: this is the literal RFC 8693 "on behalf of"
+   record, and is exactly what `identity.py`'s `actor` property reads back
+   out (`agentic.openshift.io/previous-actor` on the AgenticRun).
 7. **openshift-mcp-server to the API server**: `cluster_auth_mode=passthrough`
    means MCP does no authorization decision itself -- it forwards the
    MCP-scoped bearer token straight through to the Kubernetes API server as
@@ -216,6 +305,19 @@ because the exact fields are Keycloak-version-specific.
    (`openshiftOIDC.extraAudiences` in `charts/all/keycloak-oidc`) or every
    MCP call is rejected at this hop even though the token exchange in step 6
    succeeded cleanly.
+
+   ```
+   claimMappings applied to the step-6 token:
+     username: claim "sub"    -> "keycloak:service-account-ericsson-agent"
+     groups:   claim "groups" -> [] (absent -- the ericsson-agent client has
+                                     no groups protocol mapper configured)
+   ```
+
+   No group means RBAC has to grant that exact prefixed username, not just a
+   group, or this hop 403s even after authentication succeeds cleanly -- the
+   same class of gap as the console client's missing `groups` mapper in
+   Troubleshooting, just on the service-account side instead of the
+   human-login side.
 8. **AgenticRun -> AnalysisResult**: `lightspeed-agentic-operator` watches
    `AgenticRun` resources in its own namespace, runs the analysis through its
    own separately configured `llmProvider.*` (a third, unrelated static LLM
