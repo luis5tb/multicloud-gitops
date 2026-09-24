@@ -287,12 +287,40 @@ whose behalf" story in one column.
    }
    ```
 
-   `sub` is carried over unchanged from the subject token (step 3) -- Keycloak
-   token exchange preserves *whose* request this is. `aud` switches to the
-   new resource (`openshift-mcp`). `act.sub` is the actor performing the
-   exchange, i.e. rca-agent-mcp: this is the literal RFC 8693 "on behalf of"
-   record, and is exactly what `identity.py`'s `actor` property reads back
-   out (`agentic.openshift.io/previous-actor` on the AgenticRun).
+   Three claims here answer three different questions, and it is easy to
+   mix them up because two of them happen to have the same value in this
+   single-hop exchange:
+
+   - **`sub` -- whose authority is this?** Carried over unchanged from the
+     subject token (step 3): ericsson-agent's service account. This is *not*
+     rca-agent -- rca-agent never puts its own identity in `sub`. `sub` is
+     what `identity.py` reads (with the `sub -> client_id -> azp` fallback
+     from step 4) into `on_behalf_of`, annotated on the AgenticRun as
+     `agentic.openshift.io/on-behalf-of`. So "on behalf of X" means **X is
+     the subject being represented**, not the agent doing the representing --
+     the naming is backwards from how it reads at first glance.
+   - **`act.sub` -- who is exercising that authority?** `rca-agent-mcp`: the
+     client that authenticated the exchange call. RFC 8693's actor claim
+     exists specifically so a resource server can tell "the token says
+     ericsson-agent, but it was actually rca-agent-mcp that presented it,
+     acting *for* ericsson-agent" -- i.e. **rca-agent is the one acting on
+     behalf of the `sub`**, the reverse direction from what the phrase
+     initially suggests. This is exactly what `identity.py`'s `actor`
+     property reads back out as `agentic.openshift.io/previous-actor` on the
+     AgenticRun -- a separate annotation from `on-behalf-of` precisely
+     because they name two different parties in the same delegation.
+   - **`azp` -- who is this specific token issued to / allowed to present
+     it?** Also `rca-agent-mcp` here, but for an unrelated reason: it is the
+     client that called the token endpoint, so it is the party the resulting
+     token is handed to. `azp` is a token-transport concept (which client may
+     legitimately hold and use this bearer token); `act` is a delegation
+     concept (whose authority is being exercised versus whose authority is
+     merely being invoked). They coincide in a single-hop exchange like this
+     one only because the same client both requested the token and is the
+     sole actor. They would diverge in a longer chain: another exchange
+     further downstream would move `azp` to the next requesting client while
+     nesting the actor history as `act.act.sub`, preserving every actor `sub`
+     ever saw along the way.
 7. **openshift-mcp-server to the API server**: `cluster_auth_mode=passthrough`
    means MCP does no authorization decision itself -- it forwards the
    MCP-scoped bearer token straight through to the Kubernetes API server as
