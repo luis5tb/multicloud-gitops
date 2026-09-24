@@ -90,7 +90,7 @@ sequenceDiagram
     RCA->>MCP: resources_create_or_update(AgenticRun)<br/>Authorization: Bearer <MCP-scoped token>
     Note over MCP: cluster_auth_mode=passthrough:<br/>forwards the bearer token as-is
     MCP->>API: create AgenticRun CR, Authorization: Bearer <token>
-    API->>KC: (cached JWKS, not fetched per request)<br/>verify signature; check iss/aud against oidcProviders
+    API->>KC: (cached JWKS, not fetched per request)<br/>verify signature -- check iss/aud against oidcProviders
     API->>API: Apply claimMappings to username/groups,<br/>then RBAC against the pre-provisioned bindings above
     API-->>MCP: 201 Created
     MCP-->>RCA: AgenticRun created
