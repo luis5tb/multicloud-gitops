@@ -62,7 +62,7 @@ sequenceDiagram
     participant API as OpenShift API server
     participant Op as lightspeed-agentic-operator
 
-    Note over KC,API: Pre-provisioned, done once, not per request:<br/>1) Authentication/cluster (oidcProviders) trusts KC as an<br/>   OIDC issuer and caches KC's JWKS for signature checks.<br/>2) claimMappings.groups reads KC's "groups" claim, prefixed<br/>   "keycloak:" -- emitted by a groups protocol mapper<br/>   attached to each Keycloak client (see table below).<br/>3) RBAC (e.g. ClusterRoleBinding rca-admins-cluster-admin)<br/>   targets Group:keycloak:[kc-group] directly -- there is no<br/>   separate OpenShift User object to pre-create.
+    Note over KC,API: Pre-provisioned, done once, not per request:<br/>1) Authentication/cluster (oidcProviders) trusts KC as an<br/>   OIDC issuer and caches KC's JWKS for signature checks.<br/>2) claimMappings.groups reads KC's "groups" claim, prefixed<br/>   "keycloak:" -- emitted by a groups protocol mapper<br/>   attached to each Keycloak client (see table below).<br/>3) RBAC (e.g. ClusterRoleBinding cluster-admins-cluster-admin)<br/>   targets Group:keycloak:[kc-group] directly -- there is no<br/>   separate OpenShift User object to pre-create.
 
     User->>Eric: POST / (A2A JSON-RPC message/send)
 
@@ -122,6 +122,94 @@ sequenceDiagram
     Eric-->>User: Rendered response in UI
 ```
 
+## RFC 8693 token exchange, step by step
+
+This is the piece that actually implements "on behalf of X" delegation, and
+the piece most likely to break silently if a claim doesn't survive the way
+it's expected to. Two full, separate Keycloak grants happen here,
+authenticated by two *different* clients -- only one of them determines the
+resulting token's subject.
+
+```mermaid
+sequenceDiagram
+    participant Eric as ericsson-agent
+    participant KC as Keycloak (rca realm)
+    participant RCA as rca-agent
+    participant MCP as openshift-mcp-server
+
+    Note over Eric,KC: Grant 1 -- client_credentials + jwt-spiffe.<br/>ericsson-agent authenticates as itself -- there is no subject_token yet.
+    Eric->>KC: client_assertion = ericsson-agent's own JWT-SVID<br/>grant_type = client_credentials
+    KC-->>Eric: Token A<br/>sub = ericsson-agent's service account (opaque id)<br/>azp = ericsson-agent<br/>aud = rca-agent, rca-agent-mcp<br/>groups = ericsson-agent-rca (from ericsson-agent's own mapper)
+
+    Eric->>RCA: Authorization: Bearer Token A
+
+    Note over RCA: Validates Token A -- proves it is a legitimate,<br/>correctly-audienced Keycloak token, not that ericsson-agent<br/>may call rca-agent (that is the separate OPA check)
+
+    Note over RCA,KC: Grant 2 -- RFC 8693 token exchange.<br/>rca-agent authenticates itself as client rca-agent-mcp for<br/>THIS call -- Token A is passed as subject_token, not as its own credential.
+    RCA->>KC: client_assertion = rca-agent's own JWT-SVID<br/>grant_type = token-exchange<br/>subject_token = Token A<br/>audience = openshift-mcp
+    KC-->>RCA: Token B<br/>sub = UNCHANGED, still ericsson-agent's service account<br/>azp = rca-agent-mcp, the client that now holds this token<br/>aud = openshift-mcp<br/>groups = ericsson-agent-rca, from rca-agent-mcp's own dedicated<br/>client scope -- the client authenticating THIS request, not Token A's issuer
+
+    Note over RCA,MCP: Token A never reaches MCP or the API server --<br/>only Token B does. That is the entire point of the exchange.
+    RCA->>MCP: Authorization: Bearer Token B
+```
+
+**Grant 1 -- ericsson-agent authenticates as itself** (`client_credentials` +
+`jwt-spiffe`; step 3 below has the real captured claim shapes). ericsson-agent
+proves its own workload identity with its own SPIFFE JWT-SVID. There is no
+`subject_token` here -- this isn't an exchange, it's ericsson-agent getting a
+token *for itself*. The result, Token A, is what's attached to the A2A call
+to rca-agent.
+
+**Grant 2 -- rca-agent exchanges Token A for one scoped to OpenShift MCP**
+(`urn:ietf:params:oauth:grant-type:token-exchange`). rca-agent authenticates
+*itself* -- as the confidential client `rca-agent-mcp`, with its own SPIFFE
+JWT-SVID -- but passes Token A as `subject_token`. This is what makes it an
+exchange rather than a fresh grant: **Token B's `sub` is inherited from the
+subject_token, not from whoever is authenticating the exchange call.** So
+Token B's `sub` is still ericsson-agent's opaque id, unchanged -- rca-agent's
+own identity never becomes the subject of anything downstream.
+
+`azp` changes across the exchange precisely because it answers a different
+question than `sub` does:
+
+| Claim | Answers | Token A | Token B |
+| --- | --- | --- | --- |
+| `sub` | Whose authority does this token represent? (constant) | ericsson-agent | ericsson-agent (unchanged) |
+| `azp` | Which client currently holds/may present this token? (changes) | ericsson-agent | rca-agent-mcp |
+
+This distinction is the entire mechanism that makes delegation meaningful:
+authority doesn't shift to whoever happens to be carrying the token at the
+moment.
+
+**Does `groups` survive the exchange?** This is the one open question in the
+chain, and why the `groups` protocol mapper is attached to *both*
+`ericsson-agent` and `rca-agent-mcp` in `charts/all/keycloak-oidc`. Which
+client's mappers apply to a newly-minted token is governed by the client
+authenticating *that specific* request -- for Grant 2, that's `rca-agent-mcp`,
+not ericsson-agent (see the comment on `rca-agent-mcp`'s `groups` mapper in
+`keycloak-realm-import.yaml` for the full reasoning: a client's
+directly-attached `protocolMappers` are its own automatic "dedicated" client
+scope, always active with no `scope=` parameter needed). So `rca-agent-mcp`'s
+copy is the one that most likely determines whether Token B actually carries
+`groups: ["ericsson-agent-rca"]` -- **confirm this against a real exchanged
+token** (see "End-to-end verification" in `charts/all/keycloak-oidc/README.md`)
+rather than assuming it; this is the single most consequential unverified
+assumption in the whole flow, since RBAC and the namespace-scoping
+`ValidatingAdmissionPolicy` both key on it.
+
+**No `act` claim.** RFC 8693 defines an `act` (actor) claim for exactly this
+"X's authority, exercised by Y" case. Keycloak's *standard* (V2) token
+exchange -- what's enabled on this cluster -- does not populate it; that
+requires Keycloak's separate "Token Exchange Delegation" feature (a
+`delegation:client` client scope plus its own Fine-Grained Admin Permissions
+v2 grant), which this repo does not enable. The only actor information
+available in practice is `azp`.
+
+**Token A never reaches MCP or the API server.** Only Token B does. That's
+the actual point of the exchange: neither MCP nor the Kubernetes API server
+ever sees the raw caller token -- they only ever see one scoped specifically
+to the `openshift-mcp` audience, and only rca-agent ever sees both.
+
 ## Keycloak <-> OpenShift group mapping (pre-provisioned, not per-request)
 
 The API server never calls Keycloak "live" to ask whether a token is
@@ -142,6 +230,15 @@ and then only read from cache on the hot path:
    only appears in a token if the *client that issued it* has a `groups`
    protocol mapper attached -- there is no realm-wide default, which is
    exactly the console/CLI gotcha in Troubleshooting below.
+
+   The prefix is deliberate, not cosmetic: an **empty** prefix would let a
+   Keycloak-sourced group value collide with a Kubernetes **reserved
+   `system:`-namespaced group** (e.g. `system:masters` grants cluster-admin)
+   if a group in Keycloak was ever named that, by mistake or otherwise.
+   `keycloak:` makes that structurally impossible -- no claim value coming
+   through this path can ever produce a bare `system:...` group name. Don't
+   remove it to match examples that use an empty prefix.
+
 3. **RBAC**: bindings such as `admin-rbac.yaml`'s
    `<adminGroupName>-cluster-admin` `ClusterRoleBinding` target
    `Group:keycloak:<adminGroupName>` directly. There is no separate OpenShift
@@ -163,7 +260,7 @@ reach for just by leaving the field out. See
 
 The one manual, one-time step this doesn't template (Keycloak-version-specific
 UI, see `charts/all/keycloak-oidc/README.md`): creating the actual Keycloak
-group (e.g. `rca-admins`) and adding users to it. Everything downstream of
+group (e.g. `cluster-admins`) and adding users to it. Everything downstream of
 that -- the claim appearing in tokens, the API server trusting it, and RBAC
 resolving it -- is what steps 1-3 above wire up automatically.
 
@@ -174,11 +271,22 @@ these breaks the flow -- see that chart's README for the exact rationale.
 
 | Client | Type | Used by | Purpose |
 | --- | --- | --- | --- |
-| `rca-agent` | public | Browser / `oc login` | Native OIDC login only. Also registered as the `cli` OIDC platform client. Cannot authenticate itself. |
+| `openshift-cli` | public | Browser / `oc login` | Native OIDC login only, named for that role -- unrelated to the agent request flow. Registered as the `cli` OIDC platform client. Cannot authenticate itself. |
 | `openshift-console` | confidential | Web console | Registered as the `console` OIDC platform client. Needs the `groups` protocol mapper (see Troubleshooting) or RBAC group membership never reaches the console. |
 | `ericsson-agent` | confidential | ericsson-agent | Client-credentials-style grant authenticated with ericsson-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. Its service account belongs to the `ericsson-agent-rca` group, so its tokens carry a `groups` claim RBAC/the namespace-scoping `ValidatingAdmissionPolicy` can key on. |
 | `rca-agent-mcp` | confidential | rca-agent | RFC 8693 token exchange: takes the caller's token as `subject_token`, authenticates itself with its own SPIFFE JWT-SVID, and requests a token scoped to the `openshift-mcp` audience. |
 | `openshift-mcp` | confidential | (never authenticates) | Exists only so `rca-agent-mcp`'s exchange has a real `client_id` to name as its `audience` -- Keycloak's standard token exchange requires that parameter to be an actual client. |
+
+There is also a sixth, deliberately-not-a-client value: `keycloak.rcaAgentAudience`
+(default `rca-agent`), the audience rca-agent's own inbound
+`KeycloakTokenValidator` requires. Unlike `openshift-mcp` above, nothing in
+Keycloak requires this to correspond to a real client -- it's added to
+ericsson-agent's token via `oidc-audience-mapper`'s `included.custom.audience`
+(a plain string), not `included.client.audience`. It's unrelated to
+`openshift-cli` despite the coincidental old naming this repo used to have
+(both were once named `rca-agent`); don't confuse "the audience rca-agent's
+validator checks for" with "a client named rca-agent" -- the latter no
+longer exists.
 
 `ericsson-agent` and `rca-agent-mcp` authenticate via Keycloak's federated
 client authentication feature against the `spiffe` identity provider this
@@ -259,10 +367,12 @@ whose behalf" story in one column.
    ever needed, a user identity has to be captured before this hop and
    folded into this token (e.g. a second token exchange).
    `rca-agent`/`rca-agent-mcp` both appear in `aud` because rca-agent's own
-   inbound check needs `rca-agent`, and Keycloak's standard token exchange
-   (step 6) separately requires the subject_token to already carry the
-   exchanging client (`rca-agent-mcp`) as an audience -- both are protocol
-   mappers on the `ericsson-agent` client, see `charts/all/keycloak-oidc`.
+   inbound check needs `rca-agent` (a plain custom-audience string, no client
+   behind it -- `keycloak.rcaAgentAudience`), and Keycloak's standard token
+   exchange (step 6) separately requires the subject_token to already carry
+   the exchanging client (`rca-agent-mcp`, a real client audience this time)
+   as an audience -- both are protocol mappers on the `ericsson-agent`
+   client, see `charts/all/keycloak-oidc`.
 4. **rca-agent validates the inbound token** (`agents/rca_agent/rca_agent/identity.py`,
    `A2AAuthenticationMiddleware`): every path except `/.well-known/agent-card.json`
    and `/health/ready` requires both (a) `KeycloakTokenValidator.validate` --
@@ -275,7 +385,11 @@ whose behalf" story in one column.
    ```
    Checks run against the step-3 token by KeycloakTokenValidator.validate():
      iss == KEYCLOAK_ISSUER_URL        (https://keycloak.../realms/rca)
-     aud ∩ KEYCLOAK_AUDIENCES != {}    ({"rca-agent", "openshift"})
+     aud ∩ KEYCLOAK_AUDIENCES != {}    ({"rca-agent"} -- narrowed from
+                                        {"rca-agent", "openshift"}; "openshift"
+                                        was the openshift-cli login client's
+                                        own audience and only widened what
+                                        this check would accept)
      exp/iat within tolerance, signature verified via JWKS
      sub required (identity.py falls back sub -> client_id -> azp ->
                    preferred_username to build on_behalf_of)
@@ -386,7 +500,7 @@ whose behalf" story in one column.
    Before `charts/all/keycloak-oidc`'s `ericsson-agent-rca` group/mapper
    existed, this claim was absent, and RBAC had no group to bind and no
    username-based binding either -- `agentic-rbac.yaml` only ever granted
-   `keycloak:rca-users` (human console/CLI login), so calls attributed to
+   `keycloak:rca-agenticrun` (human console/CLI login), so calls attributed to
    ericsson-agent had no RBAC path here at all. This was the same class of
    gap as the console client's missing `groups` mapper in Troubleshooting,
    just on the service-account side. `agentic-rbac.yaml`'s RoleBinding now
@@ -460,7 +574,7 @@ oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namesp
   just the two OIDC platform client IDs.
 - **Console/CLI users authenticate but land in no RBAC groups**: the
   `openshift-console` client needs its own `groups` protocol mapper. It is
-  easy to add the mapper only to the public login client (`rca-agent`) and
+  easy to add the mapper only to the public login client (`openshift-cli`) and
   forget the console has a separate client with its own, independent set of
   protocol mappers.
 - **`/health/ready` stays `503` forever on either agent**: almost always the

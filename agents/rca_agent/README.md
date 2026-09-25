@@ -33,7 +33,7 @@ incoming JWT; the RCA identity is recorded separately as the executing agent.
 
 The token-exchange client (`identity.keycloak.tokenExchange.clientId`,
 default `rca-agent-mcp`) must be a separate, confidential client from the
-public `rca-agent` login client used for Native OIDC -- a public client
+public `openshift-cli` login client used for Native OIDC -- a public client
 cannot authenticate itself to perform a token exchange. See
 `charts/all/keycloak-oidc` for both client definitions.
 
@@ -149,12 +149,14 @@ helm upgrade --install keycloak-oidc charts/all/keycloak-oidc \
   --set agenticRun.namespace=lightspeed-agentic-operator
 ```
 
-This creates three Keycloak clients in the `rca` realm: the public
-`rca-agent` login client (Native OIDC), the confidential `rca-agent-mcp`
+This creates the Keycloak clients in the `rca` realm, including the public
+`openshift-cli` login client (Native OIDC), the confidential `rca-agent-mcp`
 client this agent uses for token exchange, and the confidential
-`ericsson-agent` client used by the Ericsson A2A agent. The two confidential
-clients still need federated client authentication configured against the
-`spiffe` identity provider in the Keycloak Admin Console -- see
+`ericsson-agent` client used by the Ericsson A2A agent (see
+`charts/all/keycloak-oidc/README.md`'s "five clients" list for the full set).
+The confidential clients still need federated client authentication
+configured against the `spiffe` identity provider in the Keycloak Admin
+Console -- see
 `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml` for details,
 since the exact fields are Keycloak-version-specific and cannot be templated
 blindly.
@@ -189,8 +191,9 @@ pre-existing Secret instead, set `litellm.existingSecret.name` and leave
 `litellm.vaultKey` empty. No raw API key value is accepted by the chart.
 
 The RCA ServiceAccount has no AgenticRun Kubernetes Role. OpenShift MCP uses
-the caller token, and the `keycloak:rca-users` group receives only `create/get`
-on AgenticRuns and `get` on AnalysisResults in the AgenticRun namespace.
+the caller token, and the `keycloak:rca-agenticrun`/`keycloak:ericsson-agent-rca`
+groups receive only `create/get` on AgenticRuns and `get` on AnalysisResults
+in the AgenticRun namespace.
 
 ## Build and push the RCA image to Quay
 
