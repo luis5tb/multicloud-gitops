@@ -20,6 +20,16 @@ serviceAccount:
 service:
   port: 8080
 
+# skipJWTVerification below means this server trusts the OpenShift API
+# server downstream to validate every request it forwards -- this restricts
+# who can reach it at all, as a compensating network-layer control.
+networkPolicy:
+  enabled: true
+  # Namespace rca-agent (the only intended caller) runs in. Must match
+  # wherever charts/all/rca-agent's Application is deployed -- see that
+  # chart's own namespace note about why it shares lightspeed-agentic-operator's.
+  callerNamespace: lightspeed-agentic-operator
+
 server:
   enabledTools:
     - resources_create_or_update
