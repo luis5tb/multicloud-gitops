@@ -1,0 +1,83 @@
+# Restricts which spec.targetNamespaces a caller may request on an
+# AgenticRun, keyed by the caller's Keycloak group (agenticRun.namespaceAllowlist).
+# agentic-rbac.yaml only controls whether a caller may create/get AgenticRuns
+# at all -- Kubernetes RBAC has no way to inspect a resource's own spec
+# fields, so it can't stop a caller from *creating* one that targets a
+# namespace it has no business touching. This ValidatingAdmissionPolicy is
+# the piece that actually closes that gap, evaluated by the API server
+# itself at admission time -- it cannot be bypassed by anything rca-agent's
+# own code does or doesn't check.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentic.openshift.io-agenticrun-caller-namespace-scope
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["agentic.openshift.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE"]
+        resources: ["agenticruns"]
+  variables:
+    # openshiftOIDC.groupsPrefix, baked in at render time -- ConfigMap data
+    # keys can't contain ":", so params.data is keyed by the bare group name
+    # and the prefix has to be stripped from request.userInfo.groups here.
+    - name: groupsPrefix
+      expression: {{ printf "%q" .Values.openshiftOIDC.groupsPrefix }}
+    - name: callerGroups
+      expression: >-
+        request.userInfo.groups.filter(g, g.startsWith(variables.groupsPrefix))
+          .map(g, g.substring(size(variables.groupsPrefix)))
+    # The CRD treats an omitted spec.targetNamespaces as "not namespace-scoped,
+    # the analysis agent decides from context" -- deliberately NOT normalized
+    # to "no restriction requested" here, so a restricted caller can't reach
+    # that wider scope just by leaving the field out. Only a "*" allow-list
+    # entry (checked separately below) may omit it.
+    - name: requestedNamespaces
+      expression: "has(object.spec.targetNamespaces) ? object.spec.targetNamespaces : []"
+  validations:
+    - expression: >-
+        variables.callerGroups.exists(g,
+          g in params.data && (
+            params.data[g] == '*' ||
+            (size(variables.requestedNamespaces) > 0 &&
+             variables.requestedNamespaces.all(ns, ns in params.data[g].split(',')))
+          )
+        )
+      messageExpression: >-
+        "caller is not permitted to request these spec.targetNamespaces: none of this
+        caller's Keycloak groups allow-list them (or spec.targetNamespaces was omitted,
+        which is not treated as unscoped for a restricted caller)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentic.openshift.io-agenticrun-caller-namespace-scope
+spec:
+  policyName: agentic.openshift.io-agenticrun-caller-namespace-scope
+  validationActions: [Deny]
+  paramRef:
+    name: {{ include "keycloak-oidc.fullname" . }}-agentic-run-namespace-allowlist
+    namespace: {{ .Values.agenticRun.namespace }}
+    # Fail closed: an authorization check with no config to consult should
+    # deny, unlike the upstream suspension policy's "not yet configured"
+    # Allow default for a killswitch.
+    parameterNotFoundAction: Deny
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keycloak-oidc.fullname" . }}-agentic-run-namespace-allowlist
+  namespace: {{ .Values.agenticRun.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+data:
+  {{- range $group, $namespaces := .Values.agenticRun.namespaceAllowlist }}
+  {{ $group | quote }}: {{ $namespaces | quote }}
+  {{- end }}

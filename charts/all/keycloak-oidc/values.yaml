@@ -19,6 +19,16 @@ keycloak:
   # charts/all/ericsson-agent).
   ericssonClientId: ericsson-agent
   ericssonClientName: Ericsson A2A agent
+  # Dedicated group for calls attributed to ericsson-agent when it invokes
+  # rca-agent -- named <caller>-<callee> (not just "ericsson-agent") so it
+  # reads as "ericsson-agent's rights when calling rca-agent", not
+  # ericsson-agent's rights in general; a future second caller gets its own
+  # <caller>-rca group rather than sharing this one. Required for the
+  # exchanged MCP-scoped token to carry any groups claim at all -- without
+  # it, ericsson-agent's calls have no RBAC subject to bind to (see
+  # agents/AUTHENTICATION.md step 7) and agentic-rbac.yaml/the
+  # ValidatingAdmissionPolicy in this chart have nothing to key on.
+  ericssonGroupName: ericsson-agent-rca
   # Confidential client registered as the web console's OIDC platform client
   # when openshiftOIDC.enabled is true. Keycloak generates its secret at
   # import time -- see charts/all/keycloak-oidc/README.md for the one-time
@@ -120,7 +130,34 @@ breakGlass:
 agenticRun:
   namespace: lightspeed-agentic-operator
   roleName: rca-agent-user
-  groupName: keycloak:rca-users
+  # Every group listed here can create/get AgenticRuns and get AnalysisResults
+  # (agentic-rbac.yaml) -- this only controls whether a caller may act on the
+  # CRD at all, not which spec.targetNamespaces it may request inside the
+  # object body. That finer-grained check is namespaceAllowlist below,
+  # enforced at admission time by agentic-vap-namespace-scope.yaml.
+  groupNames:
+    - keycloak:rca-users
+    - keycloak:ericsson-agent-rca
+  # Per-caller allow-list of AgenticRun spec.targetNamespaces, keyed by the
+  # bare group name (the ValidatingAdmissionPolicy strips openshiftOIDC.groupsPrefix
+  # at evaluation time -- ConfigMap data keys can't contain ":"). "*" allows
+  # any namespace, including an omitted spec.targetNamespaces (used for human
+  # rca-users, matching this repo's behavior before this allow-list existed).
+  # Any other value is a comma-separated allow-list, and -- importantly --
+  # the CRD treats an omitted spec.targetNamespaces as "not namespace-scoped,
+  # the analysis agent decides from context" (crds/agentic.openshift.io_agenticruns.yaml),
+  # which is not something a restricted caller should be able to reach for:
+  # agentic-vap-namespace-scope.yaml denies a restricted caller that omits
+  # spec.targetNamespaces entirely, it does not treat omission as unscoped.
+  # A caller with no entry here, or an entry that doesn't cover a requested
+  # namespace, is denied -- deny by default, so a newly onboarded caller
+  # group must be given an explicit entry before it can target anything.
+  namespaceAllowlist:
+    rca-users: "*"
+    # Replace with the real namespaces ericsson-agent may request analysis
+    # against, comma-separated (e.g. "payments,checkout"). Left empty (deny
+    # all) until set explicitly for this environment.
+    ericsson-agent-rca: ""
 
 realmImport:
   enabled: true

@@ -1,9 +1,15 @@
 # Keycloak/OIDC integration for the RCA and Ericsson A2A agents
 
 This companion chart is installed after the validated pattern's `rhbk` chart.
-It imports the RCA realm, its five clients, a SPIFFE identity provider, and a
-group into the deployed Keycloak, and creates the least-privilege AgenticRun
-RoleBinding for the OpenShift group emitted by the Keycloak `groups` claim.
+It imports the RCA realm, its five clients, a SPIFFE identity provider, and
+its groups into the deployed Keycloak; creates the least-privilege AgenticRun
+RoleBinding for the OpenShift groups emitted by the Keycloak `groups` claim
+(`agenticRun.groupNames`); and enforces which `spec.targetNamespaces` each of
+those groups may request on an `AgenticRun` via a `ValidatingAdmissionPolicy`
+(`agenticRun.namespaceAllowlist`, `templates/agentic-vap-namespace-scope.yaml`)
+-- RBAC alone can grant or deny the whole resource, but has no way to inspect
+a field inside it, which is exactly the gap a compromised or misdirected
+caller could otherwise use to reach namespaces it has no business touching.
 
 The five clients serve distinct purposes and must not be conflated:
 
@@ -21,7 +27,14 @@ The five clients serve distinct purposes and must not be conflated:
   realm, not an arbitrary string. Never authenticates itself.
 - `keycloak.ericssonClientId` (default `ericsson-agent`): confidential client
   `charts/all/ericsson-agent` uses for its client-credentials
-  call to Keycloak.
+  call to Keycloak. Its service account belongs to `keycloak.ericssonGroupName`
+  (default `ericsson-agent-rca`, named `<caller>-<callee>` rather than just
+  `ericsson-agent` so it reads as "ericsson-agent's rights when calling
+  rca-agent") -- without this group, and the `groups` protocol mapper this
+  chart attaches to the client, the token this client mints (and, unchanged,
+  the token `rca-agent-mcp` exchanges it for) carries no groups claim at all,
+  so neither `agentic-rbac.yaml` nor `agentic-vap-namespace-scope.yaml` have
+  anything to key on for calls attributed to ericsson-agent.
 - `keycloak.consoleClientId` (default `openshift-console`): confidential
   client registered as the `console` OIDC platform client when
   `openshiftOIDC.enabled` is true. See "OpenShift Native OIDC" below.
@@ -64,6 +77,40 @@ worth knowing when debugging directly against Keycloak:
   a client scope already resolves, it never adds a new one. All of this is
   templated already; it's listed here because it is not obvious from
   Keycloak's own error messages if you ever need to debug it directly.
+
+## AgenticRun authorization: RBAC + namespace-scoping admission policy
+
+Two independent layers, checking two different things:
+
+- `templates/agentic-rbac.yaml` grants every group in `agenticRun.groupNames`
+  `create`/`get` on `agenticruns` and `get` on `analysisresults`, in
+  `agenticRun.namespace`. This is coarse: it decides whether a caller may act
+  on the CRD at all, the same way any other RBAC grant would.
+- `templates/agentic-vap-namespace-scope.yaml` (a `ValidatingAdmissionPolicy`)
+  decides which `spec.targetNamespaces` each of those groups may request
+  *inside* an `AgenticRun` it's allowed to create, via `agenticRun.namespaceAllowlist`
+  (bare group name -> `"*"` or a comma-separated namespace list). RBAC has no
+  way to inspect a resource's own spec fields, so it can't express this by
+  itself -- without this policy, any caller with RBAC access to create
+  `AgenticRuns` could target any namespace in the cluster, regardless of
+  which upstream agent it actually represents.
+
+A caller with no `namespaceAllowlist` entry, or one that doesn't cover a
+requested namespace, is denied -- deny by default, so a newly onboarded
+caller group needs an explicit entry before it can target anything. This
+also applies if the caller omits `spec.targetNamespaces` entirely: the CRD
+treats that as "not namespace-scoped, the analysis agent decides from
+context" (`crds/agentic.openshift.io_agenticruns.yaml`), so the policy
+denies a restricted caller that omits the field rather than treating
+omission as unscoped -- only a `"*"` allow-list entry may omit it.
+
+Verify both are active:
+
+```bash
+oc get role,rolebinding -n lightspeed-agentic-operator rca-agent-user
+oc get validatingadmissionpolicy,validatingadmissionpolicybinding | grep agentic
+oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namespace-allowlist -o yaml
+```
 
 ## OpenShift Native OIDC
 

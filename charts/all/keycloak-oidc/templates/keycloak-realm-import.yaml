@@ -25,6 +25,7 @@ spec:
       {{- if .Values.keycloak.adminGroupName }}
       - name: {{ .Values.keycloak.adminGroupName | quote }}
       {{- end }}
+      - name: {{ .Values.keycloak.ericssonGroupName | quote }}
     clients:
       - clientId: {{ .Values.keycloak.clientId | quote }}
         name: {{ .Values.keycloak.clientName | quote }}
@@ -145,6 +146,21 @@ spec:
             config:
               included.client.audience: {{ .Values.keycloak.mcpClientId | quote }}
               access.token.claim: "true"
+          # Without this, the token this client mints (and, unchanged, the
+          # token rca-agent-mcp exchanges it for -- see AUTHENTICATION.md
+          # step 7) carries no groups claim at all, so neither RBAC
+          # (agentic-rbac.yaml) nor the namespace-scoping
+          # ValidatingAdmissionPolicy have anything to key on for calls
+          # attributed to ericsson-agent.
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
       # Confidential client registered as the web console's OIDC platform
       # client when openshiftOIDC.enabled is true.
       #
@@ -178,6 +194,17 @@ spec:
               access.token.claim: "true"
               id.token.claim: "true"
               userinfo.token.claim: "true"
+    # Puts ericsson-agent's own service-account user into its dedicated group
+    # so its tokens actually carry the groups claim the mapper above adds.
+    # serviceAccountsEnabled: true auto-creates this user
+    # (service-account-<clientId>); this only sets its group membership, it
+    # does not create the user itself.
+    users:
+      - username: {{ printf "service-account-%s" .Values.keycloak.ericssonClientId | quote }}
+        serviceAccountClientId: {{ .Values.keycloak.ericssonClientId | quote }}
+        enabled: true
+        groups:
+          - {{ printf "/%s" .Values.keycloak.ericssonGroupName | quote }}
     {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
     # Backs the two confidential agent clients' federated-jwt authentication
     # above. Config key names are this Keycloak build's actual internal

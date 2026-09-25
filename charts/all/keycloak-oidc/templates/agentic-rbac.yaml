@@ -26,8 +26,10 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: {{ .Values.rbac.syncWave | quote }}
 subjects:
+  {{- range .Values.agenticRun.groupNames }}
   - kind: Group
-    name: {{ .Values.agenticRun.groupName | quote }}
+    name: {{ . | quote }}
+  {{- end }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
