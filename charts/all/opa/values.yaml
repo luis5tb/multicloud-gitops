@@ -1,0 +1,60 @@
+fullnameOverride: rca-agent-opa
+
+replicaCount: 1
+
+image:
+  repository: docker.io/openpolicyagent/opa
+  # Pin to a real, current OPA release before deploying -- this value was
+  # only current as of this chart's authoring, not verified against what's
+  # actually published now.
+  tag: "1.4.2"
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+service:
+  port: 8181
+
+serviceAccount:
+  create: true
+  name: ""
+
+# Not a Kubernetes admission decision (no CRD object is involved -- this
+# gates an inbound A2A HTTP call before it ever reaches rca-agent's own
+# code), so this is a plain, self-run OPA server queried over HTTP, not the
+# Gatekeeper Operator/ConstraintTemplates used for the AgenticRun namespace
+# check in charts/all/keycloak-oidc. See agents/rca_agent/rca_agent/opa.py.
+policy:
+  # Callers permitted to invoke rca-agent's A2A endpoint at all, matched
+  # against the inbound Keycloak token's azp (authorized party -- the
+  # confidential client that requested the token, e.g. "ericsson-agent").
+  # Not sub: sub is an opaque per-service-account id (see
+  # agents/AUTHENTICATION.md step 3); azp is the stable, human-readable
+  # identifier Keycloak actually issues for "who obtained this token".
+  #
+  # Deny by default: a client successfully authenticating to Keycloak for
+  # *some* audience does not by itself mean it's allowed to call rca-agent --
+  # that would make "which callers are trusted" an incidental side effect of
+  # Keycloak client configuration instead of an explicit, reviewable list a
+  # new caller (e.g. a future company-B-agent) has to be added to on purpose.
+  allowedCallers:
+    - ericsson-agent
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

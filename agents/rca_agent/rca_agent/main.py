@@ -6,6 +6,7 @@ from google.adk.a2a.utils.agent_to_a2a import to_a2a
 
 from .agent import root_agent
 from .identity import A2AAuthenticationMiddleware, KeycloakTokenValidator, WorkloadIdentityProvider
+from .opa import OpaAuthorizer
 
 _a2a_app = to_a2a(
     root_agent,
@@ -30,5 +31,15 @@ a2a_app = A2AAuthenticationMiddleware(
     workload=WorkloadIdentityProvider(
         audience=os.getenv("SPIFFE_JWT_AUDIENCE", ""),
         timeout_seconds=float(os.getenv("SPIFFE_TIMEOUT_SECONDS", "5")),
+    ),
+    # Optional: unset OPA_URL preserves this middleware's pre-OPA behavior of
+    # trusting any caller Keycloak validates for the configured audience.
+    opa=(
+        OpaAuthorizer(
+            url=os.getenv("OPA_URL", ""),
+            timeout_seconds=float(os.getenv("OPA_TIMEOUT_SECONDS", "5")),
+        )
+        if os.getenv("OPA_URL")
+        else None
     ),
 )

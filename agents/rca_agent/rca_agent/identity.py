@@ -21,6 +21,8 @@ import httpx
 import jwt
 from spiffe import WorkloadApiClient
 
+from .opa import OpaAuthorizationError, OpaAuthorizer
+
 
 class AuthenticationError(Exception):
     """Raised when an inbound caller token is not accepted."""
@@ -307,10 +309,22 @@ def _bearer_token(scope: dict[str, Any]) -> Optional[str]:
 class A2AAuthenticationMiddleware:
     """Protect the A2A app while leaving public agent-card discovery available."""
 
-    def __init__(self, app: Any, keycloak: KeycloakTokenValidator, workload: WorkloadIdentityProvider):
+    def __init__(
+        self,
+        app: Any,
+        keycloak: KeycloakTokenValidator,
+        workload: WorkloadIdentityProvider,
+        opa: Optional[OpaAuthorizer] = None,
+    ):
         self.app = app
         self.keycloak = keycloak
         self.workload = workload
+        # Optional: which callers may invoke this agent at all, decided by a
+        # standalone OPA server keyed on the caller's `azp` claim (see
+        # opa.py). None preserves this middleware's pre-OPA behavior of
+        # trusting any caller Keycloak validates for the configured
+        # audience.
+        self.opa = opa
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -347,6 +361,14 @@ class A2AAuthenticationMiddleware:
         except (AuthenticationError, WorkloadIdentityError, IdentityConfigurationError):
             await self._send_error(send, 401, "A valid Keycloak bearer token and workload identity are required")
             return
+
+        if self.opa is not None:
+            try:
+                await asyncio.to_thread(self.opa.authorize, claims)
+            except OpaAuthorizationError:
+                await self._send_error(send, 403, "Caller is not permitted to invoke this agent")
+                return
+
         request_id = next(
             (value.decode("latin-1").strip() for name, value in scope.get("headers", [])
              if name.lower() == b"x-request-id" and value.strip()),

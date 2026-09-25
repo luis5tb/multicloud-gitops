@@ -91,6 +91,16 @@ identity:
       name: ""
       key: ca.crt
 
+  # Gates "may this caller invoke rca-agent at all" against a standalone OPA
+  # server (charts/all/opa), keyed on the inbound token's azp claim -- a
+  # question Keycloak's own audience check can't answer on its own, since any
+  # client sharing the required audience would otherwise pass. Empty url
+  # disables the check entirely (pre-OPA behavior: any caller Keycloak
+  # validates for the configured audience is trusted).
+  opa:
+    url: http://rca-agent-opa:8181
+    timeoutSeconds: 5
+
   # ZTWIM must have a matching ClusterSPIFFEID registration. This optional
   # object is disabled by default because the cluster trust domain is an
   # installation-specific value.

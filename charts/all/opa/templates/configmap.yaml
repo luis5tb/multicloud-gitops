@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opa.fullname" . }}-policy
+  labels:
+    {{- include "opa.labels" . | nindent 4 }}
+data:
+  rca_authorization.rego: |
+    package rca.authorization
+
+    import rego.v1
+
+    # Callers permitted to invoke rca-agent's A2A endpoint, generated from
+    # policy.allowedCallers -- not hand-edited. See values.yaml for why this
+    # is keyed on azp rather than sub.
+    allowed_callers := {{ toJson .Values.policy.allowedCallers }}
+
+    default allow := false
+
+    allow if {
+        input.azp in allowed_callers
+    }

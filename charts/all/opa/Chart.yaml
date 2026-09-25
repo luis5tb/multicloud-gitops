@@ -1,0 +1,10 @@
+apiVersion: v2
+name: opa
+description: Standalone Open Policy Agent server for rca-agent's inbound caller authorization
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - opa
+  - policy
+  - authorization

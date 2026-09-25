@@ -223,6 +223,15 @@ clusterGroup:
           value: "443"
         - name: a2a.publicProtocol
           value: https
+    opa:
+      name: rca-agent-opa
+      # Same namespace as rca-agent: identity.opa.url in that chart's
+      # overrides above (charts/all/rca-agent/values.yaml default) resolves
+      # this Service by short in-cluster DNS name, which only works
+      # same-namespace.
+      namespace: lightspeed-agentic-operator
+      argoProject: hub
+      path: charts/all/opa
     ericsson-agent:
       name: ericsson-agent
       namespace: ericsson-agent
