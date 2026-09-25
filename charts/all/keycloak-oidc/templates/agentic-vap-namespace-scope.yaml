@@ -29,7 +29,12 @@ spec:
     # keys can't contain ":", so params.data is keyed by the bare group name
     # and the prefix has to be stripped from request.userInfo.groups here.
     - name: groupsPrefix
-      expression: {{ printf "%q" .Values.openshiftOIDC.groupsPrefix }}
+      # Double-quoted: the API server compiles this field's value as CEL
+      # source, so it must contain an actual CEL string literal (quote
+      # characters included) -- a single round of quoting only produces a
+      # YAML string, and YAML strips those quotes before the value ever
+      # reaches the API server, leaving bare unparsable text like `keycloak:`.
+      expression: {{ printf "%q" .Values.openshiftOIDC.groupsPrefix | quote }}
     - name: callerGroups
       expression: >-
         request.userInfo.groups.filter(g, g.startsWith(variables.groupsPrefix))
