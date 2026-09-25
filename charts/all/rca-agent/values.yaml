@@ -67,9 +67,17 @@ identity:
     # Set this to the deployed realm issuer, for example:
     # https://keycloak.keycloak-system.svc.cluster.local/realms/<realm>
     issuerUrl: ""
+    # Only rca-agent: this validates the *inbound* A2A caller token, not the
+    # exchanged MCP-scoped one (that's identity.keycloak.tokenExchange.audience
+    # below, checked separately downstream at the API server). "openshift" was
+    # previously included here too, but it's the audience openshift-console/
+    # oc login tokens carry (see charts/all/keycloak-oidc's "openshift-audience"
+    # mapper on the public rca-agent client) -- including it widened this
+    # check to accept any such human-login token as a valid rca-agent caller,
+    # which was never the intent and isn't needed: ericsson-agent's actual
+    # token (agents/AUTHENTICATION.md step 3) only ever carries rca-agent.
     audiences:
       - rca-agent
-      - openshift
     tokenExchange:
       # The RCA client must be allowed to exchange an inbound caller token in
       # Keycloak. This must be a confidential client distinct from the public
@@ -79,6 +87,17 @@ identity:
       clientId: rca-agent-mcp
       tokenUrl: ""
       audience: openshift-mcp
+      # Deliberately empty, not a placeholder to fill in: the groups mapper
+      # rca-agent-mcp needs (charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml)
+      # is attached directly to that client, making it part of its automatic
+      # "dedicated" client scope -- always active on every token it mints,
+      # with no explicit scope= request needed to opt in. Kubernetes RBAC
+      # (agentic-rbac.yaml) and the namespace-scoping ValidatingAdmissionPolicy
+      # are the actual enforcement points regardless; an invented Keycloak
+      # scope string (e.g. "agenticrun:create") wouldn't map to a Kubernetes
+      # verb and wouldn't be enforced by anything unless it named a real,
+      # separately-configured Keycloak client scope -- don't add one here
+      # without first defining that client scope in Keycloak itself.
       scope: ""
       clientAssertionType: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
     # Existing path inside the container, if the CA is supplied by another
@@ -94,9 +113,11 @@ identity:
   # Gates "may this caller invoke rca-agent at all" against a standalone OPA
   # server (charts/all/opa), keyed on the inbound token's azp claim -- a
   # question Keycloak's own audience check can't answer on its own, since any
-  # client sharing the required audience would otherwise pass. Empty url
-  # disables the check entirely (pre-OPA behavior: any caller Keycloak
-  # validates for the configured audience is trusted).
+  # client sharing the required audience would otherwise pass. Required, not
+  # optional: OpaAuthorizer raises at startup if url is empty, the same as
+  # every other required identity.keycloak.* value below -- a deployment
+  # mistake here must fail loudly, not silently make a valid Keycloak token
+  # sufficient authorization on its own.
   opa:
     url: http://rca-agent-opa:8181
     timeoutSeconds: 5

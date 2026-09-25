@@ -30,16 +30,14 @@ a2a_app = A2AAuthenticationMiddleware(
     ),
     workload=WorkloadIdentityProvider(
         audience=os.getenv("SPIFFE_JWT_AUDIENCE", ""),
+        socket_path=os.getenv("SPIFFE_ENDPOINT_SOCKET", ""),
         timeout_seconds=float(os.getenv("SPIFFE_TIMEOUT_SECONDS", "5")),
     ),
-    # Optional: unset OPA_URL preserves this middleware's pre-OPA behavior of
-    # trusting any caller Keycloak validates for the configured audience.
-    opa=(
-        OpaAuthorizer(
-            url=os.getenv("OPA_URL", ""),
-            timeout_seconds=float(os.getenv("OPA_TIMEOUT_SECONDS", "5")),
-        )
-        if os.getenv("OPA_URL")
-        else None
+    # Required: OpaAuthorizer.__init__ raises if OPA_URL is unset, failing
+    # startup rather than silently letting a valid Keycloak token become
+    # sufficient authorization on its own.
+    opa=OpaAuthorizer(
+        url=os.getenv("OPA_URL", ""),
+        timeout_seconds=float(os.getenv("OPA_TIMEOUT_SECONDS", "5")),
     ),
 )

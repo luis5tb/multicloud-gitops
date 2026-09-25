@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from typing import Any, Optional
+from uuid import uuid4
 
 import httpx
 from mcp import ClientSession
@@ -85,16 +86,28 @@ def _configured_skills() -> list[dict[str, Any]]:
 def build_analysis_only_run(
     request: str,
     analysis_agent: str,
+    namespace: str,
     target_namespaces: Optional[list[str]] = None,
     identity: Optional[RequestIdentity] = None,
 ) -> dict[str, Any]:
-    """Build an analysis-only CR with explicit delegated-operation audit data."""
+    """Build an analysis-only CR with explicit delegated-operation audit data.
+
+    metadata.name/namespace are set explicitly, not left to generateName:
+    OpenShift MCP's resources_create_or_update applies resources via
+    Kubernetes server-side apply (Apply(ctx, obj.GetName(), obj, ...) in
+    upstream's resources.go), which is keyed on an already-known name --
+    unlike a plain create, generateName is never resolved for it, so an
+    unnamed manifest fails outright. namespace must also be explicit and
+    match AGENTIC_RUN_NAMESPACE (what create_and_wait_for_analysis polls
+    with), not whatever namespace MCP happens to default to when omitted.
+    """
 
     if not request or not request.strip():
         raise ValueError("request must not be empty")
     if len(request) > 32768:
         raise ValueError("request must be 32768 characters or shorter")
     _valid_dns_subdomain(analysis_agent, "analysis_agent")
+    _valid_dns_label(namespace, "namespace")
 
     spec: dict[str, Any] = {
         "request": request.strip(),
@@ -129,7 +142,8 @@ def build_analysis_only_run(
         "apiVersion": f"{GROUP}/{VERSION}",
         "kind": "AgenticRun",
         "metadata": {
-            "generateName": "rca-agent-",
+            "name": f"rca-agent-{uuid4().hex[:20]}",
+            "namespace": namespace,
             "labels": {"app.kubernetes.io/managed-by": "rca-agent"},
             "annotations": annotations,
         },
@@ -281,7 +295,7 @@ def create_and_wait_for_analysis(
     identity = current_request_identity()
     mcp_client = OpenShiftMcpClient(identity)
     run = mcp_client.create_or_update(
-        build_analysis_only_run(request, selected_agent, target_namespaces, identity)
+        build_analysis_only_run(request, selected_agent, namespace, target_namespaces, identity)
     )
     run_name = run["metadata"]["name"]
     deadline = time.monotonic() + timeout_seconds

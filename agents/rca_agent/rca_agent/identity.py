@@ -89,15 +89,22 @@ def current_caller_token() -> str:
 class WorkloadIdentityProvider:
     """Fetches the pod's short-lived JWT-SVID from the SPIFFE Workload API."""
 
-    def __init__(self, audience: str, timeout_seconds: float = 5.0) -> None:
+    def __init__(self, audience: str, socket_path: str = "", timeout_seconds: float = 5.0) -> None:
         if not audience:
             raise IdentityConfigurationError("SPIFFE_JWT_AUDIENCE must be configured")
         self.audience = audience
+        # Explicit, not left to the spiffe SDK's own SPIFFE_ENDPOINT_SOCKET
+        # env var fallback (what happens if this is empty) -- matches
+        # ericsson_agent/auth.py's DownstreamAuth, which already passes this
+        # explicitly rather than relying on implicit environment discovery.
+        self.socket_path = socket_path or None
         self.timeout_seconds = timeout_seconds
 
     def get_identity(self) -> dict[str, str]:
         try:
-            with WorkloadApiClient(default_timeout=self.timeout_seconds) as client:
+            with WorkloadApiClient(
+                socket_path=self.socket_path, default_timeout=self.timeout_seconds
+            ) as client:
                 svid = client.fetch_jwt_svid(audience={self.audience})
         except Exception as error:
             raise WorkloadIdentityError("ZTWIM/SPIRE did not issue a JWT-SVID") from error
@@ -314,16 +321,17 @@ class A2AAuthenticationMiddleware:
         app: Any,
         keycloak: KeycloakTokenValidator,
         workload: WorkloadIdentityProvider,
-        opa: Optional[OpaAuthorizer] = None,
+        opa: OpaAuthorizer,
     ):
         self.app = app
         self.keycloak = keycloak
         self.workload = workload
-        # Optional: which callers may invoke this agent at all, decided by a
-        # standalone OPA server keyed on the caller's `azp` claim (see
-        # opa.py). None preserves this middleware's pre-OPA behavior of
-        # trusting any caller Keycloak validates for the configured
-        # audience.
+        # Required, not optional: a valid Keycloak token only proves who the
+        # caller is, not that it's allowed to invoke this agent at all (see
+        # opa.py). Making this optional would let a deployment mistake (an
+        # unset OPA_URL) silently turn "valid Keycloak token" into
+        # sufficient authorization -- the same fail-closed posture as
+        # keycloak/workload above, which are also not optional.
         self.opa = opa
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -341,9 +349,15 @@ class A2AAuthenticationMiddleware:
                 await asyncio.gather(
                     asyncio.to_thread(self.keycloak.check_available),
                     asyncio.to_thread(self.workload.get_identity),
+                    asyncio.to_thread(self.opa.check_available),
                 )
-            except (AuthenticationError, WorkloadIdentityError, IdentityConfigurationError):
-                await self._send_error(send, 503, "Keycloak and workload identity are not ready")
+            except (
+                AuthenticationError,
+                WorkloadIdentityError,
+                IdentityConfigurationError,
+                OpaAuthorizationError,
+            ):
+                await self._send_error(send, 503, "Keycloak, workload identity, and OPA are not all ready")
                 return
             await self._send_json(send, 200, {"status": "ready"})
             return
@@ -362,12 +376,11 @@ class A2AAuthenticationMiddleware:
             await self._send_error(send, 401, "A valid Keycloak bearer token and workload identity are required")
             return
 
-        if self.opa is not None:
-            try:
-                await asyncio.to_thread(self.opa.authorize, claims)
-            except OpaAuthorizationError:
-                await self._send_error(send, 403, "Caller is not permitted to invoke this agent")
-                return
+        try:
+            await asyncio.to_thread(self.opa.authorize, claims)
+        except OpaAuthorizationError:
+            await self._send_error(send, 403, "Caller is not permitted to invoke this agent")
+            return
 
         request_id = next(
             (value.decode("latin-1").strip() for name, value in scope.get("headers", [])

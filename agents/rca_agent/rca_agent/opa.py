@@ -74,3 +74,13 @@ class OpaAuthorizer:
             ) from error
         if not allowed:
             raise OpaAuthorizationError(f"OPA denied caller azp={azp!r}")
+
+    def check_available(self) -> None:
+        """Raise OpaAuthorizationError if the OPA server itself is unreachable."""
+
+        try:
+            with httpx.Client(timeout=self.timeout_seconds) as http:
+                response = http.get(f"{self.url}/health")
+                response.raise_for_status()
+        except Exception as error:
+            raise OpaAuthorizationError("OPA is unreachable") from error
