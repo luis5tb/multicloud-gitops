@@ -9,18 +9,23 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: {{ .Values.rbac.syncWave | quote }}
 rules:
-  # Deliberately minimal, not an oversight: rca_agent only ever creates a
-  # freshly-named AgenticRun and polls it by the name it already knows
-  # (mcp_agentic_run.py's create_and_wait_for_analysis) -- it never lists or
-  # watches, and never updates one after creation (build_analysis_only_run
-  # always sets a new, unique metadata.name). If a future client needs
-  # list/watch/update, add those verbs explicitly rather than widening this
-  # blindly -- e.g. resources_create_or_update (the MCP tool this Role backs)
-  # is named as an upsert, but omitting "update" here is what actually
-  # prevents it from being used as one.
+  # rca_agent only ever creates a freshly-named AgenticRun and polls it by
+  # the name it already knows (mcp_agentic_run.py's
+  # create_and_wait_for_analysis) -- it never lists, watches, or updates one
+  # after creation (build_analysis_only_run always sets a new, unique
+  # metadata.name). "patch" is required anyway, not just "create": the MCP
+  # tool this Role backs, resources_create_or_update, implements its upsert
+  # via Kubernetes Server-Side Apply, which the API server always processes
+  # as an HTTP PATCH -- including for objects that don't exist yet -- so
+  # RBAC checks the "patch" verb regardless of whether this is really a
+  # create or an update from the caller's point of view (confirmed in
+  # production: create-only RBAC was rejected with "cannot patch resource
+  # agenticruns" on a brand-new, never-before-seen name). If a future client
+  # needs list/watch, add those verbs explicitly rather than widening this
+  # blindly.
   - apiGroups: ["agentic.openshift.io"]
     resources: ["agenticruns"]
-    verbs: ["create", "get"]
+    verbs: ["create", "patch", "get"]
   - apiGroups: ["agentic.openshift.io"]
     resources: ["analysisresults"]
     verbs: ["get"]

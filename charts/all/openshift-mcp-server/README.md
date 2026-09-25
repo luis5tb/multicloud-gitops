@@ -42,9 +42,16 @@ namespace), on top of this Service already being `ClusterIP`-only.
 RCA only ever needs to create `AgenticRun`s (see
 `agents/rca_agent/rca_agent/mcp_agentic_run.py`'s `build_analysis_only_run`,
 which always sets a fresh, unique `metadata.name`), and `agentic-rbac.yaml`
-only grants `create`/`get`, never `update` -- so an actual update attempt is
-already rejected by the API server's own RBAC regardless of what this tool is
-named. `resources_create_or_update` is upstream's only generic write tool
+grants no `list`/`watch`/`update`, so a real update-in-place attempt is still
+rejected by the API server's own RBAC regardless of what this tool is named.
+It does need `patch`, though, even for names it has never seen before:
+`resources_create_or_update` implements its upsert via Kubernetes Server-Side
+Apply, which the API server always processes as an HTTP `PATCH` -- including
+when the object doesn't exist yet -- so RBAC checks the `patch` verb, not
+`create`, for every call this tool makes (confirmed in production: granting
+only `create`/`get` was rejected with "cannot patch resource agenticruns" on
+a brand-new name; `agentic-rbac.yaml` grants `patch` for exactly this
+reason). `resources_create_or_update` is upstream's only generic write tool
 (checked against `containers/kubernetes-mcp-server`'s `pkg/kubernetes/resources.go`
 -- there is no separate create-only tool to switch to), so the tool's name
 implying more capability than RBAC actually grants is an upstream constraint,

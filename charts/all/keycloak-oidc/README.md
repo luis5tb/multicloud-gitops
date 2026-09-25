@@ -111,9 +111,14 @@ doesn't diverge from what's actually configured.
 Two independent RBAC/admission layers, checking two different things:
 
 - `templates/agentic-rbac.yaml` grants every group in `agenticRun.groupNames`
-  `create`/`get` on `agenticruns` and `get` on `analysisresults`, in
-  `agenticRun.namespace`. This is coarse: it decides whether a caller may act
-  on the CRD at all, the same way any other RBAC grant would.
+  `create`/`patch`/`get` on `agenticruns` and `get` on `analysisresults`, in
+  `agenticRun.namespace`. `patch` is required even though callers only ever
+  create AgenticRuns with a fresh, unique name -- the MCP tool backing this
+  (`resources_create_or_update`) upserts via Kubernetes Server-Side Apply,
+  which the API server always processes as a `PATCH`, even for objects that
+  don't exist yet (see `charts/all/openshift-mcp-server/README.md`). This is
+  coarse: it decides whether a caller may act on the CRD at all, the same way
+  any other RBAC grant would.
 - `templates/agentic-vap-namespace-scope.yaml` (a `ValidatingAdmissionPolicy`)
   decides which `spec.targetNamespaces` each of those groups may request
   *inside* an `AgenticRun` it's allowed to create, via `agenticRun.namespaceAllowlist`
