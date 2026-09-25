@@ -116,7 +116,7 @@ clusterGroup:
         # ExternalOIDCControllerDegraded (this has happened -- recovery
         # command is in that README too).
         - name: openshiftOIDC.enabled
-          value: "false"
+          value: "true"
         - name: openshiftOIDC.issuerURL
           value: https://keycloak.apps.ocp.rn64n.sandbox5199.opentlc.com/realms/rca
         # The web console's public route (`oc whoami --show-console`), used
