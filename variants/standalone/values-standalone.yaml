@@ -116,14 +116,14 @@ clusterGroup:
         # ExternalOIDCControllerDegraded (this has happened -- recovery
         # command is in that README too).
         - name: openshiftOIDC.enabled
-          value: "true"
+          value: "false"
         - name: openshiftOIDC.issuerURL
-          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
+          value: https://keycloak.apps.ocp.rn64n.sandbox5199.opentlc.com/realms/rca
         # The web console's public route (`oc whoami --show-console`), used
         # as the redirect URI Keycloak accepts for the console's OIDC
         # client. Required once openshiftOIDC.enabled is "true".
         - name: openshiftOIDC.consoleRoute
-          value: https://console-openshift-console.apps.ocp.rvnmn.sandbox2284.opentlc.com
+          value: https://console-openshift-console.apps.ocp.rn64n.sandbox5199.opentlc.com
         # Cluster-admin ServiceAccount + non-expiring token Secret in
         # openshift-config, independent of openshiftOIDC.enabled. Safe to
         # enable any time; run `make admin-break-glass-kubeconfig` after
@@ -146,7 +146,7 @@ clusterGroup:
         # static secret. See:
         # https://www.keycloak.org/2026/01/federated-client-authentication
         - name: keycloak.spiffeIdentityProvider.trustDomain
-          value: apps.ocp.rvnmn.sandbox2284.opentlc.com
+          value: apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: keycloak.spiffeIdentityProvider.bundleEndpoint
           value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
         # Namespace/ServiceAccount pairs ZTWIM/SPIRE issues each agent's
@@ -160,6 +160,8 @@ clusterGroup:
           value: lightspeed-agentic-operator
         - name: keycloak.mcpWorkload.serviceAccount
           value: rca-agent
+        - name: agenticRun.namespaceAllowlist.ericsson-agent-rca
+          value: "payments"
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
@@ -171,7 +173,7 @@ clusterGroup:
         - name: llmProvider.type
           value: vertexAnthropic
         - name: llmProvider.vertexAnthropic.projectID
-          value: my-project-id
+          value: redhat-marketplace-dev
         - name: llmProvider.vertexAnthropic.region
           value: global
     openshift-mcp-server:
@@ -194,7 +196,7 @@ clusterGroup:
         - name: image.tag
           value: b8177b0b
         - name: identity.keycloak.issuerUrl
-          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
+          value: https://keycloak.apps.ocp.rn64n.sandbox5199.opentlc.com/realms/rca
         - name: identity.keycloak.tokenExchange.clientId
           value: rca-agent-mcp
         - name: identity.keycloak.tokenExchange.audience
@@ -204,7 +206,7 @@ clusterGroup:
         # Must match the cluster's trust domain (see the
         # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
-          value: apps.ocp.rvnmn.sandbox2284.opentlc.com
+          value: apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: litellm.apiBase
           value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
         - name: litellm.model
@@ -218,9 +220,9 @@ clusterGroup:
         - name: route.enabled
           value: "true"
         - name: route.host
-          value: rca-agent.apps.ocp.rvnmn.sandbox2284.opentlc.com
+          value: rca-agent.apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: a2a.publicHost
-          value: rca-agent.apps.ocp.rvnmn.sandbox2284.opentlc.com
+          value: rca-agent.apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: a2a.publicPort
           value: "443"
         - name: a2a.publicProtocol
@@ -249,7 +251,7 @@ clusterGroup:
         # agent card it fetches and for every RPC url advertised inside it.
         # Must match rca-agent's route.host / a2a.publicHost overrides.
         - name: a2a.downstreamEndpoint
-          value: https://rca-agent.apps.ocp.rvnmn.sandbox2284.opentlc.com
+          value: https://rca-agent.apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: a2a.downstreamAgentName
           value: rca_agent
         - name: a2a.downstreamAgentDescription
@@ -257,9 +259,9 @@ clusterGroup:
         - name: auth.mode
           value: keycloak
         - name: auth.keycloak.issuerUrl
-          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
+          value: https://keycloak.apps.ocp.rn64n.sandbox5199.opentlc.com/realms/rca
         - name: auth.keycloak.tokenUrl
-          value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca/protocol/openid-connect/token
+          value: https://keycloak.apps.ocp.rn64n.sandbox5199.opentlc.com/realms/rca/protocol/openid-connect/token
         - name: auth.keycloak.clientId
           value: ericsson-agent
         - name: identity.spiffe.enabled
@@ -269,7 +271,7 @@ clusterGroup:
         # Must match the cluster's trust domain (see the
         # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
-          value: apps.ocp.rvnmn.sandbox2284.opentlc.com
+          value: apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: route.enabled
           value: "true"
         - name: litellm.apiBase
