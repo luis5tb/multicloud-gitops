@@ -3,12 +3,18 @@ keycloak:
   name: keycloak
   realm: rca
   displayName: RCA
-  # Public client used only for browser/oc-login OIDC flows (Native OIDC).
-  # It cannot authenticate itself, so it must never be used for the
-  # confidential clients below.
-  clientId: rca-agent
-  clientName: RCA Agent
-  groupName: rca-users
+  # Public client used only for browser/oc-login OIDC flows (Native OIDC),
+  # registered as OpenShift's "cli" platform client below -- named for that
+  # role, not for the RCA agent: this has nothing to do with the agent
+  # request flow. It cannot authenticate itself, so it must never be used
+  # for the confidential clients below.
+  clientId: openshift-cli
+  clientName: OpenShift CLI (Native OIDC)
+  # Named for what it grants (create/get on AgenticRun/AnalysisResult, see
+  # agentic-rbac.yaml) and how (rca), not "users" -- it's not a general/
+  # baseline login group, it exists for exactly one capability, the same one
+  # ericsson-agent-rca grants to the machine path.
+  groupName: rca-agenticrun
   # Confidential client rca-agent uses to exchange a caller's token for one
   # scoped to OpenShift MCP (identity.keycloak.tokenExchange.clientId in
   # charts/all/rca-agent). Must NOT be a public client.
@@ -70,6 +76,17 @@ keycloak:
   # openshiftOIDC.extraAudiences below.
   mcpAudienceClientId: openshift-mcp
   mcpAudienceClientName: OpenShift MCP (token-exchange audience)
+  # Audience value rca-agent's own inbound Keycloak validation requires
+  # (identity.keycloak.audiences in charts/all/rca-agent) -- unlike
+  # mcpAudienceClientId above, this is added to ericsson-agent's token via
+  # oidc-audience-mapper's included.custom.audience, a plain string with no
+  # backing client at all. It doesn't need one: the only thing that checks
+  # this value is rca_agent's own Python code (KeycloakTokenValidator), which
+  # has no Keycloak-side requirement that it correspond to a real client --
+  # unlike the token-exchange audience, which Keycloak's own exchange grant
+  # requires to name one. Must match charts/all/rca-agent's
+  # identity.keycloak.audiences exactly.
+  rcaAgentAudience: rca-agent
   # The namespace/ServiceAccount pair ZTWIM/SPIRE issues ericsson-agent's and
   # rca-agent's JWT-SVIDs for, used to compute each confidential client's
   # expected federated subject (spiffe://<trustDomain>/ns/<namespace>/sa/<serviceAccount>).
@@ -136,13 +153,13 @@ agenticRun:
   # object body. That finer-grained check is namespaceAllowlist below,
   # enforced at admission time by agentic-vap-namespace-scope.yaml.
   groupNames:
-    - keycloak:rca-users
+    - keycloak:rca-agenticrun
     - keycloak:ericsson-agent-rca
   # Per-caller allow-list of AgenticRun spec.targetNamespaces, keyed by the
   # bare group name (the ValidatingAdmissionPolicy strips openshiftOIDC.groupsPrefix
   # at evaluation time -- ConfigMap data keys can't contain ":"). "*" allows
   # any namespace, including an omitted spec.targetNamespaces (used for human
-  # rca-users, matching this repo's behavior before this allow-list existed).
+  # rca-agenticrun, matching this repo's behavior before this allow-list existed).
   # Any other value is a comma-separated allow-list, and -- importantly --
   # the CRD treats an omitted spec.targetNamespaces as "not namespace-scoped,
   # the analysis agent decides from context" (crds/agentic.openshift.io_agenticruns.yaml),
@@ -153,7 +170,7 @@ agenticRun:
   # namespace, is denied -- deny by default, so a newly onboarded caller
   # group must be given an explicit entry before it can target anything.
   namespaceAllowlist:
-    rca-users: "*"
+    rca-agenticrun: "*"
     # Replace with the real namespaces ericsson-agent may request analysis
     # against, comma-separated (e.g. "payments,checkout"). Left empty (deny
     # all) until set explicitly for this environment.

@@ -13,10 +13,14 @@ caller could otherwise use to reach namespaces it has no business touching.
 
 The five clients serve distinct purposes and must not be conflated:
 
-- `keycloak.clientId` (default `rca-agent`): public client for browser/`oc
-  login` OIDC flows (Native OIDC). Cannot authenticate itself. Also
-  registered as the `cli` OIDC platform client when `openshiftOIDC.enabled`
-  is true.
+- `keycloak.clientId` (default `openshift-cli`): public client for browser/`oc
+  login` OIDC flows (Native OIDC). Cannot authenticate itself. Registered as
+  the `cli` OIDC platform client when `openshiftOIDC.enabled` is true -- named
+  for that role, not for the RCA agent, since it's purely human/CLI cluster
+  access and has nothing to do with the agent request flow. (It used to be
+  named `rca-agent`, which also doubled as the string in
+  `keycloak.rcaAgentAudience` below by coincidence of sharing a name -- the
+  two are unrelated and have been split apart.)
 - `keycloak.mcpClientId` (default `rca-agent-mcp`): confidential client
   `charts/all/rca-agent` uses to exchange a caller's token for one scoped to
   OpenShift MCP.
@@ -70,17 +74,41 @@ worth knowing when debugging directly against Keycloak:
   `standard.token.exchange.enabled: "true"` (a client attribute this chart
   sets) plus a protocol mapper adding `keycloak.mcpAudienceClientId` as an
   audience on `rca-agent-mcp` itself, and a protocol mapper on
-  `ericsson-agent` adding both `keycloak.clientId` and `keycloak.mcpClientId`
-  as audiences to the tokens it mints -- Keycloak's standard token exchange
-  requires the *subject_token* to already carry the exchanging client as an
-  audience, and the `audience` request parameter only ever narrows audiences
-  a client scope already resolves, it never adds a new one. All of this is
+  `ericsson-agent` adding `keycloak.mcpClientId` as an audience (a real
+  client, `included.client.audience`) to the tokens it mints -- Keycloak's
+  standard token exchange requires the *subject_token* to already carry the
+  exchanging client as an audience, and the `audience` request parameter
+  only ever narrows audiences a client scope already resolves, it never adds
+  a new one. `ericsson-agent` also carries a *separate* mapper adding
+  `keycloak.rcaAgentAudience` as an audience (`included.custom.audience`, no
+  client involved) -- that one exists only to satisfy rca-agent's own inbound
+  check and has nothing to do with the exchange itself. All of this is
   templated already; it's listed here because it is not obvious from
   Keycloak's own error messages if you ever need to debug it directly.
 
 ## AgenticRun authorization: RBAC + namespace-scoping admission policy
 
-Two independent layers, checking two different things:
+**If the `rca` realm has already reached `Done: True`, none of this section's
+Keycloak-side pieces (the `ericsson-agent-rca` group, its membership, or the
+`groups` protocol mappers on `ericsson-agent`/`rca-agent-mcp`) take effect
+just from the next sync** -- same one-shot limitation as `keycloak.adminGroupName`
+(see "Keeping admin access after enabling OIDC" below): `KeycloakRealmImport`
+is only applied when the realm doesn't already exist, and isn't continuously
+reconciled after that. Check with:
+
+```bash
+oc get keycloakrealmimport <keycloak.realm, default "rca"> \
+  -n <keycloak.namespace, default "keycloak-system"> -o jsonpath='{.status.conditions}'
+```
+
+If it's already `Done: True`, create the `ericsson-agent-rca` group manually
+in the Admin Console, add the `groups` mapper to both `ericsson-agent` and
+`rca-agent-mcp` by hand, and add `ericsson-agent`'s service account
+(`service-account-ericsson-agent`) to the group -- matching what
+`keycloak-realm-import.yaml` declares, so a future full realm re-import
+doesn't diverge from what's actually configured.
+
+Two independent RBAC/admission layers, checking two different things:
 
 - `templates/agentic-rbac.yaml` grants every group in `agenticRun.groupNames`
   `create`/`get` on `agenticruns` and `get` on `analysisresults`, in
@@ -111,6 +139,136 @@ oc get role,rolebinding -n lightspeed-agentic-operator rca-agent-user
 oc get validatingadmissionpolicy,validatingadmissionpolicybinding | grep agentic
 oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namespace-allowlist -o yaml
 ```
+
+### End-to-end verification
+
+This is genuinely two separate things to verify, only one of which can be
+scripted without a live token.
+
+**1. RBAC + the namespace-scoping policy, via impersonation (fully
+scriptable, no live Keycloak token needed).** `oc`'s `--as`/`--as-group`
+populate `request.userInfo` for the *entire* admission chain, including
+`ValidatingAdmissionPolicy` -- so this exercises the same checks a real
+exchanged token would, without needing one:
+
+```bash
+# Positive: the caller group this repo actually grants may create in an
+# allowed namespace (adjust the namespace to one actually in
+# agenticRun.namespaceAllowlist.ericsson-agent-rca for your environment).
+oc auth can-i create agenticruns \
+  --as=nobody --as-group=keycloak:ericsson-agent-rca \
+  -n lightspeed-agentic-operator
+
+cat <<'EOF' | oc create --dry-run=server -f - \
+  --as=nobody --as-group=keycloak:ericsson-agent-rca
+apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: verify-allowed-namespace
+  namespace: lightspeed-agentic-operator
+spec:
+  request: verification
+  targetNamespaces: ["<a-namespace-actually-in-the-allow-list>"]
+  analysis:
+    agent: default
+EOF
+
+# Negative: unauthorized group entirely (no RBAC grant at all).
+oc auth can-i create agenticruns \
+  --as=nobody --as-group=keycloak:company-b-agent-rca \
+  -n lightspeed-agentic-operator
+# expect: no
+
+# Negative: authorized group, but a namespace outside its allow-list --
+# RBAC alone would allow this (it can't see spec fields); the VAP must deny
+# it. A rejection here confirms the policy is actually being evaluated, not
+# just present.
+cat <<'EOF' | oc create --dry-run=server -f - \
+  --as=nobody --as-group=keycloak:ericsson-agent-rca
+apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: verify-denied-namespace
+  namespace: lightspeed-agentic-operator
+spec:
+  request: verification
+  targetNamespaces: ["some-namespace-not-in-the-allow-list"]
+  analysis:
+    agent: default
+EOF
+# expect: admission webhook "agentic.openshift.io-agenticrun-caller-namespace-scope" denied the request
+
+# Negative: omitted spec.targetNamespaces for a restricted caller --
+# confirm this is denied, not treated as unscoped (see above).
+cat <<'EOF' | oc create --dry-run=server -f - \
+  --as=nobody --as-group=keycloak:ericsson-agent-rca
+apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: verify-omitted-namespaces
+  namespace: lightspeed-agentic-operator
+spec:
+  request: verification
+  analysis:
+    agent: default
+EOF
+# expect: denied
+```
+
+**2. That the real exchanged token actually carries the `groups` claim
+(needs a live pod -- this is the part that can't be verified without a
+running deployment).** `groups` mappers exist on both `ericsson-agent` and
+`rca-agent-mcp` (see the comment in `keycloak-realm-import.yaml`) precisely
+because it isn't verified which client's mappers Keycloak's standard V2
+exchange actually applies to the newly-minted, differently-audienced token.
+Confirm by decoding a real exchanged token's payload -- **never log or print
+the full token, only its decoded claims**:
+
+```bash
+# From inside a running rca-agent pod (has httpx + the spiffe SDK already):
+oc exec -n lightspeed-agentic-operator deploy/rca-agent -- python3 -c '
+import base64, json, os
+import httpx
+from spiffe import WorkloadApiClient
+
+# 1. Fetch a caller-shaped token the same way ericsson-agent does, so this
+#    reproduces a real exchange rather than asserting expected shape.
+#    (Run the equivalent from an ericsson-agent pod using its own
+#    SPIFFE_JWT_AUDIENCE/client id if you want a fully independent check;
+#    this abbreviated version assumes you already have a caller token.)
+caller_token = os.environ["CALLER_TOKEN_FOR_VERIFICATION"]  # paste one, do not commit it anywhere
+
+with WorkloadApiClient(socket_path=os.environ["SPIFFE_ENDPOINT_SOCKET"]) as c:
+    svid = c.fetch_jwt_svid(audience={os.environ["SPIFFE_JWT_AUDIENCE"]})
+
+resp = httpx.post(
+    os.environ["KEYCLOAK_TOKEN_URL"] or f"{os.environ[\"KEYCLOAK_ISSUER_URL\"]}/protocol/openid-connect/token",
+    data={
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": caller_token,
+        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "client_assertion_type": os.environ["KEYCLOAK_CLIENT_ASSERTION_TYPE"],
+        "client_assertion": svid.token,
+        "audience": os.environ["KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE"],
+    },
+)
+resp.raise_for_status()
+token = resp.json()["access_token"]
+payload = token.split(".")[1]
+payload += "=" * (-len(payload) % 4)
+claims = json.loads(base64.urlsafe_b64decode(payload))
+print(json.dumps({k: claims.get(k) for k in ("iss", "aud", "sub", "azp", "groups", "act")}, indent=2))
+'
+```
+
+Confirm: `iss` is the expected realm, `aud` contains `openshift-mcp`, `sub`
+matches the caller's (not rca-agent's own) subject, `azp` is `rca-agent-mcp`,
+and -- the thing this whole check exists for -- `groups` contains
+`ericsson-agent-rca`. If it doesn't, the belt-and-suspenders mapper placement
+didn't work and RBAC/the VAP have nothing to key on; see
+`keycloak-realm-import.yaml`'s comment on the `rca-agent-mcp` client's
+`groups` mapper for what to try next.
 
 ## OpenShift Native OIDC
 
@@ -187,7 +345,9 @@ OAuth/OIDC flow -- there is no client-certificate or ServiceAccount-token
 login path for a browser. So once `openshiftOIDC.enabled=true`, the only way
 to reach the console as an administrator is through a Keycloak identity that
 Kubernetes RBAC recognizes as `cluster-admin`. Set `keycloak.adminGroupName`
-(for example `rca-admins`) to have this chart create that group in the realm
+(for example `cluster-admins` -- named plainly, since cluster-admin access
+granted this way has nothing to do with the RCA agent) to have this chart
+create that group in the realm
 and bind it to `cluster-admin` via a `ClusterRoleBinding`, then add your own
 Keycloak user to that group (Admin Console → Users → your user → Groups →
 Join Group) *before* enabling OIDC. This binding is created unconditionally

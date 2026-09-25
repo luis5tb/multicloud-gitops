@@ -9,6 +9,15 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-wave: {{ .Values.rbac.syncWave | quote }}
 rules:
+  # Deliberately minimal, not an oversight: rca_agent only ever creates a
+  # freshly-named AgenticRun and polls it by the name it already knows
+  # (mcp_agentic_run.py's create_and_wait_for_analysis) -- it never lists or
+  # watches, and never updates one after creation (build_analysis_only_run
+  # always sets a new, unique metadata.name). If a future client needs
+  # list/watch/update, add those verbs explicitly rather than widening this
+  # blindly -- e.g. resources_create_or_update (the MCP tool this Role backs)
+  # is named as an upsert, but omitting "update" here is what actually
+  # prevents it from being used as one.
   - apiGroups: ["agentic.openshift.io"]
     resources: ["agenticruns"]
     verbs: ["create", "get"]

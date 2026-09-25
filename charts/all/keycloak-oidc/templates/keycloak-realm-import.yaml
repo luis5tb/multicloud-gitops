@@ -27,6 +27,13 @@ spec:
       {{- end }}
       - name: {{ .Values.keycloak.ericssonGroupName | quote }}
     clients:
+      # Named openshift-cli (OpenShift's own name for this platform-client
+      # role, see oidcClients[componentName: cli] in openshift-authentication.yaml),
+      # not after the RCA agent -- this is purely human/oc-login/console
+      # access via OpenShift Native OIDC, unrelated to the agent request
+      # flow. It does not grant rca-agent's inbound audience anymore either
+      # (see ericsson-agent's protocolMappers below, keycloak.rcaAgentAudience) --
+      # this client's only remaining job is human login.
       - clientId: {{ .Values.keycloak.clientId | quote }}
         name: {{ .Values.keycloak.clientName | quote }}
         enabled: true
@@ -95,6 +102,36 @@ spec:
             config:
               included.client.audience: {{ .Values.keycloak.mcpAudienceClientId | quote }}
               access.token.claim: "true"
+          # This, not the identical mapper on ericsson-agent below, is most
+          # likely the one that actually matters for the exchanged token:
+          # which protocol mappers apply to a minted token is governed by
+          # the client scopes of whichever client is authenticating *that
+          # specific* token request, not the subject's original client.
+          # Directly-attached protocolMappers on a client are that client's
+          # own automatic "dedicated" client scope -- always active, no
+          # explicit `scope=` request parameter needed (which is also why
+          # identity.keycloak.tokenExchange.scope is deliberately left
+          # empty; there is no optional scope to opt into here). For the
+          # RFC 8693 exchange (grant 2), the client authenticating *that*
+          # request is this one (rca-agent-mcp), not ericsson-agent (which
+          # only authenticates grant 1, minting the token this one takes as
+          # subject_token). The ericsson-agent copy is kept anyway -- it's
+          # what would make that first token carry groups too, harmless, and
+          # a cheap hedge against this reasoning being wrong for this
+          # specific Keycloak build. MUST still be confirmed against a real
+          # exchanged token (see agents/AUTHENTICATION.md's token-exchange
+          # walkthrough) -- if neither mapper turns out to be what's
+          # applied, RBAC/the namespace-scoping ValidatingAdmissionPolicy
+          # have nothing to key on for calls attributed to ericsson-agent.
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
       # Confidential client that exists only as a valid `audience` target for
       # rca-agent-mcp's token exchange above -- it never itself authenticates
       # to Keycloak. openshift-mcp-server forwards the resulting token
@@ -115,10 +152,18 @@ spec:
       # Same federated client authentication as rca-agent-mcp above, using
       # ericsson-agent's own SPIRE JWT-SVID. The audience mappers exist
       # because the token this client mints has to satisfy two independent
-      # checks: rca-agent's own inbound audience check (identity.keycloak.audiences,
-      # charts/all/rca-agent) needs `rca-agent`, and Keycloak's standard
-      # token exchange requires the *subject_token* passed to it to already
-      # carry the exchanging client (rca-agent-mcp) as an audience.
+      # checks, of two different kinds:
+      #   - rca-agent's own inbound audience check (identity.keycloak.audiences,
+      #     charts/all/rca-agent) needs keycloak.rcaAgentAudience. This is a
+      #     plain custom string (included.custom.audience below) -- it isn't
+      #     a real client and was deliberately decoupled from the
+      #     openshift-cli login client's identity, which it has nothing to
+      #     do with (nothing in Keycloak requires this one to be a client).
+      #   - Keycloak's standard token exchange requires the *subject_token*
+      #     passed to it to already carry the exchanging client
+      #     (rca-agent-mcp) as an audience -- this one genuinely must be a
+      #     real client (included.client.audience below), since that's a
+      #     requirement of the token-exchange grant itself, not our own check.
       - clientId: {{ .Values.keycloak.ericssonClientId | quote }}
         name: {{ .Values.keycloak.ericssonClientName | quote }}
         enabled: true
@@ -134,11 +179,11 @@ spec:
           jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" .Values.keycloak.spiffeIdentityProvider.trustDomain .Values.keycloak.ericssonWorkload.namespace .Values.keycloak.ericssonWorkload.serviceAccount | quote }}
         {{- end }}
         protocolMappers:
-          - name: {{ printf "%s-audience" .Values.keycloak.clientId }}
+          - name: {{ printf "%s-audience" .Values.keycloak.rcaAgentAudience }}
             protocol: openid-connect
             protocolMapper: oidc-audience-mapper
             config:
-              included.client.audience: {{ .Values.keycloak.clientId | quote }}
+              included.custom.audience: {{ .Values.keycloak.rcaAgentAudience | quote }}
               access.token.claim: "true"
           - name: {{ printf "%s-audience" .Values.keycloak.mcpClientId }}
             protocol: openid-connect

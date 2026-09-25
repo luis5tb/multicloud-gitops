@@ -131,13 +131,15 @@ clusterGroup:
         - name: breakGlass.enabled
           value: "true"
         # Keycloak group bound to cluster-admin once openshiftOIDC.enabled
-        # is true. NOTE: the realm import on this cluster already succeeded
-        # before this override existed, so it won't retroactively create
-        # this group -- create it once manually in the Admin Console
-        # (Groups -> New group -> "rca-admins"), then add your user to it,
-        # before enabling openshiftOIDC.
+        # is true. Named plainly, not "rca-admins" -- cluster-admin access
+        # granted through Keycloak has nothing to do with the RCA agent
+        # specifically. NOTE: the realm import on this cluster already
+        # succeeded before this override existed, so it won't retroactively
+        # create this group -- create it once manually in the Admin Console
+        # (Groups -> New group -> "cluster-admins"), then add your user to
+        # it, before enabling openshiftOIDC.
         - name: keycloak.adminGroupName
-          value: rca-admins
+          value: cluster-admins
         # Federate the ericsson-agent/rca-agent-mcp confidential clients'
         # authentication against SPIRE's OIDC discovery provider, so
         # SPIFFE-identified workloads authenticate to Keycloak without a
