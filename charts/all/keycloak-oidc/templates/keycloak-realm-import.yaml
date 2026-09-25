@@ -16,6 +16,29 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   keycloakCRName: {{ .Values.keycloak.name }}
+  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled }}
+  placeholders:
+    {{- if .Values.keycloak.consoleClientSecretVaultKey }}
+    # Resolves $(CONSOLE_CLIENT_SECRET) below into openshift-console's client
+    # secret, sourced from the same Secret/Vault value
+    # openshiftOIDC.consoleClientSecretName reads (see console-client-secret.yaml)
+    # -- see that file's comment for why this needs its own copy of the
+    # Secret in this namespace rather than reading the openshift-config one
+    # directly.
+    CONSOLE_CLIENT_SECRET:
+      secret:
+        name: {{ .Values.openshiftOIDC.consoleClientSecretName }}
+        key: clientSecret
+    {{- end }}
+    {{- if .Values.keycloak.consoleAdminUser.enabled }}
+    # Resolves $(CONSOLE_ADMIN_PASSWORD) below into consoleAdminUser's
+    # initial password (see console-admin-user-secret.yaml).
+    CONSOLE_ADMIN_PASSWORD:
+      secret:
+        name: {{ .Values.keycloak.consoleAdminUser.passwordSecretName }}
+        key: password
+    {{- end }}
+  {{- end }}
   realm:
     realm: {{ .Values.keycloak.realm | quote }}
     enabled: true
@@ -209,10 +232,12 @@ spec:
       # Confidential client registered as the web console's OIDC platform
       # client when openshiftOIDC.enabled is true.
       #
-      # MANUAL STEP: Keycloak generates this client's secret at import time.
-      # Copy it into a Secret in the openshift-config namespace (see the
-      # README) before setting openshiftOIDC.enabled=true, or the console
-      # will fail to log in with "no OIDC client found" / invalid_client.
+      # If keycloak.consoleClientSecretVaultKey is set, its secret comes from
+      # the placeholder above (Vault-backed, no manual step). Otherwise
+      # Keycloak generates this client's secret at import time -- MANUAL
+      # STEP: copy it into a Secret in the openshift-config namespace (see
+      # the README) before setting openshiftOIDC.enabled=true, or the
+      # console will fail to log in with "no OIDC client found" / invalid_client.
       - clientId: {{ .Values.keycloak.consoleClientId | quote }}
         name: {{ .Values.keycloak.consoleClientName | quote }}
         enabled: true
@@ -221,6 +246,9 @@ spec:
         standardFlowEnabled: true
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: false
+        {{- if .Values.keycloak.consoleClientSecretVaultKey }}
+        secret: $(CONSOLE_CLIENT_SECRET)
+        {{- end }}
         {{- if .Values.openshiftOIDC.consoleRoute }}
         redirectUris:
           - "{{ .Values.openshiftOIDC.consoleRoute }}/auth/callback"
@@ -250,6 +278,22 @@ spec:
         enabled: true
         groups:
           - {{ printf "/%s" .Values.keycloak.ericssonGroupName | quote }}
+      {{- if .Values.keycloak.consoleAdminUser.enabled }}
+      # Human user in adminGroupName (-> cluster-admin, see that value's
+      # comment), so the console has at least one working login once
+      # openshiftOIDC.enabled is true, with no manual Admin Console step.
+      # temporary: true forces a password change on first login -- the
+      # generated Vault value is a bootstrap credential, not meant to be
+      # kept long-term.
+      - username: {{ .Values.keycloak.consoleAdminUser.username | quote }}
+        enabled: true
+        credentials:
+          - type: password
+            value: $(CONSOLE_ADMIN_PASSWORD)
+            temporary: true
+        groups:
+          - {{ printf "/%s" .Values.keycloak.adminGroupName | quote }}
+      {{- end }}
     {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
     # Backs the two confidential agent clients' federated-jwt authentication
     # above. Config key names are this Keycloak build's actual internal

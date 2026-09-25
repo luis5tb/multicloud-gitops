@@ -306,8 +306,9 @@ Two things must both be correct, not just the issuer:
    can log in at all, even though the identity provider itself is fine. This
    chart now templates both `oidcClients` entries automatically
    (`keycloak.clientId` as the public `cli` client, `keycloak.consoleClientId`
-   as the confidential `console` client), but the console client's secret
-   still needs the one manual step below.
+   as the confidential `console` client). The console client's secret is
+   also fully automated when `keycloak.consoleClientSecretVaultKey` is set
+   (see below); leave it empty to fall back to the manual step.
 
 ### Keeping admin access after enabling OIDC
 
@@ -354,6 +355,24 @@ Join Group) *before* enabling OIDC. This binding is created unconditionally
 whenever `keycloak.adminGroupName` is set, independent of
 `openshiftOIDC.enabled`, so it's ready by the time you flip the switch.
 
+Setting `keycloak.consoleAdminUser.enabled=true` (and
+`keycloak.consoleAdminUser.passwordVaultKey`) automates the "add your own
+Keycloak user" step above instead: this chart creates a human user
+(`keycloak.consoleAdminUser.username`, default `cluster-admin`) directly in
+`keycloak.adminGroupName`, with an initial password read from Vault via
+External Secrets Operator (`console-admin-user-secret.yaml`). Keycloak forces
+a password change on first login (`temporary: true`), so this is a bootstrap
+credential, not a long-term one. Get the initial password with:
+
+```bash
+oc get secret <keycloak.consoleAdminUser.passwordSecretName, default "console-admin-user"> \
+  -n <keycloak.namespace, default "keycloak-system"> -o jsonpath='{.data.password}' | base64 -d
+```
+
+This is opt-in and on top of, not a replacement for, CLI break-glass above --
+a standing cluster-admin credential is a permanent addition to the cluster's
+attack surface.
+
 Note the same one-shot limitation as the rest of the realm import: setting
 `keycloak.adminGroupName` after the realm has already reached `Done: True`
 will not retroactively create the group (see the checklist below and the
@@ -394,20 +413,35 @@ doesn't have this limitation.
    A `{"error":"Realm does not exist"}` 404 here means step 1 hasn't
    succeeded yet -- do not proceed.
 
-3. Get the `openshift-console` client's Keycloak-generated secret (Admin
-   Console → Clients → `openshift-console` → Credentials tab → Client
-   secret), and create the Secret `oidcClients` expects, in the
-   `openshift-config` namespace (not this chart's namespace):
+3. Get the `openshift-console` client's secret into the Secret `oidcClients`
+   expects, in the `openshift-config` namespace (not this chart's namespace):
 
-   ```bash
-   oc create secret generic openshift-console-oidc \
-     -n openshift-config \
-     --from-literal=clientSecret='<value from the Credentials tab>'
-   ```
+   - **If `keycloak.consoleClientSecretVaultKey` is set** (recommended for a
+     fresh install): nothing to do here -- `console-client-secret.yaml`
+     already created it via External Secrets Operator, and
+     `keycloak-realm-import.yaml`'s `$(CONSOLE_CLIENT_SECRET)` placeholder
+     set the same value on the client at import time. Confirm it exists:
 
-   The secret name must match `openshiftOIDC.consoleClientSecretName`, and
-   the key must be literally `clientSecret` (required by the `Authentication`
-   CRD's `oidcClients[].clientSecret` field).
+     ```bash
+     oc get secret <openshiftOIDC.consoleClientSecretName, default "openshift-console-oidc"> \
+       -n openshift-config
+     ```
+
+   - **Otherwise** (or if the realm already existed before you set
+     `consoleClientSecretVaultKey` -- see the one-shot caveat on that value
+     in `values.yaml`), get the client's Keycloak-generated secret by hand
+     (Admin Console → Clients → `openshift-console` → Credentials tab →
+     Client secret) and create the Secret yourself:
+
+     ```bash
+     oc create secret generic openshift-console-oidc \
+       -n openshift-config \
+       --from-literal=clientSecret='<value from the Credentials tab>'
+     ```
+
+   Either way, the secret name must match `openshiftOIDC.consoleClientSecretName`,
+   and the key must be literally `clientSecret` (required by the
+   `Authentication` CRD's `oidcClients[].clientSecret` field).
 
 4. Only then set `openshiftOIDC.enabled=true`, `openshiftOIDC.issuerURL`, and
    `openshiftOIDC.consoleRoute` (the console's public route, from `oc whoami

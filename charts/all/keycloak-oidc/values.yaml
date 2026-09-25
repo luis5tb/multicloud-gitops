@@ -36,9 +36,11 @@ keycloak:
   # ValidatingAdmissionPolicy in this chart have nothing to key on.
   ericssonGroupName: ericsson-agent-rca
   # Confidential client registered as the web console's OIDC platform client
-  # when openshiftOIDC.enabled is true. Keycloak generates its secret at
-  # import time -- see charts/all/keycloak-oidc/README.md for the one-time
-  # manual step to copy it into openshiftOIDC.consoleClientSecretName.
+  # when openshiftOIDC.enabled is true. When consoleClientSecretVaultKey
+  # below is set, this chart generates its secret itself and feeds the same
+  # value into openshiftOIDC.consoleClientSecretName -- no manual step. Left
+  # empty, Keycloak generates the secret at import time instead, and
+  # charts/all/keycloak-oidc/README.md's one-time manual copy step applies.
   consoleClientId: openshift-console
   consoleClientName: OpenShift Console (Native OIDC)
   # Optional realm group. Members get cluster-admin (via the ClusterRoleBinding
@@ -49,6 +51,49 @@ keycloak:
   # and separate from the CLI break-glass credential, which this cannot
   # replace: it only helps once Keycloak/OIDC is already working correctly.
   adminGroupName: ""
+
+  # Optional human user created in this realm and put in adminGroupName
+  # above, so there's at least one way to log into the OpenShift console via
+  # Keycloak without any manual Admin Console step. Requires adminGroupName
+  # to be set (fails otherwise). Off by default -- a standing cluster-admin
+  # credential is a permanent addition to the cluster's attack surface, and
+  # this is on top of, not a replacement for, breakGlass above.
+  #
+  # One-shot caveat: like the rest of the realm import, this only takes
+  # effect on a fresh realm import -- enabling it after the realm already
+  # exists does not retroactively create the user (see the README).
+  consoleAdminUser:
+    enabled: false
+    username: cluster-admin
+    # Name of the Secret (in keycloak.namespace, key "password") this user's
+    # initial password is read from -- created via console-admin-user-secret.yaml
+    # when passwordVaultKey is set.
+    passwordSecretName: console-admin-user
+    # Vault path/property holding the initial password (property name
+    # passwordVaultProperty below), generated once by
+    # values-secret.yaml.template's onMissingValue: generate. The realm
+    # import sets temporary: true on this credential, so Keycloak forces a
+    # password change on first login -- this generated value is never meant
+    # to be the long-term password. Required when consoleAdminUser.enabled
+    # is true.
+    passwordVaultKey: ""
+    passwordVaultProperty: console-admin-password
+
+  # Vault path holding openshift-console's client secret (property name
+  # consoleClientSecretVaultProperty below), generated once by
+  # values-secret.yaml.template's onMissingValue: generate rather than left
+  # for Keycloak to auto-generate and copied into
+  # openshiftOIDC.consoleClientSecretName by hand. Both this chart's copy of
+  # the secret (fed into the realm import's openshift-console client via a
+  # KeycloakRealmImport placeholder) and openshiftOIDC.consoleClientSecretName
+  # read the same Vault value through External Secrets Operator, so they
+  # always agree. Leave empty to keep the manual step (see README).
+  #
+  # One-shot caveat: like the rest of the realm import, this only takes
+  # effect on a fresh realm import. Setting it after the realm already
+  # exists does not rotate the existing client's secret -- see the README.
+  consoleClientSecretVaultKey: ""
+  consoleClientSecretVaultProperty: console-client-secret
 
   # SPIFFE identity provider the two confidential agent clients below
   # authenticate against instead of a static secret (federated client
@@ -111,8 +156,10 @@ openshiftOIDC:
   #   oc whoami --show-console
   consoleRoute: ""
   # Name of a Secret in the openshift-config namespace, key "clientSecret",
-  # holding keycloak.consoleClientId's Keycloak-generated secret. See the
-  # README for the one-time manual step to create it.
+  # holding keycloak.consoleClientId's secret. When
+  # keycloak.consoleClientSecretVaultKey is set, this chart creates this
+  # Secret itself via External Secrets Operator; otherwise it must be
+  # created manually with Keycloak's generated secret (see the README).
   consoleClientSecretName: openshift-console-oidc
   # Extra token audiences to accept beyond the required platform client IDs
   # (keycloak.clientId for the CLI, keycloak.consoleClientId for the
@@ -175,6 +222,13 @@ agenticRun:
     # against, comma-separated (e.g. "payments,checkout"). Left empty (deny
     # all) until set explicitly for this environment.
     ericsson-agent-rca: ""
+
+# ClusterSecretStore used by console-client-secret.yaml (Vault-backed,
+# matching the rest of this pattern's External Secrets usage).
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
 
 realmImport:
   enabled: true

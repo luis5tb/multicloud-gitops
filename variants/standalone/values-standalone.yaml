@@ -142,6 +142,26 @@ clusterGroup:
         # it, before enabling openshiftOIDC.
         - name: keycloak.adminGroupName
           value: cluster-admins
+        # Generates openshift-console's client secret from Vault instead of
+        # the manual Admin Console copy step in the README -- see
+        # keycloak.consoleClientSecretVaultKey in
+        # charts/all/keycloak-oidc/values.yaml. Same one-shot caveat as
+        # adminGroupName above: this realm already imported before this
+        # override existed, so it won't retroactively set the existing
+        # openshift-console client's secret.
+        - name: keycloak.consoleClientSecretVaultKey
+          value: secret/data/global/rhbk
+        # Creates a human user in this realm, in keycloak.adminGroupName
+        # above (-> cluster-admin), with an initial password from Vault --
+        # see keycloak.consoleAdminUser in charts/all/keycloak-oidc/values.yaml.
+        # Same one-shot caveat as adminGroupName above. Change
+        # keycloak.consoleAdminUser.username below if "cluster-admin" (the
+        # chart default) isn't the name you want.
+        - name: keycloak.consoleAdminUser.enabled
+          value: "true"
+        - name: keycloak.consoleAdminUser.passwordVaultKey
+          value: secret/data/global/rhbk
+
         # Federate the ericsson-agent/rca-agent-mcp confidential clients'
         # authentication against SPIRE's OIDC discovery provider, so
         # SPIFFE-identified workloads authenticate to Keycloak without a
