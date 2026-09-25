@@ -192,7 +192,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/rca-agent
         - name: image.tag
-          value: 008c11d0
+          value: b8177b0b
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.ocp.rvnmn.sandbox2284.opentlc.com/realms/rca
         - name: identity.keycloak.tokenExchange.clientId
@@ -243,7 +243,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/ericsson-agent
         - name: image.tag
-          value: 1cba81f7
+          value: b8177b0b
         # rca-agent's edge-TLS Route, not its in-cluster Service DNS name --
         # google-adk's RemoteA2aAgent requires https (or loopback) for any
         # agent card it fetches and for every RPC url advertised inside it.
