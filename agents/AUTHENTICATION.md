@@ -57,11 +57,12 @@ sequenceDiagram
     participant LLM as LiteLLM proxy
     participant KC as Keycloak (rca realm)
     participant RCA as rca-agent
+    participant OPA as rca-agent-opa
     participant MCP as openshift-mcp-server
     participant API as OpenShift API server
     participant Op as lightspeed-agentic-operator
 
-    Note over KC,API: Pre-provisioned, done once, not per request:<br/>1) Authentication/cluster (oidcProviders) trusts KC as an<br/>   OIDC issuer and caches KC's JWKS for signature checks.<br/>2) claimMappings.groups reads KC's "groups" claim, prefixed<br/>   "keycloak:" -- emitted by a groups protocol mapper<br/>   attached to each Keycloak client (see table below).<br/>3) RBAC (e.g. ClusterRoleBinding rca-admins-cluster-admin)<br/>   targets Group:keycloak:&lt;kc-group&gt; directly -- there is no<br/>   separate OpenShift User object to pre-create.
+    Note over KC,API: Pre-provisioned, done once, not per request:<br/>1) Authentication/cluster (oidcProviders) trusts KC as an<br/>   OIDC issuer and caches KC's JWKS for signature checks.<br/>2) claimMappings.groups reads KC's "groups" claim, prefixed<br/>   "keycloak:" -- emitted by a groups protocol mapper<br/>   attached to each Keycloak client (see table below).<br/>3) RBAC (e.g. ClusterRoleBinding rca-admins-cluster-admin)<br/>   targets Group:keycloak:[kc-group] directly -- there is no<br/>   separate OpenShift User object to pre-create.
 
     User->>Eric: POST / (A2A JSON-RPC message/send)
 
@@ -80,6 +81,11 @@ sequenceDiagram
     RCA->>RCA: Validate caller token (sig, iss, aud, exp)
     RCA->>RCA: Fetch own JWT-SVID from ZTWIM/SPIRE<br/>(spiffe://.../ns/lightspeed-agentic-operator/sa/rca-agent)
 
+    Note over RCA,OPA: Not a Kubernetes admission decision -- this A2A call<br/>never reaches the API server, so nothing outside rca-agent's own<br/>code can intercept it (see charts/all/opa/README.md)
+    RCA->>OPA: POST /v1/data/rca/authorization/allow<br/>input.azp = ericsson-agent
+    OPA-->>RCA: result: true or false
+    Note over RCA: false, or OPA unreachable, denies with 403<br/>(opa.py's OpaAuthorizer, fails closed)
+
     Note over RCA,LLM: A different static LITELLM_API_KEY (own Secret) --<br/>same kind of credential as ericsson-agent's, still unrelated to the caller
     RCA->>LLM: chat completion (Authorization: Bearer LITELLM_API_KEY)
     LLM-->>RCA: tool-call decision: create_and_wait_for_analysis
@@ -92,6 +98,7 @@ sequenceDiagram
     MCP->>API: create AgenticRun CR, Authorization: Bearer <token>
     API->>KC: (cached JWKS, not fetched per request)<br/>verify signature -- check iss/aud against oidcProviders
     API->>API: Apply claimMappings to username/groups,<br/>then RBAC against the pre-provisioned bindings above
+    Note over API: ValidatingAdmissionPolicy (agentic-vap-namespace-scope.yaml):<br/>deny unless one of the caller's groups' namespaceAllowlist<br/>covers every requested spec.targetNamespaces -- RBAC above only<br/>decides whether the caller may create an AgenticRun at all
     API-->>MCP: 201 Created
     MCP-->>RCA: AgenticRun created
 
@@ -141,6 +148,19 @@ and then only read from cache on the hot path:
    `User`/`Group` object to provision -- the prefixed claim value *is* the
    RBAC subject the moment a valid token presents it.
 
+RBAC above only decides whether a caller's group may act on the `AgenticRun`
+CRD at all -- it has no way to inspect a field inside the object itself, so
+it can't stop a caller from *creating* one that targets a namespace it has
+no business touching. `agentic-vap-namespace-scope.yaml`'s
+`ValidatingAdmissionPolicy` is the piece that does: it checks
+`spec.targetNamespaces` against `agenticRun.namespaceAllowlist`, keyed by the
+same groups RBAC uses, and denies if none of the caller's groups cover every
+requested namespace -- including when `spec.targetNamespaces` is omitted
+entirely, since the CRD treats that as "not namespace-scoped, the analysis
+agent decides from context," which a restricted caller should not be able to
+reach for just by leaving the field out. See
+`charts/all/keycloak-oidc/README.md`'s "AgenticRun authorization" section.
+
 The one manual, one-time step this doesn't template (Keycloak-version-specific
 UI, see `charts/all/keycloak-oidc/README.md`): creating the actual Keycloak
 group (e.g. `rca-admins`) and adding users to it. Everything downstream of
@@ -156,7 +176,7 @@ these breaks the flow -- see that chart's README for the exact rationale.
 | --- | --- | --- | --- |
 | `rca-agent` | public | Browser / `oc login` | Native OIDC login only. Also registered as the `cli` OIDC platform client. Cannot authenticate itself. |
 | `openshift-console` | confidential | Web console | Registered as the `console` OIDC platform client. Needs the `groups` protocol mapper (see Troubleshooting) or RBAC group membership never reaches the console. |
-| `ericsson-agent` | confidential | ericsson-agent | Client-credentials-style grant authenticated with ericsson-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. |
+| `ericsson-agent` | confidential | ericsson-agent | Client-credentials-style grant authenticated with ericsson-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. Its service account belongs to the `ericsson-agent-rca` group, so its tokens carry a `groups` claim RBAC/the namespace-scoping `ValidatingAdmissionPolicy` can key on. |
 | `rca-agent-mcp` | confidential | rca-agent | RFC 8693 token exchange: takes the caller's token as `subject_token`, authenticates itself with its own SPIFFE JWT-SVID, and requests a token scoped to the `openshift-mcp` audience. |
 | `openshift-mcp` | confidential | (never authenticates) | Exists only so `rca-agent-mcp`'s exchange has a real `client_id` to name as its `audience` -- Keycloak's standard token exchange requires that parameter to be an actual client. |
 
@@ -207,7 +227,10 @@ whose behalf" story in one column.
    `Authorization: Bearer` on every outbound A2A request (`httpx`
    `event_hooks`).
 
-   Real captured shape (irrelevant claims trimmed):
+   Real captured shape (irrelevant claims trimmed; `groups` reflects the
+   `ericsson-agent-rca` group/protocol mapper added after this capture, not
+   yet independently re-verified live -- everything else below is unchanged
+   from the verified capture):
 
    ```json
    {
@@ -216,6 +239,7 @@ whose behalf" story in one column.
      "azp": "ericsson-agent",
      "aud": ["rca-agent", "rca-agent-mcp", "account"],
      "preferred_username": "service-account-ericsson-agent",
+     "groups": ["ericsson-agent-rca"],
      "scope": "email profile",
      "exp": 1790256558,
      "iat": 1790256258
@@ -298,7 +322,12 @@ whose behalf" story in one column.
      audience=openshift-mcp
    ```
 
-   No `client_id` here either, same reason as step 3. Real captured shape:
+   No `client_id` here either, same reason as step 3. Real captured shape
+   (`groups` is expected from the `ericsson-agent-rca` mapper added after
+   this capture -- **not yet independently re-verified live**; whether
+   Keycloak's standard V2 exchange re-runs the subject's own protocol
+   mappers for the new audience, or only the audience client's, is the thing
+   to confirm):
 
    ```json
    {
@@ -307,6 +336,7 @@ whose behalf" story in one column.
      "aud": ["openshift-mcp"],
      "azp": "rca-agent-mcp",
      "preferred_username": "service-account-ericsson-agent",
+     "groups": ["ericsson-agent-rca"],
      "exp": 1790256632
    }
    ```
@@ -347,16 +377,23 @@ whose behalf" story in one column.
 
    ```
    claimMappings applied to the step-6 token:
-     username: claim "sub"    -> "keycloak:service-account-ericsson-agent"
-     groups:   claim "groups" -> [] (absent -- the ericsson-agent client has
-                                     no groups protocol mapper configured)
+     username: claim "sub"    -> "keycloak:0e844946-0456-475b-9265-e17532b362c9"
+     groups:   claim "groups" -> ["keycloak:ericsson-agent-rca"] (expected --
+                                  see the "not yet independently re-verified
+                                  live" note on the step-6 sample above)
    ```
 
-   No group means RBAC has to grant that exact prefixed username, not just a
-   group, or this hop 403s even after authentication succeeds cleanly -- the
-   same class of gap as the console client's missing `groups` mapper in
-   Troubleshooting, just on the service-account side instead of the
-   human-login side.
+   Before `charts/all/keycloak-oidc`'s `ericsson-agent-rca` group/mapper
+   existed, this claim was absent, and RBAC had no group to bind and no
+   username-based binding either -- `agentic-rbac.yaml` only ever granted
+   `keycloak:rca-users` (human console/CLI login), so calls attributed to
+   ericsson-agent had no RBAC path here at all. This was the same class of
+   gap as the console client's missing `groups` mapper in Troubleshooting,
+   just on the service-account side. `agentic-rbac.yaml`'s RoleBinding now
+   also grants `keycloak:ericsson-agent-rca`; `agentic-vap-namespace-scope.yaml`
+   (a `ValidatingAdmissionPolicy`, see "Keycloak <-> OpenShift group mapping"
+   above) further restricts what that group's calls may set
+   `spec.targetNamespaces` to.
 8. **AgenticRun -> AnalysisResult**: `lightspeed-agentic-operator` watches
    `AgenticRun` resources in its own namespace, runs the analysis through its
    own separately configured `llmProvider.*` (a third, unrelated static LLM
@@ -393,6 +430,17 @@ oc get authentication.config.openshift.io cluster -o jsonpath='{.spec.oidcProvid
 # 6. The operator side
 oc get agenticrun -n lightspeed-agentic-operator
 oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=lightspeed-agentic-operator -f
+
+# 7. The inbound OPA check (before the caller-token/token-exchange logs in
+#    step 2 above -- a 403 here means step 2 never ran KeycloakTokenExchanger)
+oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=opa -f
+
+# 8. Whether the namespace-scoping ValidatingAdmissionPolicy is why an
+#    AgenticRun create was rejected -- the API server returns the policy's
+#    messageExpression directly in the client error, but this confirms the
+#    policy/binding/ConfigMap it read are what you expect
+oc get validatingadmissionpolicy,validatingadmissionpolicybinding | grep agentic
+oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namespace-allowlist -o yaml
 ```
 
 ## Troubleshooting (bugs actually hit building this)
@@ -492,3 +540,24 @@ oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=lightspeed-agen
   arbitrary string. Separately, (4) the *subject_token* being exchanged
   (ericsson-agent's token from step 3) must already carry `rca-agent-mcp` as
   an audience, or the exchange is rejected outright regardless of the above.
+- **ericsson-agent's calls to rca-agent now get a generic `403` after
+  previously working**: check `oc logs ... -l app.kubernetes.io/name=opa`
+  (tracing step 7) before looking anywhere else -- this is the inbound OPA
+  check (`opa.py`'s `OpaAuthorizer`), evaluated *before* Keycloak-validated
+  claims ever reach `rca_agent`'s own tool logic, and it fails closed: an
+  unreachable/erroring `rca-agent-opa` denies every caller, not just a
+  misconfigured one. Confirm `charts/all/opa`'s `policy.allowedCallers`
+  actually lists the caller's `azp` value, and that `identity.opa.url` in
+  `charts/all/rca-agent` resolves (same-namespace short DNS name by default
+  -- wrong if `opa`'s Application namespace ever diverges from rca-agent's).
+- **An `AgenticRun` create is rejected with a message mentioning
+  `spec.targetNamespaces`**: this is `agentic-vap-namespace-scope.yaml`'s
+  `ValidatingAdmissionPolicy`, not RBAC or Keycloak -- RBAC only decided the
+  caller could create *an* `AgenticRun`, not this specific one. Check
+  `agenticRun.namespaceAllowlist` in `charts/all/keycloak-oidc/values.yaml`
+  has an entry for the caller's group covering every namespace it requested,
+  and remember an *omitted* `spec.targetNamespaces` is deliberately **not**
+  treated as unscoped for a restricted caller (only a `"*"` entry may omit
+  it) -- a caller that previously worked by leaving the field out will need
+  to start setting it explicitly once it stops being unconditionally
+  trusted.
