@@ -92,6 +92,8 @@ clusterGroup:
           value: secret/data/global/rhbk
         - name: keycloak.postgresqlDb.passwordVaultKey
           value: secret/data/global/rhbk
+        - name: keycloak.spiffeIdentityProvider.enabled
+          value: "true"
     keycloak-oidc:
       name: keycloak-oidc
       namespace: keycloak-system
