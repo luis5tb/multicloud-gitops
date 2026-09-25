@@ -14,6 +14,12 @@ spec:
     metadata:
       labels:
         {{- include "opa.labels" . | nindent 8 }}
+      annotations:
+        # subPath below bind-mounts the single rego file directly, which
+        # means kubelet never live-updates it on a ConfigMap change (a known
+        # subPath limitation) -- this annotation forces a new ReplicaSet
+        # instead whenever the policy content actually changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "opa.serviceAccountName" . }}
       securityContext:
@@ -53,8 +59,14 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            # subPath mounts only this one file, not the whole ConfigMap
+            # directory -- mounting the directory makes OPA load the same
+            # rego content three times (the top-level symlink, Kubernetes'
+            # "..data" symlink, and the real timestamped directory it points
+            # to), which OPA rejects as "multiple default rules ... found".
             - name: policy
-              mountPath: /policies
+              mountPath: /policies/rca_authorization.rego
+              subPath: rca_authorization.rego
               readOnly: true
       volumes:
         - name: policy
