@@ -39,6 +39,9 @@ a2a:
 litellm:
   # The ADK agent always calls LiteLLM. The proxy can route to Gemini,
   # Anthropic, OpenAI, or another approved provider without changing this pod.
+  # This is the ADK_MODEL value the agent's LiteLlm client requests --
+  # matching ericsson-agent's chart, which reads its own ADK_MODEL from this
+  # same key, so environment overrides work identically for both charts.
   enabled: true
   model: openai/rca-agent
   apiBase: http://litellm.litellm.svc.cluster.local:4000
@@ -142,9 +145,6 @@ agenticRun:
     - image: quay.io/openshiftanalytics/agentic-skills:latest
       paths:
         - /skills/cluster-troubleshoot/investigate-alert
-
-adk:
-  model: openai/rca-agent
 
 openshiftMcp:
   enabled: true

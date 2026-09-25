@@ -66,7 +66,7 @@ spec:
             - name: A2A_PUBLIC_PROTOCOL
               value: {{ .Values.a2a.publicProtocol | quote }}
             - name: ADK_MODEL
-              value: {{ .Values.adk.model | quote }}
+              value: {{ .Values.litellm.model | quote }}
             - name: LITELLM_API_BASE
               value: {{ .Values.litellm.apiBase | quote }}
             - name: LITELLM_API_KEY
