@@ -9,11 +9,6 @@ plugins:
     config:
       role: client
       header: Authorization
-      # Preserve the original OPA decision key exactly: authorized party
-      # (azp), not the token subject or a potentially different client_id.
-      claims:
-        include:
-          - azp
       trusted_issuers:
         - issuer: "{{ trimSuffix "/" .Values.identity.keycloak.issuerUrl }}"
           audiences:
@@ -46,6 +41,16 @@ routes:
 
   # Catch-all: all other HTTP requests require a valid Keycloak client token
   # and an explicit allow-list match. The earlier exact routes take priority.
+  #
+  # The identity/jwt plugin's claim_mapper (both "keycloak" and "standard"
+  # presets) always normalizes the client claim -- azp, client_id, or the
+  # pre-2023 Keycloak "clientId" -- into a single mapped field named
+  # "client_id". "azp" is only ever an input candidate, never the exposed
+  # field name, so `claim.azp` is always undefined here; compare against
+  # `claim.client_id` instead. Also note pre_invocation entries are bare
+  # boolean expressions (see the "allow" entries above) -- wrapping one in
+  # `require(...)` is accepted by the config schema but never evaluates
+  # true, so it fails closed regardless of the claim compared.
   - http:
       path_prefix: /
     authentication:
@@ -54,5 +59,5 @@ routes:
     authorization:
       pre_invocation:
 {{ range .Values.policy.allowedCallers }}
-        - {{ printf "require(claim.azp == '%s')" . | quote }}
+        - {{ printf "claim.client_id == '%s'" . | quote }}
 {{ end }}

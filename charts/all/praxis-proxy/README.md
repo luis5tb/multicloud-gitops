@@ -19,11 +19,16 @@ the internal Service.
 `files/policy.yaml` is rendered into the chart ConfigMap and loaded by the
 Praxis `policy` filter at process startup. The `identity/jwt` plugin validates
 `Authorization` against the configured Keycloak issuer, JWKS endpoint, and
-`rca-agent` audience. APL explicitly includes and matches the signed `azp`
-(authorized-party) claim, preserving the previous OPA policy's decision key
-rather than using `sub` or another client claim. `policy.allowedCallers`
+`rca-agent` audience. Its `claim_mapper` (`keycloak`/`standard` presets)
+normalizes the token's client identity -- `azp`, `client_id`, or the
+pre-2023 Keycloak `clientId` -- into a single mapped field always named
+`client_id`; `azp` itself is never the exposed field, so APL matches
+`claim.client_id` (not `claim.azp`, and not `sub`). `policy.allowedCallers`
 defaults to the explicit allow-list `[ericsson-agent]`; an absent identity, a
-different client, or a policy/JWKS failure does not reach RCA.
+different client, or a policy/JWKS failure does not reach RCA. Also note
+`pre_invocation` entries must be bare boolean expressions (see the two
+unauthenticated routes' `"allow"` entries) -- wrapping a comparison in
+`require(...)` is accepted by the config schema but never evaluates true.
 
 Two unauthenticated HTTP paths are intentionally forwarded:
 

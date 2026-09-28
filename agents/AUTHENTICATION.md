@@ -78,7 +78,7 @@ sequenceDiagram
 
     Note over Praxis: Praxis policy filter validates the JWT with Keycloak JWKS
     Praxis->>KC: GET /.well-known/openid-configuration + JWKS
-    Praxis->>Praxis: APL allow-list: claim.azp == ericsson-agent
+    Praxis->>Praxis: APL allow-list: claim.client_id == ericsson-agent (mapped from the token's azp)
     Note over Praxis: Invalid JWT, non-allow-listed client, or policy failure<br/>is denied with 401/403 before forwarding (fail closed).
     Praxis->>RCA: Forward allowed A2A request and original bearer token
 
@@ -147,7 +147,7 @@ sequenceDiagram
     Note over Praxis,KC: Praxis fetches and caches the issuer's discovery data and JWKS.
     Eric->>Praxis: Authorization: Bearer Token A
     Praxis->>Praxis: Verify Token A signature, issuer, audience, and expiry
-    Praxis->>Praxis: APL checks claim.azp == ericsson-agent
+    Praxis->>Praxis: APL checks claim.client_id == ericsson-agent (mapped from the token's azp)
     Note over Praxis: Praxis forwards Token A unchanged -- it does not exchange tokens.
     Praxis->>RCA: Forward A2A request with Authorization: Bearer Token A
 
@@ -676,6 +676,25 @@ oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namesp
   identity. Also verify the RCA NetworkPolicy admits the Praxis pod selector;
   do not disable it to work around a selector mismatch, since that would
   restore a direct path around the proxy.
+- **ericsson-agent's calls to rca-agent get a `403` from Praxis with body
+  `routes.http:prefix:/.pre_invocation[0]: access denied`, even though the
+  decoded caller token's `azp` is exactly `ericsson-agent` and Praxis can
+  reach Keycloak's JWKS fine**: this is `charts/all/praxis-proxy/files/policy.yaml`
+  checking the wrong field, not an identity/network problem. The
+  `identity/jwt` plugin's `claim_mapper` (`keycloak` and `standard` presets
+  alike) always normalizes the client claim -- `azp`, `client_id`, or the
+  pre-2023 Keycloak `clientId` -- into one mapped field named `client_id`;
+  `azp` is only ever an input candidate, never the field APL sees, so
+  `claim.azp` is always undefined and any `== 'ericsson-agent'` compared
+  against it is always false. Compare `claim.client_id` instead. Separately,
+  wrapping the comparison in `require(...)` (as an earlier version of this
+  policy did) is accepted by the config schema but never evaluates true
+  regardless of the claim inside it -- `pre_invocation` entries must be bare
+  boolean expressions, the same shape as the two unauthenticated routes'
+  `"allow"` entries above. Verified live by temporarily patching the
+  `praxis-proxy` ConfigMap: `"allow"` and `"claim.client_id == '...'"` both
+  passed the request through; `"require(allow)"`, `"require(claim.azp ==
+  '...')"`, and `"require(claim.client_id == '...')"` all denied identically.
 - **An `AgenticRun` create is rejected with a message mentioning
   `spec.targetNamespaces`**: this is `agentic-vap-namespace-scope.yaml`'s
   `ValidatingAdmissionPolicy`, not RBAC or Keycloak -- RBAC only decided the
