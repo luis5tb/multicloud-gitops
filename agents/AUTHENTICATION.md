@@ -1,0 +1,708 @@
+# Authentication flow: ACME UI to root-cause analysis
+
+This documents the full per-request authentication path from a user typing a
+message in the ACME agent's UI through to `rca_agent` triggering an
+`AgenticRun` and returning a diagnosis. There is no single token used
+end-to-end -- three separate Keycloak grants, two independent LLM
+credentials, and one passthrough hop happen per request, each with its own
+identity and failure mode.
+
+## Two unrelated credential systems
+
+It is easy to conflate these because both eventually show up as an
+`Authorization` header somewhere, but they answer completely different
+questions and must not be confused when debugging:
+
+1. **LLM inference credentials (LiteLLM).** `LITELLM_API_KEY`/
+   `LITELLM_API_BASE` (or provider-specific equivalents such as
+   `OPENAI_API_KEY`). This is a **static, standing credential per
+   deployment** -- every request from every user goes through the *same*
+   key, and acme-agent and rca-agent each hold their *own*, independent
+   key/Secret (`litellm.credentialsSecretName` in each chart) even though
+   both talk to the same LiteLLM proxy. It answers "how does this agent's
+   own reasoning step (the ADK `LlmAgent`/`LiteLlm` call) authenticate to the
+   model backend", and has nothing to do with who is asking or what they're
+   allowed to do. If this is broken, the agent can't think at all -- it
+   fails before ever deciding whether to call a tool or a downstream agent
+   (see the `litellm.InternalServerError` / `Model ... not found` failures in
+   Troubleshooting below, both entirely independent of Keycloak/SPIFFE). A
+   third, separate static LLM credential exists one hop further out:
+   `lightspeed-agentic-operator` runs the actual analysis against its own
+   configured `llmProvider.*` (e.g. Vertex Anthropic), which neither agent
+   ever sees or authenticates to.
+2. **Workload/caller identity tokens (SPIFFE JWT-SVID + Keycloak).**
+   Everything else in this document. This is **dynamic and per-request**: it
+   answers "which identity authorizes this specific tool call or
+   downstream-agent call, on behalf of whom". acme-agent authenticates
+   to Keycloak as *itself* (its own SPIFFE identity) to call rca-agent;
+   rca-agent then authenticates to Keycloak as *itself* again, but the token
+   it requests carries the *original caller's* identity as the exchange
+   subject, so the eventual `AgenticRun` is attributable to the caller, not
+   to rca-agent's own service identity. This is the delegation chain that
+   makes "on behalf of X" authorization possible, and it is what steps 3-6
+   of the sequence below implement.
+
+In short: the LiteLLM keys decide *whether an agent can talk to its LLM at
+all*; the SPIFFE/Keycloak chain decides *what the agent is allowed to do to
+the cluster, and as whom*. A failure in one never explains a failure in the
+other -- that's also why the diagram below draws the LiteLLM proxy as its own
+participant instead of folding it into a `Note`.
+
+## Sequence
+
+```mermaid
+sequenceDiagram
+    participant User as Browser (UI)
+    participant Acme as acme-agent
+    participant LLM as LiteLLM proxy
+    participant KC as Keycloak (rca realm)
+    participant Praxis as praxis-proxy (Praxis Policy Engine)
+    participant RCA as rca-agent
+    participant MCP as openshift-mcp-server
+    participant API as OpenShift API server
+    participant Op as lightspeed-agentic-operator
+
+    Note over KC,API: Pre-provisioned, done once, not per request:<br/>1) Authentication/cluster (oidcProviders) trusts KC as an<br/>   OIDC issuer and caches KC's JWKS for signature checks.<br/>2) claimMappings.groups reads KC's "groups" claim, prefixed<br/>   "keycloak:" -- emitted by a groups protocol mapper<br/>   attached to each Keycloak client (see table below).<br/>3) RBAC (e.g. ClusterRoleBinding cluster-admins-cluster-admin)<br/>   targets Group:keycloak:[kc-group] directly -- there is no<br/>   separate OpenShift User object to pre-create.
+
+    User->>Acme: POST / (A2A JSON-RPC message/send)
+
+    Note over Acme,LLM: Static, standing credential (LITELLM_API_KEY) --<br/>same key for every request, carries no caller identity
+    Acme->>LLM: chat completion (Authorization: Bearer LITELLM_API_KEY)
+    LLM-->>Acme: tool-call decision: route to rca_agent
+
+    Acme->>Acme: Fetch own JWT-SVID from ZTWIM/SPIRE<br/>(spiffe://.../ns/acme-agent/sa/acme-agent)
+    Acme->>KC: POST /token, client_assertion=JWT-SVID<br/>(client_id=acme-agent, jwt-spiffe grant)
+    KC-->>Acme: access_token
+
+    Acme->>Praxis: POST / (A2A), Authorization: Bearer <access_token>
+
+    Note over Praxis: Praxis policy filter validates the JWT with Keycloak JWKS
+    Praxis->>KC: GET /.well-known/openid-configuration + JWKS
+    Praxis->>Praxis: APL allow-list: claim.client_id == acme-agent (mapped from the token's azp)
+    Note over Praxis: Invalid JWT, non-allow-listed client, or policy failure<br/>is denied with 401/403 before forwarding (fail closed).
+    Praxis->>RCA: Forward allowed A2A request and original bearer token
+
+    Note over RCA: A2AAuthenticationMiddleware (independent validation)
+    RCA->>KC: Validate caller token with cached JWKS
+    RCA->>RCA: Validate caller token (sig, iss, aud, exp)
+    RCA->>RCA: Fetch own JWT-SVID from ZTWIM/SPIRE<br/>(spiffe://.../ns/lightspeed-agentic-operator/sa/rca-agent)
+
+    Note over Praxis,RCA: The public OpenShift Route targets Praxis, not RCA.<br/>An RCA NetworkPolicy allows ingress only from Praxis pods,<br/>so callers cannot bypass the authorization boundary.
+    Note over RCA,LLM: A different static LITELLM_API_KEY (own Secret) --<br/>same kind of credential as acme-agent's, still unrelated to the caller
+    RCA->>LLM: chat completion (Authorization: Bearer LITELLM_API_KEY)
+    LLM-->>RCA: tool-call decision: create_and_wait_for_analysis
+
+    RCA->>KC: POST /token (RFC 8693 token exchange)<br/>subject_token=caller token<br/>client_assertion=RCA's own JWT-SVID<br/>requested aud=openshift-mcp
+    KC-->>RCA: MCP-scoped access_token
+
+    RCA->>MCP: resources_create_or_update(AgenticRun)<br/>Authorization: Bearer <MCP-scoped token>
+    Note over MCP: cluster_auth_mode=passthrough:<br/>forwards the bearer token as-is
+    MCP->>API: create AgenticRun CR, Authorization: Bearer <token>
+    API->>KC: (cached JWKS, not fetched per request)<br/>verify signature -- check iss/aud against oidcProviders
+    API->>API: Apply claimMappings to username/groups,<br/>then RBAC against the pre-provisioned bindings above
+    Note over API: ValidatingAdmissionPolicy (agentic-vap-namespace-scope.yaml):<br/>deny unless one of the caller's groups' namespaceAllowlist<br/>covers every requested spec.targetNamespaces -- RBAC above only<br/>decides whether the caller may create an AgenticRun at all
+    API-->>MCP: 201 Created
+    MCP-->>RCA: AgenticRun created
+
+    Op->>Op: Watches AgenticRuns in its namespace
+    Note over Op: Runs analysis using its own configured LLM<br/>provider (llmProvider.*, e.g. Vertex Anthropic) --<br/>a third static credential, independent of LiteLLM or Keycloak
+    Op->>Op: Writes AnalysisResult
+
+    loop poll until Analyzed or timeout
+        RCA->>MCP: resources_get(AgenticRun status)
+        MCP->>API: get AgenticRun, Authorization: Bearer <token>
+        API-->>MCP: status
+        MCP-->>RCA: status
+    end
+
+    RCA->>MCP: resources_get(AnalysisResult)
+    MCP->>API: get AnalysisResult
+    API-->>MCP: diagnosis + remediation proposals
+    MCP-->>RCA: AnalysisResult
+
+    RCA-->>Acme: A2A response: diagnosis + proposals
+    Acme-->>User: Rendered response in UI
+```
+
+## RFC 8693 token exchange, step by step
+
+This is the piece that actually implements "on behalf of X" delegation, and
+the piece most likely to break silently if a claim doesn't survive the way
+it's expected to. Two full, separate Keycloak grants happen here,
+authenticated by two *different* clients -- only one of them determines the
+resulting token's subject.
+
+```mermaid
+sequenceDiagram
+    participant Acme as acme-agent
+    participant KC as Keycloak (rca realm)
+    participant Praxis as praxis-proxy (Praxis Policy Engine)
+    participant RCA as rca-agent
+    participant MCP as openshift-mcp-server
+
+    Note over Acme,KC: Grant 1 -- client_credentials + jwt-spiffe.<br/>acme-agent authenticates as itself -- there is no subject_token yet.
+    Acme->>KC: client_assertion = acme-agent's own JWT-SVID<br/>grant_type = client_credentials
+    KC-->>Acme: Token A<br/>sub = acme-agent's service account (opaque id)<br/>azp = acme-agent<br/>aud = rca-agent, rca-agent-mcp<br/>groups = acme-agent-rca (from acme-agent's own mapper)
+
+    Note over Praxis,KC: Praxis fetches and caches the issuer's discovery data and JWKS.
+    Acme->>Praxis: Authorization: Bearer Token A
+    Praxis->>Praxis: Verify Token A signature, issuer, audience, and expiry
+    Praxis->>Praxis: APL checks claim.client_id == acme-agent (mapped from the token's azp)
+    Note over Praxis: Praxis forwards Token A unchanged -- it does not exchange tokens.
+    Praxis->>RCA: Forward A2A request with Authorization: Bearer Token A
+
+    Note over RCA: Independently validates Token A and fetches its own<br/>SPIFFE JWT-SVID. This retains a trusted caller identity for token exchange.
+
+    Note over RCA,KC: Grant 2 -- RFC 8693 token exchange.<br/>rca-agent authenticates itself as client rca-agent-mcp for<br/>THIS call -- Token A is passed as subject_token, not as its own credential.
+    RCA->>KC: client_assertion = rca-agent's own JWT-SVID<br/>grant_type = token-exchange<br/>subject_token = Token A<br/>audience = openshift-mcp
+    KC-->>RCA: Token B<br/>sub = UNCHANGED, still acme-agent's service account<br/>azp = rca-agent-mcp, the client that now holds this token<br/>aud = openshift-mcp<br/>groups = acme-agent-rca, from rca-agent-mcp's own dedicated<br/>client scope -- the client authenticating THIS request, not Token A's issuer
+
+    Note over RCA,MCP: Token A never reaches MCP or the API server --<br/>only Token B does. That is the entire point of the exchange.
+    RCA->>MCP: Authorization: Bearer Token B
+```
+
+**Grant 1 -- acme-agent authenticates as itself** (`client_credentials` +
+`jwt-spiffe`; step 3 below has the real captured claim shapes). acme-agent
+proves its own workload identity with its own SPIFFE JWT-SVID. There is no
+`subject_token` here -- this isn't an exchange, it's acme-agent getting a
+token *for itself*. The result, Token A, is attached to the A2A call to the
+Praxis public Route. Praxis validates Token A and its `azp` allow-list, then
+forwards the same bearer token to rca-agent; the agent validates it again so
+it can use the caller claims as the RFC 8693 `subject_token`.
+
+**Grant 2 -- rca-agent exchanges Token A for one scoped to OpenShift MCP**
+(`urn:ietf:params:oauth:grant-type:token-exchange`). rca-agent authenticates
+*itself* -- as the confidential client `rca-agent-mcp`, with its own SPIFFE
+JWT-SVID -- but passes Token A as `subject_token`. This is what makes it an
+exchange rather than a fresh grant: **Token B's `sub` is inherited from the
+subject_token, not from whoever is authenticating the exchange call.** So
+Token B's `sub` is still acme-agent's opaque id, unchanged -- rca-agent's
+own identity never becomes the subject of anything downstream.
+
+`azp` changes across the exchange precisely because it answers a different
+question than `sub` does:
+
+| Claim | Answers | Token A | Token B |
+| --- | --- | --- | --- |
+| `sub` | Whose authority does this token represent? (constant) | acme-agent | acme-agent (unchanged) |
+| `azp` | Which client currently holds/may present this token? (changes) | acme-agent | rca-agent-mcp |
+
+This distinction is the entire mechanism that makes delegation meaningful:
+authority doesn't shift to whoever happens to be carrying the token at the
+moment.
+
+**Does `groups` survive the exchange?** This is the one open question in the
+chain, and why the `groups` protocol mapper is attached to *both*
+`acme-agent` and `rca-agent-mcp` in `charts/all/keycloak-oidc`. Which
+client's mappers apply to a newly-minted token is governed by the client
+authenticating *that specific* request -- for Grant 2, that's `rca-agent-mcp`,
+not acme-agent (see the comment on `rca-agent-mcp`'s `groups` mapper in
+`keycloak-realm-import.yaml` for the full reasoning: a client's
+directly-attached `protocolMappers` are its own automatic "dedicated" client
+scope, always active with no `scope=` parameter needed). So `rca-agent-mcp`'s
+copy is the one that most likely determines whether Token B actually carries
+`groups: ["acme-agent-rca"]` -- **confirm this against a real exchanged
+token** (see "End-to-end verification" in `charts/all/keycloak-oidc/README.md`)
+rather than assuming it; this is the single most consequential unverified
+assumption in the whole flow, since RBAC and the namespace-scoping
+`ValidatingAdmissionPolicy` both key on it.
+
+**No `act` claim.** RFC 8693 defines an `act` (actor) claim for exactly this
+"X's authority, exercised by Y" case. Keycloak's *standard* (V2) token
+exchange -- what's enabled on this cluster -- does not populate it; that
+requires Keycloak's separate "Token Exchange Delegation" feature (a
+`delegation:client` client scope plus its own Fine-Grained Admin Permissions
+v2 grant), which this repo does not enable. The only actor information
+available in practice is `azp`.
+
+**Token A never reaches MCP or the API server.** Only Token B does. That's
+the actual point of the exchange: neither MCP nor the Kubernetes API server
+ever sees the raw caller token -- they only ever see one scoped specifically
+to the `openshift-mcp` audience, and only rca-agent ever sees both.
+
+## Keycloak <-> OpenShift group mapping (pre-provisioned, not per-request)
+
+The API server never calls Keycloak "live" to ask whether a token is
+authorized -- everything below is configured once by `charts/all/keycloak-oidc`
+and then only read from cache on the hot path:
+
+1. **Trust**: `Authentication/cluster`'s `spec.oidcProviders[0]` (rendered by
+   `templates/openshift-authentication.yaml`) names Keycloak's realm issuer
+   URL and fetches/caches its JWKS for signature verification. Any audience a
+   token was issued for must be listed in `issuer.audiences`
+   (`keycloak.clientId`, `keycloak.consoleClientId`, plus
+   `openshiftOIDC.extraAudiences` -- this is exactly the `openshift-mcp` gap
+   covered in Troubleshooting/step 5 below).
+2. **Claim mapping**: `claimMappings.groups.claim` (`openshiftOIDC.groupsClaim`,
+   default `groups`) tells the API server which token claim carries group
+   membership, and `claimMappings.groups.prefix` (`openshiftOIDC.groupsPrefix`,
+   default `keycloak:`) is prepended to every value. The `groups` claim itself
+   only appears in a token if the *client that issued it* has a `groups`
+   protocol mapper attached -- there is no realm-wide default, which is
+   exactly the console/CLI gotcha in Troubleshooting below.
+
+   The prefix is deliberate, not cosmetic: an **empty** prefix would let a
+   Keycloak-sourced group value collide with a Kubernetes **reserved
+   `system:`-namespaced group** (e.g. `system:masters` grants cluster-admin)
+   if a group in Keycloak was ever named that, by mistake or otherwise.
+   `keycloak:` makes that structurally impossible -- no claim value coming
+   through this path can ever produce a bare `system:...` group name. Don't
+   remove it to match examples that use an empty prefix.
+
+3. **RBAC**: bindings such as `admin-rbac.yaml`'s
+   `<adminGroupName>-cluster-admin` `ClusterRoleBinding` target
+   `Group:keycloak:<adminGroupName>` directly. There is no separate OpenShift
+   `User`/`Group` object to provision -- the prefixed claim value *is* the
+   RBAC subject the moment a valid token presents it.
+
+RBAC above only decides whether a caller's group may act on the `AgenticRun`
+CRD at all -- it has no way to inspect a field inside the object itself, so
+it can't stop a caller from *creating* one that targets a namespace it has
+no business touching. `agentic-vap-namespace-scope.yaml`'s
+`ValidatingAdmissionPolicy` is the piece that does: it checks
+`spec.targetNamespaces` against `agenticRun.namespaceAllowlist`, keyed by the
+same groups RBAC uses, and denies if none of the caller's groups cover every
+requested namespace -- including when `spec.targetNamespaces` is omitted
+entirely, since the CRD treats that as "not namespace-scoped, the analysis
+agent decides from context," which a restricted caller should not be able to
+reach for just by leaving the field out. See
+`charts/all/keycloak-oidc/README.md`'s "AgenticRun authorization" section.
+
+The one manual, one-time step this doesn't template (Keycloak-version-specific
+UI, see `charts/all/keycloak-oidc/README.md`): creating the actual Keycloak
+group (e.g. `cluster-admins`) and adding users to it. Everything downstream of
+that -- the claim appearing in tokens, the API server trusting it, and RBAC
+resolving it -- is what steps 1-3 above wire up automatically.
+
+## The five Keycloak clients
+
+Defined by `charts/all/keycloak-oidc`, in the `rca` realm. Conflating any of
+these breaks the flow -- see that chart's README for the exact rationale.
+
+| Client | Type | Used by | Purpose |
+| --- | --- | --- | --- |
+| `openshift-cli` | public | Browser / `oc login` | Native OIDC login only, named for that role -- unrelated to the agent request flow. Registered as the `cli` OIDC platform client. Cannot authenticate itself. |
+| `openshift-console` | confidential | Web console | Registered as the `console` OIDC platform client. Needs the `groups` protocol mapper (see Troubleshooting) or RBAC group membership never reaches the console. |
+| `acme-agent` | confidential | acme-agent | Client-credentials-style grant authenticated with acme-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. Its service account belongs to the `acme-agent-rca` group, so its tokens carry a `groups` claim RBAC/the namespace-scoping `ValidatingAdmissionPolicy` can key on. |
+| `rca-agent-mcp` | confidential | rca-agent | RFC 8693 token exchange: takes the caller's token as `subject_token`, authenticates itself with its own SPIFFE JWT-SVID, and requests a token scoped to the `openshift-mcp` audience. |
+| `openshift-mcp` | confidential | (never authenticates) | Exists only so `rca-agent-mcp`'s exchange has a real `client_id` to name as its `audience` -- Keycloak's standard token exchange requires that parameter to be an actual client. |
+
+There is also a sixth, deliberately-not-a-client value: `keycloak.rcaAgentAudience`
+(default `rca-agent`), the audience rca-agent's own inbound
+`KeycloakTokenValidator` requires. Unlike `openshift-mcp` above, nothing in
+Keycloak requires this to correspond to a real client -- it's added to
+acme-agent's token via `oidc-audience-mapper`'s `included.custom.audience`
+(a plain string), not `included.client.audience`. It's unrelated to
+`openshift-cli` despite the coincidental old naming this repo used to have
+(both were once named `rca-agent`); don't confuse "the audience rca-agent's
+validator checks for" with "a client named rca-agent" -- the latter no
+longer exists.
+
+`acme-agent` and `rca-agent-mcp` authenticate via Keycloak's federated
+client authentication feature against the `spiffe` identity provider this
+chart also creates -- fully declarative
+(`keycloak.spiffeIdentityProvider.*`/`clientAuthenticatorType: federated-jwt`
+in `charts/all/keycloak-oidc`), no manual Admin Console step required. See
+that chart's README for the exact mechanics, including two non-obvious
+requirements this doc's Troubleshooting section below also covers: the
+`client_id` form parameter must be omitted from these requests, and the
+SPIFFE JWT-SVID used as `client_assertion` must be requested with the
+Keycloak realm issuer URL as its audience, not the workload's own name.
+
+## Per-hop identity and validation
+
+Every JWT sample below is illustrative -- field names and the exact claim set
+depend on this realm's protocol mappers, not a spec all Keycloak realms share
+-- but the shapes match what this repo's charts actually configure. Watch
+`sub`/`azp`/`aud` change hop to hop; that's the whole "who, calling what, on
+whose behalf" story in one column.
+
+1. **User to acme-agent**: no authentication by default (`auth.mode` on
+   the caller-facing side is out of scope here -- this doc covers the
+   *downstream* auth acme-agent performs, not who's allowed to open the
+   UI). No token exists yet, which matters below: nothing upstream of step 3
+   ever identifies the human at the keyboard.
+2. **acme-agent to LiteLLM** (`agents/acme_agent/src/acme_agent/agent.py`,
+   `_model()`): every reasoning step of the local ADK coordinator (including
+   the decision to route to `rca_agent`) goes through `LiteLlm(base_url=...,
+   api_key=...)`, populated from `LITELLM_API_BASE`/`LITELLM_API_KEY` -- a
+   static credential from acme-agent's own `litellm.credentialsSecretName`
+   Secret, unrelated to the caller and to steps 3-8 below.
+
+   ```
+   Authorization: Bearer sk-litellm-REDACTED
+   ```
+
+   Opaque, not a JWT -- there is nothing to decode. This key identifies the
+   *deployment*, not any caller; the same value is sent for every request.
+3. **acme-agent to rca-agent** (`agents/acme_agent/src/acme_agent/auth.py`,
+   `DownstreamAuth`): fetches a JWT-SVID from the SPIFFE Workload API for
+   audience `identity.keycloak.issuerUrl` (the Keycloak realm issuer --
+   *not* `acme-agent`; see Troubleshooting), uses it as `client_assertion`
+   in a Keycloak `client_credentials` token request for the confidential
+   `acme-agent` client (with no `client_id` form parameter -- also see
+   Troubleshooting), and attaches the resulting access token as
+   `Authorization: Bearer` on every outbound A2A request (`httpx`
+   `event_hooks`).
+
+   Real captured shape (irrelevant claims trimmed; `groups` reflects the
+   `acme-agent-rca` group/protocol mapper added after this capture, not
+   yet independently re-verified live -- everything else below is unchanged
+   from the verified capture):
+
+   ```json
+   {
+     "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
+     "sub": "0e844946-0456-475b-9265-e17532b362c9",
+     "azp": "acme-agent",
+     "aud": ["rca-agent", "rca-agent-mcp", "account"],
+     "preferred_username": "service-account-acme-agent",
+     "groups": ["acme-agent-rca"],
+     "scope": "email profile",
+     "exp": 1790256558,
+     "iat": 1790256258
+   }
+   ```
+
+   **This is the token that ends up as "on behalf of" for the rest of the
+   chain.** Because step 1 authenticates no one, `sub` here is
+   acme-agent's own service account, not the human using the UI --
+   everything downstream is attributable to acme-agent-as-caller, not to
+   an end user. Note `sub` is an opaque internal user id, not the readable
+   `service-account-acme-agent` string (that only appears in
+   `preferred_username`) -- `identity.py`'s `sub -> client_id -> azp ->
+   preferred_username` fallback picks `sub` first, so
+   `agentic.openshift.io/on-behalf-of` on the AgenticRun will actually read
+   that opaque id, not a human-readable name. If per-user attribution is
+   ever needed, a user identity has to be captured before this hop and
+   folded into this token (e.g. a second token exchange).
+   `rca-agent`/`rca-agent-mcp` both appear in `aud` because rca-agent's own
+   inbound check needs `rca-agent` (a plain custom-audience string, no client
+   behind it -- `keycloak.rcaAgentAudience`), and Keycloak's standard token
+   exchange (step 6) separately requires the subject_token to already carry
+   the exchanging client (`rca-agent-mcp`, a real client audience this time)
+   as an audience -- both are protocol mappers on the `acme-agent`
+   client, see `charts/all/keycloak-oidc`.
+4. **rca-agent validates the inbound token** (`agents/rca_agent/rca_agent/identity.py`,
+   `A2AAuthenticationMiddleware`): every path except `/.well-known/agent-card.json`
+   and `/health/ready` requires both (a) `KeycloakTokenValidator.validate` --
+   signature via JWKS, issuer, and audience against `KEYCLOAK_ISSUER_URL`/
+   `KEYCLOAK_AUDIENCES` -- and (b) `WorkloadIdentityProvider.get_identity` --
+   RCA's own JWT-SVID must be obtainable at all, independent of the caller's
+   token. Either failing returns a generic `401` (the specific cause is only
+   in the pod logs, deliberately -- see Troubleshooting).
+
+   ```
+   Checks run against the step-3 token by KeycloakTokenValidator.validate():
+     iss == KEYCLOAK_ISSUER_URL        (https://keycloak.../realms/rca)
+     aud ∩ KEYCLOAK_AUDIENCES != {}    ({"rca-agent"} -- narrowed from
+                                        {"rca-agent", "openshift"}; "openshift"
+                                        was the openshift-cli login client's
+                                        own audience and only widened what
+                                        this check would accept)
+     exp/iat within tolerance, signature verified via JWKS
+     sub required (identity.py falls back sub -> client_id -> azp ->
+                   preferred_username to build on_behalf_of)
+   ```
+
+   RCA's own JWT-SVID, fetched independently of the caller token. `aud` is
+   the Keycloak realm issuer, same reasoning as step 3 -- this JWT-SVID's
+   only consumer is the `client_assertion` on the exchange in step 6 below:
+
+   ```json
+   {
+     "sub": "spiffe://apps.<cluster-domain>/ns/lightspeed-agentic-operator/sa/rca-agent",
+     "aud": ["https://keycloak.apps.<cluster-domain>/realms/rca"],
+     "exp": 1732000300
+   }
+   ```
+5. **rca-agent to LiteLLM** (`agents/rca_agent/rca_agent/agent.py`, `_model()`):
+   same pattern as step 2, a *different* static credential from rca-agent's
+   own `litellm.credentialsSecretName` Secret, used when its `LlmAgent`
+   decides whether/how to call the `create_and_wait_for_analysis` tool. Never
+   the caller's Keycloak token.
+
+   ```
+   Authorization: Bearer sk-litellm-REDACTED   (rca-agent's own key, different
+                                                 value from step 2's)
+   ```
+6. **rca-agent to OpenShift MCP** (`agents/rca_agent/rca_agent/mcp_agentic_run.py`
+   + `identity.py`'s `KeycloakTokenExchanger`): the caller's *validated*
+   token is used only as the `subject_token` of an RFC 8693 exchange -- it is
+   never forwarded to MCP itself. RCA authenticates the exchange call with
+   its own JWT-SVID as `client_assertion` on the confidential `rca-agent-mcp`
+   client, requesting the `openshift-mcp` audience
+   (`identity.keycloak.tokenExchange.audience`). The resulting MCP-scoped
+   token is what actually gets sent to `openshift-mcp-server`.
+
+   ```
+   Token-exchange request (KeycloakTokenExchanger.exchange):
+     grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+     subject_token=<step 3's access token>
+     subject_token_type=urn:ietf:params:oauth:token-type:access_token
+     requested_token_type=urn:ietf:params:oauth:token-type:access_token
+     client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+     client_assertion=<rca-agent's own JWT-SVID from step 4>
+     audience=openshift-mcp
+   ```
+
+   No `client_id` here either, same reason as step 3. Real captured shape
+   (`groups` is expected from the `acme-agent-rca` mapper added after
+   this capture -- **not yet independently re-verified live**; whether
+   Keycloak's standard V2 exchange re-runs the subject's own protocol
+   mappers for the new audience, or only the audience client's, is the thing
+   to confirm):
+
+   ```json
+   {
+     "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
+     "sub": "0e844946-0456-475b-9265-e17532b362c9",
+     "aud": ["openshift-mcp"],
+     "azp": "rca-agent-mcp",
+     "preferred_username": "service-account-acme-agent",
+     "groups": ["acme-agent-rca"],
+     "exp": 1790256632
+   }
+   ```
+
+   - **`sub` -- whose authority is this?** Carried over unchanged from the
+     subject token (step 3): acme-agent's service account (the same
+     opaque id, not rca-agent's). `sub` is what `identity.py` reads (with the
+     `sub -> client_id -> azp -> preferred_username` fallback from step 4)
+     into `on_behalf_of`, annotated on the AgenticRun as
+     `agentic.openshift.io/on-behalf-of`. So "on behalf of X" means **X is
+     the subject being represented**, not the agent doing the representing --
+     the naming is backwards from how it reads at first glance.
+   - **`azp` -- who is this specific token issued to / allowed to present
+     it?** `rca-agent-mcp`: the client that called the token endpoint, so it
+     is the party the resulting token is handed to.
+   - **No `act` claim.** RFC 8693 defines an `act` (actor) claim for exactly
+     this "X's authority, exercised by Y" case, and an earlier version of
+     this doc described one -- but Keycloak's *standard* (V2) token exchange,
+     which is what's enabled on this cluster, does not populate it. Keycloak
+     has a separate, additional "Token Exchange Delegation" feature
+     (`delegation:client` client scope, its own Fine-Grained Admin
+     Permissions v2 grant) that adds an `act`/`may_act` claim -- this repo
+     does not enable it, so `identity.py`'s `actor` property will not find
+     one and `agentic.openshift.io/previous-actor` will not be set on the
+     AgenticRun. The only actor information available in practice is `azp`.
+7. **openshift-mcp-server to the API server**: `cluster_auth_mode=passthrough`
+   means MCP does no authorization decision itself -- it forwards the
+   MCP-scoped bearer token straight through to the Kubernetes API server as
+   the caller's own credential. The API server's own OIDC authenticator (via
+   `Authentication/cluster`) makes the actual RBAC decision by validating the
+   token against its cached Keycloak JWKS and then applying `claimMappings`
+   (see "Keycloak <-> OpenShift group mapping" above) -- it does not call
+   Keycloak per request. This means `openshift-mcp` **must** be one of
+   `Authentication.spec.oidcProviders[].issuer.audiences`
+   (`openshiftOIDC.extraAudiences` in `charts/all/keycloak-oidc`) or every
+   MCP call is rejected at this hop even though the token exchange in step 6
+   succeeded cleanly.
+
+   ```
+   claimMappings applied to the step-6 token:
+     username: claim "sub"    -> "keycloak:0e844946-0456-475b-9265-e17532b362c9"
+     groups:   claim "groups" -> ["keycloak:acme-agent-rca"] (expected --
+                                  see the "not yet independently re-verified
+                                  live" note on the step-6 sample above)
+   ```
+
+   Before `charts/all/keycloak-oidc`'s `acme-agent-rca` group/mapper
+   existed, this claim was absent, and RBAC had no group to bind and no
+   username-based binding either -- `agentic-rbac.yaml` only ever granted
+   `keycloak:rca-agenticrun` (human console/CLI login), so calls attributed to
+   acme-agent had no RBAC path here at all. This was the same class of
+   gap as the console client's missing `groups` mapper in Troubleshooting,
+   just on the service-account side. `agentic-rbac.yaml`'s RoleBinding now
+   also grants `keycloak:acme-agent-rca`; `agentic-vap-namespace-scope.yaml`
+   (a `ValidatingAdmissionPolicy`, see "Keycloak <-> OpenShift group mapping"
+   above) further restricts what that group's calls may set
+   `spec.targetNamespaces` to.
+8. **AgenticRun -> AnalysisResult**: `lightspeed-agentic-operator` watches
+   `AgenticRun` resources in its own namespace, runs the analysis through its
+   own separately configured `llmProvider.*` (a third, unrelated static LLM
+   credential), and writes `AnalysisResult` once analysis completes; RCA
+   polls via the same MCP-scoped token from step 6 (short-lived -- the
+   exchange happens once per request, not once per poll, so a very
+   long-running analysis can outlive it).
+
+## Tracing a live request
+
+Each hop fails independently and mostly silently (generic `401`s are
+deliberate), so trace hop-by-hop rather than end-to-end:
+
+```bash
+# 1. acme-agent's outbound call and its own SPIFFE fetch
+oc logs -n acme-agent -l app.kubernetes.io/name=acme-agent -f
+
+# 2. rca-agent's inbound validation, its own SPIFFE fetch, and the
+#    token-exchange call
+oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=rca-agent -f
+
+# 3. Keycloak's own record of every grant/exchange against a client --
+#    enable this once: Admin Console -> Realm Settings -> Events -> Save Events
+#    then Realm -> Sessions / Events, filtered by client (acme-agent,
+#    rca-agent-mcp)
+
+# 4. The passthrough hop -- MCP does no authz itself, so any 401/403 here
+#    is really the API server rejecting the forwarded token
+oc logs -n openshift-mcp-server -l app.kubernetes.io/name=openshift-mcp-server -f
+
+# 5. What the API server currently trusts
+oc get authentication.config.openshift.io cluster -o jsonpath='{.spec.oidcProviders[0].issuer.audiences}'
+
+# 6. The operator side
+oc get agenticrun -n lightspeed-agentic-operator
+oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=lightspeed-agentic-operator -f
+
+# 7. Praxis ingress authorization (before the caller-token/token-exchange
+#    logs in step 2 above -- a deny here means RCA never received the request)
+oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=praxis-proxy -f
+
+# 8. Whether the namespace-scoping ValidatingAdmissionPolicy is why an
+#    AgenticRun create was rejected -- the API server returns the policy's
+#    messageExpression directly in the client error, but this confirms the
+#    policy/binding/ConfigMap it read are what you expect
+oc get validatingadmissionpolicy,validatingadmissionpolicybinding | grep agentic
+oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namespace-allowlist -o yaml
+```
+
+## Troubleshooting (bugs actually hit building this)
+
+- **`litellm.InternalServerError: ... Missing credentials`, or `Model
+  openai/... not found`**: this is the *LLM inference* credential (see
+  above), not the SPIFFE/Keycloak chain -- don't go looking in Keycloak
+  Events for this one. `LiteLlm` forwards `**kwargs` straight to
+  `litellm.completion()`, which does not read `LITELLM_API_BASE`/
+  `LITELLM_API_KEY` on its own; those are this repo's own env var names, not
+  something litellm auto-detects for the `openai/` model prefix (it only
+  auto-reads `OPENAI_API_KEY`). Both `agent.py`s must pass them explicitly as
+  `base_url=`/`api_key=` kwargs to `LiteLlm(...)` -- note the kwarg is
+  `base_url`, not `api_base`.
+- **RCA calls to MCP get 401 despite a successful token exchange**: check
+  step 7 above -- `openshift-mcp` must be in the trusted audiences list, not
+  just the two OIDC platform client IDs.
+- **Console/CLI users authenticate but land in no RBAC groups**: the
+  `openshift-console` client needs its own `groups` protocol mapper. It is
+  easy to add the mapper only to the public login client (`openshift-cli`) and
+  forget the console has a separate client with its own, independent set of
+  protocol mappers.
+- **`/health/ready` stays `503` forever on either agent**: almost always the
+  SPIFFE Workload API socket. The CSI driver always names the file
+  `spire-agent.sock`, not `socket` -- check `identity.workloadApiSocket` /
+  `identity.spiffe.workloadApiSocket` matches exactly what's mounted.
+- **acme-agent logs `Failed to resolve remote A2A agent rca_agent: Agent
+  card URL must use https, or http on a loopback host: http://rca-agent...`**:
+  this is neither Keycloak nor SPIFFE -- google-adk's `RemoteA2aAgent` refuses
+  to fetch an agent card (and, separately, refuses to trust the RPC url
+  *inside* a card it did fetch) over plain http on a non-loopback host. The
+  in-cluster Service DNS name is non-loopback plain http, so it no longer
+  qualifies once a real caller in a different pod resolves it. Fix: put
+  rca-agent behind its Route (`route.enabled`, edge TLS) and set
+  `a2a.publicHost`/`a2a.publicPort`/`a2a.publicProtocol` (which control the
+  RPC url the agent card itself advertises, in `rca_agent/main.py`) to that
+  route's https origin, then point acme-agent's `a2a.downstreamEndpoint`
+  at the same https origin instead of the in-cluster Service DNS name. The
+  chart's `deployment.yaml` fails the template if `route.enabled` is true
+  while `a2a.publicProtocol` is left at `http` to catch this early.
+- **acme-agent logs a 401 from Keycloak's `/token` endpoint while fetching
+  rca-agent's agent card** (`Agent card URL must use https...` is fixed, but
+  the fetch itself then 401s): the agent card fetch is unauthenticated, but
+  acme-agent's httpx client attaches its Keycloak bearer token to *every*
+  outbound request via an event hook -- so this is actually the
+  client_credentials + jwt-spiffe grant failing, not the card fetch. Reproduce
+  directly against Keycloak's token endpoint from inside the pod (fetch a
+  JWT-SVID via `spiffe.WorkloadApiClient`, POST it as `client_assertion`) to
+  see the real Keycloak error body instead of a generic httpx exception. In
+  order encountered, debugging this surfaced three separate, unrelated causes
+  -- all now fixed in the charts, but worth knowing if this ever regresses:
+  - `{"errorMessage":"Invalid trust domain name"}` when creating the `spiffe`
+    identity provider via the Admin REST API with `config.trustDomain` set:
+    on Keycloak 26.4.16 (RHBK), `SpiffeIdentityProviderConfig.getTrustDomain()`
+    actually reads the generic `config.issuer` key, not `config.trustDomain`
+    -- upstream `main` renamed this field, but this repo's Keycloak build
+    predates that rename. `charts/all/keycloak-oidc` now emits `issuer`.
+  - `{"error":"unauthorized_client","error_description":"Invalid client or
+    Invalid client credentials"}`: the `spiffe` identity provider referenced
+    by `jwt.credential.issuer` didn't exist in the realm at all -- it was
+    never actually templated anywhere (the `keycloak` application's
+    `spiffeIdentityProvider` override targeted the `rhbk` chart, which
+    doesn't consume it for realm-level identity providers; `rca` realm's
+    `KeycloakRealmImport` is entirely owned by `charts/all/keycloak-oidc`,
+    which didn't declare one). Now templated in
+    `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml`'s
+    `identityProviders` list.
+  - `{"error":"invalid_client","error_description":"client_id parameter does
+    not match sub claim"}`: both agents' code sent a `client_id` form
+    parameter alongside `client_assertion`. Keycloak's generic JWT client
+    validator (`AbstractJWTClientValidator.validateClient`) rejects the
+    request outright whenever `client_id` is present and differs from the
+    assertion's `sub` -- and for a SPIFFE assertion `sub` is always a SPIFFE
+    ID, never the Keycloak client_id, by design. Fixed by omitting `client_id`
+    entirely in `acme_agent/auth.py`'s `_keycloak_token()` and
+    `rca_agent/identity.py`'s `KeycloakTokenExchanger.exchange()` -- the
+    client is resolved from the assertion's `sub` instead.
+  - Also relevant once the above three are fixed: the SPIFFE JWT-SVID used as
+    `client_assertion` must be requested with **the Keycloak realm issuer
+    URL** as its audience (`SPIFFE_JWT_AUDIENCE` in both charts) --
+    `FederatedJWTClientValidator.getExpectedAudiences()` defaults to
+    `Urls.realmIssuer(...)` when no explicit audience list is configured.
+    Requesting an audience like `acme-agent` (the workload's own name,
+    what both charts defaulted to) fails this check.
+- **RCA's token exchange succeeds but the resulting token's `aud` doesn't
+  contain the requested audience** (or the exchange is rejected as
+  unavailable): Keycloak's *standard* (V2) token exchange audience parameter
+  only **filters** audiences the exchanging client's own protocol mappers
+  already resolve -- it never adds one that wasn't already resolvable. Three
+  things must all be true, and this repo's chart templates them together so
+  they don't drift apart: (1) `rca-agent-mcp` needs the client attribute
+  `standard.token.exchange.enabled: "true"` (V2 exchange is opt-in per
+  client), (2) `rca-agent-mcp` needs its own protocol mapper adding
+  `openshift-mcp` as an audience (`included.client.audience: openshift-mcp`),
+  and (3) `openshift-mcp` must exist as an actual client in the realm -- the
+  `audience` request parameter must name a real `client_id`, it cannot be an
+  arbitrary string. Separately, (4) the *subject_token* being exchanged
+  (acme-agent's token from step 3) must already carry `rca-agent-mcp` as
+  an audience, or the exchange is rejected outright regardless of the above.
+- **acme-agent's calls to rca-agent now get a generic `401` or `403` after
+  previously working**: inspect `praxis-proxy` logs first. Its embedded Praxis
+  Policy Engine validates the Keycloak JWT and applies the APL allow-list
+  before forwarding; unknown clients and identity/policy errors fail closed.
+  Confirm `policy.allowedCallers` in `charts/all/praxis-proxy/values.yaml`
+  includes the token's `azp`, the issuer and audience match the token, and the
+  Praxis pod can fetch Keycloak's JWKS. If the proxy allows the request but
+  RCA rejects it, inspect the `rca-agent` logs next:
+  RCA independently validates the same bearer token and its SPIFFE workload
+  identity. Also verify the RCA NetworkPolicy admits the Praxis pod selector;
+  do not disable it to work around a selector mismatch, since that would
+  restore a direct path around the proxy.
+- **acme-agent's calls to rca-agent get a `403` from Praxis with body
+  `routes.http:prefix:/.pre_invocation[0]: access denied`, even though the
+  decoded caller token's `azp` is exactly `acme-agent` and Praxis can
+  reach Keycloak's JWKS fine**: this is `charts/all/praxis-proxy/files/policy.yaml`
+  checking the wrong field, not an identity/network problem. The
+  `identity/jwt` plugin's `claim_mapper` (`keycloak` and `standard` presets
+  alike) always normalizes the client claim -- `azp`, `client_id`, or the
+  pre-2023 Keycloak `clientId` -- into one mapped field named `client_id`;
+  `azp` is only ever an input candidate, never the field APL sees, so
+  `claim.azp` is always undefined and any `== 'acme-agent'` compared
+  against it is always false. Compare `claim.client_id` instead. Separately,
+  wrapping the comparison in `require(...)` (as an earlier version of this
+  policy did) is accepted by the config schema but never evaluates true
+  regardless of the claim inside it -- `pre_invocation` entries must be bare
+  boolean expressions, the same shape as the two unauthenticated routes'
+  `"allow"` entries above. Verified live by temporarily patching the
+  `praxis-proxy` ConfigMap: `"allow"` and `"claim.client_id == '...'"` both
+  passed the request through; `"require(allow)"`, `"require(claim.azp ==
+  '...')"`, and `"require(claim.client_id == '...')"` all denied identically.
+- **An `AgenticRun` create is rejected with a message mentioning
+  `spec.targetNamespaces`**: this is `agentic-vap-namespace-scope.yaml`'s
+  `ValidatingAdmissionPolicy`, not RBAC or Keycloak -- RBAC only decided the
+  caller could create *an* `AgenticRun`, not this specific one. Check
+  `agenticRun.namespaceAllowlist` in `charts/all/keycloak-oidc/values.yaml`
+  has an entry for the caller's group covering every namespace it requested,
+  and remember an *omitted* `spec.targetNamespaces` is deliberately **not**
+  treated as unscoped for a restricted caller (only a `"*"` entry may omit
+  it) -- a caller that previously worked by leaving the field out will need
+  to start setting it explicitly once it stops being unconditionally
+  trusted.
