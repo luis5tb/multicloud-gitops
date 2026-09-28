@@ -232,7 +232,7 @@ clusterGroup:
         - name: litellm.apiBase
           value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
         - name: litellm.model
-          value: openai/gpt-oss-120b
+          value: openai/gpt-oss-20b
         # google-adk's RemoteA2aAgent (used by ericsson-agent to call this
         # agent) refuses to fetch or trust an agent card advertising a
         # non-loopback plain-http RPC url -- the in-cluster Service DNS name
@@ -313,7 +313,7 @@ clusterGroup:
         - name: litellm.apiBase
           value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
         - name: litellm.model
-          value: openai/gpt-oss-120b
+          value: openai/gpt-oss-20b
     mao-mongo:
       name: mao-mongo
       namespace: mao
