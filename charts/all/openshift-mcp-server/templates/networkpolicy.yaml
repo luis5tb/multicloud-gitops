@@ -1,0 +1,33 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- if not .Values.networkPolicy.callerNamespace }}
+{{- fail "networkPolicy.callerNamespace must be set when networkPolicy.enabled is true" }}
+{{- end }}
+# server.requireOAuth/skipJWTVerification/clusterAuthMode=passthrough (see
+# README.md) mean this server does no token validation of its own -- it
+# trusts the API server downstream to do that. This restricts who can reach
+# it at the network layer as a compensating control, independent of that
+# trust chain: only pods in networkPolicy.callerNamespace (rca-agent's
+# namespace) may connect, on top of this Service already being ClusterIP
+# only (never routed externally).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openshift-mcp-server.fullname" . }}
+  labels:
+    {{- include "openshift-mcp-server.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "openshift-mcp-server.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.callerNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+{{- end }}

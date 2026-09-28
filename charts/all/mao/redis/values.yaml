@@ -1,0 +1,73 @@
+# Matches docker-compose `redis` service: single redis:7-alpine, no volume, ClusterIP only.
+
+fullnameOverride: redis
+
+image:
+  registry: ""
+  repository: redis
+  tag: "7-alpine"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# Leave empty so OpenShift restricted SCC can inject UID / fsGroup.
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 6379
+
+auth:
+  enabled: false
+  password: changeme
+
+# Secret consumed by mas-api / mas-worker (same keys as openshift/mas-api.yml).
+connectionSecret:
+  name: mao-secret-redis
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+livenessProbe:
+  exec:
+    command: ["redis-cli", "ping"]
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command: ["redis-cli", "ping"]
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+startupProbe:
+  exec:
+    command: ["redis-cli", "ping"]
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 15
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

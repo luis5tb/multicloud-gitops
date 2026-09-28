@@ -1,0 +1,24 @@
+apiVersion: infrastructure.opendatahub.io/v1
+kind: HardwareProfile
+metadata:
+  name: nvidia-gpu
+  namespace: redhat-ods-applications
+  annotations:
+    opendatahub.io/display-name: nvidia-gpu
+    opendatahub.io/disabled: 'false'
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  identifiers:
+    - displayName: GPU
+      identifier: nvidia.com/gpu
+      resourceType: Accelerator
+      minCount: 1
+      defaultCount: 1
+  scheduling:
+    type: Node
+    node:
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: openshift-mcp-server
+description: OpenShift MCP server configured for caller-token passthrough and RCA resources only
+type: application
+version: 0.1.0
+appVersion: "latest"
