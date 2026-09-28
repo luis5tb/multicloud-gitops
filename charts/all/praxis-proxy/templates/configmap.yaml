@@ -1,0 +1,14 @@
+{{- if empty .Values.policy.allowedCallers }}
+{{- fail "policy.allowedCallers must contain at least one client; an empty allow-list would only require a valid token" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+data:
+  praxis.yaml: |
+{{ tpl (.Files.Get "files/praxis.yaml") . | indent 4 }}
+  policy.yaml: |
+{{ tpl (.Files.Get "files/policy.yaml") . | indent 4 }}

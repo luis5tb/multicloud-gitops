@@ -1,0 +1,63 @@
+plugins:
+  - name: jwt-client
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    capabilities:
+      - perform_http
+    on_error: fail
+    config:
+      role: client
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{{ trimSuffix "/" .Values.identity.keycloak.issuerUrl }}"
+          audiences:
+            - {{ .Values.identity.keycloak.audience | quote }}
+          algorithms:
+            - RS256
+          decoding_key:
+            kind: jwks_url
+            url: "{{ printf "%s/protocol/openid-connect/certs" (trimSuffix "/" .Values.identity.keycloak.issuerUrl) }}"
+      claim_mapper: keycloak
+
+routes:
+  # The A2A discovery document is public by design. Its RPC URL still points
+  # at the public Praxis Route, never directly at the RCA Service.
+  - http:
+      path: /.well-known/agent-card.json
+      method: GET
+    authorization:
+      pre_invocation:
+        - "allow"
+
+  # Readiness is routed through to RCA so the proxy is not marked ready while
+  # the application, Keycloak, or the workload identity socket is unavailable.
+  - http:
+      path: /health/ready
+      method: GET
+    authorization:
+      pre_invocation:
+        - "allow"
+
+  # Catch-all: all other HTTP requests require a valid Keycloak client token
+  # and an explicit allow-list match. The earlier exact routes take priority.
+  #
+  # The identity/jwt plugin's claim_mapper (both "keycloak" and "standard"
+  # presets) always normalizes the client claim -- azp, client_id, or the
+  # pre-2023 Keycloak "clientId" -- into a single mapped field named
+  # "client_id". "azp" is only ever an input candidate, never the exposed
+  # field name, so `claim.azp` is always undefined here; compare against
+  # `claim.client_id` instead. Also note pre_invocation entries are bare
+  # boolean expressions (see the "allow" entries above) -- wrapping one in
+  # `require(...)` is accepted by the config schema but never evaluates
+  # true, so it fails closed regardless of the claim compared.
+  - http:
+      path_prefix: /
+    authentication:
+      steps:
+        - jwt-client
+    authorization:
+      pre_invocation:
+{{ range .Values.policy.allowedCallers }}
+        - {{ printf "claim.client_id == '%s'" . | quote }}
+{{ end }}

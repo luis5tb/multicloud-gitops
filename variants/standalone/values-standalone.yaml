@@ -202,6 +202,23 @@ clusterGroup:
       namespace: openshift-mcp-server
       argoProject: hub
       path: charts/all/openshift-mcp-server
+    praxis-proxy:
+      name: praxis-proxy
+      namespace: lightspeed-agentic-operator
+      argoProject: hub
+      path: charts/all/praxis-proxy
+      overrides:
+        # Replace the former direct RCA Route with the policy-enforcing
+        # gateway. RCA ingress is limited to this same-namespace proxy by the
+        # NetworkPolicy configured on the rca-agent application above.
+        - name: route.enabled
+          value: "true"
+        - name: route.host
+          value: rca-agent.apps.ocp.kf8ql.sandbox3578.opentlc.com
+        - name: identity.keycloak.issuerUrl
+          value: https://keycloak.apps.ocp.kf8ql.sandbox3578.opentlc.com/realms/rca
+        - name: upstream.host
+          value: rca-agent.lightspeed-agentic-operator.svc.cluster.local
     mao-mongo:
       name: mao-mongo
       namespace: mao

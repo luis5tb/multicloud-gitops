@@ -1,0 +1,54 @@
+fullnameOverride: praxis-proxy
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/praxis-proxy/ai
+  # Pin an upstream release; do not use latest for the authorization gateway.
+  tag: "0.4.1"
+  digest: sha256:83c86c059162cd17a0ee7bc3e5146e4be02f811bada6d38027acc6668b8be903
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+service:
+  port: 8080
+
+route:
+  enabled: false
+  host: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+upstream:
+  host: rca-agent.lightspeed-agentic-operator.svc.cluster.local
+  port: 8000
+
+identity:
+  keycloak:
+    # Override with the exact issuer URL used by the access tokens.
+    issuerUrl: https://keycloak.example.com/realms/rca
+    audience: rca-agent
+
+policy:
+  allowedCallers:
+    - acme-agent
+
+securityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

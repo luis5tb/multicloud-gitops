@@ -1,0 +1,38 @@
+listeners:
+  - name: rca-a2a
+    address: "0.0.0.0:{{ .Values.service.port }}"
+    filter_chains: [authorization-and-routing]
+
+filter_chains:
+  - name: authorization-and-routing
+    filters:
+      - filter: policy
+        config_path: /etc/praxis/config/policy.yaml
+        # This gateway authorizes generic HTTP/A2A requests, not MCP entity
+        # requests, so it intentionally has no protocol-classifier requirement.
+        require_protocol_metadata: false
+        init_timeout_secs: 30
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: rca-agent
+
+      - filter: load_balancer
+        clusters:
+          - name: rca-agent
+            endpoints:
+              - "{{ .Values.upstream.host }}:{{ .Values.upstream.port }}"
+
+admin:
+  # Kept on loopback: only container-local health probes can access it.
+  address: "127.0.0.1:9901"
+
+# Praxis currently requires both opt-ins for its static in-cluster RCA
+# upstream: allow_private_endpoints for config-load-time validation of the
+# load_balancer cluster endpoint, and allow_private_upstreams for the
+# runtime connection check. Keep the upstream fixed in this chart and
+# restrict RCA ingress with the NetworkPolicy in the rca-agent chart.
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
