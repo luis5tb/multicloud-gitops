@@ -1,0 +1,259 @@
+keycloak:
+  namespace: keycloak-system
+  name: keycloak
+  realm: rca
+  displayName: RCA
+  # Public client used only for browser/oc-login OIDC flows (Native OIDC),
+  # registered as OpenShift's "cli" platform client below -- named for that
+  # role, not for the RCA agent: this has nothing to do with the agent
+  # request flow. It cannot authenticate itself, so it must never be used
+  # for the confidential clients below.
+  clientId: openshift-cli
+  clientName: OpenShift CLI (Native OIDC)
+  # Named for what it grants (create/get on AgenticRun/AnalysisResult, see
+  # agentic-rbac.yaml) and how (rca), not "users" -- it's not a general/
+  # baseline login group, it exists for exactly one capability, the same one
+  # acme-agent-rca grants to the machine path.
+  groupName: rca-agenticrun
+  # Confidential client rca-agent uses to exchange a caller's token for one
+  # scoped to OpenShift MCP (identity.keycloak.tokenExchange.clientId in
+  # charts/all/rca-agent). Must NOT be a public client.
+  mcpClientId: rca-agent-mcp
+  mcpClientName: RCA Agent (OpenShift MCP token exchange)
+  # Confidential client acme-agent uses for its client-credentials call
+  # to Keycloak (auth.keycloak.clientId in
+  # charts/all/acme-agent).
+  acmeClientId: acme-agent
+  acmeClientName: ACME A2A agent
+  # Dedicated group for calls attributed to acme-agent when it invokes
+  # rca-agent -- named <caller>-<callee> (not just "acme-agent") so it
+  # reads as "acme-agent's rights when calling rca-agent", not
+  # acme-agent's rights in general; a future second caller gets its own
+  # <caller>-rca group rather than sharing this one. Required for the
+  # exchanged MCP-scoped token to carry any groups claim at all -- without
+  # it, acme-agent's calls have no RBAC subject to bind to (see
+  # agents/AUTHENTICATION.md step 7) and agentic-rbac.yaml/the
+  # ValidatingAdmissionPolicy in this chart have nothing to key on.
+  acmeGroupName: acme-agent-rca
+  # Confidential client registered as the web console's OIDC platform client
+  # when openshiftOIDC.enabled is true. When consoleClientSecretVaultKey
+  # below is set, this chart generates its secret itself and feeds the same
+  # value into openshiftOIDC.consoleClientSecretName -- no manual step. Left
+  # empty, Keycloak generates the secret at import time instead, and
+  # charts/all/keycloak-oidc/README.md's one-time manual copy step applies.
+  consoleClientId: openshift-console
+  consoleClientName: OpenShift Console (Native OIDC)
+  # Optional realm group. Members get cluster-admin (via the ClusterRoleBinding
+  # below) once openshiftOIDC.enabled is true, so there is at least one way to
+  # reach the console as an administrator through Keycloak itself. Empty
+  # disables the group and binding entirely. See the README section
+  # "Keeping admin access after enabling OIDC" -- this is deliberately opt-in
+  # and separate from the CLI break-glass credential, which this cannot
+  # replace: it only helps once Keycloak/OIDC is already working correctly.
+  adminGroupName: ""
+
+  # Optional human user created in this realm and put in adminGroupName
+  # above, so there's at least one way to log into the OpenShift console via
+  # Keycloak without any manual Admin Console step. Requires adminGroupName
+  # to be set (fails otherwise). Off by default -- a standing cluster-admin
+  # credential is a permanent addition to the cluster's attack surface, and
+  # this is on top of, not a replacement for, breakGlass above.
+  #
+  # One-shot caveat: like the rest of the realm import, this only takes
+  # effect on a fresh realm import -- enabling it after the realm already
+  # exists does not retroactively create the user (see the README).
+  consoleAdminUser:
+    enabled: false
+    username: cluster-admin
+    # Name of the Secret (in keycloak.namespace, key "password") this user's
+    # initial password is read from -- created via console-admin-user-secret.yaml
+    # when passwordVaultKey is set.
+    passwordSecretName: console-admin-user
+    # Vault path/property holding the initial password (property name
+    # passwordVaultProperty below), generated once by
+    # values-secret.yaml.template's onMissingValue: generate. The realm
+    # import sets temporary: true on this credential, so Keycloak forces a
+    # password change on first login -- this generated value is never meant
+    # to be the long-term password. Required when consoleAdminUser.enabled
+    # is true.
+    passwordVaultKey: ""
+    passwordVaultProperty: console-admin-password
+
+  # Vault path holding openshift-console's client secret (property name
+  # consoleClientSecretVaultProperty below), generated once by
+  # values-secret.yaml.template's onMissingValue: generate rather than left
+  # for Keycloak to auto-generate and copied into
+  # openshiftOIDC.consoleClientSecretName by hand. Both this chart's copy of
+  # the secret (fed into the realm import's openshift-console client via a
+  # KeycloakRealmImport placeholder) and openshiftOIDC.consoleClientSecretName
+  # read the same Vault value through External Secrets Operator, so they
+  # always agree. Leave empty to keep the manual step (see README).
+  #
+  # One-shot caveat: like the rest of the realm import, this only takes
+  # effect on a fresh realm import. Setting it after the realm already
+  # exists does not rotate the existing client's secret -- see the README.
+  consoleClientSecretVaultKey: ""
+  consoleClientSecretVaultProperty: console-client-secret
+
+  # Master-realm admin credentials, used only by
+  # realm-secrets-reconciler-job.yaml (an ArgoCD PostSync hook) to
+  # re-assert openshift-console's client secret and consoleAdminUser's
+  # password directly against the running realm on every sync -- this is
+  # what makes those two one-shot-substituted values above self-heal instead
+  # of silently staying wrong forever if the substitution ever loses its
+  # startup race (see that file's comment). This Secret is created by the
+  # separate "keycloak" application's rhbk chart (its
+  # keycloak.adminUser.passwordVaultKey), not this chart.
+  adminUser:
+    secretName: keycloak-admin-user
+    usernameKey: username
+    passwordKey: password
+
+  # SPIFFE identity provider the two confidential agent clients below
+  # authenticate against instead of a static secret (federated client
+  # authentication -- see https://www.keycloak.org/2026/01/federated-client-authentication).
+  # Both the identity provider and the per-client federated-jwt config are
+  # fully templated: no manual Admin Console step is required.
+  spiffeIdentityProvider:
+    enabled: true
+    alias: spiffe
+    # Bare SPIFFE trust domain, e.g. apps.<cluster-domain> -- same value and
+    # format as identity.clusterSpiffeID.trustDomain in charts/all/rca-agent
+    # and charts/all/acme-agent (see the zero-trust-workload-identity-manager
+    # application's comment in values-standalone.yaml). This template adds
+    # the "spiffe://" scheme itself.
+    trustDomain: ""
+    # SPIRE's OIDC discovery provider JWKS endpoint, e.g.
+    # https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
+    bundleEndpoint: ""
+  # Confidential client that exists only so rca-agent-mcp's RFC 8693 token
+  # exchange has a real client_id to request as its `audience` parameter --
+  # Keycloak's standard (V2) token exchange requires the audience parameter
+  # to name an actual client in the realm, it cannot be an arbitrary string.
+  # This client never itself authenticates. Must match
+  # identity.keycloak.tokenExchange.audience in charts/all/rca-agent and
+  # openshiftOIDC.extraAudiences below.
+  mcpAudienceClientId: openshift-mcp
+  mcpAudienceClientName: OpenShift MCP (token-exchange audience)
+  # Audience value rca-agent's own inbound Keycloak validation requires
+  # (identity.keycloak.audiences in charts/all/rca-agent) -- unlike
+  # mcpAudienceClientId above, this is added to acme-agent's token via
+  # oidc-audience-mapper's included.custom.audience, a plain string with no
+  # backing client at all. It doesn't need one: the only thing that checks
+  # this value is rca_agent's own Python code (KeycloakTokenValidator), which
+  # has no Keycloak-side requirement that it correspond to a real client --
+  # unlike the token-exchange audience, which Keycloak's own exchange grant
+  # requires to name one. Must match charts/all/rca-agent's
+  # identity.keycloak.audiences exactly.
+  rcaAgentAudience: rca-agent
+  # The namespace/ServiceAccount pair ZTWIM/SPIRE issues acme-agent's and
+  # rca-agent's JWT-SVIDs for, used to compute each confidential client's
+  # expected federated subject (spiffe://<trustDomain>/ns/<namespace>/sa/<serviceAccount>).
+  # Must match charts/all/acme-agent's and charts/all/rca-agent's own
+  # Deployment/ServiceAccount namespaces exactly, or Keycloak will reject the
+  # client assertion with "Invalid client or Invalid client credentials".
+  acmeWorkload:
+    namespace: acme-agent
+    serviceAccount: acme-agent
+  mcpWorkload:
+    namespace: lightspeed-agentic-operator
+    serviceAccount: rca-agent
+
+openshiftOIDC:
+  enabled: false
+  providerName: keycloak
+  issuerURL: ""
+  # The web console's public route, e.g.
+  # https://console-openshift-console.apps.<cluster-domain>. Used both as
+  # the redirect URI Keycloak accepts for keycloak.consoleClientId and to
+  # register the console as an OIDC platform client below. Find it with:
+  #   oc whoami --show-console
+  consoleRoute: ""
+  # Name of a Secret in the openshift-config namespace, key "clientSecret",
+  # holding keycloak.consoleClientId's secret. When
+  # keycloak.consoleClientSecretVaultKey is set, this chart creates this
+  # Secret itself via External Secrets Operator; otherwise it must be
+  # created manually with Keycloak's generated secret (see the README).
+  consoleClientSecretName: openshift-console-oidc
+  # Extra token audiences to accept beyond the required platform client IDs
+  # (keycloak.clientId for the CLI, keycloak.consoleClientId for the
+  # console). openshift-mcp must always be included here: it is the
+  # audience rca-agent's identity.keycloak.tokenExchange.audience
+  # (charts/all/rca-agent) exchanges the caller's token for, and
+  # openshift-mcp-server forwards that exchanged token straight to this API
+  # server (cluster_auth_mode=passthrough) -- without it in this list, the
+  # API server's OIDC authenticator rejects every AgenticRun call RCA makes,
+  # even though the exchange itself succeeds.
+  extraAudiences:
+    - openshift-mcp
+  usernameClaim: sub
+  usernamePrefix: "keycloak:"
+  groupsClaim: groups
+  groupsPrefix: "keycloak:"
+  caConfigMapName: ""
+
+# Cluster-admin ServiceAccount + non-expiring token Secret in
+# openshift-config, independent of Authentication/cluster's spec.type: it
+# keeps working no matter what openshiftOIDC.enabled is set to, since
+# ServiceAccount tokens never go through the OAuth/OIDC login flow. Run
+# `make admin-break-glass-kubeconfig` (Makefile) to turn the token into a
+# local kubeconfig file once this is deployed. See the README section
+# "Keeping admin access after enabling OIDC". Off by default -- a standing
+# cluster-admin credential is a permanent addition to the cluster's attack
+# surface, so opt in deliberately rather than getting it for free.
+breakGlass:
+  enabled: false
+  serviceAccountName: admin-break-glass
+
+agenticRun:
+  namespace: lightspeed-agentic-operator
+  roleName: rca-agent-user
+  # Every group listed here can create/get AgenticRuns and get AnalysisResults
+  # (agentic-rbac.yaml) -- this only controls whether a caller may act on the
+  # CRD at all, not which spec.targetNamespaces it may request inside the
+  # object body. That finer-grained check is namespaceAllowlist below,
+  # enforced at admission time by agentic-vap-namespace-scope.yaml.
+  groupNames:
+    - keycloak:rca-agenticrun
+    - keycloak:acme-agent-rca
+  # Per-caller allow-list of AgenticRun spec.targetNamespaces, keyed by the
+  # bare group name (the ValidatingAdmissionPolicy strips openshiftOIDC.groupsPrefix
+  # at evaluation time -- ConfigMap data keys can't contain ":"). "*" allows
+  # any namespace, including an omitted spec.targetNamespaces (used for human
+  # rca-agenticrun, matching this repo's behavior before this allow-list existed).
+  # Any other value is a comma-separated allow-list, and -- importantly --
+  # the CRD treats an omitted spec.targetNamespaces as "not namespace-scoped,
+  # the analysis agent decides from context" (crds/agentic.openshift.io_agenticruns.yaml),
+  # which is not something a restricted caller should be able to reach for:
+  # agentic-vap-namespace-scope.yaml denies a restricted caller that omits
+  # spec.targetNamespaces entirely, it does not treat omission as unscoped.
+  # A caller with no entry here, or an entry that doesn't cover a requested
+  # namespace, is denied -- deny by default, so a newly onboarded caller
+  # group must be given an explicit entry before it can target anything.
+  namespaceAllowlist:
+    rca-agenticrun: "*"
+    # Replace with the real namespaces acme-agent may request analysis
+    # against, comma-separated (e.g. "payments,checkout"). Left empty (deny
+    # all) until set explicitly for this environment.
+    acme-agent-rca: ""
+
+# ClusterSecretStore used by console-client-secret.yaml (Vault-backed,
+# matching the rest of this pattern's External Secrets usage).
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+realmImport:
+  enabled: true
+  syncWave: "5"
+
+# Image for realm-secrets-reconciler-job.yaml. Needs only python3's stdlib
+# (json/urllib) -- no curl/jq dependency to pin separately. Pin a real tag,
+# not "latest", for the same reason praxis-proxy's chart does.
+realmSecretsReconciler:
+  image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
+
+rbac:
+  enabled: true
+  syncWave: "10"
