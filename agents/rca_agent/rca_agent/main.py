@@ -6,7 +6,6 @@ from google.adk.a2a.utils.agent_to_a2a import to_a2a
 
 from .agent import root_agent
 from .identity import A2AAuthenticationMiddleware, KeycloakTokenValidator, WorkloadIdentityProvider
-from .opa import OpaAuthorizer
 
 _a2a_app = to_a2a(
     root_agent,
@@ -32,12 +31,5 @@ a2a_app = A2AAuthenticationMiddleware(
         audience=os.getenv("SPIFFE_JWT_AUDIENCE", ""),
         socket_path=os.getenv("SPIFFE_ENDPOINT_SOCKET", ""),
         timeout_seconds=float(os.getenv("SPIFFE_TIMEOUT_SECONDS", "5")),
-    ),
-    # Required: OpaAuthorizer.__init__ raises if OPA_URL is unset, failing
-    # startup rather than silently letting a valid Keycloak token become
-    # sufficient authorization on its own.
-    opa=OpaAuthorizer(
-        url=os.getenv("OPA_URL", ""),
-        timeout_seconds=float(os.getenv("OPA_TIMEOUT_SECONDS", "5")),
     ),
 )

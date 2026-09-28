@@ -2,7 +2,9 @@
 
 The agent uses ZTWIM/SPIRE for its own short-lived workload identity and
 Keycloak as the issuer of caller access tokens. Both checks are required for
-an A2A request; there is no anonymous or development authentication mode.
+an authenticated A2A request; there is no anonymous or development
+authentication mode. The Praxis gateway owns caller authorization before
+requests reach this app.
 """
 
 from __future__ import annotations
@@ -20,8 +22,6 @@ from uuid import uuid4
 import httpx
 import jwt
 from spiffe import WorkloadApiClient
-
-from .opa import OpaAuthorizationError, OpaAuthorizer
 
 
 class AuthenticationError(Exception):
@@ -314,25 +314,17 @@ def _bearer_token(scope: dict[str, Any]) -> Optional[str]:
 
 
 class A2AAuthenticationMiddleware:
-    """Protect the A2A app while leaving public agent-card discovery available."""
+    """Validate request identity; keep discovery public and authorization at Praxis."""
 
     def __init__(
         self,
         app: Any,
         keycloak: KeycloakTokenValidator,
         workload: WorkloadIdentityProvider,
-        opa: OpaAuthorizer,
     ):
         self.app = app
         self.keycloak = keycloak
         self.workload = workload
-        # Required, not optional: a valid Keycloak token only proves who the
-        # caller is, not that it's allowed to invoke this agent at all (see
-        # opa.py). Making this optional would let a deployment mistake (an
-        # unset OPA_URL) silently turn "valid Keycloak token" into
-        # sufficient authorization -- the same fail-closed posture as
-        # keycloak/workload above, which are also not optional.
-        self.opa = opa
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") != "http":
@@ -349,15 +341,13 @@ class A2AAuthenticationMiddleware:
                 await asyncio.gather(
                     asyncio.to_thread(self.keycloak.check_available),
                     asyncio.to_thread(self.workload.get_identity),
-                    asyncio.to_thread(self.opa.check_available),
                 )
             except (
                 AuthenticationError,
                 WorkloadIdentityError,
                 IdentityConfigurationError,
-                OpaAuthorizationError,
             ):
-                await self._send_error(send, 503, "Keycloak, workload identity, and OPA are not all ready")
+                await self._send_error(send, 503, "Keycloak and workload identity are not both ready")
                 return
             await self._send_json(send, 200, {"status": "ready"})
             return
@@ -374,12 +364,6 @@ class A2AAuthenticationMiddleware:
             }
         except (AuthenticationError, WorkloadIdentityError, IdentityConfigurationError):
             await self._send_error(send, 401, "A valid Keycloak bearer token and workload identity are required")
-            return
-
-        try:
-            await asyncio.to_thread(self.opa.authorize, claims)
-        except OpaAuthorizationError:
-            await self._send_error(send, 403, "Caller is not permitted to invoke this agent")
             return
 
         request_id = next(

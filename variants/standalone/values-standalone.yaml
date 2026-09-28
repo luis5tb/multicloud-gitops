@@ -237,27 +237,35 @@ clusterGroup:
         # agent) refuses to fetch or trust an agent card advertising a
         # non-loopback plain-http RPC url -- the in-cluster Service DNS name
         # no longer qualifies once a real caller (ericsson-agent, a different
-        # pod) resolves it. Route this agent behind an edge-TLS Route instead
-        # and advertise that origin in the agent card.
+        # pod) resolves it. Route this agent through the edge-TLS Praxis
+        # authorization gateway and advertise that origin in the agent card.
         - name: route.enabled
+          value: "false"
+        - name: networkPolicy.enabled
           value: "true"
-        - name: route.host
-          value: rca-agent.apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: a2a.publicHost
           value: rca-agent.apps.ocp.rn64n.sandbox5199.opentlc.com
         - name: a2a.publicPort
           value: "443"
         - name: a2a.publicProtocol
           value: https
-    opa:
-      name: rca-agent-opa
-      # Same namespace as rca-agent: identity.opa.url in that chart's
-      # overrides above (charts/all/rca-agent/values.yaml default) resolves
-      # this Service by short in-cluster DNS name, which only works
-      # same-namespace.
+    praxis-proxy:
+      name: praxis-proxy
       namespace: lightspeed-agentic-operator
       argoProject: hub
-      path: charts/all/opa
+      path: charts/all/praxis-proxy
+      overrides:
+        # Replace the former direct RCA Route with the policy-enforcing
+        # gateway. RCA ingress is limited to this same-namespace proxy by the
+        # NetworkPolicy configured on the rca-agent application above.
+        - name: route.enabled
+          value: "true"
+        - name: route.host
+          value: rca-agent.apps.ocp.rn64n.sandbox5199.opentlc.com
+        - name: identity.keycloak.issuerUrl
+          value: https://keycloak.apps.ocp.rn64n.sandbox5199.opentlc.com/realms/rca
+        - name: upstream.host
+          value: rca-agent.lightspeed-agentic-operator.svc.cluster.local
     ericsson-agent:
       name: ericsson-agent
       namespace: ericsson-agent

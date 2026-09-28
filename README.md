@@ -47,6 +47,11 @@ The steps are the next:
 See the [lightspeed-agentic-operator chart README](charts/all/lightspeed-agentic-operator/README.md)
 for instructions on configuring, using, and testing the operator.
 
+The RCA A2A service is fronted by the Praxis AI gateway and its embedded
+Praxis Policy Engine. See [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md)
+for the request flow and [`charts/all/praxis-proxy/README.md`](charts/all/praxis-proxy/README.md)
+for deployment, policy, and upstream maturity details.
+
 ## MAO Configuration
 
 The standalone variant deploys the MAO runtime from

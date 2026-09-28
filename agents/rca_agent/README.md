@@ -1,10 +1,12 @@
 # RCA Agent
 
 `rca_agent` is a Google Agent Development Kit (ADK) agent exposed through
-Agent2Agent (A2A). It validates the caller's Keycloak bearer token and its own
-ZTWIM/SPIRE workload identity, creates an analysis-only `AgenticRun` through
-the upstream `openshift/openshift-mcp-server`, polls it, and returns the
-diagnosis plus remediation proposals from the `AnalysisResult`.
+Agent2Agent (A2A), behind the Praxis AI gateway deployed by this Pattern. The
+gateway validates the caller token and enforces the native APL caller
+allow-list; the agent independently validates the Keycloak bearer token and
+its own ZTWIM/SPIRE workload identity. It creates an analysis-only
+`AgenticRun` through the upstream `openshift/openshift-mcp-server`, polls it,
+and returns the diagnosis plus remediation proposals from the `AnalysisResult`.
 
 It never creates an approval, execution, or verification step. The inbound
 caller token is validated and kept in memory for the request only. RCA then
@@ -17,12 +19,12 @@ sandbox.
 The delegated flow is:
 
 ```text
-User/UI -> Ericsson A2A --validated Keycloak JWT--> RCA A2A
-                                                   RCA validates caller JWT
-                                                   RCA gets its SPIFFE JWT-SVID
-                                                   RCA exchanges caller JWT at Keycloak
-                                                   RCA --MCP-scoped JWT--> OpenShift MCP
-                                                   AgenticRun: RCA executing on behalf of caller
+User/UI -> Ericsson A2A --Keycloak JWT--> Praxis Proxy --allow-listed--> RCA A2A
+                                         Praxis validates + authorizes     RCA validates caller JWT
+                                                                          RCA gets its SPIFFE JWT-SVID
+                                                                          RCA exchanges caller JWT at Keycloak
+                                                                          RCA --MCP-scoped JWT--> OpenShift MCP
+                                                                          AgenticRun: RCA executing on behalf of caller
 ```
 
 The exchanged token must be issued for the `openshift-mcp` audience (or the
@@ -50,12 +52,14 @@ cannot authenticate itself to perform a token exchange. See
   ServiceAccount and the `rca-agent` JWT audience.
 - A LiteLLM-compatible endpoint and an API key delivered through a Secret.
 - When another agent (e.g. `ericsson-agent`) calls this one over the network,
-  it must be reachable over https, or over http only on a loopback host --
+  the Praxis Route must be reachable over https, or over http only on a
+  loopback host --
   google-adk's `RemoteA2aAgent` refuses both the agent-card fetch and the
   card's own advertised RPC url otherwise. Enable `route.enabled` (edge TLS)
-  and set `a2a.publicHost`/`a2a.publicPort`/`a2a.publicProtocol` to that
-  route's https origin; do not point callers at the in-cluster Service DNS
-  name. See `AUTHENTICATION.md`'s Troubleshooting section.
+  on `praxis-proxy`, keep it disabled on `rca-agent`, and set
+  `a2a.publicHost`/`a2a.publicPort`/`a2a.publicProtocol` to the Praxis Route's
+  https origin; do not point callers at the in-cluster RCA Service DNS name.
+  See `AUTHENTICATION.md`'s Troubleshooting section.
 
 ## Local setup
 
@@ -90,6 +94,11 @@ export KEYCLOAK_CLIENT_ASSERTION_TYPE='urn:ietf:params:oauth:client-assertion-ty
 uvicorn rca_agent.main:a2a_app --app-dir agents/rca_agent --host 0.0.0.0 --port 8000
 ```
 
+This direct local command does not run the Praxis caller allow-list. The RCA
+process still validates Keycloak and SPIFFE identity, but production callers
+must reach it through Praxis; use only a controlled local development setup
+when running the app directly.
+
 ADK uses LiteLLM for the model call. Configure the provider, upstream model,
 and provider credentials in the LiteLLM proxy; do not put provider keys in this
 repository or in Helm values.
@@ -122,7 +131,12 @@ timeout returns the latest run status so it can be inspected with MCP or `oc`.
 
 ## Helm charts
 
-The RCA chart is at [`charts/all/rca-agent`](../../charts/all/rca-agent). The
+The RCA chart is at [`charts/all/rca-agent`](../../charts/all/rca-agent); its
+NetworkPolicy is enabled by default and restricts Service ingress to the Praxis
+proxy pods. The Praxis gateway chart is at
+[`charts/all/praxis-proxy`](../../charts/all/praxis-proxy). Its public Route
+replaces the former direct RCA Route and evaluates the `ericsson-agent`
+allow-list using Praxis Policy Engine (APL). The
 companion [`charts/all/openshift-mcp-server`](../../charts/all/openshift-mcp-server)
 deploys the upstream OpenShift MCP image in passthrough mode and allowlists
 only the two generic resource tools required by this agent. The
@@ -178,6 +192,11 @@ helm upgrade --install rca-agent charts/all/rca-agent \
   --namespace lightspeed-agentic-operator --create-namespace \
   --set image.repository=quay.io/<organization>/rca-agent \
   --set image.tag=<immutable-tag> \
+  --set route.enabled=false \
+  --set networkPolicy.enabled=true \
+  --set a2a.publicHost=rca-agent.apps.example.com \
+  --set a2a.publicPort=443 \
+  --set a2a.publicProtocol=https \
   --set identity.keycloak.issuerUrl='https://keycloak.apps.example.com/realms/rca' \
   --set identity.keycloak.audiences[0]=rca-agent \
   --set identity.keycloak.audiences[1]=openshift \
@@ -185,6 +204,24 @@ helm upgrade --install rca-agent charts/all/rca-agent \
   --set identity.keycloak.tokenExchange.audience=openshift-mcp \
   --set litellm.vaultKey='secret/data/global/rca-agent-litellm'
 ```
+
+Keep the RCA Route off and restrict its Service to the proxy pods, then expose
+the Praxis Route on the public A2A host:
+
+```bash
+helm upgrade --install praxis-proxy charts/all/praxis-proxy \
+  --namespace lightspeed-agentic-operator \
+  --set route.enabled=true \
+  --set route.host=rca-agent.apps.example.com \
+  --set identity.keycloak.issuerUrl='https://keycloak.apps.example.com/realms/rca' \
+  --set upstream.host=rca-agent.lightspeed-agentic-operator.svc.cluster.local
+```
+
+Set the RCA `a2a.publicHost` to `rca-agent.apps.example.com`,
+`a2a.publicPort` to `443`, and `a2a.publicProtocol` to `https` so the
+unauthenticated agent card still advertises the public gateway origin. The
+RCA NetworkPolicy selector assumes the Praxis chart release name is
+`praxis-proxy` and both charts are in the same namespace.
 
 The chart creates an `ExternalSecret` with the `LITELLM_API_KEY` key. To use a
 pre-existing Secret instead, set `litellm.existingSecret.name` and leave
@@ -218,9 +255,12 @@ the image pull Secret in `image.pullSecrets`. Avoid `latest` in production.
 ```bash
 pytest -q agents/rca_agent/tests
 helm lint charts/all/rca-agent
+helm lint charts/all/praxis-proxy
 helm lint charts/all/openshift-mcp-server
 helm lint charts/all/keycloak-oidc
 ```
 
-The unit test verifies that the generated AgenticRun contains no execution,
-verification, or MCP-token fields.
+The unit tests cover caller-token and workload-identity validation, context
+propagation, public discovery/readiness handling, and analysis-only
+AgenticRun creation. The Praxis chart policy declares public agent-card and
+readiness routes plus a fail-closed allow-listed HTTP catch-all.

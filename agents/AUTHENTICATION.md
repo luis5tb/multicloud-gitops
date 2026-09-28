@@ -56,8 +56,8 @@ sequenceDiagram
     participant Eric as ericsson-agent
     participant LLM as LiteLLM proxy
     participant KC as Keycloak (rca realm)
+    participant Praxis as praxis-proxy (Praxis Policy Engine)
     participant RCA as rca-agent
-    participant OPA as rca-agent-opa
     participant MCP as openshift-mcp-server
     participant API as OpenShift API server
     participant Op as lightspeed-agentic-operator
@@ -74,18 +74,20 @@ sequenceDiagram
     Eric->>KC: POST /token, client_assertion=JWT-SVID<br/>(client_id=ericsson-agent, jwt-spiffe grant)
     KC-->>Eric: access_token
 
-    Eric->>RCA: POST / (A2A), Authorization: Bearer <access_token>
+    Eric->>Praxis: POST / (A2A), Authorization: Bearer <access_token>
 
-    Note over RCA: A2AAuthenticationMiddleware
-    RCA->>KC: GET /.well-known/openid-configuration + JWKS
+    Note over Praxis: Praxis policy filter validates the JWT with Keycloak JWKS
+    Praxis->>KC: GET /.well-known/openid-configuration + JWKS
+    Praxis->>Praxis: APL allow-list: claim.azp == ericsson-agent
+    Note over Praxis: Invalid JWT, non-allow-listed client, or policy failure<br/>is denied with 401/403 before forwarding (fail closed).
+    Praxis->>RCA: Forward allowed A2A request and original bearer token
+
+    Note over RCA: A2AAuthenticationMiddleware (independent validation)
+    RCA->>KC: Validate caller token with cached JWKS
     RCA->>RCA: Validate caller token (sig, iss, aud, exp)
     RCA->>RCA: Fetch own JWT-SVID from ZTWIM/SPIRE<br/>(spiffe://.../ns/lightspeed-agentic-operator/sa/rca-agent)
 
-    Note over RCA,OPA: Not a Kubernetes admission decision -- this A2A call<br/>never reaches the API server, so nothing outside rca-agent's own<br/>code can intercept it (see charts/all/opa/README.md)
-    RCA->>OPA: POST /v1/data/rca/authorization/allow<br/>input.azp = ericsson-agent
-    OPA-->>RCA: result: true or false
-    Note over RCA: false, or OPA unreachable, denies with 403<br/>(opa.py's OpaAuthorizer, fails closed)
-
+    Note over Praxis,RCA: The public OpenShift Route targets Praxis, not RCA.<br/>An RCA NetworkPolicy allows ingress only from Praxis pods,<br/>so callers cannot bypass the authorization boundary.
     Note over RCA,LLM: A different static LITELLM_API_KEY (own Secret) --<br/>same kind of credential as ericsson-agent's, still unrelated to the caller
     RCA->>LLM: chat completion (Authorization: Bearer LITELLM_API_KEY)
     LLM-->>RCA: tool-call decision: create_and_wait_for_analysis
@@ -143,7 +145,7 @@ sequenceDiagram
 
     Eric->>RCA: Authorization: Bearer Token A
 
-    Note over RCA: Validates Token A -- proves it is a legitimate,<br/>correctly-audienced Keycloak token, not that ericsson-agent<br/>may call rca-agent (that is the separate OPA check)
+    Note over RCA: Validates Token A -- proves it is a legitimate,<br/>correctly-audienced Keycloak token. The separate Praxis APL<br/>allow-list already authorized the client at the proxy boundary.
 
     Note over RCA,KC: Grant 2 -- RFC 8693 token exchange.<br/>rca-agent authenticates itself as client rca-agent-mcp for<br/>THIS call -- Token A is passed as subject_token, not as its own credential.
     RCA->>KC: client_assertion = rca-agent's own JWT-SVID<br/>grant_type = token-exchange<br/>subject_token = Token A<br/>audience = openshift-mcp
@@ -545,9 +547,9 @@ oc get authentication.config.openshift.io cluster -o jsonpath='{.spec.oidcProvid
 oc get agenticrun -n lightspeed-agentic-operator
 oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=lightspeed-agentic-operator -f
 
-# 7. The inbound OPA check (before the caller-token/token-exchange logs in
-#    step 2 above -- a 403 here means step 2 never ran KeycloakTokenExchanger)
-oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=opa -f
+# 7. Praxis ingress authorization (before the caller-token/token-exchange
+#    logs in step 2 above -- a deny here means RCA never received the request)
+oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=praxis-proxy -f
 
 # 8. Whether the namespace-scoping ValidatingAdmissionPolicy is why an
 #    AgenticRun create was rejected -- the API server returns the policy's
@@ -654,16 +656,18 @@ oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namesp
   arbitrary string. Separately, (4) the *subject_token* being exchanged
   (ericsson-agent's token from step 3) must already carry `rca-agent-mcp` as
   an audience, or the exchange is rejected outright regardless of the above.
-- **ericsson-agent's calls to rca-agent now get a generic `403` after
-  previously working**: check `oc logs ... -l app.kubernetes.io/name=opa`
-  (tracing step 7) before looking anywhere else -- this is the inbound OPA
-  check (`opa.py`'s `OpaAuthorizer`), evaluated *before* Keycloak-validated
-  claims ever reach `rca_agent`'s own tool logic, and it fails closed: an
-  unreachable/erroring `rca-agent-opa` denies every caller, not just a
-  misconfigured one. Confirm `charts/all/opa`'s `policy.allowedCallers`
-  actually lists the caller's `azp` value, and that `identity.opa.url` in
-  `charts/all/rca-agent` resolves (same-namespace short DNS name by default
-  -- wrong if `opa`'s Application namespace ever diverges from rca-agent's).
+- **ericsson-agent's calls to rca-agent now get a generic `401` or `403` after
+  previously working**: inspect `praxis-proxy` logs first. Its embedded Praxis
+  Policy Engine validates the Keycloak JWT and applies the APL allow-list
+  before forwarding; unknown clients and identity/policy errors fail closed.
+  Confirm `policy.allowedCallers` in `charts/all/praxis-proxy/values.yaml`
+  includes the token's `azp`, the issuer and audience match the token, and the
+  Praxis pod can fetch Keycloak's JWKS. If the proxy allows the request but
+  RCA rejects it, inspect the `rca-agent` logs next:
+  RCA independently validates the same bearer token and its SPIFFE workload
+  identity. Also verify the RCA NetworkPolicy admits the Praxis pod selector;
+  do not disable it to work around a selector mismatch, since that would
+  restore a direct path around the proxy.
 - **An `AgenticRun` create is rejected with a message mentioning
   `spec.targetNamespaces`**: this is `agentic-vap-namespace-scope.yaml`'s
   `ValidatingAdmissionPolicy`, not RBAC or Keycloak -- RBAC only decided the

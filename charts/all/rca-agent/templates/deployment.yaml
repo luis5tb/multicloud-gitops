@@ -121,10 +121,6 @@ spec:
               value: {{ .Values.identity.timeoutSeconds | quote }}
             - name: SPIFFE_TIMEOUT_SECONDS
               value: {{ .Values.identity.timeoutSeconds | quote }}
-            - name: OPA_URL
-              value: {{ .Values.identity.opa.url | quote }}
-            - name: OPA_TIMEOUT_SECONDS
-              value: {{ .Values.identity.opa.timeoutSeconds | quote }}
             {{- if .Values.identity.keycloak.caBundle }}
             - name: KEYCLOAK_CA_BUNDLE
               value: {{ .Values.identity.keycloak.caBundle | quote }}
