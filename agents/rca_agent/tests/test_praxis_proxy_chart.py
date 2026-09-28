@@ -86,7 +86,7 @@ def test_praxis_policy_filter_precedes_static_rca_routing_and_uses_pinned_image(
     assert filters[2]["clusters"][0]["endpoints"] == [
         "rca-agent.lightspeed-agentic-operator.svc.cluster.local:8000"
     ]
-    assert proxy_config["insecure_options"]["allow_private_endpoints"] is True
+    assert proxy_config["insecure_options"]["allow_private_upstreams"] is True
 
     deployment = _one(resources, "Deployment", "praxis-proxy")
     container = deployment["spec"]["template"]["spec"]["containers"][0]
