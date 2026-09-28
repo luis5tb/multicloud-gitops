@@ -148,7 +148,7 @@ sequenceDiagram
     Eric->>Praxis: Authorization: Bearer Token A
     Praxis->>Praxis: Verify Token A signature, issuer, audience, and expiry
     Praxis->>Praxis: APL checks claim.azp == ericsson-agent
-    Note over Praxis: Praxis forwards Token A unchanged; it does not exchange tokens.
+    Note over Praxis: Praxis forwards Token A unchanged -- it does not exchange tokens.
     Praxis->>RCA: Forward A2A request with Authorization: Bearer Token A
 
     Note over RCA: Independently validates Token A and fetches its own<br/>SPIFFE JWT-SVID. This retains a trusted caller identity for token exchange.
