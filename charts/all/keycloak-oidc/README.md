@@ -86,6 +86,195 @@ worth knowing when debugging directly against Keycloak:
   templated already; it's listed here because it is not obvious from
   Keycloak's own error messages if you ever need to debug it directly.
 
+## AgenticRun authorization: RBAC + namespace-scoping admission policy
+
+**If the `rca` realm has already reached `Done: True`, none of this section's
+Keycloak-side pieces (the `acme-agent-rca` group, its membership, or the
+`groups` protocol mappers on `acme-agent`/`rca-agent-mcp`) take effect
+just from the next sync** -- same one-shot limitation as `keycloak.adminGroupName`
+(see "Keeping admin access after enabling OIDC" below): `KeycloakRealmImport`
+is only applied when the realm doesn't already exist, and isn't continuously
+reconciled after that. Check with:
+
+```bash
+oc get keycloakrealmimport <keycloak.realm, default "rca"> \
+  -n <keycloak.namespace, default "keycloak-system"> -o jsonpath='{.status.conditions}'
+```
+
+If it's already `Done: True`, create the `acme-agent-rca` group manually
+in the Admin Console, add the `groups` mapper to both `acme-agent` and
+`rca-agent-mcp` by hand, and add `acme-agent`'s service account
+(`service-account-acme-agent`) to the group -- matching what
+`keycloak-realm-import.yaml` declares, so a future full realm re-import
+doesn't diverge from what's actually configured.
+
+Two independent RBAC/admission layers, checking two different things:
+
+- `templates/agentic-rbac.yaml` grants every group in `agenticRun.groupNames`
+  `create`/`patch`/`get` on `agenticruns` and `get` on `analysisresults`, in
+  `agenticRun.namespace`. `patch` is required even though callers only ever
+  create AgenticRuns with a fresh, unique name -- the MCP tool backing this
+  (`resources_create_or_update`) upserts via Kubernetes Server-Side Apply,
+  which the API server always processes as a `PATCH`, even for objects that
+  don't exist yet (see `charts/all/openshift-mcp-server/README.md`). This is
+  coarse: it decides whether a caller may act on the CRD at all, the same way
+  any other RBAC grant would.
+- `templates/agentic-vap-namespace-scope.yaml` (a `ValidatingAdmissionPolicy`)
+  decides which `spec.targetNamespaces` each of those groups may request
+  *inside* an `AgenticRun` it's allowed to create, via `agenticRun.namespaceAllowlist`
+  (bare group name -> `"*"` or a comma-separated namespace list). RBAC has no
+  way to inspect a resource's own spec fields, so it can't express this by
+  itself -- without this policy, any caller with RBAC access to create
+  `AgenticRuns` could target any namespace in the cluster, regardless of
+  which upstream agent it actually represents.
+
+A caller with no `namespaceAllowlist` entry, or one that doesn't cover a
+requested namespace, is denied -- deny by default, so a newly onboarded
+caller group needs an explicit entry before it can target anything. This
+also applies if the caller omits `spec.targetNamespaces` entirely: the CRD
+treats that as "not namespace-scoped, the analysis agent decides from
+context" (`crds/agentic.openshift.io_agenticruns.yaml`), so the policy
+denies a restricted caller that omits the field rather than treating
+omission as unscoped -- only a `"*"` allow-list entry may omit it.
+
+Verify both are active:
+
+```bash
+oc get role,rolebinding -n lightspeed-agentic-operator rca-agent-user
+oc get validatingadmissionpolicy,validatingadmissionpolicybinding | grep agentic
+oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namespace-allowlist -o yaml
+```
+
+### End-to-end verification
+
+This is genuinely two separate things to verify, only one of which can be
+scripted without a live token.
+
+**1. RBAC + the namespace-scoping policy, via impersonation (fully
+scriptable, no live Keycloak token needed).** `oc`'s `--as`/`--as-group`
+populate `request.userInfo` for the *entire* admission chain, including
+`ValidatingAdmissionPolicy` -- so this exercises the same checks a real
+exchanged token would, without needing one:
+
+```bash
+# Positive: the caller group this repo actually grants may create in an
+# allowed namespace (adjust the namespace to one actually in
+# agenticRun.namespaceAllowlist.acme-agent-rca for your environment).
+oc auth can-i create agenticruns \
+  --as=nobody --as-group=keycloak:acme-agent-rca \
+  -n lightspeed-agentic-operator
+
+cat <<'EOF' | oc create --dry-run=server -f - \
+  --as=nobody --as-group=keycloak:acme-agent-rca
+apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: verify-allowed-namespace
+  namespace: lightspeed-agentic-operator
+spec:
+  request: verification
+  targetNamespaces: ["<a-namespace-actually-in-the-allow-list>"]
+  analysis:
+    agent: default
+EOF
+
+# Negative: unauthorized group entirely (no RBAC grant at all).
+oc auth can-i create agenticruns \
+  --as=nobody --as-group=keycloak:company-b-agent-rca \
+  -n lightspeed-agentic-operator
+# expect: no
+
+# Negative: authorized group, but a namespace outside its allow-list --
+# RBAC alone would allow this (it can't see spec fields); the VAP must deny
+# it. A rejection here confirms the policy is actually being evaluated, not
+# just present.
+cat <<'EOF' | oc create --dry-run=server -f - \
+  --as=nobody --as-group=keycloak:acme-agent-rca
+apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: verify-denied-namespace
+  namespace: lightspeed-agentic-operator
+spec:
+  request: verification
+  targetNamespaces: ["some-namespace-not-in-the-allow-list"]
+  analysis:
+    agent: default
+EOF
+# expect: admission webhook "agentic.openshift.io-agenticrun-caller-namespace-scope" denied the request
+
+# Negative: omitted spec.targetNamespaces for a restricted caller --
+# confirm this is denied, not treated as unscoped (see above).
+cat <<'EOF' | oc create --dry-run=server -f - \
+  --as=nobody --as-group=keycloak:acme-agent-rca
+apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: verify-omitted-namespaces
+  namespace: lightspeed-agentic-operator
+spec:
+  request: verification
+  analysis:
+    agent: default
+EOF
+# expect: denied
+```
+
+**2. That the real exchanged token actually carries the `groups` claim
+(needs a live pod -- this is the part that can't be verified without a
+running deployment).** `groups` mappers exist on both `acme-agent` and
+`rca-agent-mcp` (see the comment in `keycloak-realm-import.yaml`) precisely
+because it isn't verified which client's mappers Keycloak's standard V2
+exchange actually applies to the newly-minted, differently-audienced token.
+Confirm by decoding a real exchanged token's payload -- **never log or print
+the full token, only its decoded claims**:
+
+```bash
+# From inside a running rca-agent pod (has httpx + the spiffe SDK already):
+oc exec -n lightspeed-agentic-operator deploy/rca-agent -- python3 -c '
+import base64, json, os
+import httpx
+from spiffe import WorkloadApiClient
+
+# 1. Fetch a caller-shaped token the same way acme-agent does, so this
+#    reproduces a real exchange rather than asserting expected shape.
+#    (Run the equivalent from an acme-agent pod using its own
+#    SPIFFE_JWT_AUDIENCE/client id if you want a fully independent check;
+#    this abbreviated version assumes you already have a caller token.)
+caller_token = os.environ["CALLER_TOKEN_FOR_VERIFICATION"]  # paste one, do not commit it anywhere
+
+with WorkloadApiClient(socket_path=os.environ["SPIFFE_ENDPOINT_SOCKET"]) as c:
+    svid = c.fetch_jwt_svid(audience={os.environ["SPIFFE_JWT_AUDIENCE"]})
+
+resp = httpx.post(
+    os.environ["KEYCLOAK_TOKEN_URL"] or f"{os.environ[\"KEYCLOAK_ISSUER_URL\"]}/protocol/openid-connect/token",
+    data={
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": caller_token,
+        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "client_assertion_type": os.environ["KEYCLOAK_CLIENT_ASSERTION_TYPE"],
+        "client_assertion": svid.token,
+        "audience": os.environ["KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE"],
+    },
+)
+resp.raise_for_status()
+token = resp.json()["access_token"]
+payload = token.split(".")[1]
+payload += "=" * (-len(payload) % 4)
+claims = json.loads(base64.urlsafe_b64decode(payload))
+print(json.dumps({k: claims.get(k) for k in ("iss", "aud", "sub", "azp", "groups", "act")}, indent=2))
+'
+```
+
+Confirm: `iss` is the expected realm, `aud` contains `openshift-mcp`, `sub`
+matches the caller's (not rca-agent's own) subject, `azp` is `rca-agent-mcp`,
+and -- the thing this whole check exists for -- `groups` contains
+`acme-agent-rca`. If it doesn't, the belt-and-suspenders mapper placement
+didn't work and RBAC/the VAP have nothing to key on; see
+`keycloak-realm-import.yaml`'s comment on the `rca-agent-mcp` client's
+`groups` mapper for what to try next.
+
 ## OpenShift Native OIDC
 
 `Authentication/cluster` is a cluster-wide singleton: setting

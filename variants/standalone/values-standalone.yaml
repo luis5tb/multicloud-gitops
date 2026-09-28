@@ -181,6 +181,8 @@ clusterGroup:
           value: lightspeed-agentic-operator
         - name: keycloak.mcpWorkload.serviceAccount
           value: rca-agent
+        - name: agenticRun.namespaceAllowlist.acme-agent-rca
+          value: "payments"
     lightspeed-agentic-operator:
       name: lightspeed-agentic-operator
       namespace: lightspeed-agentic-operator
