@@ -1,0 +1,27 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: agentic-operator-mutating-webhook
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+    # Applied after the operator Deployment (wave 1) so the webhook server is
+    # already serving TLS before the cluster starts enforcing this config.
+    argocd.argoproj.io/sync-wave: "2"
+webhooks:
+  - name: agenticrunapproval-mutator.agentic.openshift.io
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Values.namespace }}
+    clientConfig:
+      service:
+        name: agentic-operator-webhook-service
+        namespace: {{ .Values.namespace }}
+        path: /mutate-agenticrunapproval
+    rules:
+      - operations: ["UPDATE"]
+        apiGroups: ["agentic.openshift.io"]
+        apiVersions: ["v1alpha1"]
+        resources: ["agenticrunapprovals"]
+    failurePolicy: Fail
+    sideEffects: None
+    admissionReviewVersions: ["v1"]

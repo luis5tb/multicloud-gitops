@@ -9,6 +9,7 @@ clusterGroup:
     redhat-ods-operator:
       operatorGroup: true
       targetNamespaces: []
+    lightspeed-agentic-operator:
     openshift-mcp-server:
     mao:
   subscriptions:
@@ -54,6 +55,20 @@ clusterGroup:
       namespace: redhat-ods-operator
       project: openshift-ai
       path: charts/all/rhoai-config
+    lightspeed-agentic-operator:
+      name: lightspeed-agentic-operator
+      namespace: lightspeed-agentic-operator
+      argoProject: hub
+      path: charts/all/lightspeed-agentic-operator
+      overrides:
+        - name: llmProvider.enabled
+          value: "true"
+        - name: llmProvider.type
+          value: vertexAnthropic
+        - name: llmProvider.vertexAnthropic.projectID
+          value: redhat-marketplace-dev
+        - name: llmProvider.vertexAnthropic.region
+          value: global
     openshift-mcp-server:
       name: openshift-mcp-server
       namespace: openshift-mcp-server
