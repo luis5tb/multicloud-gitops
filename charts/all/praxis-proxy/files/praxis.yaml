@@ -28,8 +28,11 @@ admin:
   # Kept on loopback: only container-local health probes can access it.
   address: "127.0.0.1:9901"
 
-# Praxis currently requires this opt-in for its static in-cluster RCA
-# upstream. Keep the upstream fixed in this chart and restrict RCA ingress
-# with the NetworkPolicy in the rca-agent chart.
+# Praxis currently requires both opt-ins for its static in-cluster RCA
+# upstream: allow_private_endpoints for config-load-time validation of the
+# load_balancer cluster endpoint, and allow_private_upstreams for the
+# runtime connection check. Keep the upstream fixed in this chart and
+# restrict RCA ingress with the NetworkPolicy in the rca-agent chart.
 insecure_options:
+  allow_private_endpoints: true
   allow_private_upstreams: true

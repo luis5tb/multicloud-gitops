@@ -45,10 +45,12 @@ public Route, and enable `networkPolicy.enabled`. Keep the proxy and RCA in the
 same namespace unless you also update the RCA NetworkPolicy's pod and namespace
 selectors. The upstream hostname and port are chart values, not caller input.
 
-Praxis 0.4.1 currently requires `insecure_options.allow_private_upstreams` for
-this static in-cluster upstream. That is a broad private-address opt-in, so
+Praxis 0.4.1 currently requires both `insecure_options.allow_private_endpoints`
+(config-load-time validation of the load_balancer cluster endpoint) and
+`insecure_options.allow_private_upstreams` (the runtime connection check) for
+this static in-cluster upstream. Those are broad private-address opt-ins, so
 this chart keeps the destination fixed and relies on the RCA NetworkPolicy for
-ingress isolation. Do not use the flag to proxy user-supplied destinations.
+ingress isolation. Do not use these flags to proxy user-supplied destinations.
 
 ## Checks and diagnostics
 
