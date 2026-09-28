@@ -136,6 +136,7 @@ resulting token's subject.
 sequenceDiagram
     participant Eric as ericsson-agent
     participant KC as Keycloak (rca realm)
+    participant Praxis as praxis-proxy (Praxis Policy Engine)
     participant RCA as rca-agent
     participant MCP as openshift-mcp-server
 
@@ -143,9 +144,14 @@ sequenceDiagram
     Eric->>KC: client_assertion = ericsson-agent's own JWT-SVID<br/>grant_type = client_credentials
     KC-->>Eric: Token A<br/>sub = ericsson-agent's service account (opaque id)<br/>azp = ericsson-agent<br/>aud = rca-agent, rca-agent-mcp<br/>groups = ericsson-agent-rca (from ericsson-agent's own mapper)
 
-    Eric->>RCA: Authorization: Bearer Token A
+    Note over Praxis,KC: Praxis fetches and caches the issuer's discovery data and JWKS.
+    Eric->>Praxis: Authorization: Bearer Token A
+    Praxis->>Praxis: Verify Token A signature, issuer, audience, and expiry
+    Praxis->>Praxis: APL checks claim.azp == ericsson-agent
+    Note over Praxis: Praxis forwards Token A unchanged; it does not exchange tokens.
+    Praxis->>RCA: Forward A2A request with Authorization: Bearer Token A
 
-    Note over RCA: Validates Token A -- proves it is a legitimate,<br/>correctly-audienced Keycloak token. The separate Praxis APL<br/>allow-list already authorized the client at the proxy boundary.
+    Note over RCA: Independently validates Token A and fetches its own<br/>SPIFFE JWT-SVID. This retains a trusted caller identity for token exchange.
 
     Note over RCA,KC: Grant 2 -- RFC 8693 token exchange.<br/>rca-agent authenticates itself as client rca-agent-mcp for<br/>THIS call -- Token A is passed as subject_token, not as its own credential.
     RCA->>KC: client_assertion = rca-agent's own JWT-SVID<br/>grant_type = token-exchange<br/>subject_token = Token A<br/>audience = openshift-mcp
@@ -159,8 +165,10 @@ sequenceDiagram
 `jwt-spiffe`; step 3 below has the real captured claim shapes). ericsson-agent
 proves its own workload identity with its own SPIFFE JWT-SVID. There is no
 `subject_token` here -- this isn't an exchange, it's ericsson-agent getting a
-token *for itself*. The result, Token A, is what's attached to the A2A call
-to rca-agent.
+token *for itself*. The result, Token A, is attached to the A2A call to the
+Praxis public Route. Praxis validates Token A and its `azp` allow-list, then
+forwards the same bearer token to rca-agent; the agent validates it again so
+it can use the caller claims as the RFC 8693 `subject_token`.
 
 **Grant 2 -- rca-agent exchanges Token A for one scoped to OpenShift MCP**
 (`urn:ietf:params:oauth:grant-type:token-exchange`). rca-agent authenticates
