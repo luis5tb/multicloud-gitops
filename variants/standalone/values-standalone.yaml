@@ -202,6 +202,52 @@ clusterGroup:
       namespace: openshift-mcp-server
       argoProject: hub
       path: charts/all/openshift-mcp-server
+    rca-agent:
+      name: rca-agent
+      # Same namespace as lightspeed-agentic-operator: the operator only
+      # watches AgenticRuns/Agents in its own namespace (see
+      # --namespace={{ .Values.namespace }} in that chart's Deployment), so
+      # this is also where AgenticRuns created by this agent must live.
+      namespace: lightspeed-agentic-operator
+      argoProject: hub
+      path: charts/all/rca-agent
+      overrides:
+        - name: image.repository
+          value: quay.io/ltomasbo/rca-agent
+        - name: image.tag
+          value: 9a471781
+        - name: identity.keycloak.issuerUrl
+          value: https://keycloak.apps.ocp.kf8ql.sandbox3578.opentlc.com/realms/rca
+        - name: identity.keycloak.tokenExchange.clientId
+          value: rca-agent-mcp
+        - name: identity.keycloak.tokenExchange.audience
+          value: openshift-mcp
+        - name: identity.clusterSpiffeID.enabled
+          value: "true"
+        # Must match the cluster's trust domain (see the
+        # zero-trust-workload-identity-manager application's comment above).
+        - name: identity.clusterSpiffeID.trustDomain
+          value: apps.ocp.kf8ql.sandbox3578.opentlc.com
+        - name: litellm.apiBase
+          value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
+        - name: litellm.model
+          value: openai/gpt-oss-20b
+        # google-adk's RemoteA2aAgent (used by acme-agent to call this
+        # agent) refuses to fetch or trust an agent card advertising a
+        # non-loopback plain-http RPC url -- the in-cluster Service DNS name
+        # no longer qualifies once a real caller (acme-agent, a different
+        # pod) resolves it. Route this agent through the edge-TLS Praxis
+        # authorization gateway and advertise that origin in the agent card.
+        - name: route.enabled
+          value: "false"
+        - name: networkPolicy.enabled
+          value: "true"
+        - name: a2a.publicHost
+          value: rca-agent.apps.ocp.kf8ql.sandbox3578.opentlc.com
+        - name: a2a.publicPort
+          value: "443"
+        - name: a2a.publicProtocol
+          value: https
     praxis-proxy:
       name: praxis-proxy
       namespace: lightspeed-agentic-operator

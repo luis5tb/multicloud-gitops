@@ -1,0 +1,177 @@
+fullnameOverride: rca-agent
+
+replicaCount: 1
+
+image:
+  repository: quay.io/your-org/rca-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8000
+
+route:
+  enabled: false
+  host: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+a2a:
+  # The A2A agent card this Deployment advertises must point at a reachable,
+  # https-or-loopback origin -- google-adk's RemoteA2aAgent refuses to fetch
+  # (and, once fetched, refuses to trust the RPC url inside) a card served
+  # over plain http on a non-loopback host. In-cluster Service DNS is
+  # non-loopback plain http, so calling agents (e.g. acme-agent) need
+  # this Deployment reachable over TLS -- set these three to match
+  # route.enabled/route.host once that's turned on, rather than the
+  # in-cluster Service DNS name.
+  publicHost: localhost
+  publicPort: 8000
+  publicProtocol: http
+
+litellm:
+  # The ADK agent always calls LiteLLM. The proxy can route to Gemini,
+  # Anthropic, OpenAI, or another approved provider without changing this pod.
+  # This is the ADK_MODEL value the agent's LiteLlm client requests --
+  # matching acme-agent's chart, which reads its own ADK_MODEL from this
+  # same key, so environment overrides work identically for both charts.
+  enabled: true
+  model: openai/rca-agent
+  apiBase: http://litellm.litellm.svc.cluster.local:4000
+  credentialsSecretName: rca-agent-litellm
+  vaultKey: secret/data/global/rca-agent-litellm
+  vaultProperty: api-key
+  existingSecret:
+    name: ""
+    key: LITELLM_API_KEY
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+identity:
+  # ZTWIM/SPIRE identity is mandatory for A2A requests.
+  enabled: true
+  # The SPIFFE CSI driver always names this file spire-agent.sock -- it is
+  # not configurable server-side, so this must match regardless of the mount
+  # path chosen below.
+  workloadApiSocket: unix:///spiffe-workload-api/spire-agent.sock
+  workloadApiMountPath: /spiffe-workload-api
+  timeoutSeconds: 5
+  keycloak:
+    # Set this to the deployed realm issuer, for example:
+    # https://keycloak.keycloak-system.svc.cluster.local/realms/<realm>
+    issuerUrl: ""
+    # Only rca-agent: this validates the *inbound* A2A caller token, not the
+    # exchanged MCP-scoped one (that's identity.keycloak.tokenExchange.audience
+    # below, checked separately downstream at the API server). "openshift" was
+    # previously included here too, but it's the audience openshift-console/
+    # oc login tokens carry (see charts/all/keycloak-oidc's "openshift-audience"
+    # mapper on the public rca-agent client) -- including it widened this
+    # check to accept any such human-login token as a valid rca-agent caller,
+    # which was never the intent and isn't needed: acme-agent's actual
+    # token (agents/AUTHENTICATION.md step 3) only ever carries rca-agent.
+    audiences:
+      - rca-agent
+    tokenExchange:
+      # The RCA client must be allowed to exchange an inbound caller token in
+      # Keycloak. This must be a confidential client distinct from the public
+      # login client used for Native OIDC (see charts/all/keycloak-oidc,
+      # keycloak.mcpClientId) -- a public client cannot authenticate itself
+      # to perform a token exchange.
+      clientId: rca-agent-mcp
+      tokenUrl: ""
+      audience: openshift-mcp
+      # Deliberately empty, not a placeholder to fill in: the groups mapper
+      # rca-agent-mcp needs (charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml)
+      # is attached directly to that client, making it part of its automatic
+      # "dedicated" client scope -- always active on every token it mints,
+      # with no explicit scope= request needed to opt in. Kubernetes RBAC
+      # (agentic-rbac.yaml) and the namespace-scoping ValidatingAdmissionPolicy
+      # are the actual enforcement points regardless; an invented Keycloak
+      # scope string (e.g. "agenticrun:create") wouldn't map to a Kubernetes
+      # verb and wouldn't be enforced by anything unless it named a real,
+      # separately-configured Keycloak client scope -- don't add one here
+      # without first defining that client scope in Keycloak itself.
+      scope: ""
+      clientAssertionType: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+    # Existing path inside the container, if the CA is supplied by another
+    # volume. Prefer caBundleSecret or caBundleConfigMap below.
+    caBundle: ""
+    caBundleSecret:
+      name: ""
+      key: ca.crt
+    caBundleConfigMap:
+      name: ""
+      key: ca.crt
+
+  # ZTWIM must have a matching ClusterSPIFFEID registration. This optional
+  # object is disabled by default because the cluster trust domain is an
+  # installation-specific value.
+  clusterSpiffeID:
+    enabled: false
+    name: rca-agent
+    trustDomain: ""
+
+agenticRun:
+  namespace: ""
+  analysisAgent: default
+  timeoutSeconds: 1200
+  pollIntervalSeconds: 5
+  # Skills bundle attached to every AgenticRun this agent creates. Static
+  # across requests -- override per-deployment if a different skills image or
+  # set of paths is needed.
+  skills:
+    - image: quay.io/openshiftanalytics/agentic-skills:latest
+      paths:
+        - /skills/cluster-troubleshoot/investigate-alert
+
+openshiftMcp:
+  enabled: true
+  url: http://openshift-mcp-server.openshift-mcp-server.svc.cluster.local:8080/mcp
+  transport: streamable-http
+  createTool: resources_create_or_update
+  getTool: resources_get
+  timeoutSeconds: 30
+
+rbac:
+  # The agent uses the caller's bearer token through OpenShift MCP. It must
+  # not receive a service-account Role for AgenticRuns by default.
+  enabled: false
+
+# When enabled, only the Praxis proxy pods selected below may connect to the
+# RCA HTTP Service. This is required when the proxy is the authorization
+# boundary; otherwise an in-cluster caller could bypass its APL policy.
+networkPolicy:
+  enabled: true
+  proxyPodSelector:
+    app.kubernetes.io/name: praxis-proxy
+    app.kubernetes.io/instance: praxis-proxy
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
