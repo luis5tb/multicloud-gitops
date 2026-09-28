@@ -315,6 +315,20 @@ Two things must both be correct, not just the issuer:
    also fully automated when `keycloak.consoleClientSecretVaultKey` is set
    (see below); leave it empty to fall back to the manual step.
 
+   `KeycloakRealmImport`'s `$(CONSOLE_CLIENT_SECRET)` placeholder substitution
+   (used to set this automatically) only ever gets one shot, at import time --
+   if it loses a startup race against the Secret it reads from (observed in
+   practice on a fresh cluster: `ClusterSecretStore` wasn't `Ready` yet), it
+   silently bakes in the literal placeholder text as the client's real secret
+   instead, with `KeycloakRealmImport` still reporting `Done: True`.
+   `realm-secrets-reconciler-job.yaml`, an ArgoCD `PostSync` hook, re-asserts
+   this value (and `consoleAdminUser`'s password, below) directly against the
+   running realm on every sync using `keycloak.adminUser`'s master-realm
+   credentials, so this self-heals on the next sync rather than requiring a
+   manual Admin REST API/Console fix. Check `oc get job -n
+   <keycloak.namespace> <keycloak.realm>-realm-secrets-reconciler` if you
+   suspect it hasn't run.
+
 ### Keeping admin access after enabling OIDC
 
 CLI and console need two separate answers here -- OIDC replaces the login
@@ -386,6 +400,15 @@ manually once in the Admin Console with the same name instead -- the
 `ClusterRoleBinding` itself is a normal, always-reconciled resource and
 doesn't have this limitation.
 
+Unlike the group itself, `consoleAdminUser`'s *password* is covered by
+`realm-secrets-reconciler-job.yaml` (see above): if the initial
+`$(CONSOLE_ADMIN_PASSWORD)` substitution ever loses its startup race and gets
+baked in literally, or the underlying Vault value changes later, this
+PostSync hook resets it back to the current Vault value on the next sync.
+The user itself still isn't retroactively created if `consoleAdminUser` is
+enabled after the realm already imported -- only its password self-heals
+once the user exists.
+
 ### Pre-flight checklist (do this before setting `openshiftOIDC.enabled=true`)
 
 0. Complete "Keeping admin access after enabling OIDC" above: have a
@@ -424,17 +447,26 @@ doesn't have this limitation.
    - **If `keycloak.consoleClientSecretVaultKey` is set** (recommended for a
      fresh install): nothing to do here -- `console-client-secret.yaml`
      already created it via External Secrets Operator, and
-     `keycloak-realm-import.yaml`'s `$(CONSOLE_CLIENT_SECRET)` placeholder
-     set the same value on the client at import time. Confirm it exists:
+     `keycloak-realm-import.yaml`'s `$(CONSOLE_CLIENT_SECRET)` placeholder set
+     the same value on the client at import time, with
+     `realm-secrets-reconciler-job.yaml` re-asserting it on every sync as a
+     backstop (see above) if that one-shot substitution ever loses its
+     startup race. Confirm it exists, and that the two actually match:
 
      ```bash
      oc get secret <openshiftOIDC.consoleClientSecretName, default "openshift-console-oidc"> \
        -n openshift-config
+     oc get job -n <keycloak.namespace, default "keycloak-system"> \
+       <keycloak.realm, default "rca">-realm-secrets-reconciler
      ```
 
-   - **Otherwise** (or if the realm already existed before you set
-     `consoleClientSecretVaultKey` -- see the one-shot caveat on that value
-     in `values.yaml`), get the client's Keycloak-generated secret by hand
+     A login failing with "Authentication error" / the console logging
+     `unable to verify auth code with issuer: ... "Invalid client or Invalid
+     client credentials"` despite this Secret existing means the two are out
+     of sync -- check whether the reconciler Job actually completed
+     successfully.
+
+   - **Otherwise**: get the client's Keycloak-generated secret by hand
      (Admin Console → Clients → `openshift-console` → Credentials tab →
      Client secret) and create the Secret yourself:
 
@@ -443,6 +475,14 @@ doesn't have this limitation.
        -n openshift-config \
        --from-literal=clientSecret='<value from the Credentials tab>'
      ```
+
+     If the realm already existed before you set `consoleClientSecretVaultKey`
+     (the one-shot caveat on that value in `values.yaml`), you no longer need
+     this manual step either: set it and `keycloak.consoleAdminUser.enabled`
+     as needed, sync, and `realm-secrets-reconciler-job.yaml` will set the
+     existing `openshift-console` client's secret to the Vault-backed value
+     directly, the same way it self-heals a botched one-shot substitution
+     above.
 
    Either way, the secret name must match `openshiftOIDC.consoleClientSecretName`,
    and the key must be literally `clientSecret` (required by the

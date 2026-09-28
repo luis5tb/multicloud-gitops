@@ -95,6 +95,20 @@ keycloak:
   consoleClientSecretVaultKey: ""
   consoleClientSecretVaultProperty: console-client-secret
 
+  # Master-realm admin credentials, used only by
+  # realm-secrets-reconciler-job.yaml (an ArgoCD PostSync hook) to
+  # re-assert openshift-console's client secret and consoleAdminUser's
+  # password directly against the running realm on every sync -- this is
+  # what makes those two one-shot-substituted values above self-heal instead
+  # of silently staying wrong forever if the substitution ever loses its
+  # startup race (see that file's comment). This Secret is created by the
+  # separate "keycloak" application's rhbk chart (its
+  # keycloak.adminUser.passwordVaultKey), not this chart.
+  adminUser:
+    secretName: keycloak-admin-user
+    usernameKey: username
+    passwordKey: password
+
   # SPIFFE identity provider the two confidential agent clients below
   # authenticate against instead of a static secret (federated client
   # authentication -- see https://www.keycloak.org/2026/01/federated-client-authentication).
@@ -233,6 +247,12 @@ secretStore:
 realmImport:
   enabled: true
   syncWave: "5"
+
+# Image for realm-secrets-reconciler-job.yaml. Needs only python3's stdlib
+# (json/urllib) -- no curl/jq dependency to pin separately. Pin a real tag,
+# not "latest", for the same reason praxis-proxy's chart does.
+realmSecretsReconciler:
+  image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
 
 rbac:
   enabled: true

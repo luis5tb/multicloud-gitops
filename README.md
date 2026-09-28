@@ -21,26 +21,265 @@ The goal for this pattern is to:
 
 ## Deployment
 
-The steps are the next:
+Deploy from branch `mao-poc-rca-praxis`.
 
-* Copy the secrets:
+### Phase 0 — Before touching the cluster
+
+1. Build and push both agent images (Praxis itself isn't built from this
+   repo -- it pulls a pinned upstream image):
+
+    ```bash
+    export QUAY_ORG=<your-quay-org>
+    podman login quay.io
+
+    export RCA_TAG=$(git rev-parse --short HEAD)
+    podman build -f agents/rca_agent/Containerfile -t quay.io/${QUAY_ORG}/rca-agent:${RCA_TAG} agents/rca_agent
+    podman push quay.io/${QUAY_ORG}/rca-agent:${RCA_TAG}
+
+    export ERICSSON_TAG=$(git rev-parse --short HEAD)
+    podman build -f agents/ericsson_agent/Containerfile -t quay.io/${QUAY_ORG}/ericsson-agent:${ERICSSON_TAG} agents/ericsson_agent
+    podman push quay.io/${QUAY_ORG}/ericsson-agent:${ERICSSON_TAG}
+    ```
+
+2. Fill in the image placeholders in `variants/standalone/values-standalone.yaml`
+   for the `rca-agent` and `ericsson-agent` applications only. `praxis-proxy`
+   needs no image edit -- it pins `ghcr.io/praxis-proxy/ai:0.4.1` by digest in
+   `charts/all/praxis-proxy/values.yaml`. That image is alpha/prerelease
+   upstream software and this integration isn't a Red Hat-supported Praxis
+   distribution -- don't bump `image.tag` without reviewing upstream release
+   notes and re-pinning the digest.
+
+3. Confirm `mao-poc-rca-praxis` is what's pushed and what the new cluster's
+   ArgoCD Application will track:
+
+    ```bash
+    git checkout mao-poc-rca-praxis
+    git push origin mao-poc-rca-praxis
+    ```
+
+### Phase 1 — Install
+
+4. Prepare secrets:
 
     ```bash
     cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
+    $EDITOR ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
     ```
 
-* Install the pattern:
+    - Uncomment `llm-creds-vertex` and point `path:` at a real GCP
+      Application Default Credentials JSON file --
+      `lightspeed-agentic-operator` needs this
+      (`llmProvider.type: vertexAnthropic` is already set in
+      `values-standalone.yaml`).
+    - `rca-agent-litellm` and `ericsson-agent-litellm` will prompt
+      interactively during `load-secrets` (`onMissingValue: prompt`).
+    - Optionally set `breakGlass.enabled: "true"` and
+      `keycloak.adminGroupName` on the `keycloak-oidc` application now,
+      before install (see Phase 3). Leave `openshiftOIDC.enabled: "false"`
+      -- it can't be safely enabled until the cluster (and its real trust
+      domain) exists; see Phase 3.
+
+5. Log into the fresh cluster as cluster-admin, then install:
 
     ```bash
+    oc login <new-cluster-api>
+    make validate-prereq
+    make validate-origin
     ./pattern.sh make install
     ```
 
-* If secrets are added/modified after installation then:
+    This brings up vault, ESO, ZTWIM, Keycloak, RHOAI, MAO,
+    `lightspeed-agentic-operator`, `openshift-mcp-server`, `keycloak-oidc`,
+    `rca-agent`, `praxis-proxy`, and `ericsson-agent` in one shot.
+    `rca-agent`'s own Route stays disabled (`route.enabled: "false"`) and its
+    Service is NetworkPolicy-restricted to same-namespace `praxis-proxy`
+    pods; `praxis-proxy` owns the public Route instead. Everything syncs
+    with placeholder Keycloak URLs and trust domain at first, so
+    `keycloak-oidc`/`rca-agent`/`praxis-proxy`/`ericsson-agent` will be
+    Synced but not functional yet. Expected -- continue to Phase 2.
+
+    If secrets are added/modified after installation, re-run:
 
     ```bash
     cp values-secret.yaml.template ~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml
     ./pattern.sh make load-secrets
     ```
+
+### Phase 2 — Wire up the real cluster-specific values
+
+6. Look up the values the placeholders need:
+
+    ```bash
+    oc get zerotrustworkloadidentitymanager cluster -o jsonpath='{.spec.trustDomain}{"\n"}'
+    ```
+
+    That single value (e.g. `apps.ocp.<hash>.sandboxNNNN.opentlc.com`) is the
+    trust domain, and everything else derives from it:
+
+    - `keycloak-oidc` → `openshiftOIDC.issuerURL` = `https://keycloak.<trustDomain>/realms/rca`
+    - `keycloak-oidc` → `openshiftOIDC.consoleRoute` = `https://console-openshift-console.<trustDomain>` (confirm with `oc whoami --show-console`) -- leave `openshiftOIDC.enabled` `"false"` regardless, until Phase 3
+    - `keycloak-oidc` → `keycloak.spiffeIdentityProvider.trustDomain` = the trust domain itself
+    - `rca-agent` → `identity.keycloak.issuerUrl` = same as `openshiftOIDC.issuerURL`
+    - `rca-agent` → `identity.clusterSpiffeID.trustDomain` = the trust domain itself
+    - `rca-agent` → `a2a.publicHost` = the public A2A hostname you choose (e.g. `rca-agent.<trustDomain>`) -- `rca-agent`'s own Route stays off, so this is used only for agent-card metadata, but it must match `praxis-proxy`'s `route.host` below exactly
+    - `praxis-proxy` → `route.host` = the same hostname as `rca-agent`'s `a2a.publicHost` -- this is the Route actually exposed to callers
+    - `praxis-proxy` → `identity.keycloak.issuerUrl` = same as `openshiftOIDC.issuerURL`
+    - `ericsson-agent` → `auth.keycloak.tokenUrl` = `<issuerURL>/protocol/openid-connect/token`
+    - `ericsson-agent` → `identity.clusterSpiffeID.trustDomain` = the trust domain itself
+    - `ericsson-agent` → `a2a.downstreamEndpoint` = `https://<same hostname as praxis-proxy's route.host>`
+
+7. Edit `variants/standalone/values-standalone.yaml`, replacing the
+   placeholders above with the real values.
+
+8. Verify the realm import actually succeeded -- a real gotcha: on a fresh
+   install, `KeycloakRealmImport` can race the `Keycloak` CR's own creation
+   and fail permanently without retrying.
+
+    ```bash
+    oc get keycloakrealmimport rca -n keycloak-system -o jsonpath='{.status.conditions}'
+    ```
+
+    If you don't see `"type":"Done","status":"True"`, and instead see
+    `HasErrors` mentioning `keycloaks.k8s.keycloak.org "keycloak" not found`:
+    wait for the `Keycloak` CR and its pod to be `Running`, then delete the
+    `KeycloakRealmImport` object and let ArgoCD recreate it -- it'll succeed
+    once the dependency actually exists. Do this before moving on, since the
+    realm import only ever gets one real shot (if you set
+    `breakGlass.enabled`/`adminGroupName` in step 4, this is also the moment
+    those get created correctly).
+
+    Federated-jwt client authentication for `rca-agent-mcp` and
+    `ericsson-agent` against the SPIFFE identity provider, and the RFC 8693
+    token-exchange wiring for `openshift-mcp`, are fully declarative in
+    `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml` -- no
+    manual Admin Console step is required. `praxis-proxy` needs no client
+    registration either -- it authorizes callers by validating their bearer
+    JWT against Keycloak's JWKS and checking the `azp` claim against
+    `policy.allowedCallers`, never acting as a Keycloak client itself.
+
+9. Commit, push, and re-sync:
+
+    ```bash
+    git add variants/standalone/values-standalone.yaml
+    git commit -m "Set cluster-specific Keycloak URL and trust domain"
+    git push origin mao-poc-rca-praxis
+    make argo-healthcheck
+    ```
+
+10. Verify Praxis is actually enforcing the policy:
+
+    ```bash
+    oc get configmap praxis-proxy -n lightspeed-agentic-operator -o yaml   # rendered policy.yaml/praxis.yaml
+    oc logs -n lightspeed-agentic-operator -l app.kubernetes.io/name=praxis-proxy
+    oc get networkpolicy rca-agent -n lightspeed-agentic-operator -o yaml  # ingress restricted to praxis-proxy pods
+
+    # agent-card discovery is intentionally public, no token needed:
+    curl -sf https://<praxis route host>/.well-known/agent-card.json
+
+    # everything else must reject an unauthenticated/non-allow-listed caller:
+    curl -s -o /dev/null -w '%{http_code}\n' https://<praxis route host>/  # expect 401/403
+    ```
+
+At this point `rca-agent`, `praxis-proxy`, and `ericsson-agent` should be
+fully functional: `ericsson-agent`'s Keycloak token reaches the public
+Praxis Route, Praxis validates the token and its `azp` allow-list and
+forwards it unchanged to `rca-agent` (which independently re-validates it
+and does the RFC 8693 token exchange for OpenShift MCP), and RCA's own
+Service is unreachable except from Praxis. See
+[`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) for the full request
+flow.
+
+### Phase 3 — Optional: enable OpenShift Native OIDC
+
+Skip entirely unless you specifically want direct Keycloak login for the
+console and `oc`. Nothing above depends on it, and getting it wrong locks
+out console and CLI login cluster-wide. Full detail is in
+[`charts/all/keycloak-oidc/README.md`](charts/all/keycloak-oidc/README.md);
+short version:
+
+11. Set up admin access first, unconditionally, before touching anything
+    OIDC-related:
+
+    ```bash
+    # if you didn't set these in step 4 already:
+    # breakGlass.enabled: "true" and keycloak.adminGroupName: rca-admins
+    # on the keycloak-oidc application, then: git commit, push, make argo-healthcheck
+    make admin-break-glass-kubeconfig
+    oc --kubeconfig=admin-break-glass.kubeconfig whoami   # verify it works
+    ```
+
+    Move `admin-break-glass.kubeconfig` somewhere safe outside the repo. Add
+    your own user to `keycloak.adminGroupName` in the Admin Console
+    (Users → your user → Groups → Join Group), or set
+    `keycloak.consoleAdminUser.enabled: "true"` to have the chart create a
+    bootstrap admin user for you instead.
+
+12. Get the `openshift-console` client's secret into `openshift-config`. If
+    `keycloak.consoleClientSecretVaultKey` is set, this is already
+    automated -- confirm the Secret exists:
+
+    ```bash
+    oc get secret openshift-console-oidc -n openshift-config
+    ```
+
+    Otherwise, create it by hand from the Admin Console's Credentials tab:
+
+    ```bash
+    oc create secret generic openshift-console-oidc -n openshift-config \
+      --from-literal=clientSecret='<value from the Credentials tab>'
+    ```
+
+13. Walk the rest of the pre-flight checklist in the README (confirm the
+    realm's `.well-known/openid-configuration` is reachable, etc.), then
+    enable it:
+
+    ```bash
+    # openshiftOIDC.enabled: "true" on the keycloak-oidc application
+    git add variants/standalone/values-standalone.yaml
+    git commit -m "Enable OpenShift Native OIDC"
+    git push origin mao-poc-rca-praxis
+    make argo-healthcheck
+    ```
+
+    Verify console and `oc login` both work via Keycloak before
+    disconnecting your current session. If anything's wrong:
+
+    ```bash
+    oc --kubeconfig=admin-break-glass.kubeconfig patch authentication.config.openshift.io cluster \
+      --type=merge -p '{"spec":{"type":"","oidcProviders":null}}'
+    ```
+
+    restores the internal OAuth server immediately.
+
+## Accessing Argo CD
+
+With `global.singleArgoCD: true` (this pattern's default), the hub Argo CD
+instance is always named `vp-gitops`, in the `vp-gitops` namespace --
+regardless of the pattern name -- so this is stable across clusters:
+
+```bash
+export ARGOCD_URL="https://$(oc get route vp-gitops-server -n vp-gitops -o jsonpath='{.spec.host}')"
+export ARGOCD_PASSWORD=$(oc get secret vp-gitops-cluster -n vp-gitops -o jsonpath='{.data.admin\.password}' | base64 -d)
+echo "$ARGOCD_URL"
+echo "$ARGOCD_PASSWORD"
+```
+
+Username is `admin`.
+
+## Accessing Keycloak
+
+Once the `keycloak` application has synced (Phase 1), get the realm's Admin
+Console URL and the operator-generated admin credentials (populated from
+Vault via `keycloak.adminUser.passwordVaultKey`):
+
+```bash
+export KEYCLOAK_URL="https://keycloak.<trustDomain>"   # trustDomain from Phase 2, step 6
+oc get secret keycloak-admin-user -n keycloak-system -o jsonpath='{.data.username}' | base64 -d; echo
+oc get secret keycloak-admin-user -n keycloak-system -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Open `$KEYCLOAK_URL` and select the `rca` realm to inspect the clients,
+groups, and identity provider `keycloak-realm-import.yaml` declares.
 
 ## Lightspeed Agentic Operator
 
