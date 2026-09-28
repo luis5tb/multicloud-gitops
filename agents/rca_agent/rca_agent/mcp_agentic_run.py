@@ -285,7 +285,7 @@ def create_and_wait_for_analysis(
         os.getenv("AGENTIC_RUN_NAMESPACE", "default"), "AGENTIC_RUN_NAMESPACE"
     )
     selected_agent = analysis_agent or os.getenv("AGENTIC_RUN_ANALYSIS_AGENT", "default")
-    timeout_seconds = int(os.getenv("AGENTIC_RUN_TIMEOUT_SECONDS", "900"))
+    timeout_seconds = int(os.getenv("AGENTIC_RUN_TIMEOUT_SECONDS", "1200"))
     poll_interval_seconds = float(os.getenv("AGENTIC_RUN_POLL_INTERVAL_SECONDS", "5"))
     if timeout_seconds < 1:
         raise ValueError("AGENTIC_RUN_TIMEOUT_SECONDS must be positive")

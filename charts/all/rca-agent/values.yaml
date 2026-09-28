@@ -124,7 +124,7 @@ identity:
 agenticRun:
   namespace: ""
   analysisAgent: default
-  timeoutSeconds: 900
+  timeoutSeconds: 1200
   pollIntervalSeconds: 5
   # Skills bundle attached to every AgenticRun this agent creates. Static
   # across requests -- override per-deployment if a different skills image or

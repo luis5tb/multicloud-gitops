@@ -286,6 +286,12 @@ clusterGroup:
           value: rca_agent
         - name: a2a.downstreamAgentDescription
           value: Investigates OpenShift incidents and returns root-cause analysis with remediation proposals.
+        # Match rca-agent's agenticRun.timeoutSeconds (charts/all/rca-agent
+        # values.yaml) -- create_and_wait_for_analysis can legitimately run
+        # that long polling the AgenticRun, and the default 60s A2A client
+        # timeout would truncate the response before rca-agent finishes.
+        - name: a2a.requestTimeout
+          value: "1200"
         - name: auth.mode
           value: keycloak
         - name: auth.keycloak.issuerUrl
