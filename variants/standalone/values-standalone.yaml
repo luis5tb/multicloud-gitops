@@ -190,14 +190,30 @@ clusterGroup:
       argoProject: hub
       path: charts/all/lightspeed-agentic-operator
       overrides:
-        - name: llmProvider.enabled
+        - name: llmProviders.vertexAnthropic.enabled
           value: "true"
-        - name: llmProvider.type
-          value: vertexAnthropic
-        - name: llmProvider.vertexAnthropic.projectID
+        - name: llmProviders.vertexAnthropic.projectID
           value: redhat-marketplace-dev
-        - name: llmProvider.vertexAnthropic.region
+        - name: llmProviders.vertexAnthropic.region
           value: global
+        - name: llmProviders.openai.enabled
+          value: "true"
+        - name: llmProviders.openai.name
+          value: litellm-gpt-oss
+        - name: llmProviders.openai.url
+          value: http://litellm.litellm.svc.cluster.local:4000/v1
+        - name: llmProviders.openai.vaultKey
+          value: secret/data/global/llm-creds-openai
+        # AgenticRuns from rca-agent select "default" by default. Route those
+        # to LiteLLM; keep Vertex available as a separately selectable Agent.
+        - name: agents.default.llmProvider
+          value: litellm-gpt-oss
+        - name: agents.default.model
+          value: gpt-oss-20b
+        - name: agents.vertex.llmProvider
+          value: vertex-anthropic
+        - name: agents.vertex.model
+          value: claude-opus-4-6
     openshift-mcp-server:
       name: openshift-mcp-server
       namespace: openshift-mcp-server
@@ -213,6 +229,10 @@ clusterGroup:
       argoProject: hub
       path: charts/all/rca-agent
       overrides:
+        # AgenticRuns created by RCA use the "default" Agent (LiteLLM).
+        # Change to "vertex" to select the Vertex-backed Agent instead.
+        - name: agenticRun.analysisAgent
+          value: default
         - name: image.repository
           value: quay.io/ltomasbo/rca-agent
         - name: image.tag

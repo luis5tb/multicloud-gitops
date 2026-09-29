@@ -1,20 +1,19 @@
-{{- if .Values.llmProvider.enabled }}
-{{- if eq .Values.llmProvider.type "vertexAnthropic" }}
-{{- $p := .Values.llmProvider.vertexAnthropic }}
+{{- $hasDocuments := false }}
+{{ if .Values.llmProviders.vertexAnthropic.enabled }}
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: {{ $p.credentialsSecretName }}
-  namespace: {{ $.Values.namespace }}
+  name: {{ .Values.llmProviders.vertexAnthropic.credentialsSecretName }}
+  namespace: {{ .Values.namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
-  refreshInterval: {{ $.Values.secretStore.refreshInterval }}
+  refreshInterval: {{ .Values.secretStore.refreshInterval }}
   secretStoreRef:
-    name: {{ $.Values.secretStore.name }}
-    kind: {{ $.Values.secretStore.kind }}
+    name: {{ .Values.secretStore.name }}
+    kind: {{ .Values.secretStore.kind }}
   target:
-    name: {{ $p.credentialsSecretName }}
+    name: {{ .Values.llmProviders.vertexAnthropic.credentialsSecretName }}
     template:
       type: Opaque
       data:
@@ -22,58 +21,45 @@ spec:
   data:
     - secretKey: credentials
       remoteRef:
-        key: {{ $p.vaultKey }}
+        key: {{ .Values.llmProviders.vertexAnthropic.vaultKey }}
         property: credentials
 ---
 apiVersion: agentic.openshift.io/v1alpha1
 kind: LLMProvider
 metadata:
-  name: {{ $p.name }}
-  namespace: {{ $.Values.namespace }}
+  name: {{ .Values.llmProviders.vertexAnthropic.name }}
+  namespace: {{ .Values.namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   type: GoogleCloudVertex
   googleCloudVertex:
-    projectID: {{ $p.projectID | quote }}
-    region: {{ $p.region | quote }}
+    projectID: {{ .Values.llmProviders.vertexAnthropic.projectID | quote }}
+    region: {{ .Values.llmProviders.vertexAnthropic.region | quote }}
     modelProvider: Anthropic
     credentialsSecret:
-      name: {{ $p.credentialsSecretName }}
+      name: {{ .Values.llmProviders.vertexAnthropic.credentialsSecretName }}
+{{ $hasDocuments = true }}
+{{ end }}
+{{ if .Values.llmProviders.openai.enabled }}
+{{ if $hasDocuments }}
 ---
-apiVersion: agentic.openshift.io/v1alpha1
-kind: Agent
-metadata:
-  name: {{ $.Values.llmProvider.agent.name }}
-  namespace: {{ $.Values.namespace }}
-  annotations:
-    argocd.argoproj.io/sync-wave: "3"
-    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
-spec:
-  llmProvider:
-    name: {{ $p.name }}
-  model: {{ $p.model | quote }}
-  timeouts:
-    analysisSeconds: {{ $.Values.llmProvider.agent.timeouts.analysisSeconds }}
-    executionSeconds: {{ $.Values.llmProvider.agent.timeouts.executionSeconds }}
-    verificationSeconds: {{ $.Values.llmProvider.agent.timeouts.verificationSeconds }}
-{{- else if eq .Values.llmProvider.type "openai" }}
-{{- $p := .Values.llmProvider.openai }}
+{{ end }}
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: {{ $p.credentialsSecretName }}
-  namespace: {{ $.Values.namespace }}
+  name: {{ .Values.llmProviders.openai.credentialsSecretName }}
+  namespace: {{ .Values.namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
-  refreshInterval: {{ $.Values.secretStore.refreshInterval }}
+  refreshInterval: {{ .Values.secretStore.refreshInterval }}
   secretStoreRef:
-    name: {{ $.Values.secretStore.name }}
-    kind: {{ $.Values.secretStore.kind }}
+    name: {{ .Values.secretStore.name }}
+    kind: {{ .Values.secretStore.kind }}
   target:
-    name: {{ $p.credentialsSecretName }}
+    name: {{ .Values.llmProviders.openai.credentialsSecretName }}
     template:
       type: Opaque
       data:
@@ -81,40 +67,47 @@ spec:
   data:
     - secretKey: api_key
       remoteRef:
-        key: {{ $p.vaultKey }}
+        key: {{ .Values.llmProviders.openai.vaultKey }}
         property: api-key
 ---
 apiVersion: agentic.openshift.io/v1alpha1
 kind: LLMProvider
 metadata:
-  name: {{ $p.name }}
-  namespace: {{ $.Values.namespace }}
+  name: {{ .Values.llmProviders.openai.name }}
+  namespace: {{ .Values.namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   type: OpenAI
   openAI:
+    {{- with .Values.llmProviders.openai.url }}
+    url: {{ . | quote }}
+    {{- end }}
     credentialsSecret:
-      name: {{ $p.credentialsSecretName }}
+      name: {{ .Values.llmProviders.openai.credentialsSecretName }}
+{{ $hasDocuments = true }}
+{{ end }}
+{{ range $agentName, $agent := .Values.agents }}
+{{ if $hasDocuments }}
 ---
+{{ end }}
+{{- $timeouts := $agent.timeouts | default $.Values.agentDefaults.timeouts }}
 apiVersion: agentic.openshift.io/v1alpha1
 kind: Agent
 metadata:
-  name: {{ $.Values.llmProvider.agent.name }}
+  name: {{ $agentName }}
   namespace: {{ $.Values.namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "3"
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   llmProvider:
-    name: {{ $p.name }}
-  model: {{ $p.model | quote }}
+    name: {{ $agent.llmProvider | quote }}
+  model: {{ $agent.model | quote }}
   timeouts:
-    analysisSeconds: {{ $.Values.llmProvider.agent.timeouts.analysisSeconds }}
-    executionSeconds: {{ $.Values.llmProvider.agent.timeouts.executionSeconds }}
-    verificationSeconds: {{ $.Values.llmProvider.agent.timeouts.verificationSeconds }}
-{{- else }}
-{{- fail (printf "llmProvider.type must be \"vertexAnthropic\" or \"openai\", got %q" .Values.llmProvider.type) }}
-{{- end }}
-{{- end }}
+    analysisSeconds: {{ $timeouts.analysisSeconds }}
+    executionSeconds: {{ $timeouts.executionSeconds }}
+    verificationSeconds: {{ $timeouts.verificationSeconds }}
+{{ $hasDocuments = true }}
+{{ end }}

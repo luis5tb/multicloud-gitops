@@ -25,30 +25,29 @@ oc get configmap lightspeed-agentic-configuration -n lightspeed-agentic-operator
 
 ## Enabling an LLMProvider + Agent
 
-`llmProvider.enabled` is `false` by default in this chart, but the
-`standalone` variant (`variants/standalone/values-standalone.yaml`) turns it
-on with `llmProvider.type: vertexAnthropic` out of the box. Only one provider
-is active at a time, picked by `llmProvider.type`: `vertexAnthropic` or
-`openai`. Credentials always come from Vault via an `ExternalSecret` -- never
-commit them to Git. `projectID`/`region` are plain `overrides` in git, not
-routed through Vault: they aren't credentials (comparable to an AWS account
-ID) and the `LLMProvider` CRD has no `secretRef` indirection for them anyway
-(only `credentialsSecret` supports referencing a Secret).
+Providers and Agents are configured independently under `llmProviders` and
+`agents`, so multiple providers can be installed together. Each enabled
+provider creates its own `LLMProvider` and ESO-managed credentials Secret;
+each Agent selects one provider and a model name understood by that provider.
+Credentials always come from Vault via an `ExternalSecret` -- never commit
+them to Git. Vertex `projectID`/`region` are ordinary values, not credentials.
 
-### Vertex AI (Anthropic / Claude) -- enabled by default
+### Vertex AI (Anthropic / Claude)
 
-The `standalone` variant already sets:
+The Vertex provider can be enabled independently of OpenAI:
 
 ```yaml
 overrides:
-  - name: llmProvider.enabled
+  - name: llmProviders.vertexAnthropic.enabled
     value: "true"
-  - name: llmProvider.type
-    value: vertexAnthropic
-  - name: llmProvider.vertexAnthropic.projectID
+  - name: llmProviders.vertexAnthropic.projectID
     value: my-project-id   # replace with your real GCP project ID
-  - name: llmProvider.vertexAnthropic.region
+  - name: llmProviders.vertexAnthropic.region
     value: global          # replace with your real Vertex AI region
+  - name: agents.vertex.llmProvider
+    value: vertex-anthropic
+  - name: agents.vertex.model
+    value: claude-opus-4-6
 ```
 
 Replace `projectID`/`region` with your real values before syncing. Matches
@@ -71,28 +70,62 @@ This chart creates that same secret declaratively instead, via Vault + ESO:
 2. Copy the template to wherever `load-secrets` reads it from and run
    `./pattern.sh make load-secrets`.
 
-### OpenAI
+### OpenAI-compatible services and LiteLLM
 
-To switch to OpenAI instead, change the `standalone` overrides to:
+An OpenAI-compatible provider can point at OpenAI itself or a proxy such as
+LiteLLM. Set `url` to the proxy's OpenAI-compatible API base and set `vaultKey`
+to a Vault secret whose `api-key` property is accepted by that proxy:
 
 ```yaml
 overrides:
-  - name: llmProvider.enabled
+  - name: llmProviders.openai.enabled
     value: "true"
-  - name: llmProvider.type
-    value: openai
-  - name: llmProvider.openai.model
-    value: "gpt-5.4"   # optional, this is the default
+  - name: llmProviders.openai.name
+    value: litellm-gpt-oss
+  - name: llmProviders.openai.url
+    value: http://litellm.litellm.svc.cluster.local:4000/v1
+  - name: llmProviders.openai.vaultKey
+    value: secret/data/global/llm-creds-openai
+  - name: agents.default.llmProvider
+    value: litellm-gpt-oss
+  - name: agents.default.model
+    value: gpt-oss-20b
 ```
 
-Matches upstream's
-[`examples/openai.yaml`](https://github.com/openshift/lightspeed-agentic-operator/blob/main/hack/quickstart/examples/openai.yaml)
-and its `OPENAI_API_KEY` secret key. Its credentials come from Vault too:
+The chart maps the Vault `api-key` property into an operator-namespace Secret
+with the required `OPENAI_API_KEY` key. For LiteLLM, the Agent's `model` must
+be the model name exposed by LiteLLM. The standalone pattern uses
+`gpt-oss-20b`, matching RCA's `litellm.model`, for the `default` Agent so
+existing RCA-created runs continue to work. It also creates a `vertex` Agent
+referencing the Vertex provider.
 
-1. In `values-secret.yaml.template`, uncomment the `llm-creds-openai` entry
-   (`onMissingValue: prompt` asks for the key interactively during
-   `load-secrets` -- it can't be auto-generated).
-2. Run `./pattern.sh make load-secrets`.
+To select a provider for an individual run, set the Agent name on that
+AgenticRun stage: `analysis.agent: default` selects LiteLLM, while
+`analysis.agent: vertex` selects Vertex. RCA-created runs take this name from
+`agenticRun.analysisAgent` (default `default`). To send all new RCA-created
+runs to Vertex, set this override on the `rca-agent` application:
+
+```yaml
+- name: agenticRun.analysisAgent
+  value: vertex
+```
+
+Sync the application after changing the override. Set it back to `default` to
+route new RCA-created runs through LiteLLM again.
+
+For direct OpenAI API usage, leave `url` empty, set `vaultKey` to the Vault
+entry containing the OpenAI API key, and set the Agent's model to one available
+to that key.
+
+The OpenAI ExternalSecret defaults to reading
+`secret/data/global/llm-creds-openai`. This gives the Lightspeed operator an
+independent key from RCA. To deliberately share RCA's LiteLLM key instead,
+override `llmProviders.openai.vaultKey` with
+`secret/data/global/rca-agent-litellm`; ESO still materializes a separate
+operator-namespace Secret with the key `OPENAI_API_KEY`.
+For Vertex credentials, uncomment `llm-creds-vertex` in
+`values-secret.yaml.template`, point `path` at a GCP Application Default
+Credentials JSON file, then run `./pattern.sh make load-secrets`.
 
 ## Verifying and running an agent
 
@@ -177,9 +210,9 @@ spec:
 EOF
 ```
 
-`agent: default` matches `llmProvider.agent.name` above, so this works
-against whichever provider (`vertexAnthropic` or `openai`) is currently
-active. Then watch/approve it:
+`agent: default` selects the OpenAI-compatible LiteLLM provider in the
+standalone pattern. Use
+`agent: vertex` for a run stage to select Vertex instead. Then watch/approve it:
 
 ```bash
 oc-agentic run watch test-run -n lightspeed-agentic-operator
@@ -190,4 +223,4 @@ oc-agentic run approve test-run --stage=execution --option=0 -n lightspeed-agent
 
 The OTEL collector, Alertmanager alerts adapter, and OpenShift console plugin
 from `hack/quickstart/` are not deployed here -- only the core operator plus
-the optional single-provider `LLMProvider`/`Agent` pair described above.
+the configured `LLMProvider` and `Agent` resources described above.

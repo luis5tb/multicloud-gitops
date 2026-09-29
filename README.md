@@ -69,10 +69,12 @@ Deploy from branch `rca-praxis`.
     - Uncomment `llm-creds-vertex` and point `path:` at a real GCP
       Application Default Credentials JSON file --
       `lightspeed-agentic-operator` needs this
-      (`llmProvider.type: vertexAnthropic` is already set in
-      `values-standalone.yaml`).
-    - `rca-agent-litellm` and `acme-agent-litellm` will prompt
-      interactively during `load-secrets` (`onMissingValue: prompt`).
+      (the Vertex provider is enabled in `values-standalone.yaml`).
+    - `rca-agent-litellm`, `acme-agent-litellm`, and `llm-creds-openai` prompt
+      interactively during `load-secrets` (`onMissingValue: prompt`). The
+      lightspeed operator uses the independent `llm-creds-openai` key by
+      default; its `default` Agent calls LiteLLM model `gpt-oss-20b`, while the
+      separate `vertex` Agent uses Vertex Anthropic.
     - Optionally set `breakGlass.enabled: "true"` and
       `keycloak.adminGroupName` on the `keycloak-oidc` application now,
       before install (see Phase 3). Leave `openshiftOIDC.enabled: "false"`
