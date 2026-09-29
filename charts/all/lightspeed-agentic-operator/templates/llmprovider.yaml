@@ -1,9 +1,9 @@
 {{- $hasDocuments := false }}
-{{ if .Values.llmProviders.vertexAnthropic.enabled }}
+{{ if or .Values.llmProviders.vertexAnthropic.enabled .Values.llmProviders.vertexGoogle.enabled }}
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: {{ .Values.llmProviders.vertexAnthropic.credentialsSecretName }}
+  name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
   namespace: {{ .Values.namespace }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
@@ -13,7 +13,7 @@ spec:
     name: {{ .Values.secretStore.name }}
     kind: {{ .Values.secretStore.kind }}
   target:
-    name: {{ .Values.llmProviders.vertexAnthropic.credentialsSecretName }}
+    name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
     template:
       type: Opaque
       data:
@@ -21,8 +21,10 @@ spec:
   data:
     - secretKey: credentials
       remoteRef:
-        key: {{ .Values.llmProviders.vertexAnthropic.vaultKey }}
+        key: {{ .Values.llmProviders.vertex.vaultKey }}
         property: credentials
+{{ $hasDocuments = true }}
+{{ if .Values.llmProviders.vertexAnthropic.enabled }}
 ---
 apiVersion: agentic.openshift.io/v1alpha1
 kind: LLMProvider
@@ -39,8 +41,31 @@ spec:
     region: {{ .Values.llmProviders.vertexAnthropic.region | quote }}
     modelProvider: Anthropic
     credentialsSecret:
-      name: {{ .Values.llmProviders.vertexAnthropic.credentialsSecretName }}
+      name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
 {{ $hasDocuments = true }}
+{{ end }}
+{{ if .Values.llmProviders.vertexGoogle.enabled }}
+{{ if $hasDocuments }}
+---
+{{ end }}
+apiVersion: agentic.openshift.io/v1alpha1
+kind: LLMProvider
+metadata:
+  name: {{ .Values.llmProviders.vertexGoogle.name }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  type: GoogleCloudVertex
+  googleCloudVertex:
+    projectID: {{ .Values.llmProviders.vertexGoogle.projectID | quote }}
+    region: {{ .Values.llmProviders.vertexGoogle.region | quote }}
+    modelProvider: Google
+    credentialsSecret:
+      name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
+{{ $hasDocuments = true }}
+{{ end }}
 {{ end }}
 {{ if .Values.llmProviders.openai.enabled }}
 {{ if $hasDocuments }}

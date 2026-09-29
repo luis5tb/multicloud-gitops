@@ -8,16 +8,24 @@ image:
 approvalPolicy:
   maxConcurrentRuns: 5
 
-# Providers are independent: one or both can be enabled. Each creates an
-# LLMProvider plus an ESO-managed credentials Secret in this namespace.
+# Providers are independent and can be enabled together. Each creates an
+# LLMProvider; Vertex providers share one ESO-managed GCP credentials Secret.
 llmProviders:
+  vertex:
+    credentialsSecretName: llm-creds-vertex
+    vaultKey: secret/data/global/llm-creds-vertex
+
   vertexAnthropic:
     enabled: false
     name: vertex-anthropic
     projectID: ""
     region: ""
-    credentialsSecretName: llm-creds-vertex
-    vaultKey: secret/data/global/llm-creds-vertex
+
+  vertexGoogle:
+    enabled: false
+    name: vertex-google
+    projectID: ""
+    region: ""
 
   openai:
     enabled: false

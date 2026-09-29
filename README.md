@@ -74,7 +74,8 @@ Deploy from branch `rca-praxis`.
       interactively during `load-secrets` (`onMissingValue: prompt`). The
       lightspeed operator uses the independent `llm-creds-openai` key by
       default; its `default` Agent calls LiteLLM model `gpt-oss-20b`, while the
-      separate `vertex` Agent uses Vertex Anthropic.
+      separate `vertex` Agent uses Vertex Anthropic, and `gemini` uses Gemini
+      on Vertex. Both Vertex Agents share the `llm-creds-vertex` GCP credentials.
     - Optionally set `breakGlass.enabled: "true"` and
       `keycloak.adminGroupName` on the `keycloak-oidc` application now,
       before install (see Phase 3). Leave `openshiftOIDC.enabled: "false"`

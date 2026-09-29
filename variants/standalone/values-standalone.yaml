@@ -196,6 +196,14 @@ clusterGroup:
           value: redhat-marketplace-dev
         - name: llmProviders.vertexAnthropic.region
           value: global
+        - name: llmProviders.vertexGoogle.enabled
+          value: "true"
+        - name: llmProviders.vertexGoogle.name
+          value: vertex-google
+        - name: llmProviders.vertexGoogle.projectID
+          value: redhat-marketplace-dev
+        - name: llmProviders.vertexGoogle.region
+          value: global
         - name: llmProviders.openai.enabled
           value: "true"
         - name: llmProviders.openai.name
@@ -205,7 +213,7 @@ clusterGroup:
         - name: llmProviders.openai.vaultKey
           value: secret/data/global/llm-creds-openai
         # AgenticRuns from rca-agent select "default" by default. Route those
-        # to LiteLLM; keep Vertex available as a separately selectable Agent.
+        # to LiteLLM; keep Anthropic-on-Vertex and Gemini-on-Vertex selectable.
         - name: agents.default.llmProvider
           value: litellm-gpt-oss
         - name: agents.default.model
@@ -214,6 +222,10 @@ clusterGroup:
           value: vertex-anthropic
         - name: agents.vertex.model
           value: claude-opus-4-6
+        - name: agents.gemini.llmProvider
+          value: vertex-google
+        - name: agents.gemini.model
+          value: gemini-3.8-flash
     openshift-mcp-server:
       name: openshift-mcp-server
       namespace: openshift-mcp-server
@@ -230,7 +242,7 @@ clusterGroup:
       path: charts/all/rca-agent
       overrides:
         # AgenticRuns created by RCA use the "default" Agent (LiteLLM).
-        # Change to "vertex" to select the Vertex-backed Agent instead.
+        # Change to "vertex" (Anthropic) or "gemini" (Google) to use Vertex.
         - name: agenticRun.analysisAgent
           value: default
         - name: image.repository

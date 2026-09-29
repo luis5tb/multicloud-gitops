@@ -27,14 +27,15 @@ oc get configmap lightspeed-agentic-configuration -n lightspeed-agentic-operator
 
 Providers and Agents are configured independently under `llmProviders` and
 `agents`, so multiple providers can be installed together. Each enabled
-provider creates its own `LLMProvider` and ESO-managed credentials Secret;
-each Agent selects one provider and a model name understood by that provider.
+provider creates an `LLMProvider`; OpenAI gets its own ESO-managed credentials
+Secret, while Vertex Anthropic and Vertex Google share the GCP credentials
+Secret. Each Agent selects one provider and its model name.
 Credentials always come from Vault via an `ExternalSecret` -- never commit
 them to Git. Vertex `projectID`/`region` are ordinary values, not credentials.
 
-### Vertex AI (Anthropic / Claude)
+### Vertex AI: Anthropic and Gemini
 
-The Vertex provider can be enabled independently of OpenAI:
+Vertex Anthropic and Vertex Google (Gemini) can be enabled independently:
 
 ```yaml
 overrides:
@@ -48,6 +49,18 @@ overrides:
     value: vertex-anthropic
   - name: agents.vertex.model
     value: claude-opus-4-6
+  - name: llmProviders.vertexGoogle.enabled
+    value: "true"
+  - name: llmProviders.vertexGoogle.name
+    value: vertex-google
+  - name: llmProviders.vertexGoogle.projectID
+    value: my-project-id
+  - name: llmProviders.vertexGoogle.region
+    value: global
+  - name: agents.gemini.llmProvider
+    value: vertex-google
+  - name: agents.gemini.model
+    value: gemini-3.8-flash
 ```
 
 Replace `projectID`/`region` with your real values before syncing. Matches
@@ -69,6 +82,10 @@ This chart creates that same secret declaratively instead, via Vault + ESO:
    Credentials JSON file.
 2. Copy the template to wherever `load-secrets` reads it from and run
    `./pattern.sh make load-secrets`.
+
+Both Vertex providers reference that same GCP credentials Secret. Select a
+Gemini model available to the configured project and region; the standalone
+variant uses `gemini-3.8-flash` as an example.
 
 ### OpenAI-compatible services and LiteLLM
 
@@ -97,21 +114,23 @@ with the required `OPENAI_API_KEY` key. For LiteLLM, the Agent's `model` must
 be the model name exposed by LiteLLM. The standalone pattern uses
 `gpt-oss-20b`, matching RCA's `litellm.model`, for the `default` Agent so
 existing RCA-created runs continue to work. It also creates a `vertex` Agent
-referencing the Vertex provider.
+for Anthropic-on-Vertex and a `gemini` Agent for Google-on-Vertex.
 
 To select a provider for an individual run, set the Agent name on that
-AgenticRun stage: `analysis.agent: default` selects LiteLLM, while
-`analysis.agent: vertex` selects Vertex. RCA-created runs take this name from
-`agenticRun.analysisAgent` (default `default`). To send all new RCA-created
-runs to Vertex, set this override on the `rca-agent` application:
+AgenticRun stage: `analysis.agent: default` selects LiteLLM,
+`analysis.agent: vertex` selects Anthropic on Vertex, and
+`analysis.agent: gemini` selects Gemini on Vertex. RCA-created runs take this
+name from `agenticRun.analysisAgent` (default `default`). To send all new
+RCA-created runs to Gemini, set this override on the `rca-agent` application:
 
 ```yaml
 - name: agenticRun.analysisAgent
-  value: vertex
+  value: gemini
 ```
 
 Sync the application after changing the override. Set it back to `default` to
-route new RCA-created runs through LiteLLM again.
+route new RCA-created runs through LiteLLM again, or use `vertex` for
+Anthropic-on-Vertex.
 
 For direct OpenAI API usage, leave `url` empty, set `vaultKey` to the Vault
 entry containing the OpenAI API key, and set the Agent's model to one available
@@ -123,7 +142,7 @@ independent key from RCA. To deliberately share RCA's LiteLLM key instead,
 override `llmProviders.openai.vaultKey` with
 `secret/data/global/rca-agent-litellm`; ESO still materializes a separate
 operator-namespace Secret with the key `OPENAI_API_KEY`.
-For Vertex credentials, uncomment `llm-creds-vertex` in
+For Vertex credentials used by either provider, uncomment `llm-creds-vertex` in
 `values-secret.yaml.template`, point `path` at a GCP Application Default
 Credentials JSON file, then run `./pattern.sh make load-secrets`.
 
