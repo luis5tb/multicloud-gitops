@@ -244,7 +244,7 @@ clusterGroup:
         # AgenticRuns created by RCA use the "default" Agent (LiteLLM).
         # Change to "vertex" (Anthropic) or "gemini" (Google) to use Vertex.
         - name: agenticRun.analysisAgent
-          value: default
+          value: gemini
         - name: image.repository
           value: quay.io/ltomasbo/rca-agent
         - name: image.tag
