@@ -209,7 +209,7 @@ clusterGroup:
         - name: llmProviders.openai.name
           value: litellm-gpt-oss
         - name: llmProviders.openai.url
-          value: http://litellm.litellm.svc.cluster.local:4000/v1
+          value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
         - name: llmProviders.openai.vaultKey
           value: secret/data/global/llm-creds-openai
         # AgenticRuns from rca-agent select "default" by default. Route those
