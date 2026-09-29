@@ -8,6 +8,10 @@ metadata:
   name: {{ include "praxis-proxy.fullname" . }}
   labels:
     {{- include "praxis-proxy.labels" . | nindent 4 }}
+  {{- with .Values.route.timeout }}
+  annotations:
+    haproxy.router.openshift.io/timeout: {{ . | quote }}
+  {{- end }}
 spec:
   {{- with .Values.route.host }}
   host: {{ . | quote }}

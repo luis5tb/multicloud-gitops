@@ -124,6 +124,8 @@ identity:
 route:
   enabled: false
   host: ""
+  # Optional OpenShift HAProxy route timeout for long-running A2A requests.
+  timeout: ""
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect

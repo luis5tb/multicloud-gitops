@@ -294,6 +294,9 @@ clusterGroup:
           value: "true"
         - name: route.host
           value: rca-agent.apps.ocp.vskw8.sandbox2271.opentlc.com
+        # RCA may wait for an AgenticRun analysis for up to 20 minutes.
+        - name: route.timeout
+          value: 22m
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.ocp.vskw8.sandbox2271.opentlc.com/realms/rca
         - name: upstream.host
@@ -320,12 +323,10 @@ clusterGroup:
           value: rca_agent
         - name: a2a.remoteAgents[0].description
           value: Investigates OpenShift incidents and returns root-cause analysis with remediation proposals.
-        # Match rca-agent's agenticRun.timeoutSeconds (charts/all/rca-agent
-        # values.yaml) -- create_and_wait_for_analysis can legitimately run
-        # that long polling the AgenticRun, and the default 60s A2A client
-        # timeout would truncate the response before rca-agent finishes.
+        # Allow 60s beyond rca-agent's 20-minute AgenticRun timeout for
+        # polling and returning the final A2A response.
         - name: a2a.requestTimeout
-          value: "1200"
+          value: "1260"
         - name: auth.mode
           value: keycloak
         - name: auth.keycloak.issuerUrl
@@ -344,6 +345,9 @@ clusterGroup:
           value: apps.ocp.vskw8.sandbox2271.opentlc.com
         - name: route.enabled
           value: "true"
+        # Allow the browser's A2A request to survive the long-running analysis.
+        - name: route.timeout
+          value: 22m
         - name: litellm.apiBase
           value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
         - name: litellm.model
