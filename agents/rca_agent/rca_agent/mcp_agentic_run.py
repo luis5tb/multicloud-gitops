@@ -12,6 +12,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import httpx
+import yaml
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -168,9 +169,20 @@ def _result_value(result: Any) -> dict[str, Any]:
         try:
             decoded = json.loads(content.text)
         except (TypeError, json.JSONDecodeError):
-            continue
+            # resources_create_or_update has no structuredContent -- unlike
+            # resources_get -- and replies with a "# ... successfully"
+            # comment line followed by a YAML list of the applied resources,
+            # not JSON.
+            try:
+                decoded = yaml.safe_load(content.text)
+            except yaml.YAMLError:
+                continue
         if isinstance(decoded, dict):
             return decoded
+        if isinstance(decoded, list):
+            for item in decoded:
+                if isinstance(item, dict):
+                    return item
     raise RuntimeError("OpenShift MCP returned no structured Kubernetes resource")
 
 

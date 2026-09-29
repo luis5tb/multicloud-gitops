@@ -706,3 +706,21 @@ oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namesp
   it) -- a caller that previously worked by leaving the field out will need
   to start setting it explicitly once it stops being unconditionally
   trusted.
+- **`oc apply -f`-ing an `AgenticRun` manually is denied by the same VAP even
+  with `spec.targetNamespaces` set correctly and even when using a
+  cluster-admin identity** (e.g. `admin-break-glass.kubeconfig`, or
+  `kubeadmin`): this policy's `callerGroups` variable is derived entirely
+  from `request.userInfo.groups` -- specifically, only the entries prefixed
+  with `openshiftOIDC.groupsPrefix` (`keycloak:`) -- see the `variables`
+  block in `agentic-vap-namespace-scope.yaml`. A credential that never went
+  through the Keycloak OIDC authenticator (a ServiceAccount token, a
+  break-glass admin token, `kubeadmin`) carries no `keycloak:`-prefixed
+  groups at all, no matter how privileged its native Kubernetes RBAC is, so
+  `callerGroups` evaluates to an empty list and the policy denies
+  unconditionally -- this is not a namespaceAllowlist gap to fix. To create
+  one manually, `oc login` as a real Keycloak-backed OIDC user (not
+  kubeadmin/a ServiceAccount) whose Keycloak group has an
+  `agenticRun.namespaceAllowlist` entry -- `rca-agenticrun: "*"` is the
+  default human console/CLI login group (see "Keycloak <-> OpenShift group
+  mapping" above), so any user in that Keycloak group can `oc apply` any
+  `AgenticRun` regardless of `spec.targetNamespaces`.
