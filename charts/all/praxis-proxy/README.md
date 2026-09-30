@@ -50,6 +50,18 @@ public Route, and enable `networkPolicy.enabled`. Keep the proxy and RCA in the
 same namespace unless you also update the RCA NetworkPolicy's pod and namespace
 selectors. The upstream hostname and port are chart values, not caller input.
 
+The pinned Praxis AI 0.4.1 build only provides the filter-wide
+`allow_private_idp` option, exposed as `policy.allowPrivateIdp` here. It is
+needed when the configured Keycloak JWKS host resolves to a private ingress
+address. It permits non-public destinations—including loopback and
+link-local—for all policy-plugin callouts, so keep those endpoints
+operator-controlled and static; this chart's policy only calls its configured
+Keycloak JWKS URL. This setting is distinct from
+`insecure_options.allow_private_endpoints` / `allow_private_upstreams`, which
+apply to the proxy's load-balancer upstream. Newer Praxis builds expose a
+narrower per-host `trusted_private_endpoints` option; use that instead when the
+image is upgraded to a release that supports it.
+
 Praxis 0.4.1 currently requires both `insecure_options.allow_private_endpoints`
 (config-load-time validation of the load_balancer cluster endpoint) and
 `insecure_options.allow_private_upstreams` (the runtime connection check) for

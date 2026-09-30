@@ -314,6 +314,11 @@ clusterGroup:
           value: 22m
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+        # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide
+        # private IdP egress switch. Its only configured callout is this
+        # static Keycloak JWKS URL; do not add user-controlled URLs here.
+        - name: policy.allowPrivateIdp
+          value: "true"
         - name: upstream.host
           value: rca-agent.lightspeed-agentic-operator.svc.cluster.local
     acme-agent:

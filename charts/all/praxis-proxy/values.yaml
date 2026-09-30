@@ -35,6 +35,12 @@ identity:
 policy:
   allowedCallers:
     - acme-agent
+  # Praxis AI 0.4.1 only exposes a filter-wide private-destination opt-in.
+  # Enable only when a statically configured policy endpoint (such as the
+  # Keycloak JWKS URL) resolves to a non-public cluster address. This also
+  # permits loopback and link-local destinations, so keep policy callouts
+  # operator-controlled and never user-supplied.
+  allowPrivateIdp: false
 
 securityContext:
   seccompProfile:

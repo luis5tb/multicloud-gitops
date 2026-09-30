@@ -8,6 +8,9 @@ filter_chains:
     filters:
       - filter: policy
         config_path: /etc/praxis/config/policy.yaml
+        # This is separate from insecure_options below: it permits the policy
+        # engine's configured IdP/JWKS callouts to resolve to private IPs.
+        allow_private_idp: {{ .Values.policy.allowPrivateIdp }}
         # This gateway authorizes generic HTTP/A2A requests, not MCP entity
         # requests, so it intentionally has no protocol-classifier requirement.
         require_protocol_metadata: false
@@ -31,8 +34,9 @@ admin:
 # Praxis currently requires both opt-ins for its static in-cluster RCA
 # upstream: allow_private_endpoints for config-load-time validation of the
 # load_balancer cluster endpoint, and allow_private_upstreams for the
-# runtime connection check. Keep the upstream fixed in this chart and
-# restrict RCA ingress with the NetworkPolicy in the rca-agent chart.
+# runtime connection check. These flags do not configure policy-engine
+# callouts. Keep the upstream fixed in this chart and restrict RCA ingress
+# with the NetworkPolicy in the rca-agent chart.
 insecure_options:
   allow_private_endpoints: true
   allow_private_upstreams: true
