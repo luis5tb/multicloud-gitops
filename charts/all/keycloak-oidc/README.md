@@ -329,6 +329,14 @@ Two things must both be correct, not just the issuer:
    <keycloak.namespace> <keycloak.realm>-realm-secrets-reconciler` if you
    suspect it hasn't run.
 
+   The reconciler verifies Keycloak's TLS certificate by default. If the route
+   uses a self-signed certificate, set
+   `realmSecretsReconciler.skipTlsVerify: true` on this chart to bypass
+   verification for this Job only. This makes the connection vulnerable to
+   man-in-the-middle attacks; preferably configure the Job to trust the CA that
+   issued the route certificate instead. The setting does not change TLS
+   verification in the agent workloads or OpenShift's OIDC configuration.
+
 ### Keeping admin access after enabling OIDC
 
 CLI and console need two separate answers here -- OIDC replaces the login

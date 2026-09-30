@@ -100,6 +100,11 @@ clusterGroup:
       argoProject: hub
       path: charts/all/keycloak-oidc
       overrides:
+        # The cluster's Keycloak route presents a self-signed certificate.
+        # Limit the verification bypass to this reconciler Job; install the
+        # route CA in its image trust store instead where possible.
+        - name: realmSecretsReconciler.skipTlsVerify
+          value: "true"
         - name: keycloak.namespace
           value: keycloak-system
         - name: keycloak.name
