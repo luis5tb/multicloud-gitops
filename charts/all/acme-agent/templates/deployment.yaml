@@ -13,6 +13,12 @@
 {{- if and (eq .Values.auth.mode "keycloak") .Values.identity.spiffe.enabled (not .Values.auth.keycloak.issuerUrl) }}
 {{- fail "auth.keycloak.issuerUrl must be set when auth.mode is keycloak and identity.spiffe.enabled is true: it is the audience Keycloak's federated-jwt client validator expects on the SPIFFE JWT-SVID client_assertion" }}
 {{- end }}
+{{- if and .Values.auth.caBundle .Values.auth.caBundleConfigMap.name }}
+{{- fail "configure only one of auth.caBundle or auth.caBundleConfigMap" }}
+{{- end }}
+{{- if and .Values.auth.caBundleSync.enabled (not .Values.auth.caBundleConfigMap.name) }}
+{{- fail "auth.caBundleConfigMap.name is required when auth.caBundleSync.enabled is true" }}
+{{- end }}
 {{- if not .Values.a2a.remoteAgents }}
 {{- fail "a2a.remoteAgents must have at least one entry (name, description, endpoint) -- there is no default downstream agent" }}
 {{- end }}
@@ -22,6 +28,8 @@ metadata:
   name: {{ include "acme-agent.fullname" . }}
   labels:
     {{- include "acme-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -34,9 +42,14 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
+      {{- if or .Values.podAnnotations .Values.auth.caBundleSync.enabled }}
       annotations:
+        {{- if .Values.auth.caBundleSync.enabled }}
+        ca-bundle-sync-sha256: ""
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "acme-agent.serviceAccountName" . }}
@@ -83,7 +96,7 @@ spec:
             - name: A2A_TLS_VERIFY
               value: {{ .Values.auth.tlsVerify | quote }}
             - name: A2A_CA_BUNDLE
-              value: {{ .Values.auth.caBundle | quote }}
+              value: {{ if .Values.auth.caBundle }}{{ .Values.auth.caBundle | quote }}{{ else if .Values.auth.caBundleConfigMap.name }}{{ printf "/etc/acme-agent/ca-bundle/%s" .Values.auth.caBundleConfigMap.key | quote }}{{ else }}""{{ end }}
             - name: ZTO_FORWARD_IDENTITY
               value: {{ .Values.auth.forwardZtoIdentity | quote }}
             - name: ZTO_IDENTITY_HEADER
@@ -147,6 +160,11 @@ spec:
               mountPath: {{ .Values.identity.spiffe.workloadApiMountPath }}
               readOnly: true
             {{- end }}
+            {{- if .Values.auth.caBundleConfigMap.name }}
+            - name: ca-bundle
+              mountPath: /etc/acme-agent/ca-bundle
+              readOnly: true
+            {{- end }}
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
@@ -180,6 +198,14 @@ spec:
           csi:
             driver: csi.spiffe.io
             readOnly: true
+        {{- end }}
+        {{- if .Values.auth.caBundleConfigMap.name }}
+        - name: ca-bundle
+          configMap:
+            name: {{ .Values.auth.caBundleConfigMap.name }}
+            items:
+              - key: {{ .Values.auth.caBundleConfigMap.key }}
+                path: {{ .Values.auth.caBundleConfigMap.key }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

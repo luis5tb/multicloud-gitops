@@ -150,6 +150,14 @@ The following settings are supported:
 | `ZTO_IDENTITY_TOKEN` | Optional environment fallback for the identity token |
 | `ZTO_FORWARD_IDENTITY` | Also forward the identity in `ZTO_IDENTITY_HEADER` |
 | `A2A_TLS_VERIFY` | Set to `false` only for local development with test certificates |
+| `A2A_CA_BUNDLE` | Optional path to a PEM CA bundle used to verify downstream A2A and Keycloak HTTPS connections |
+
+For OpenShift routes signed by the cluster's managed ingress CA, the Helm
+chart can sync that CA into the agent namespace (`auth.caBundleSync.enabled`),
+mount it, and pass its path through `A2A_CA_BUNDLE`. A periodic sync refreshes
+the bundle and rolls the Deployment when it changes, so the long-lived HTTPX
+client reloads its TLS context. Keep `auth.tlsVerify=true`; disabling TLS
+verification also affects the Keycloak token client.
 
 The exact Keycloak client policy is deployment-specific, so the chart exposes
 the token URL, client-auth method, and SPIFFE/ZTO settings as values rather

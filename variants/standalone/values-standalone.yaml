@@ -321,11 +321,26 @@ clusterGroup:
       namespace: acme-agent
       argoProject: hub
       path: charts/all/acme-agent
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          name: acme-agent
+          namespace: acme-agent
+          jsonPointers:
+            - /spec/template/metadata/annotations/ca-bundle-sync-sha256
       overrides:
         - name: image.repository
           value: quay.io/ltomasbo/acme-agent
         - name: image.tag
           value: da3c4e81
+        # Trust the cluster's managed ingress CA for the HTTPS Praxis route
+        # and Keycloak token endpoint, keeping certificate verification on.
+        - name: auth.caBundleConfigMap.name
+          value: acme-agent-ingress-ca
+        - name: auth.caBundleConfigMap.key
+          value: ca-bundle.crt
+        - name: auth.caBundleSync.enabled
+          value: "true"
         # rca-agent's edge-TLS Route, not its in-cluster Service DNS name --
         # google-adk's RemoteA2aAgent requires https (or loopback) for any
         # agent card it fetches and for every RPC url advertised inside it.

@@ -59,7 +59,29 @@ auth:
   # none, static, or keycloak
   mode: none
   tlsVerify: true
+  # Optional path to a CA bundle supplied by another volume. Alternatively,
+  # set caBundleConfigMap to have this chart mount a ConfigMap and populate
+  # A2A_CA_BUNDLE with its path.
   caBundle: ""
+  caBundleConfigMap:
+    name: ""
+    key: ca-bundle.crt
+  # Copies the managed OpenShift ingress CA into this release's namespace.
+  # The bootstrap Job runs before the agent Deployment; the CronJob refreshes
+  # the bundle and rolls the Deployment when its contents change.
+  caBundleSync:
+    enabled: false
+    sourceNamespace: openshift-config-managed
+    sourceConfigMap: default-ingress-cert
+    sourceKey: ca-bundle.crt
+    schedule: "*/5 * * * *"
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
   forwardZtoIdentity: false
   ztoIdentityHeader: X-ZTO-Identity
   staticTokenSecret:

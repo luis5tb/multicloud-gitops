@@ -1,0 +1,26 @@
+{{- if .Values.auth.caBundleSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "acme-agent.fullname" . }}-ca-sync
+  labels:
+    {{- include "acme-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  schedule: {{ .Values.auth.caBundleSync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 180
+      template:
+        metadata:
+          labels:
+            {{- include "acme-agent.labels" . | nindent 12 }}
+        spec:
+{{ include "acme-agent.caSyncPodSpec" . | nindent 10 }}
+{{- end }}
