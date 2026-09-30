@@ -12,9 +12,10 @@ metadata:
     argocd.argoproj.io/sync-wave: "-3"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.identity.keycloak.caBundleSync.sourceNamespace }}
   labels:
     {{- include "rca-agent.labels" . | nindent 4 }}
   annotations:
@@ -30,9 +31,10 @@ rules:
       - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.identity.keycloak.caBundleSync.sourceNamespace }}
   labels:
     {{- include "rca-agent.labels" . | nindent 4 }}
   annotations:
@@ -43,7 +45,7 @@ subjects:
     namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
 ---
 apiVersion: rbac.authorization.k8s.io/v1

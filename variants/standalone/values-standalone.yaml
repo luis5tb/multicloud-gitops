@@ -100,17 +100,21 @@ clusterGroup:
       argoProject: hub
       path: charts/all/keycloak-oidc
       overrides:
-        # The cluster's Keycloak route presents a self-signed certificate.
-        # Limit the verification bypass to this reconciler Job; install the
-        # route CA in its image trust store instead where possible.
-        - name: realmSecretsReconciler.skipTlsVerify
-          value: "true"
         - name: keycloak.namespace
           value: keycloak-system
         - name: keycloak.name
           value: keycloak
         - name: keycloak.realm
           value: rca
+        # Bootstrap the managed ingress CA into openshift-config (for the
+        # Authentication OIDC provider) and keycloak-system (for the realm
+        # reconciler), then refresh both copies periodically for CA rotation.
+        - name: openshiftOIDC.caConfigMapName
+          value: keycloak-oidc-ca
+        - name: openshiftOIDC.caBundleSync.enabled
+          value: "true"
+        - name: realmSecretsReconciler.caBundleConfigMapName
+          value: keycloak-oidc-ca
         - name: agenticRun.namespace
           value: lightspeed-agentic-operator
         # Native OIDC is cluster-wide and switches Authentication/cluster's

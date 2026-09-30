@@ -1,0 +1,95 @@
+{{- if .Values.openshiftOIDC.caBundleSync.enabled }}
+{{- if not .Values.openshiftOIDC.caConfigMapName }}
+{{- fail "openshiftOIDC.caConfigMapName is required when caBundleSync.enabled is true" }}
+{{- end }}
+{{- if ne .Values.openshiftOIDC.caConfigMapName .Values.openshiftOIDC.caBundleSync.targetConfigMapName }}
+{{- fail "openshiftOIDC.caConfigMapName must match caBundleSync.targetConfigMapName" }}
+{{- end }}
+{{- if and .Values.realmSecretsReconciler.caBundleConfigMapName (ne .Values.realmSecretsReconciler.caBundleConfigMapName .Values.openshiftOIDC.caBundleSync.targetConfigMapName) }}
+{{- fail "realmSecretsReconciler.caBundleConfigMapName must match caBundleSync.targetConfigMapName when CA sync is enabled" }}
+{{- end }}
+{{- $fullname := include "keycloak-oidc.fullname" . }}
+{{- $source := .Values.openshiftOIDC.caBundleSync.sourceNamespace }}
+{{- $serviceAccount := printf "%s-keycloak-ca-sync" $fullname }}
+{{- $targetNamespaces := list "openshift-config" .Values.keycloak.namespace | uniq }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccount }}
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $serviceAccount }}-source
+  namespace: {{ $source }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.openshiftOIDC.caBundleSync.sourceConfigMap | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $serviceAccount }}-source
+  namespace: {{ $source }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ .Values.keycloak.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $serviceAccount }}-source
+{{- range $namespace := $targetNamespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $serviceAccount }}-target
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ $.Values.openshiftOIDC.caBundleSync.targetConfigMapName | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $serviceAccount }}-target
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ $.Values.keycloak.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $serviceAccount }}-target
+{{- end }}
+{{- end }}

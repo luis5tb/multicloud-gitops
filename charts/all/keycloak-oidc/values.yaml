@@ -191,6 +191,25 @@ openshiftOIDC:
   groupsClaim: groups
   groupsPrefix: "keycloak:"
   caConfigMapName: ""
+  # Copies the managed ingress CA into openshift-config before applying the
+  # Authentication resource, then refreshes it periodically for CA rotations.
+  # The same bundle is also copied into keycloak.namespace for the realm
+  # reconciler when realmSecretsReconciler.caBundleConfigMapName is set.
+  caBundleSync:
+    enabled: false
+    sourceNamespace: openshift-config-managed
+    sourceConfigMap: default-ingress-cert
+    sourceKey: ca-bundle.crt
+    targetConfigMapName: keycloak-oidc-ca
+    schedule: "*/5 * * * *"
+    image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
 
 # Cluster-admin ServiceAccount + non-expiring token Secret in
 # openshift-config, independent of Authentication/cluster's spec.type: it
@@ -253,9 +272,11 @@ realmImport:
 # not "latest", for the same reason praxis-proxy's chart does.
 realmSecretsReconciler:
   image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
-  # Set true only when Keycloak uses a certificate the reconciler cannot
-  # validate (for example, a self-signed ingress certificate). Prefer adding
-  # the issuing CA to the image's trust store instead.
+  # Optional ConfigMap in keycloak.namespace containing the Keycloak issuer CA
+  # under ca-bundle.crt. Prefer this over skipTlsVerify for private issuers.
+  caBundleConfigMapName: ""
+  # Set true only as a last resort; it disables hostname and certificate
+  # verification for the realm reconciliation requests.
   skipTlsVerify: false
 
 rbac:

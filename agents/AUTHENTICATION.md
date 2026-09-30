@@ -594,7 +594,9 @@ oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namesp
   SPIFFE succeeds but Keycloak discovery reports a certificate verification
   error, configure the issuer's CA bundle; the standalone `rca-agent` chart
   bootstraps and periodically refreshes its mounted CA ConfigMap from
-  OpenShift's managed ingress CA bundle.
+  OpenShift's managed ingress CA bundle. The `keycloak-oidc` chart separately
+  copies that bundle to `openshift-config` for native OpenShift OIDC trust and
+  to `keycloak-system` for its realm reconciler.
 - **acme-agent logs `Failed to resolve remote A2A agent rca_agent: Agent
   card URL must use https, or http on a loopback host: http://rca-agent...`**:
   this is neither Keycloak nor SPIFFE -- google-adk's `RemoteA2aAgent` refuses

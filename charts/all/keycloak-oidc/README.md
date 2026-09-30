@@ -329,13 +329,20 @@ Two things must both be correct, not just the issuer:
    <keycloak.namespace> <keycloak.realm>-realm-secrets-reconciler` if you
    suspect it hasn't run.
 
-   The reconciler verifies Keycloak's TLS certificate by default. If the route
-   uses a self-signed certificate, set
-   `realmSecretsReconciler.skipTlsVerify: true` on this chart to bypass
-   verification for this Job only. This makes the connection vulnerable to
-   man-in-the-middle attacks; preferably configure the Job to trust the CA that
-   issued the route certificate instead. The setting does not change TLS
-   verification in the agent workloads or OpenShift's OIDC configuration.
+   When `openshiftOIDC.caBundleSync.enabled` is true, this chart copies the
+   configured source CA bundle (by default
+   `openshift-config-managed/default-ingress-cert`, key `ca-bundle.crt`) into
+   `openshift-config` and `keycloak.namespace`. The first copy is an Argo CD Sync
+   hook that completes before `Authentication/cluster` is applied; a CronJob
+   refreshes both ConfigMaps on the configured schedule so signer CA rotations
+   propagate. Set `openshiftOIDC.caConfigMapName` to the generated ConfigMap name.
+   Set `realmSecretsReconciler.caBundleConfigMapName` to the same name to mount
+   the local copy into the reconciler and keep its TLS verification enabled.
+   This assumes the source bundle is the CA that issued the Keycloak route
+   certificate; configure the source values if the route uses a different CA.
+   Avoid `realmSecretsReconciler.skipTlsVerify: true` except as a last resort:
+   it disables certificate and hostname verification for that Job, and does
+   not affect the RCA agent or OpenShift's OIDC verification.
 
 ### Keeping admin access after enabling OIDC
 
