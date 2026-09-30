@@ -1,0 +1,90 @@
+{{- if .Values.identity.keycloak.caBundleSync.enabled }}
+{{- if not .Values.identity.keycloak.caBundleConfigMap.name }}
+{{- fail "identity.keycloak.caBundleConfigMap.name is required when caBundleSync.enabled is true" }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+  labels:
+    {{- include "rca-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+  labels:
+    {{- include "rca-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - {{ .Values.identity.keycloak.caBundleSync.sourceConfigMap | quote }}
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+  labels:
+    {{- include "rca-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+  labels:
+    {{- include "rca-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - {{ .Values.identity.keycloak.caBundleConfigMap.name | quote }}
+    verbs:
+      - get
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+  labels:
+    {{- include "rca-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-sync
+{{- end }}

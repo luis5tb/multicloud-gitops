@@ -1,0 +1,22 @@
+{{- if .Values.identity.keycloak.caBundleSync.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rca-agent.fullname" . }}-keycloak-ca-bootstrap
+  labels:
+    {{- include "rca-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rca-agent-ca-sync
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+{{ include "rca-agent.keycloakCaSyncPodSpec" . | nindent 6 }}
+{{- end }}

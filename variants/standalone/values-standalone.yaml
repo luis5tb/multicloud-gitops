@@ -256,6 +256,12 @@ clusterGroup:
           value: da3c4e81
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+        - name: identity.keycloak.caBundleConfigMap.name
+          value: rca-agent-keycloak-ca
+        - name: identity.keycloak.caBundleConfigMap.key
+          value: ca-bundle.crt
+        - name: identity.keycloak.caBundleSync.enabled
+          value: "true"
         - name: identity.keycloak.tokenExchange.clientId
           value: rca-agent-mcp
         - name: identity.keycloak.tokenExchange.audience

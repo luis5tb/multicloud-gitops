@@ -28,6 +28,8 @@ metadata:
   name: {{ include "rca-agent.fullname" . }}
   labels:
     {{- include "rca-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:

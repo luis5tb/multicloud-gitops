@@ -112,6 +112,21 @@ identity:
     caBundleConfigMap:
       name: ""
       key: ca.crt
+    # When enabled, an ArgoCD sync hook bootstraps this namespace's CA ConfigMap
+    # before the Deployment syncs, then a CronJob refreshes it on this schedule.
+    caBundleSync:
+      enabled: false
+      sourceNamespace: openshift-config-managed
+      sourceConfigMap: default-ingress-cert
+      sourceKey: ca-bundle.crt
+      schedule: "*/5 * * * *"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
 
   # ZTWIM must have a matching ClusterSPIFFEID registration. This optional
   # object is disabled by default because the cluster trust domain is an

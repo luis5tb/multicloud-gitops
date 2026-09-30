@@ -587,10 +587,14 @@ oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namesp
   easy to add the mapper only to the public login client (`openshift-cli`) and
   forget the console has a separate client with its own, independent set of
   protocol mappers.
-- **`/health/ready` stays `503` forever on either agent**: almost always the
-  SPIFFE Workload API socket. The CSI driver always names the file
-  `spire-agent.sock`, not `socket` -- check `identity.workloadApiSocket` /
-  `identity.spiffe.workloadApiSocket` matches exactly what's mounted.
+- **`rca-agent /health/ready` stays `503`**: readiness requires both Keycloak
+  OIDC discovery and a SPIFFE JWT-SVID. Check the pod logs and test both
+  dependencies. The CSI driver always names the socket `spire-agent.sock`, not
+  `socket` -- check `identity.workloadApiSocket` matches the mounted path. If
+  SPIFFE succeeds but Keycloak discovery reports a certificate verification
+  error, configure the issuer's CA bundle; the standalone `rca-agent` chart
+  bootstraps and periodically refreshes its mounted CA ConfigMap from
+  OpenShift's managed ingress CA bundle.
 - **acme-agent logs `Failed to resolve remote A2A agent rca_agent: Agent
   card URL must use https, or http on a loopback host: http://rca-agent...`**:
   this is neither Keycloak nor SPIFFE -- google-adk's `RemoteA2aAgent` refuses
