@@ -62,6 +62,17 @@ apply to the proxy's load-balancer upstream. Newer Praxis builds expose a
 narrower per-host `trusted_private_endpoints` option; use that instead when the
 image is upgraded to a release that supports it.
 
+When the configured Keycloak route uses the cluster's managed ingress CA,
+enable `policy.caBundleSync`. A bootstrap Job copies the source bundle into
+this namespace before Praxis starts; a CronJob refreshes it and rolls the
+Deployment when the CA changes. The chart mounts that bundle and sets
+`SSL_CERT_FILE` for the policy transport's OpenSSL client. The bundle replaces
+the image's default trust file, so this is appropriate while the policy's only
+HTTPS callout is the configured Keycloak JWKS URL. If other HTTPS callouts are
+added, provide a combined bundle containing the image's public roots and every
+required private issuer. For a publicly trusted Keycloak certificate, leave CA
+sync disabled and use the image's normal trust store.
+
 Praxis 0.4.1 currently requires both `insecure_options.allow_private_endpoints`
 (config-load-time validation of the load_balancer cluster endpoint) and
 `insecure_options.allow_private_upstreams` (the runtime connection check) for

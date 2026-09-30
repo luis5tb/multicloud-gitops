@@ -41,6 +41,24 @@ policy:
   # permits loopback and link-local destinations, so keep policy callouts
   # operator-controlled and never user-supplied.
   allowPrivateIdp: false
+  caBundleConfigMap:
+    name: ""
+    key: ca-bundle.crt
+  caBundleSync:
+    enabled: false
+    sourceNamespace: openshift-config-managed
+    sourceConfigMap: default-ingress-cert
+    sourceKey: ca-bundle.crt
+    targetConfigMapName: praxis-keycloak-ca
+    schedule: "*/5 * * * *"
+    image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
 
 securityContext:
   seccompProfile:

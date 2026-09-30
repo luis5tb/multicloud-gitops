@@ -301,6 +301,13 @@ clusterGroup:
       namespace: lightspeed-agentic-operator
       argoProject: hub
       path: charts/all/praxis-proxy
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          name: praxis-proxy
+          namespace: lightspeed-agentic-operator
+          jsonPointers:
+            - /spec/template/metadata/annotations/ca-bundle-sync-sha256
       overrides:
         # Replace the former direct RCA Route with the policy-enforcing
         # gateway. RCA ingress is limited to this same-namespace proxy by the
@@ -318,6 +325,12 @@ clusterGroup:
         # private IdP egress switch. Its only configured callout is this
         # static Keycloak JWKS URL; do not add user-controlled URLs here.
         - name: policy.allowPrivateIdp
+          value: "true"
+        # Praxis's policy transport uses OpenSSL's trust file. Sync the
+        # managed ingress CA into this namespace for the Keycloak JWKS fetch.
+        - name: policy.caBundleConfigMap.name
+          value: praxis-keycloak-ca
+        - name: policy.caBundleSync.enabled
           value: "true"
         - name: upstream.host
           value: rca-agent.lightspeed-agentic-operator.svc.cluster.local

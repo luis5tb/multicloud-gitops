@@ -1,6 +1,15 @@
 {{- if empty .Values.policy.allowedCallers }}
 {{- fail "policy.allowedCallers must contain at least one client; an empty allow-list would only require a valid token" }}
 {{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (not .Values.policy.caBundleConfigMap.name) }}
+{{- fail "policy.caBundleConfigMap.name is required when policy.caBundleSync.enabled is true" }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (not .Values.policy.caBundleSync.targetConfigMapName) }}
+{{- fail "policy.caBundleSync.targetConfigMapName is required when policy.caBundleSync.enabled is true" }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (ne .Values.policy.caBundleConfigMap.name .Values.policy.caBundleSync.targetConfigMapName) }}
+{{- fail "policy.caBundleConfigMap.name must match policy.caBundleSync.targetConfigMapName" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

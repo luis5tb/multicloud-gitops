@@ -676,7 +676,11 @@ oc get configmap -n lightspeed-agentic-operator keycloak-oidc-agentic-run-namesp
   before forwarding; unknown clients and identity/policy errors fail closed.
   Confirm `policy.allowedCallers` in `charts/all/praxis-proxy/values.yaml`
   includes the token's `azp`, the issuer and audience match the token, and the
-  Praxis pod can fetch Keycloak's JWKS. If the proxy allows the request but
+  Praxis pod can fetch Keycloak's JWKS. If Praxis reports `no public address`
+  or `private address (RFC 1918)`, enable its `policy.allowPrivateIdp` only for
+  the static issuer configuration; if it reports `UnknownIssuer`, configure
+  `policy.caBundleSync` so the proxy trusts the managed ingress CA. These are
+  separate egress and TLS-trust checks. If the proxy allows the request but
   RCA rejects it, inspect the `rca-agent` logs next:
   RCA independently validates the same bearer token and its SPIFFE workload
   identity. Also verify the RCA NetworkPolicy admits the Praxis pod selector;

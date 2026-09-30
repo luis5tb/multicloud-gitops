@@ -1,0 +1,13 @@
+{{- if .Values.policy.caBundleSync.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-ca-sync-script
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  sync_ingress_ca.py: |-
+{{ .Files.Get "files/sync_ingress_ca.py" | indent 4 }}
+{{- end }}

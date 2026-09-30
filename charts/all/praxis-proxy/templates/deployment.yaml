@@ -4,6 +4,8 @@ metadata:
   name: {{ include "praxis-proxy.fullname" . }}
   labels:
     {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
@@ -16,6 +18,9 @@ spec:
         {{- include "praxis-proxy.labels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.policy.caBundleSync.enabled }}
+        ca-bundle-sync-sha256: ""
+        {{- end }}
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -28,6 +33,11 @@ spec:
         - name: praxis-proxy
           image: {{ include "praxis-proxy.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.policy.caBundleConfigMap.name }}
+          env:
+            - name: SSL_CERT_FILE
+              value: /etc/praxis/ca-bundle/ca-bundle.crt
+          {{- end }}
           args:
             - --config
             - /etc/praxis/config/praxis.yaml
@@ -77,8 +87,21 @@ spec:
             - name: config
               mountPath: /etc/praxis/config
               readOnly: true
+            {{- if .Values.policy.caBundleConfigMap.name }}
+            - name: policy-ca-bundle
+              mountPath: /etc/praxis/ca-bundle
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "praxis-proxy.fullname" . }}
             defaultMode: 0444
+        {{- if .Values.policy.caBundleConfigMap.name }}
+        - name: policy-ca-bundle
+          configMap:
+            name: {{ .Values.policy.caBundleConfigMap.name }}
+            items:
+              - key: {{ .Values.policy.caBundleConfigMap.key }}
+                path: ca-bundle.crt
+        {{- end }}
