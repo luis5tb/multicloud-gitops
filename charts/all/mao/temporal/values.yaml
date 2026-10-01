@@ -1,0 +1,75 @@
+# Matches docker-compose `temporal` service: temporalio/temporal start-dev, no volume.
+
+fullnameOverride: temporal
+
+image:
+  registry: ""
+  repository: temporalio/temporal
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# Leave empty so OpenShift restricted SCC can inject UID / fsGroup.
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 7233
+  uiPort: 8233
+
+# UI is HTTP — Route is the OpenShift equivalent of compose publishing 8233.
+route:
+  enabled: false
+  host: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 2Gi
+
+# Same check as docker-compose healthcheck.
+livenessProbe:
+  exec:
+    command: ["temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command: ["temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+startupProbe:
+  exec:
+    command: ["temporal", "operator", "cluster", "health", "--address", "127.0.0.1:7233"]
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
