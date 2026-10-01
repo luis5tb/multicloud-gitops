@@ -1,0 +1,171 @@
+fullnameOverride: openshift-lightspeed-config
+
+# Must match the namespace this Application is installed into
+# (variants/standalone/values-standalone.yaml) and the namespace carrying the
+# lightspeed-operator Subscription's OperatorGroup. Frozen per
+# LIGHTSPEED_IMPLEMENTATION_PLAN.md T0.9.
+namespace: openshift-lightspeed
+
+# OLSConfig is conventionally a cluster-scoped singleton CR; "cluster" is the
+# assumed/expected name. This chart could not independently confirm the
+# exact CRD constraint (e.g. whether the name is schema-enforced) against a
+# trustworthy source -- verify with `oc explain olsconfig.metadata.name` or
+# the installed CRD before assuming a different name works.
+olsConfigName: cluster
+
+# Used only by the Keycloak CA sync Job/CronJob container below -- a small
+# Python script calling the Kubernetes API with its projected SA token, not
+# the Lightspeed service image. The operator selects the app-server/MCP
+# images itself (its --service-image flag / OLSConfig.spec.ols.serviceImage);
+# see README.md.
+image:
+  repository: registry.access.redhat.com/ubi9/python-312
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+llm:
+  # Same Gemini-on-Vertex project/location this pattern has always used.
+  defaultProvider: vertex-google
+  defaultModel: gemini-3.8-flash
+  vertex:
+    providerName: vertex-google
+    projectID: redhat-marketplace-dev
+    location: global
+    model: gemini-3.8-flash
+    # OLSConfig's google_vertex provider reads the credential from this key
+    # inside credentialsSecretRef by default when credentialKey is set
+    # explicitly here to "apitoken" (the operator's own default for
+    # google_vertex providers when the field is omitted; set explicitly for
+    # readability and to pin behavior across operator versions).
+    credentialKey: apitoken
+    # Deliberately its own Secret name, in case another component ever
+    # reads the same Vault path into its own differently-shaped Secret.
+    credentialsSecretName: ols-llm-creds-vertex
+    # Same underlying Vault ADC JSON as the llm-creds-vertex entry in
+    # values-secret.yaml.template (that file is
+    # outside this chart's ownership -- its "llm-creds-vertex" block must be
+    # uncommented/populated for either operator's ExternalSecret to resolve).
+    vaultKey: secret/data/global/llm-creds-vertex
+    vaultProperty: credentials
+
+ols:
+  # See LIGHTSPEED_DESIGN.md section 4: true (the default when
+  # omitted) makes the operator auto-deploy and wire in the built-in
+  # OpenShift MCP server. Do not also add spec.mcpServers for it.
+  introspectionEnabled: true
+  # SPECULATIVE / UNCONFIRMED -- disabled by default. LIGHTSPEED_DESIGN.md
+  # section 5 documents the operator-managed MCP server as NOT exposing a
+  # supported require_oauth/hardening knob in the inspected upstream revision
+  # (require_oauth defaults false in the MCP binary itself, and the plan
+  # treats fixing this as an open operator-level gap -- see README.md "MCP
+  # hardening"). This block renders an OLSConfig.spec.ols.mcpServerSecurity
+  # stanza on the *chance* a future/different operator build supports such a
+  # field, but this chart has no trustworthy confirmation that the field
+  # name, shape, or even existence below is correct. Do not enable this
+  # against a real cluster without first confirming the actual installed
+  # operator's OLSConfig CRD schema (e.g. `oc explain olsconfig.spec.ols` or
+  # the CRD's OpenAPI schema) supports it.
+  mcpServerSecurity:
+    enabled: false
+    # HTTPS Keycloak realm issuer URL to validate inbound bearer tokens
+    # against, e.g. https://keycloak.apps.<cluster-domain>/realms/rca. Only
+    # used if mcpServerSecurity.enabled is true and the field turns out to
+    # be real.
+    authorizationURL: ""
+    oauthAudience: openshift-mcp
+    caSecretRef:
+      name: ols-keycloak-ca
+      key: ca.crt
+    # Allow-listed MCP toolsets, if such a field exists. Add only after
+    # reviewing each toolset's exposed tools/RBAC against
+    # LIGHTSPEED_DESIGN.md's "Rights to grant" section.
+    toolsets: []
+    allowPrometheusMetrics: true
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+identity:
+  keycloak:
+    # This pattern's established identity.keycloak.caBundleSync approach: it
+    # actually syncs the cluster's *managed ingress* CA bundle (which also
+    # signs Keycloak's own Route certificate), not a Keycloak-specific CA.
+    # Unlike the ConfigMap target other charts use, this copy writes a
+    # Secret instead, since the speculative ols.mcpServerSecurity.caSecretRef
+    # option above (see README.md -- unconfirmed whether it is a real CRD
+    # field) would need one if it turns out to exist. See
+    # files/sync_keycloak_ca.py.
+    caBundleSecret:
+      name: ols-keycloak-ca
+      key: ca.crt
+    caBundleSync:
+      enabled: false
+      sourceNamespace: openshift-config-managed
+      sourceConfigMap: default-ingress-cert
+      sourceKey: ca-bundle.crt
+      schedule: "*/5 * * * *"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+
+  # ZTWIM/SPIRE registration for the *operator-created* app-server
+  # ServiceAccount (lightspeed-app-server) -- this chart does not create that
+  # ServiceAccount itself (see T0.9's frozen interface table). Disabled by
+  # default because the cluster trust domain is installation-specific. Only
+  # meaningful once the Lightspeed A2A/SPIFFE workstream (vendor/lightspeed-service,
+  # separate from this chart) is deployed.
+  clusterSpiffeID:
+    enabled: false
+    name: ols-app-server
+    trustDomain: ""
+    serviceAccountName: lightspeed-app-server
+
+# UNCONFIRMED GUESS: this chart has no trustworthy source for the actual pod
+# labels the Lightspeed Operator applies to its managed app-server
+# Deployment. The values below are a best-effort guess based on common
+# operator labeling conventions (app.kubernetes.io/* selector labels), not a
+# confirmed fact. Verify with
+# `oc get pods -n <namespace> --show-labels | grep lightspeed` against the
+# actually-installed operator and correct this value -- otherwise
+# templates/networkpolicy.yaml and templates/cluster-spiffe-id.yaml, which
+# both select pods by this map, may silently match nothing.
+appServer:
+  podSelectorLabels:
+    app.kubernetes.io/component: application-server
+    app.kubernetes.io/managed-by: lightspeed-operator
+    app.kubernetes.io/name: lightspeed-service-api
+    app.kubernetes.io/part-of: openshift-lightspeed
+
+# Restricts ingress to the operator-managed app-server pods (selected via
+# appServer.podSelectorLabels above) to same-namespace traffic and the
+# Praxis gateway. Any NetworkPolicy the operator itself creates for these pods is
+# independent of this one and not something this chart inspected or can
+# assume the contents of; Kubernetes NetworkPolicies targeting the same pods
+# are additive (OR'd), so this policy cannot narrow access an operator-owned
+# policy already grants elsewhere. See README.md.
+networkPolicy:
+  enabled: true
+  praxisPodSelector:
+    app.kubernetes.io/name: praxis-proxy
+    app.kubernetes.io/instance: praxis-proxy
+  praxisNamespace: praxis-proxy
+  port: 8443
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

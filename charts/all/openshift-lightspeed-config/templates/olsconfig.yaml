@@ -1,0 +1,66 @@
+{{- if and .Values.ols.mcpServerSecurity.enabled (not .Values.ols.mcpServerSecurity.authorizationURL) }}
+{{- fail "ols.mcpServerSecurity.authorizationURL must be set when ols.mcpServerSecurity.enabled is true." }}
+{{- end }}
+# apiVersion ols.openshift.io/v1alpha1 and the google_vertex provider shape
+# below (including the googleVertexConfig.projectID/location field names)
+# follow LIGHTSPEED_IMPLEMENTATION_PLAN.md's frozen interface assumptions
+# (T0.9). This chart has no trustworthy, independently-confirmed source for
+# the installed operator's actual CRD schema -- verify with
+# `oc explain olsconfig.spec` (or the installed CRD's OpenAPI schema)
+# against the real cluster before relying on this rendering unchanged.
+apiVersion: ols.openshift.io/v1alpha1
+kind: OLSConfig
+metadata:
+  # OLSConfig is conventionally a cluster-scoped singleton; "cluster" is the
+  # assumed name (see values.yaml's olsConfigName comment -- unconfirmed
+  # whether a different name would be rejected).
+  name: {{ .Values.olsConfigName }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    # The lightspeed-operator Subscription/CSV may not have registered the
+    # OLSConfig CRD yet on this Application's first sync -- the classic
+    # Argo CD race against an operator that hasn't finished installing.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  llm:
+    providers:
+      - name: {{ .Values.llm.vertex.providerName }}
+        type: google_vertex
+        credentialsSecretRef:
+          name: {{ .Values.llm.vertex.credentialsSecretName }}
+        credentialKey: {{ .Values.llm.vertex.credentialKey }}
+        googleVertexConfig:
+          projectID: {{ .Values.llm.vertex.projectID | quote }}
+          location: {{ .Values.llm.vertex.location | quote }}
+        models:
+          - name: {{ .Values.llm.vertex.model | quote }}
+  ols:
+    defaultProvider: {{ .Values.llm.defaultProvider | quote }}
+    defaultModel: {{ .Values.llm.defaultModel | quote }}
+    introspectionEnabled: {{ .Values.ols.introspectionEnabled }}
+    {{- if .Values.ols.mcpServerSecurity.enabled }}
+    # SPECULATIVE / UNCONFIRMED (disabled unless explicitly opted into via
+    # ols.mcpServerSecurity.enabled: true) -- see README.md's "MCP hardening"
+    # section. This chart has no trustworthy confirmation that
+    # spec.ols.mcpServerSecurity is a real field the installed operator's
+    # OLSConfig CRD accepts; it is rendered here only so this chart can be
+    # pointed at a future/different operator build that is confirmed to
+    # support it, without requiring a template edit. Verify against the
+    # installed CRD before enabling this against a real cluster -- an
+    # operator version that doesn't recognize this field may reject the CR
+    # outright (strict schema) or silently prune it (structural schema with
+    # pruning), neither of which provides the hardening this chart intends.
+    mcpServerSecurity:
+      authorizationURL: {{ .Values.ols.mcpServerSecurity.authorizationURL | quote }}
+      oauthAudience: {{ .Values.ols.mcpServerSecurity.oauthAudience | quote }}
+      caSecretRef:
+        name: {{ .Values.ols.mcpServerSecurity.caSecretRef.name }}
+        key: {{ .Values.ols.mcpServerSecurity.caSecretRef.key }}
+      {{- with .Values.ols.mcpServerSecurity.toolsets }}
+      toolsets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      allowPrometheusMetrics: {{ .Values.ols.mcpServerSecurity.allowPrometheusMetrics }}
+    {{- end }}
