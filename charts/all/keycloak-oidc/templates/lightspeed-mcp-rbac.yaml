@@ -1,0 +1,55 @@
+# Least-privilege, namespace-scoped RBAC for the mapped keycloak:acme-agent-rca
+# group's own direct OpenShift MCP reads (lightspeedRbac.* in values.yaml).
+# This grants exactly the read-only verbs an investigation MCP tool needs
+# (get/list on pods and events), in exactly the namespaces listed in
+# lightspeedRbac.namespaces, and nothing else: no pod logs, no Secrets, no
+# RBAC objects, no write verbs by default. See LIGHTSPEED_DESIGN.md's
+# "Rights to grant (and not grant)" section and lightspeedRbac.extraRules in
+# values.yaml for how to deliberately opt into pod-logs access.
+#
+# OpenShift RBAC is the final, authoritative allow/deny for every API call
+# the exchanged token (Token B) makes -- this template is additive to, and
+# does not replace, independent MCP-side tool/toolset restrictions configured
+# elsewhere (see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 2).
+{{- if .Values.lightspeedRbac.enabled }}
+{{- $root := . }}
+{{- range $i, $namespace := .Values.lightspeedRbac.namespaces }}
+{{- if $i }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list"]
+  {{- with $root.Values.lightspeedRbac.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+{{- end }}
+{{- end }}
