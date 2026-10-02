@@ -1,0 +1,98 @@
+# Responses File Resolve
+# Requires `--features openai-file-resolve-filter` because these filters are opt-in.
+#
+# Resolves `file_id` and `file_url` references in Responses API
+# input by fetching file metadata and content, then inlining
+# base64 content as `file_data` or `image_url` before forwarding.
+#
+# file_url: resolve (default)
+#   Fetches the URL and inlines content as a data URI in file_data.
+#   Use for backends that do not consume file_url directly.
+#
+# file_url: passthrough
+#   Leaves file_url unchanged. Use for native OpenAI-compatible
+#   backends that handle file_url natively.
+#
+# Use case: Codex or other Responses API clients send file
+# references (`file_id: "file-abc123"`) and the proxy
+# transparently inlines the content so the backend receives
+# a self-contained request.
+#
+# Client-facing Files API requests under /v1/files are routed
+# directly to the same Files API service. The router uses
+# segment-boundary prefix matching, so /v1/files and all of its
+# subresources go to the Files API while paths such as /v1/filesystem do not.
+#
+# This filter resolves the file transport reference only. The
+# inference backend must support inline `input_file` / `file_data`
+# or `input_image` / `image_url` content. Backend-specific document
+# extraction for vLLM is tracked separately in issue #397.
+#
+# Build:
+#   cargo build -p praxis-ai-proxy --features openai-file-resolve-filter
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [file-resolve-pipeline]
+
+filter_chains:
+  - name: file-resolve-pipeline
+    filters:
+      - filter: openai_responses_format
+        on_invalid: continue
+        headers:
+          format: x-praxis-ai-format
+          model: x-praxis-ai-model
+
+      - filter: openai_file_resolve
+        files_api_url: "http://127.0.0.1:9999"
+        allow_pre_security_callout: true
+        # file_id metadata and content callouts run through this
+        # outbound filter chain via the filtered subrequest executor,
+        # so its filters observe and can mutate each callout before it
+        # is dialed. SSRF protection for files_api_url derives from the
+        # pipeline's allow_private_upstreams, enforced when the callout
+        # target is pinned and again at connect time. Client-controlled
+        # file_url downloads never traverse this chain.
+        outbound_chain:
+          name: files-api-outbound
+          filters:
+            - filter: headers
+              request_set:
+                - name: x-file-callout
+                  value: file-resolve
+        # file_url: resolve is the default — fetches remote URLs
+        # and inlines content as data URIs. Set to 'passthrough'
+        # for native OpenAI-compatible backends.
+        file_url: resolve
+        forward_headers:
+          - authorization
+          - x-tenant-id
+        on_missing: reject
+        timeout_ms: 10000
+
+      - filter: router
+        routes:
+          - path_prefix: "/v1/files"
+            cluster: "files-api"
+          - path: "/v1/responses"
+            cluster: "inference-backend"
+          - path_prefix: "/"
+            cluster: "default-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "files-api"
+            endpoints:
+              - "127.0.0.1:9999"
+          - name: "inference-backend"
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: "default-backend"
+            endpoints:
+              - "127.0.0.1:3002"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
+  allow_private_upstreams: true # file_id callouts reach the loopback Files API

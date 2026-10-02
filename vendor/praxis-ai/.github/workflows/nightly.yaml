@@ -1,0 +1,126 @@
+name: Nightly
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  schedule:
+    - cron: "47 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Lint (fmt + clippy + dependency lint)
+  # ----------------------------------------------------------------------------
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+
+      - name: Setup Rust (lint)
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Lint
+        run: make lint
+
+  # ----------------------------------------------------------------------------
+  # Documentation
+  # ----------------------------------------------------------------------------
+
+  doc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+
+      - name: Setup Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        with:
+          cache-suffix: doc
+
+      - name: Build documentation
+        run: make doc
+
+  # ----------------------------------------------------------------------------
+  # Unit tests
+  # ----------------------------------------------------------------------------
+
+  test-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+
+      - name: Setup Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+
+      - name: Unit tests
+        run: make test-unit
+
+  # ----------------------------------------------------------------------------
+  # Supply chain audit
+  # ----------------------------------------------------------------------------
+
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+
+      - name: Supply chain audit
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+
+  # ----------------------------------------------------------------------------
+  # Coverage gate
+  # ----------------------------------------------------------------------------
+
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+
+      - name: Coverage check
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0

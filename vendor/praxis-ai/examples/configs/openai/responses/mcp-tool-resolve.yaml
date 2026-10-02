@@ -1,0 +1,128 @@
+# MCP Tool Resolution
+# Requires `--features openai-mcp-tools,store-sqlite` because these filters are opt-in.
+#
+# Demonstrates the `openai_mcp_tool_resolve` filter, which resolves MCP
+# tool entries in the Responses API `tools` array into concrete
+# tool definitions by calling `tools/list` on each upstream MCP
+# server.
+#
+# The filter runs after `openai_tool_parse` (gated on `openai_tool_parse.has_mcp`)
+# and before `openai_responses_proxy`. It reads MCP entries from the
+# buffered request body, checks `previous_tools` for cached
+# listings, calls `tools/list` via the `mcp_client` module, and
+# writes `mcp_tool_map` to `ResponsesState`.
+# For `stream: true`, runtime and response-processing failures are
+# returned as a Responses SSE lifecycle containing
+# `response.mcp_list_tools.failed` and terminal `response.failed` events.
+# Local request-policy failures such as SSRF blocking remain HTTP errors.
+#
+# Configured `connector_id` plus `defer_loading: true` is validated
+# here when the request also includes `tool_search`: the ID is resolved
+# locally and stripped from the backend body, but this pipeline does
+# **not** load tools. Deferred discovery requires `openai_mcp_dispatch`
+# inside an agentic loop — see agentic-loop.yaml.
+#
+# On SUCCESS, the filter seeds one `mcp_list_tools` output item per
+# resolved server into the response state, but — unlike the failure
+# lifecycle, which this filter emits itself — a successful request must
+# still reach the backend for inference, so those items are surfaced to
+# the client only by a downstream response-finalizing filter:
+# `openai_agentic_loop`/`openai_mcp_dispatch` (buffered `output`) or
+# `openai_stream_events`, which synthesizes the streaming lifecycle
+# when placed inside the agentic loop.
+# This minimal pipeline has none of those, so it demonstrates resolution
+# and the failure lifecycle only; see agentic-loop.yaml for a pipeline
+# that surfaces successful `mcp_list_tools` items on both the buffered and
+# streaming paths.
+#
+# This is a minimal pipeline focused on MCP tool discovery. For a
+# complete setup with multi-turn conversation support (rehydrate,
+# response store), see full-flow-agentic.yaml.
+#
+# For cross-request caching via `previous_tools`, add
+# `openai_responses_rehydrate` before this filter so that
+# `ResponsesState.previous_tools` is populated from the stored
+# previous response.
+#
+# Example requests:
+#
+#   # Request with MCP tools
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "model": "gpt-4.1",
+#       "input": "What is the weather?",
+#       "tools": [{
+#         "type": "mcp",
+#         "server_label": "weather",
+#         "server_url": "http://mcp-server:8001/mcp",
+#         "allowed_tools": ["get_weather"]
+#       }]
+#     }'
+#
+#   # Request without MCP tools (passthrough)
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model": "gpt-4.1", "input": "Hello, world!"}'
+#
+#   # Request with connector_id (resolved from filter config)
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#       "model": "gpt-4.1",
+#       "input": "Search for quarterly reports",
+#       "tools": [{
+#         "type": "mcp",
+#         "server_label": "drive",
+#         "connector_id": "corp_drive",
+#         "allowed_tools": ["search"]
+#       }]
+#     }'
+#
+# Build:
+#   cargo build -p praxis-ai-proxy --features openai-mcp-tools,store-sqlite
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [responses-pipeline]
+
+filter_chains:
+  - name: responses-pipeline
+    filters:
+      - filter: openai_responses_format
+        on_invalid: continue
+        headers:
+          format: x-praxis-ai-format
+          model: x-praxis-ai-model
+          stream: x-praxis-ai-stream
+          mode: x-praxis-responses-mode
+
+      - filter: openai_tool_parse
+
+      - filter: openai_mcp_tool_resolve
+        timeout_ms: 5000
+        connectors:
+          - id: corp_drive
+            server_url: https://drive-mcp.internal:8443/mcp
+          - id: internal_search
+            server_url: https://search-mcp.internal:8443/mcp
+
+      - filter: openai_responses_proxy
+        name: inference
+
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            headers:
+              x-praxis-ai-format: "openai_responses"
+            cluster: "inference-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "inference-backend"
+            endpoints:
+              - "127.0.0.1:3001"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

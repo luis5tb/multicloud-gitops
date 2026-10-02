@@ -1,0 +1,69 @@
+# Intelligent Route: Inference Model Routing
+#
+# Routes requests to different upstream clusters based on the inference
+# model name carried in a configured request header.  The header value is
+# set by the `model_to_header` filter, which promotes the JSON body's
+# `model` field and strips any client-supplied copy of the header so
+# routing cannot be spoofed from the wire.
+#
+# `intelligent_route` selects a candidate by static scoring and writes the
+# cluster name into `ctx.cluster`.  The downstream `load_balancer` reads
+# that cluster.  No `router` filter is required between them.
+#
+# Scoring: fresh > stale, local-site > remote on equal freshness.
+# First configured candidate wins on equal score.
+#
+# This filter is registered by praxis-ai-proxy, not Praxis core, because
+# it encodes AI-specific routing semantics.
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy -- -c examples/configs/intelligent-route-inference.yaml
+
+listeners:
+  - name: proxy
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # Promote the JSON body's `model` field into X-Model and strip any
+      # client-supplied X-Model so the routed model cannot be spoofed.
+      - filter: model_to_header
+        header: X-Model
+
+      # Route to the cluster that serves the requested model.
+      # Selects by highest score: fresh > stale, local > remote.
+      - filter: intelligent_route
+        local_site: site-a
+        model_header: X-Model
+        candidates:
+          - kind: inference_model
+            name: granite-3.3-8b
+            site: site-a
+            cluster: granite-local
+            fresh: true
+
+          - kind: inference_model
+            name: llama-3.2-8b
+            site: site-b
+            cluster: llama-remote
+            fresh: true
+
+      # Forward to whichever cluster intelligent_route selected.
+      - filter: load_balancer
+        clusters:
+          - name: granite-local
+            endpoints:
+              - "127.0.0.1:8001"
+          - name: llama-remote
+            endpoints:
+              - "127.0.0.1:8002"
+
+admin:
+  address: "127.0.0.1:9901"
+shutdown_timeout_secs: 5
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

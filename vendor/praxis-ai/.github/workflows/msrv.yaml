@@ -1,0 +1,46 @@
+name: MSRV
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Minimum Supported Rust Version
+  # ----------------------------------------------------------------------------
+
+  msrv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust (MSRV)
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        with:
+          cache-suffix: msrv
+
+      - name: Check workspace compiles on MSRV
+        run: cargo check --workspace

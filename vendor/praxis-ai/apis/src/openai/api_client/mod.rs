@@ -1,0 +1,1408 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! Shared HTTP client for OpenAI-compatible API callouts.
+//!
+//! Provides URL construction, SSRF-safe base-URL validation,
+//! resource-ID path-segment encoding, header forwarding, bounded
+//! JSON and byte reads, and normalized error mapping. Used by the
+//! `openai_file_resolve` Files API client and vector-store search.
+//!
+//! All requests route through the [`SubRequestClient`] from
+//! praxis-core for connection pooling, TLS, admission control,
+//! and response body size limits.
+//!
+//! Each consuming filter retains its own [`ApiClient`] instance.
+//!
+//! [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
+
+pub(crate) mod error;
+pub(crate) mod url;
+
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use bytes::Bytes;
+use http::HeaderMap;
+use praxis_core::connectivity::{is_private_ip, prepare_url_target};
+use praxis_filter::{
+    CalloutOutcome, CalloutResponse, FilterPipeline, FilteredSubrequestExecutor, RequestExtensions, StagedUpstream,
+    StagedUpstreamFallback, SubrequestRuntime, TlsPeerIdentity,
+};
+
+#[cfg(feature = "openai-responses")]
+pub(crate) use self::url::validate_forward_headers;
+pub(crate) use self::{
+    error::ApiClientError,
+    url::{resource_url, validate_base_url},
+};
+use crate::{
+    callout_identity::CalloutIdentity,
+    callout_target::AddressPolicy,
+    http_hop::{connection_nominates_header, is_hop_by_hop},
+    subrequest::{self, SubRequest, SubRequestClient, SubRequestError, SubResponse},
+};
+
+/// Sub-request nesting depth for Files API callouts. These callouts run
+/// from the top-level request pipeline, never from within another
+/// sub-request, so they start a fresh depth count.
+const OUTBOUND_CALLOUT_DEPTH: u8 = 0;
+
+/// Configuration for constructing an [`ApiClient`].
+///
+/// Assembled programmatically by each consuming filter from its
+/// own validated YAML config — no shared YAML schema.
+pub(crate) struct ApiClientConfig {
+    /// Base URL of the API endpoint (trailing slash stripped).
+    pub api_base_url: String,
+    /// Sub-request client for bounded execution.
+    pub client: SubRequestClient,
+    /// Per-request timeout.
+    pub timeout: Duration,
+    /// Maximum response body bytes.
+    pub max_response_bytes: usize,
+    /// Header names to forward from the original request.
+    pub forward_header_names: Vec<http::HeaderName>,
+    /// Connect-time policy for the configured API target.
+    pub address_policy: AddressPolicy,
+}
+
+/// Shared HTTP client for OpenAI-compatible API callouts.
+///
+/// All requests route through the [`SubRequestClient`] from
+/// praxis-core for connection pooling, TLS, admission control,
+/// and response body size limits.
+///
+/// [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
+pub(crate) struct ApiClient {
+    /// Base URL of the API endpoint (trailing slash stripped).
+    api_base_url: String,
+    /// Normalized origin to which forwarded credentials are bound.
+    target_origin: Option<String>,
+    /// Sub-request client for bounded execution.
+    client: SubRequestClient,
+    /// Per-request timeout.
+    timeout: Duration,
+    /// Maximum response body bytes for JSON requests.
+    max_response_bytes: usize,
+    /// Header names to forward from the original downstream
+    /// request.
+    forward_header_names: Vec<http::HeaderName>,
+    /// Connect-time policy for the configured API target.
+    address_policy: AddressPolicy,
+}
+
+/// Map a [`SubRequestError`] to an [`ApiClientError`].
+fn map_subrequest_error(err: SubRequestError) -> ApiClientError {
+    match err {
+        SubRequestError::ResponseTooLarge { limit, .. } => ApiClientError::ResponseTooLarge { limit },
+        source => ApiClientError::Transport { source },
+    }
+}
+
+/// Whether a configured forward header is safe to copy from the inbound request.
+fn should_copy_forward_header(name: &http::HeaderName, request_headers: &HeaderMap) -> bool {
+    !is_hop_by_hop(name.as_str()) && !connection_nominates_header(request_headers, name)
+}
+
+impl ApiClient {
+    /// Build a new client from validated configuration.
+    ///
+    /// The base URL should already be validated with
+    /// [`validate_base_url`].
+    pub(crate) fn new(config: ApiClientConfig) -> Self {
+        let ApiClientConfig {
+            api_base_url,
+            client,
+            timeout,
+            max_response_bytes,
+            forward_header_names,
+            address_policy,
+        } = config;
+
+        let target_origin = ::url::Url::parse(&api_base_url)
+            .ok()
+            .map(|url| url.origin().ascii_serialization());
+        Self {
+            api_base_url: api_base_url.trim_end_matches('/').to_owned(),
+            target_origin,
+            client,
+            timeout,
+            max_response_bytes,
+            forward_header_names,
+            address_policy,
+        }
+    }
+
+    /// Return the validated base URL.
+    pub(crate) fn api_base_url(&self) -> &str {
+        &self.api_base_url
+    }
+
+    /// Return the configured maximum response size.
+    pub(crate) fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
+    }
+
+    /// Return the configured per-request timeout.
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Build a resource URL from the configured base, a path
+    /// prefix, a resource ID, and an optional suffix.
+    ///
+    /// See [`resource_url`] for encoding and validation behavior.
+    pub(crate) fn resource_url(
+        &self,
+        path_prefix: &str,
+        resource_id: &str,
+        suffix: Option<&str>,
+    ) -> Result<String, ApiClientError> {
+        resource_url(&self.api_base_url, path_prefix, resource_id, suffix)
+    }
+
+    /// Shared sub-request client used for callouts.
+    pub(crate) fn subrequest_client(&self) -> &SubRequestClient {
+        &self.client
+    }
+
+    /// Send a GET request and return a bounded HTTP response.
+    pub(crate) async fn get(
+        &self,
+        url: &str,
+        request_headers: &HeaderMap,
+        max_response_bytes: usize,
+    ) -> Result<SubResponse, ApiClientError> {
+        let headers = self.build_header_map(request_headers);
+        self.execute_url(url, http::Method::GET, headers, Bytes::new(), max_response_bytes)
+            .await
+    }
+
+    /// Send a pre-serialized JSON body and return the bounded HTTP
+    /// response.
+    pub(crate) async fn post_json_bytes(
+        &self,
+        url: String,
+        body: Vec<u8>,
+        request_headers: &HeaderMap,
+    ) -> Result<SubResponse, ApiClientError> {
+        let mut headers = self.build_header_map(request_headers);
+        headers.remove(http::header::CONTENT_TYPE);
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+
+        self.execute_url(
+            &url,
+            http::Method::POST,
+            headers,
+            Bytes::from(body),
+            self.max_response_bytes,
+        )
+        .await
+    }
+
+    /// Send a GET request and return the response body with
+    /// bounded reads.
+    ///
+    /// The Pingora connector does not follow redirects because it
+    /// connects to a specific peer. Redirect responses are returned
+    /// to the caller as bounded HTTP responses.
+    pub(crate) async fn get_bytes(
+        &self,
+        url: &str,
+        request_headers: &HeaderMap,
+        max_bytes: usize,
+    ) -> Result<Bytes, ApiClientError> {
+        let response = self.get(url, request_headers, max_bytes).await?;
+        Ok(response.body)
+    }
+
+    /// Copy configured headers from the original downstream
+    /// request into a [`HeaderMap`] for forwarding.
+    pub(crate) fn forward_headers(&self, request_headers: &HeaderMap) -> Vec<(http::HeaderName, http::HeaderValue)> {
+        let mut headers = Vec::new();
+        for name in &self.forward_header_names {
+            if !should_copy_forward_header(name, request_headers) {
+                continue;
+            }
+            if let Some(value) = request_headers.get(name) {
+                headers.push((name.clone(), value.clone()));
+            }
+        }
+        headers
+    }
+
+    /// Build a [`HeaderMap`] from forwarded headers.
+    fn build_header_map(&self, request_headers: &HeaderMap) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for name in &self.forward_header_names {
+            if !should_copy_forward_header(name, request_headers) {
+                continue;
+            }
+            if let Some(value) = request_headers.get(name) {
+                map.insert(name.clone(), value.clone());
+            }
+        }
+        map
+    }
+
+    /// Parse the URL, build a [`SubRequest`], and execute it with
+    /// the caller's response-size limit.
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the request's independently owned transport fields and credential-origin binding stay explicit"
+    )]
+    async fn execute_url(
+        &self,
+        url: &str,
+        method: http::Method,
+        headers: HeaderMap,
+        body: Bytes,
+        max_response_bytes: usize,
+    ) -> Result<SubResponse, ApiClientError> {
+        let candidate_origin = ::url::Url::parse(url)
+            .map_err(|_error| ApiClientError::Transport {
+                source: SubRequestError::InvalidRequest("malformed callout URL".to_owned()),
+            })?
+            .origin()
+            .ascii_serialization();
+        if Some(candidate_origin) != self.target_origin {
+            return Err(ApiClientError::Transport {
+                source: SubRequestError::InvalidRequest(
+                    "callout URL changed the configured credential origin".to_owned(),
+                ),
+            });
+        }
+        let request = SubRequest {
+            method,
+            uri: http::Uri::default(),
+            headers,
+            body,
+        };
+
+        let mut response = subrequest::execute_url(
+            &self.client,
+            url,
+            request,
+            max_response_bytes,
+            self.timeout,
+            self.address_policy,
+        )
+        .await
+        .map_err(map_subrequest_error)?;
+        sanitize_response_headers(&mut response.headers);
+        Ok(response)
+    }
+
+    /// Build an [`OutboundExecution`] that routes callouts through
+    /// `pipeline` using this client's shared sub-request transport,
+    /// per-request timeout, and the originating downstream attributes.
+    pub(crate) fn outbound_execution(
+        &self,
+        pipeline: Arc<FilterPipeline>,
+        runtime: DownstreamRuntime,
+    ) -> OutboundExecution {
+        OutboundExecution {
+            pipeline,
+            client: self.client.clone(),
+            step_timeout: self.timeout,
+            runtime,
+            callout_identity: None,
+            credential_authority: None,
+        }
+    }
+
+    /// Send a GET request through the bound outbound filter chain and
+    /// return a bounded, header-sanitized HTTP response.
+    ///
+    /// Unlike [`get`](Self::get), the request traverses the
+    /// [`FilteredSubrequestExecutor`], so the outbound chain observes and
+    /// can mutate the callout before it is dialed. SSRF protection for the
+    /// configured target derives from the bound pipeline's
+    /// `allow_private_upstreams`, enforced both when the target is pinned
+    /// (`prepare_url_target`) and at connect time (`build_peer`).
+    pub(crate) async fn get_via_chain(
+        &self,
+        url: &str,
+        request_headers: &HeaderMap,
+        max_response_bytes: usize,
+        outbound: &OutboundExecution,
+    ) -> Result<SubResponse, ApiClientError> {
+        let headers = self.build_header_map(request_headers);
+        // Box the transport future so it is heap-allocated rather than inlined
+        // into this future and every ancestor resolve future (large_futures).
+        Box::pin(self.execute_via_chain(
+            url,
+            http::Method::GET,
+            headers,
+            Bytes::new(),
+            max_response_bytes,
+            outbound,
+        ))
+        .await
+    }
+
+    /// Pin the target, stage it, and run the request through the bound
+    /// outbound chain, returning the buffered response.
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::large_stack_frames,
+        reason = "callout assembly holds the staged target, sub-request, and extensions; transport futures are already boxed"
+    )]
+    async fn execute_via_chain(
+        &self,
+        url: &str,
+        method: http::Method,
+        headers: HeaderMap,
+        body: Bytes,
+        max_response_bytes: usize,
+        outbound: &OutboundExecution,
+    ) -> Result<SubResponse, ApiClientError> {
+        let parsed = ::url::Url::parse(url).map_err(|_error| ApiClientError::Transport {
+            source: SubRequestError::InvalidRequest("malformed callout URL".to_owned()),
+        })?;
+        if Some(parsed.origin().ascii_serialization()) != self.target_origin {
+            return Err(ApiClientError::Transport {
+                source: SubRequestError::InvalidRequest(
+                    "callout URL changed the configured credential origin".to_owned(),
+                ),
+            });
+        }
+
+        // One clock bounds both target preparation and the sub-request. A
+        // configured Files API callout staged inside an IRR cannot receive a
+        // fresh timeout beyond the router's remaining absolute deadline.
+        let started = Instant::now();
+        let deadline = outbound.callout_identity.as_ref().map_or_else(
+            || started.checked_add(self.timeout).unwrap_or(started),
+            |identity| identity.deadline(started, self.timeout),
+        );
+        let step_timeout = deadline.saturating_duration_since(started);
+
+        // Pin the resolved target before dialing: the validation hook runs
+        // once on the complete address set, rejecting private or reserved
+        // addresses unless the bound pipeline opted into private upstreams.
+        let allow_private = outbound.pipeline.allow_private_upstreams();
+        let target = Box::pin(prepare_url_target(url, deadline, |addresses: &[SocketAddr]| {
+            if allow_private {
+                return Ok(());
+            }
+            if addresses.iter().any(|addr| is_private_ip(&addr.ip())) {
+                return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                    "callout target resolves to a private or reserved address".into(),
+                );
+            }
+            Ok(())
+        }))
+        .await
+        .map_err(|error| ApiClientError::Transport {
+            source: SubRequestError::Connect(error.to_string()),
+        })?;
+
+        let staged_upstream =
+            StagedUpstream::from_prepared_target(&target).map_err(|error| ApiClientError::Transport {
+                source: SubRequestError::Connect(error.to_string()),
+            })?;
+        let staged_fallback = StagedUpstreamFallback::from_prepared_target(&target);
+
+        // The executor sets Host from the staged authority and forwards the
+        // request URI verbatim, so send an origin-form path+query target.
+        let origin_form = match parsed.query() {
+            Some(query) => format!("{}?{query}", parsed.path()),
+            None => parsed.path().to_owned(),
+        };
+        let uri = origin_form
+            .parse::<http::Uri>()
+            .map_err(|_error| ApiClientError::Transport {
+                source: SubRequestError::InvalidRequest("malformed callout URL path".to_owned()),
+            })?;
+
+        let request = SubRequest {
+            method,
+            uri,
+            headers,
+            body,
+        };
+        let mut extensions = RequestExtensions::default();
+        extensions.insert(staged_upstream);
+        extensions.insert(staged_fallback);
+        if let Some(identity) = outbound.callout_identity.as_ref() {
+            let authority = outbound
+                .credential_authority
+                .as_deref()
+                .ok_or_else(|| ApiClientError::Transport {
+                    source: SubRequestError::InvalidRequest("missing configured credential authority".to_owned()),
+                })?;
+            identity
+                .stage_header_credential_into(&mut extensions, authority, http::header::AUTHORIZATION)
+                .map_err(|_error| ApiClientError::Transport {
+                    source: SubRequestError::InvalidRequest("Files API credential staging failed".to_owned()),
+                })?;
+        }
+
+        let executor = FilteredSubrequestExecutor::for_callout(
+            outbound.client.clone(),
+            outbound.runtime.runtime(),
+            OUTBOUND_CALLOUT_DEPTH,
+            max_response_bytes,
+            outbound.step_timeout.min(step_timeout),
+        );
+
+        let mut response = match Box::pin(executor.run_classified(&outbound.pipeline, &request, extensions, deadline))
+            .await
+            .map_err(|error| ApiClientError::Transport {
+                source: SubRequestError::Io(error.to_string()),
+            })? {
+            CalloutOutcome::Response(CalloutResponse::Buffered(response)) => response,
+            CalloutOutcome::Response(CalloutResponse::Streaming { .. }) => {
+                return Err(ApiClientError::Transport {
+                    source: SubRequestError::InvalidRequest(
+                        "outbound chain returned a streaming response for a buffered file callout".to_owned(),
+                    ),
+                });
+            },
+            CalloutOutcome::ResponseTooLarge { limit, .. } => {
+                return Err(ApiClientError::ResponseTooLarge { limit });
+            },
+            _ => {
+                return Err(ApiClientError::Transport {
+                    source: SubRequestError::Io("outbound chain returned an unsupported classified outcome".to_owned()),
+                });
+            },
+        };
+        sanitize_response_headers(&mut response.headers);
+        Ok(response)
+    }
+}
+
+/// Cloneable snapshot of the downstream attributes forwarded into each
+/// outbound sub-request.
+///
+/// Held so a fresh [`SubrequestRuntime`] can be built per callout without
+/// requiring [`SubrequestRuntime`] itself to be cloneable.
+#[derive(Clone)]
+pub(crate) struct DownstreamRuntime {
+    /// Original downstream client address.
+    pub client_addr: Option<IpAddr>,
+    /// Whether the original downstream connection used TLS.
+    pub downstream_tls: bool,
+    /// Verified downstream peer identity, when present.
+    pub peer_identity: Option<Arc<TlsPeerIdentity>>,
+    /// Start instant of the logical client request.
+    pub request_start: Instant,
+}
+
+impl DownstreamRuntime {
+    /// Materialize a per-sub-request [`SubrequestRuntime`] from the snapshot.
+    fn runtime(&self) -> SubrequestRuntime {
+        SubrequestRuntime::new(
+            self.client_addr,
+            self.downstream_tls,
+            self.peer_identity.clone(),
+            self.request_start,
+        )
+    }
+}
+
+/// Prebuilt context for routing configured API callouts through a bound
+/// outbound filter chain via the [`FilteredSubrequestExecutor`].
+pub(crate) struct OutboundExecution {
+    /// Bound outbound filter pipeline applied to each callout.
+    pipeline: Arc<FilterPipeline>,
+    /// Shared sub-request transport client.
+    client: SubRequestClient,
+    /// Per-sub-request step timeout.
+    step_timeout: Duration,
+    /// Downstream attributes forwarded into each sub-request.
+    runtime: DownstreamRuntime,
+    /// Trusted caller context projected into each child callout.
+    callout_identity: Option<CalloutIdentity>,
+    /// Exact authority for an optional caller-scoped Authorization credential.
+    credential_authority: Option<String>,
+}
+
+impl OutboundExecution {
+    /// Attach the trusted caller context used by configured Files API callouts.
+    pub(crate) fn with_callout_identity(mut self, identity: CalloutIdentity, credential_authority: String) -> Self {
+        self.callout_identity = Some(identity);
+        self.credential_authority = Some(credential_authority);
+        self
+    }
+}
+
+/// Retain the safe response metadata required by callout consumers.
+fn sanitize_response_headers(headers: &mut HeaderMap) {
+    let mut sanitized = HeaderMap::new();
+    for name in [
+        "content-type",
+        "retry-after",
+        "x-request-id",
+        "request-id",
+        "openai-request-id",
+    ] {
+        for value in headers.get_all(name) {
+            sanitized.append(http::HeaderName::from_static(name), value.clone());
+        }
+    }
+    *headers = sanitized;
+}
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
+mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        net::{SocketAddr, TcpListener, TcpStream},
+        thread::JoinHandle,
+    };
+
+    use http::HeaderValue;
+
+    use super::*;
+    use crate::{
+        callout_identity::stage_callout_identity,
+        test_utils::{make_filter_context, make_request},
+    };
+
+    fn bind_test_server() -> (TcpListener, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        (listener, addr)
+    }
+
+    fn capture_request(listener: TcpListener, response_body: &str) -> JoinHandle<String> {
+        let body = response_body.to_owned();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8(request).unwrap()
+        })
+    }
+
+    fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 4096];
+
+        loop {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0, "connection closed before the complete request arrived");
+            request.extend_from_slice(&buf[..n]);
+
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let body_start = header_end + 4;
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+
+            if request.len() >= body_start + content_length {
+                return request;
+            }
+        }
+    }
+
+    fn test_client(base_url: &str) -> ApiClient {
+        ApiClient::new(ApiClientConfig {
+            api_base_url: base_url.to_owned(),
+            client: subrequest::isolated_client(4),
+            timeout: Duration::from_millis(1_000),
+            max_response_bytes: 1_048_576,
+            forward_header_names: Vec::new(),
+            address_policy: AddressPolicy::AllowPrivate,
+        })
+    }
+
+    fn private_outbound(client: &ApiClient) -> OutboundExecution {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let mut entries = [];
+        let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+        pipeline.set_allow_private_upstreams(true);
+        client.outbound_execution(
+            Arc::new(pipeline),
+            DownstreamRuntime {
+                client_addr: None,
+                downstream_tls: false,
+                peer_identity: None,
+                request_start: Instant::now(),
+            },
+        )
+    }
+
+    #[test]
+    fn new_strips_trailing_slash() {
+        let client = test_client("http://ogx:8321/");
+        assert_eq!(client.api_base_url(), "http://ogx:8321");
+    }
+
+    #[test]
+    fn forward_headers_copies_configured_headers() {
+        let client = ApiClient::new(ApiClientConfig {
+            api_base_url: "http://ogx:8321".to_owned(),
+            client: subrequest::isolated_client(4),
+            timeout: Duration::from_millis(1_000),
+            max_response_bytes: 1_048_576,
+            forward_header_names: vec![
+                http::header::AUTHORIZATION,
+                http::HeaderName::from_static("x-tenant-id"),
+            ],
+            address_policy: AddressPolicy::AllowPrivate,
+        });
+
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(http::header::AUTHORIZATION, "Bearer token".parse().unwrap());
+        request_headers.insert("x-tenant-id", "tenant-1".parse().unwrap());
+        request_headers.insert("x-unrelated", "ignored".parse().unwrap());
+
+        let forwarded = client.forward_headers(&request_headers);
+
+        assert_eq!(forwarded.len(), 2, "only configured headers should be forwarded");
+        assert!(
+            forwarded
+                .iter()
+                .any(|(n, v)| n == "authorization" && v == "Bearer token"),
+            "authorization header should be forwarded"
+        );
+        assert!(
+            forwarded.iter().any(|(n, v)| n == "x-tenant-id" && v == "tenant-1"),
+            "x-tenant-id header should be forwarded"
+        );
+    }
+
+    #[test]
+    fn forward_headers_skips_connection_nominated_fields() {
+        let client = ApiClient::new(ApiClientConfig {
+            api_base_url: "http://ogx:8321".to_owned(),
+            client: subrequest::isolated_client(4),
+            timeout: Duration::from_millis(1_000),
+            max_response_bytes: 1_048_576,
+            forward_header_names: vec![
+                http::HeaderName::from_static("x-smuggle"),
+                http::HeaderName::from_static("x-tenant-id"),
+            ],
+            address_policy: AddressPolicy::AllowPrivate,
+        });
+
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(http::header::CONNECTION, "x-smuggle".parse().unwrap());
+        request_headers.insert("x-smuggle", "secret".parse().unwrap());
+        request_headers.insert("x-tenant-id", "tenant-1".parse().unwrap());
+
+        let forwarded = client.forward_headers(&request_headers);
+
+        assert_eq!(forwarded.len(), 1, "only the un-nominated header should be forwarded");
+        assert!(
+            forwarded.iter().any(|(n, v)| n == "x-tenant-id" && v == "tenant-1"),
+            "x-tenant-id is not listed in Connection and should still be forwarded"
+        );
+        assert!(
+            forwarded.iter().all(|(n, _)| n != "x-smuggle"),
+            "fields named by Connection must not be copied onto the outbound request"
+        );
+    }
+
+    #[test]
+    fn resource_url_delegates_to_url_module() {
+        let client = test_client("http://ogx:8321");
+        let url = client.resource_url("v1/files", "file-abc", Some("content")).unwrap();
+        assert_eq!(url, "http://ogx:8321/v1/files/file-abc/content");
+    }
+
+    #[tokio::test]
+    async fn forwarded_credentials_are_bound_to_configured_origin() {
+        let client = test_client("https://api.example.com");
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::AUTHORIZATION, "Bearer secret".parse().unwrap());
+
+        let error = client
+            .get("https://attacker.example/v1/files", &headers, 1024)
+            .await
+            .expect_err("a derived URL on another origin must be rejected before I/O");
+
+        assert!(
+            matches!(
+                error,
+                ApiClientError::Transport {
+                    source: SubRequestError::InvalidRequest(detail),
+                } if detail.contains("configured credential origin")
+            ),
+            "cross-origin derived URLs should be rejected as invalid requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_callout_url_is_rejected_before_origin_comparison() {
+        let client = test_client("https://api.example.com");
+
+        let error = client
+            .get("not a valid URL", &HeaderMap::new(), 1024)
+            .await
+            .expect_err("a malformed callout URL must be rejected before I/O");
+
+        assert!(
+            matches!(
+                error,
+                ApiClientError::Transport {
+                    source: SubRequestError::InvalidRequest(detail),
+                } if detail == "malformed callout URL"
+            ),
+            "malformed callout URLs should be rejected as invalid requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_bytes_preserves_redirect_without_following_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/secret\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let body = client
+            .get_bytes(
+                &format!("http://{address}/v1/files/test/content"),
+                &HeaderMap::new(),
+                1024,
+            )
+            .await
+            .unwrap();
+
+        assert!(body.is_empty(), "redirect response should not contact its target");
+    }
+
+    #[tokio::test]
+    async fn get_bytes_transport_failure_returns_callout_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let err = client
+            .get_bytes(
+                &format!("http://{address}/v1/files/test/content"),
+                &HeaderMap::new(),
+                1024,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ApiClientError::Transport { .. }),
+            "transport errors should remain typed"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_bytes_rejects_response_exceeding_per_request_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n0123456789abcdef")
+                .unwrap();
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let err = client
+            .get_bytes(&format!("http://{address}/v1/files/test/content"), &HeaderMap::new(), 8)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ApiClientError::ResponseTooLarge { .. }),
+            "responses exceeding per-request max_bytes should be rejected as ResponseTooLarge: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_bytes_oversized_non_2xx_is_response_too_large() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).unwrap();
+            let body = vec![b'x'; 64];
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let err = client
+            .get_bytes(&format!("http://{address}/v1/files/test/content"), &HeaderMap::new(), 8)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ApiClientError::ResponseTooLarge { .. }),
+            "oversized response body should be ResponseTooLarge regardless of status: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_chain_preserves_response_too_large_classification() {
+        let (listener, address) = bind_test_server();
+        let request = capture_request(listener, "0123456789abcdef");
+        let client = test_client(&format!("http://{address}"));
+        let outbound = private_outbound(&client);
+
+        let err = client
+            .get_via_chain(
+                &format!("http://{address}/v1/files/test/content"),
+                &HeaderMap::new(),
+                8,
+                &outbound,
+            )
+            .await
+            .expect_err("the classified executor must surface an oversized response");
+        let _request = request.join().unwrap();
+
+        assert!(
+            matches!(err, ApiClientError::ResponseTooLarge { limit: 8 }),
+            "the outbound-chain path should preserve the typed overflow and its limit: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_file_call_is_capped_by_parent_deadline() {
+        let (listener, address) = bind_test_server();
+        slow_body_server(listener);
+        let client = test_client(&format!("http://{address}"));
+        let parent_deadline = Instant::now() + Duration::from_millis(50);
+        let outbound = private_outbound(&client).with_callout_identity(
+            CalloutIdentity::for_test_with_deadline(parent_deadline),
+            address.to_string(),
+        );
+        let started = Instant::now();
+
+        let response = client
+            .get_via_chain(
+                &format!("http://{address}/v1/files/slow/content"),
+                &HeaderMap::new(),
+                1024,
+                &outbound,
+            )
+            .await
+            .expect("the executor represents its local timeout as a buffered response");
+
+        assert_eq!(
+            response.status, 504,
+            "the parent deadline must stop the nested file callout"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "the callout must not receive the client's fresh one-second timeout"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test runs and compares two complete parallel callout exchanges"
+    )]
+    async fn parallel_outbound_file_calls_share_trace_and_mint_distinct_spans() {
+        let (first_listener, first_address) = bind_test_server();
+        let first_request = capture_request(first_listener, "{}");
+        let (second_listener, second_address) = bind_test_server();
+        let second_request = capture_request(second_listener, "{}");
+
+        let mut parent_request = make_request(http::Method::POST, "/v1/responses");
+        parent_request
+            .headers
+            .insert("x-request-id", HeaderValue::from_static("request-parent"));
+        parent_request.headers.insert(
+            "traceparent",
+            HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+        );
+        let mut parent_context = make_filter_context(&parent_request);
+        let trace_filter = praxis_filter::builtins::TraceContextFilter::from_config(
+            &serde_yaml::from_str("{}").expect("valid trace filter config"),
+        )
+        .expect("trace_context filter");
+        let _action = trace_filter
+            .on_request(&mut parent_context)
+            .await
+            .expect("trace context established");
+
+        let first_client = test_client(&format!("http://{first_address}"));
+        let first_outbound = private_outbound(&first_client).with_callout_identity(
+            stage_callout_identity(&parent_context, None).expect("first identity"),
+            first_address.to_string(),
+        );
+        let second_client = test_client(&format!("http://{second_address}"));
+        let second_outbound = private_outbound(&second_client).with_callout_identity(
+            stage_callout_identity(&parent_context, None).expect("second identity"),
+            second_address.to_string(),
+        );
+
+        let first_url = format!("http://{first_address}/v1/files/first/content");
+        let second_url = format!("http://{second_address}/v1/files/second/content");
+        let first_headers = HeaderMap::new();
+        let second_headers = HeaderMap::new();
+        let (first_result, second_result) = tokio::join!(
+            first_client.get_via_chain(&first_url, &first_headers, 1024, &first_outbound,),
+            second_client.get_via_chain(&second_url, &second_headers, 1024, &second_outbound,),
+        );
+        first_result.expect("first file callout");
+        second_result.expect("second file callout");
+
+        let first = first_request.join().expect("first captured request");
+        let second = second_request.join().expect("second captured request");
+        let first_traceparent = captured_header(&first, "traceparent").expect("first traceparent");
+        let second_traceparent = captured_header(&second, "traceparent").expect("second traceparent");
+        assert_eq!(captured_header(&first, "x-request-id"), Some("request-parent"));
+        assert_eq!(captured_header(&second, "x-request-id"), Some("request-parent"));
+        let (first_trace_id, first_span_id) = traceparent_ids(first_traceparent);
+        let (second_trace_id, second_span_id) = traceparent_ids(second_traceparent);
+        assert_eq!(first_trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_eq!(second_trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+        assert_ne!(first_span_id, "00f067aa0ba902b7");
+        assert_ne!(second_span_id, "00f067aa0ba902b7");
+        assert_ne!(
+            first_span_id, second_span_id,
+            "parallel child callouts require independent span IDs"
+        );
+    }
+
+    fn captured_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (candidate, value) = line.split_once(':')?;
+            candidate.eq_ignore_ascii_case(name).then_some(value.trim())
+        })
+    }
+
+    fn traceparent_ids(traceparent: &str) -> (&str, &str) {
+        let mut fields = traceparent.split('-');
+        assert_eq!(fields.next(), Some("00"), "expected W3C version 00");
+        let trace_id = fields.next().expect("trace ID");
+        let span_id = fields.next().expect("span ID");
+        assert_eq!(fields.next(), Some("01"), "expected sampled trace flags");
+        assert!(fields.next().is_none(), "unexpected traceparent fields");
+        (trace_id, span_id)
+    }
+
+    #[tokio::test]
+    async fn get_returns_valid_json_without_decoding() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).unwrap();
+            let body = r#"{"id":"file-abc","content_type":"text/plain"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let response = client
+            .get(&format!("http://{address}/v1/files/file-abc"), &HeaderMap::new(), 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+
+        assert_eq!(json["id"].as_str().unwrap(), "file-abc");
+        assert_eq!(json["content_type"].as_str().unwrap(), "text/plain");
+    }
+
+    #[tokio::test]
+    async fn get_preserves_invalid_json_without_decoding() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nnot-json!!!")
+                .unwrap();
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let response = client
+            .get(&format!("http://{address}/v1/files/file-abc"), &HeaderMap::new(), 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(response.body, "not-json!!!");
+    }
+
+    #[tokio::test]
+    async fn post_json_bytes_sends_body_and_preserves_response() {
+        let (listener, address) = bind_test_server();
+        let captured = capture_request(listener, r#"{"results":[]}"#);
+        let client = test_client(&format!("http://{address}"));
+
+        let response = client
+            .post_json_bytes(
+                format!("http://{address}/v1/vector_stores/vs-123/search"),
+                br#"{"query":"test"}"#.to_vec(),
+                &HeaderMap::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.body, br#"{"results":[]}"#.as_slice());
+
+        let request = captured.join().unwrap();
+        let request_lower = request.to_lowercase();
+        assert!(request.starts_with("POST"), "should be a POST request");
+        assert!(
+            request_lower.contains("content-type: application/json"),
+            "should have JSON content-type: {request}"
+        );
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        assert_eq!(body, r#"{"query":"test"}"#, "serialized JSON body should be sent");
+    }
+
+    #[tokio::test]
+    async fn post_json_bytes_preserves_invalid_json() {
+        let (listener, address) = bind_test_server();
+        let captured = capture_request(listener, "not-json!!!");
+        let client = test_client(&format!("http://{address}"));
+
+        let response = client
+            .post_json_bytes(
+                format!("http://{address}/v1/vector_stores/vs-123/search"),
+                br#"{"query":"test"}"#.to_vec(),
+                &HeaderMap::new(),
+            )
+            .await
+            .unwrap();
+
+        captured.join().unwrap();
+        assert_eq!(response.body, "not-json!!!");
+    }
+
+    #[tokio::test]
+    async fn post_json_strips_forwarded_content_type() {
+        let (listener, address) = bind_test_server();
+        let captured = capture_request(listener, r#"{"ok":true}"#);
+
+        let client = ApiClient::new(ApiClientConfig {
+            api_base_url: format!("http://{address}"),
+            client: subrequest::isolated_client(4),
+            timeout: Duration::from_millis(1_000),
+            max_response_bytes: 1_048_576,
+            forward_header_names: vec![http::header::CONTENT_TYPE],
+            address_policy: AddressPolicy::AllowPrivate,
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+
+        client
+            .post_json_bytes(format!("http://{address}/v1/search"), b"{}".to_vec(), &headers)
+            .await
+            .unwrap();
+
+        let req = captured.join().unwrap();
+        let req_lower = req.to_lowercase();
+        let ct_count = req_lower.matches("content-type:").count();
+        assert_eq!(ct_count, 1, "exactly one content-type header, got {ct_count}");
+        assert!(
+            req_lower.contains("content-type: application/json"),
+            "should be application/json: {req}"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the status matrix keeps every response-preservation case visible"
+    )]
+    async fn get_preserves_valid_http_statuses_and_bounded_bodies() {
+        for (status, location) in [
+            (301_u16, Some("https://example.invalid/redirect")),
+            (302_u16, Some("https://example.invalid/redirect")),
+            (401_u16, None),
+            (403_u16, None),
+            (404_u16, None),
+            (429_u16, None),
+            (500_u16, None),
+            (503_u16, None),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let body = format!(r#"{{"error":{{"message":"status-{status}"}}}}"#);
+            let response_body = body.clone();
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _read = stream.read(&mut request).unwrap();
+                let location = location.map_or_else(String::new, |value| format!("Location: {value}\r\n"));
+                let response = format!(
+                    "HTTP/1.1 {status} Status\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let client = test_client(&format!("http://{address}"));
+
+            let response = client
+                .get(&format!("http://{address}/v1/files/file-abc"), &HeaderMap::new(), 1024)
+                .await
+                .unwrap();
+
+            assert_eq!(response.status, status, "status {status} should be preserved");
+            assert_eq!(response.body, body, "status {status} body should be preserved");
+            assert!(
+                response.headers.get(http::header::LOCATION).is_none(),
+                "Location must not be exposed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the header policy test lists the allowed and rejected boundary values"
+    )]
+    async fn get_exposes_only_safe_response_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 30\r\nX-Request-Id: req_123\r\nConnection: x-remove-me\r\nX-Remove-Me: should-not-pass\r\nX-Praxis-Private: should-not-pass\r\nSet-Cookie: session=secret\r\nCookie: session=secret\r\nAuthorization: Bearer secret\r\nX-Api-Key: secret\r\nX-Auth-Token: secret\r\nX-Unknown-Provider: should-not-pass\r\nContent-Length: 2\r\n\r\n{}",
+                )
+                .unwrap();
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let response = client
+            .get(&format!("http://{address}/v1/files/file-abc"), &HeaderMap::new(), 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(response.headers[http::header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers[http::header::RETRY_AFTER], "30");
+        assert_eq!(response.headers["x-request-id"], "req_123");
+        for name in [
+            "connection",
+            "x-remove-me",
+            "x-praxis-private",
+            "set-cookie",
+            "cookie",
+            "authorization",
+            "x-api-key",
+            "x-auth-token",
+            "x-unknown-provider",
+        ] {
+            assert!(response.headers.get(name).is_none(), "{name} must not be exposed");
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each typed transport variant needs an independent source-redaction assertion"
+    )]
+    fn transport_errors_preserve_kind_without_rendering_source_details() {
+        let connect = map_subrequest_error(SubRequestError::Connect("attacker-controlled".to_owned()));
+        assert!(
+            matches!(
+                connect,
+                ApiClientError::Transport {
+                    source: SubRequestError::Connect(_)
+                }
+            ),
+            "connect failures should preserve their typed transport variant"
+        );
+        assert!(
+            !connect.to_string().contains("attacker-controlled"),
+            "connect failure details should not expose attacker-controlled text"
+        );
+
+        let io = map_subrequest_error(SubRequestError::Io("attacker-controlled".to_owned()));
+        assert!(
+            matches!(
+                io,
+                ApiClientError::Transport {
+                    source: SubRequestError::Io(_)
+                }
+            ),
+            "I/O failures should preserve their typed transport variant"
+        );
+        assert!(
+            !io.to_string().contains("attacker-controlled"),
+            "I/O failure details should not expose attacker-controlled text"
+        );
+
+        let admission = map_subrequest_error(SubRequestError::AdmissionTimeout { max_connections: 1 });
+        assert!(
+            matches!(
+                admission,
+                ApiClientError::Transport {
+                    source: SubRequestError::AdmissionTimeout { .. }
+                }
+            ),
+            "admission timeouts should preserve their typed transport variant"
+        );
+
+        let circuit = map_subrequest_error(SubRequestError::CircuitOpen {
+            peer: "attacker-controlled".to_owned(),
+        });
+        assert!(
+            matches!(
+                circuit,
+                ApiClientError::Transport {
+                    source: SubRequestError::CircuitOpen { .. }
+                }
+            ),
+            "circuit-open errors should preserve their typed transport variant"
+        );
+        assert!(
+            !circuit.to_string().contains("attacker-controlled"),
+            "circuit-open details should not expose attacker-controlled text"
+        );
+
+        let deadline = map_subrequest_error(SubRequestError::DeadlineExceeded);
+        assert!(
+            matches!(
+                deadline,
+                ApiClientError::Transport {
+                    source: SubRequestError::DeadlineExceeded
+                }
+            ),
+            "deadline errors should preserve their typed transport variant"
+        );
+    }
+
+    #[test]
+    fn display_invalid_resource_id() {
+        let err = ApiClientError::InvalidResourceId {
+            resource_id: "../etc/passwd".to_owned(),
+            detail: "path traversal".to_owned(),
+        };
+        assert_eq!(err.to_string(), "invalid resource id '../etc/passwd': path traversal");
+    }
+
+    #[test]
+    fn display_response_too_large() {
+        let err = ApiClientError::ResponseTooLarge { limit: 1024 };
+        assert_eq!(err.to_string(), "response exceeds size limit (1024 bytes)");
+    }
+
+    #[tokio::test]
+    async fn get_bytes_above_one_mib_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let payload_size: usize = 1_200_000;
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _read = stream.read(&mut request).unwrap();
+            let body = vec![0x42_u8; payload_size];
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {payload_size}\r\nConnection: close\r\n\r\n");
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        let client = test_client(&format!("http://{address}"));
+
+        let bytes = client
+            .get_bytes(
+                &format!("http://{address}/v1/files/big/content"),
+                &HeaderMap::new(),
+                2_000_000,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(bytes.len(), payload_size, "should receive full >1 MiB payload");
+    }
+
+    fn slow_body_server(listener: TcpListener) {
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 4096];
+            let _n = stream.read(&mut buf).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\na")
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::park_timeout(Duration::from_millis(250));
+            let _result = stream.write_all(b"bcde");
+        });
+    }
+
+    #[tokio::test]
+    async fn get_bytes_timeout_covers_response_body() {
+        let (listener, addr) = bind_test_server();
+        slow_body_server(listener);
+
+        let client = ApiClient::new(ApiClientConfig {
+            api_base_url: format!("http://{addr}"),
+            client: subrequest::isolated_client(4),
+            timeout: Duration::from_millis(50),
+            max_response_bytes: 1_048_576,
+            forward_header_names: Vec::new(),
+            address_policy: AddressPolicy::AllowPrivate,
+        });
+
+        let err = client
+            .get_bytes(&format!("http://{addr}/v1/files/slow/content"), &HeaderMap::new(), 1024)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                ApiClientError::Transport {
+                    source: SubRequestError::DeadlineExceeded
+                }
+            ),
+            "slow body should fail before completing: {err}"
+        );
+    }
+}

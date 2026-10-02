@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024 Praxis Contributors
+
+//! Integration test suite for Praxis.
+
+#![allow(
+    clippy::allow_attributes_without_reason,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::cognitive_complexity,
+    clippy::default_trait_access,
+    clippy::disallowed_methods,
+    clippy::doc_markdown,
+    clippy::doc_nested_refdefs,
+    clippy::expect_used,
+    clippy::format_push_string,
+    clippy::indexing_slicing,
+    clippy::items_after_statements,
+    clippy::len_zero,
+    clippy::manual_is_multiple_of,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::needless_raw_string_hashes,
+    clippy::needless_raw_strings,
+    clippy::panic,
+    clippy::print_stderr,
+    clippy::redundant_closure_for_method_calls,
+    clippy::string_add,
+    clippy::tests_outside_test_module,
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    clippy::used_underscore_binding,
+    clippy::useless_format,
+    reason = "test code"
+)]
+
+mod a2a;
+mod agentic_mocks;
+mod anthropic_messages;
+mod claude_code;
+mod claude_code_vllm;
+mod codex_http;
+mod codex_websocket;
+#[cfg(feature = "store-sqlite")]
+mod conversations_rehydrate;
+mod error_response_formatter;
+mod examples;
+mod failure_mode;
+mod fips;
+mod guardrails;
+mod harness;
+// Several replayed scenarios run examples backed by the SQLite response store.
+#[cfg(feature = "store-sqlite")]
+mod inference_fixtures;
+mod mcp;
+mod mcp_broker;
+#[cfg(feature = "store-sqlite")]
+mod openai_mcp_tool_resolve;
+mod openai_responses_format;
+mod openai_responses_model_rewrite;
+mod openai_tool_parse;
+mod prompt_enrich;
+mod responses_routing;

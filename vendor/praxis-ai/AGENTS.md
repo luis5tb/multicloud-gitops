@@ -1,0 +1,206 @@
+# AGENTS.md
+
+This file provides guidance to coding agents when working
+with code in this repository.
+
+AI tools may assist with implementation, but do not add Claude or another AI
+tool as a commit collaborator, co-author, or signatory. Commit sign-off belongs
+to the human contributor responsible for the change.
+
+## Requirements
+
+- Rust stable 1.96+
+- Rust nightly (for `rustfmt`)
+- CMake 3.31+ (for Pingora build via praxis dep)
+- Docker 29.3.0+ or Podman (for container builds)
+- Optional Praxis core checkout at `../praxis` for testing local core
+  changes through `make patch-praxis`
+
+## Rust Data Ownership
+
+Avoid cloning request, response, header, body, or SSE data
+unless the copy is necessary for correctness. This is a
+high-performance proxy, so prefer borrowing, moving, or
+sharing data through existing ownership boundaries before
+adding `.clone()`, `to_vec()`, `to_string()`, or full-body
+buffering.
+
+When a clone is necessary, keep it close to the boundary
+that requires ownership and make the reason clear in the
+surrounding code or test. Do not clone streaming chunks or
+provider payloads just to satisfy local control flow; instead
+reshape the code to move completed buffers, borrow parsed
+fields, or process data incrementally.
+
+## Quick Reference
+
+```console
+make setup-hooks    # install git pre-commit hook
+make build          # workspace build
+make test           # all tests
+make fmt            # format with nightly rustfmt
+make lint           # clippy, fmt, dependency, docs, and example checks
+make doc            # rustdoc with -D warnings
+make audit          # cargo audit + cargo deny check
+make container      # build praxis-ai container image
+make container-fips # FIPS runtime image on UBI 9 (see docs/fips.md)
+```
+
+Run a single test:
+
+```console
+cargo test -p praxis-ai-apis --features full -- test_name
+cargo test -p praxis-ai-filters --features full -- test_name
+cargo test -p praxis-ai-proxy --features full -- test_name
+```
+
+The product crates default to the lean `standard` feature set, so tests for the
+opt-in OpenAI groups are compiled out without `--features full` (or the group's
+own feature). A name filter that matches only compiled-out tests reports
+"0 passed" and exits successfully.
+
+## Architecture
+
+**Crate dependency flow:**
+
+```text
+server (praxis-ai-proxy)
+  -> filters (praxis-ai-filters)
+  -> apis (praxis-ai-apis)
+  -> praxis-filter (versioned Praxis core dependency)
+```
+
+- **server** (`praxis-ai-proxy`): binary entry point,
+  registers AI filters on top of core builtins,
+  injects `ResponseStoreRegistry` as pipeline extension
+- **apis** (`praxis-ai-apis`): provider-specific API
+  types (OpenAI, Anthropic), request classification,
+  response storage backends (SQLite, PostgreSQL),
+  token usage extraction, SSE parsing
+- **filters** (`praxis-ai-filters`): cross-cutting AI
+  filter implementations (A2A, MCP, guardrails,
+  inference routing, prompt enrichment, token usage
+  header injection)
+
+**Dependencies on Praxis core** use the versioned crates in the root
+`Cargo.toml`: `praxis-filter` for `HttpFilter`, pipeline, and registry;
+`praxis-core` for config types; `praxis-protocol` for HTTP/TCP adapters;
+and `praxis-tls` for TLS. Use `make patch-praxis` only when testing a
+local sibling checkout at `../praxis`.
+
+## Conventions
+
+Follows the same conventions as
+[praxis core](https://github.com/praxis-proxy/praxis).
+See [CONTRIBUTING.md] for the full coding style guide,
+including the
+[PR review process](CONTRIBUTING.md#pr-review-process)
+for handling `praxis-bot` automated review comments.
+
+[CONTRIBUTING.md]: https://github.com/praxis-proxy/ai/blob/main/CONTRIBUTING.md
+
+## Git Workflow
+
+- **Never amend commits** — when addressing PR
+  review feedback, add new fixup commits on top
+  of the branch.
+- PRs are merged with **squash and merge**, so the
+  final commit on the target branch is always clean
+  regardless of intermediate fixup commits.
+
+## Test Requirements
+
+New capabilities require:
+
+1. Unit tests
+2. Integration tests
+3. Example config in `examples/configs/`
+4. Functional integration test for the example config
+5. Generated example and filter documentation kept in sync
+
+When changing anything under `apis/src/openai/`, always add or extend
+integration tests exercised through the OpenAI client where possible, in
+`tests/integration/sdk/openai/test_openai_conversations.py` or
+`tests/integration/sdk/openai/test_openai_responses_vllm.py`.
+
+When changing anything under `apis/src/anthropic/`, always add or extend
+integration tests exercised through the Anthropic client where possible, in
+`tests/integration/sdk/anthropic/` (e.g.
+`tests/integration/sdk/anthropic/test_anthropic_error_formatter.py`).
+
+## Inference Fixture Maintenance
+
+When an inference transformation behavior changes, update its tests and
+fixture coverage in the same change:
+
+1. Add or update the scenario and its focused unit/integration tests.
+2. Add truthful provider recordings or controlled synthetic evidence.
+3. Update `tests/integration/fixtures/inference/coverage.yaml`, including its
+   feature, scope, scenario, provider, and status links.
+4. Run `cargo xtask sync-inference-readme --fix`; do not hand-edit the
+   generated coverage block in the inference fixture README.
+5. Run `cargo xtask check-inference` and `make test-inference-fixtures`.
+
+Do not enumerate Rust test function names in the README. The manifest is the
+stable coverage inventory; test names may change without changing behavior.
+Credentialed live recordings require explicit authorization and must retain
+truthful provider, model, and provenance metadata.
+
+## Adding a Filter
+
+1. Create module under `filters/src/` or `apis/src/`
+2. Implement `HttpFilter` from `praxis-filter`
+3. Register in `praxis_ai_filters::register_ai_filters`
+   (`filters/src/register.rs`) via `register_filters!`
+4. Add unit tests and doctests
+5. Add example config in `examples/configs/`
+
+## Key Patterns
+
+- **Classify → route → branch**: classifier filters
+  promote facts to internal headers
+  (`x-praxis-ai-*`) and the router matches those
+  headers to select clusters.
+- **Do not buffer full streaming responses**:
+  streaming and SSE filters should use
+  `BodyMode::Stream` and process chunks
+  incrementally.
+- **Validate only proxy-needed fields**: let the
+  backend handle parameter ranges, model
+  availability, and role ordering.
+
+## Filter Organization
+
+- `apis/src/anthropic/` — Anthropic Messages API
+- `apis/src/openai/` — OpenAI Responses, Conversations,
+  SSE, model rewrite, store, rehydrate, validate, proxy
+- `apis/src/classifier/` — AI request format detection
+- `apis/src/json_body.rs` — Shared JSON body mutation
+  helper (serialize, replace, tracing events)
+- `apis/src/store/` — ResponseStore trait, SQLite/Postgres
+- `filters/src/agentic/` — A2A, MCP protocol filters
+- `filters/src/guardrails/` — AI content safety (NeMo)
+- `filters/src/inference/` — Model-to-header routing
+- `filters/src/prompt_enrich/` — Prompt enrichment
+- `filters/src/token_usage/` — Token counting and headers
+
+## Dynamic Config Reload
+
+Praxis swaps filter pipelines at runtime without
+restarting. The AI server inherits this from
+praxis-protocol. The `ResponseStoreRegistry` is
+injected as a `PipelineExtension` and created fresh
+per pipeline build.
+
+## Pingora Boundary
+
+See praxis core documentation. Pingora handles:
+request smuggling prevention, H2 backpressure,
+connection pool safety, HTTP/1.1 upgrade detection.
+
+## CI Workflows
+
+CI workflows that post PR comments must use the
+`praxis-bot-app` GitHub App token (via
+`actions/create-github-app-token`), not the default
+`github.token`.

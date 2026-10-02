@@ -1,0 +1,851 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! Resolves `file_id` and `file_url` references in `OpenAI` Responses API requests.
+//!
+//! Walks `message` content arrays and `function_call_output` output
+//! arrays, finds content parts that reference files by ID or URL, fetches
+//! file metadata and content from an external Files API (e.g. OGX) or
+//! remote URL via [`ApiClient`], and inlines the content: raw base64
+//! in `file_data` for `input_file`, or a `data:` URL in `image_url` for
+//! `input_image`. Forwards configurable headers (`Authorization`,
+//! `X-Tenant-ID`) to the Files API for tenant isolation.
+//!
+//! Praxis runs `StreamBuffer` body hooks before header-phase request
+//! filters. Configuration therefore requires an explicit
+//! `allow_pre_security_callout: true` acknowledgement and should only
+//! be used behind an outer authentication and authorization boundary.
+//! Header forwarding is disabled by default; configured headers are copied
+//! from the effective request after trusted body-phase removals and projections.
+//!
+//! When [`ResponsesState`] is present (e.g. after `rehydrate`),
+//! resolved content is synced back into `state.request_body`,
+//! `state.messages`, and `state.persisted_messages` so that
+//! `responses_proxy` does not overwrite the rewritten body.
+//!
+//! Content parts with `file_data` or `image_url` pass through unchanged.
+//! Content parts with `file_url` are resolved to `file_data` when
+//! `file_url: resolve` (default), or passed through when `file_url:
+//! passthrough`. No content-part validation — the inference backend
+//! handles that.
+//!
+//! `on_missing` only governs `file_id` availability gaps. A `file_url`
+//! fetch failure is always rejected, regardless of `on_missing`: the
+//! resolver's SSRF, redirect, and size checks may have just rejected
+//! an attacker-controlled target, and that outcome must never be
+//! downgraded into forwarding the original URL for the backend to
+//! fetch itself without the same protections.
+//!
+//! This filter resolves the file transport reference but does not
+//! interpret document contents. The inference backend must already
+//! support the resulting inline `input_file` / `file_data` or
+//! `input_image` / `image_url` part. Backend-specific document
+//! adaptation, including extraction to `input_text` for vLLM, is
+//! tracked in [#397].
+//!
+//! `file_id` is supported by the `OpenAI` Responses schema but not
+//! baseline `OpenResponses`. This filter intentionally accepts the
+//! `OpenAI` extension and converts it to portable inline content.
+//!
+//! [#397]: https://github.com/praxis-proxy/ai/issues/397
+//! [`ApiClient`]: crate::openai::api_client::ApiClient
+//! [`ResponsesState`]: super::state::ResponsesState
+
+mod config;
+pub(crate) mod resolve;
+pub(crate) mod resolve_url;
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::too_many_lines,
+    reason = "tests"
+)]
+mod tests;
+
+use std::{borrow::Cow, sync::Arc};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use praxis_core::config::ChainRef;
+use praxis_filter::{
+    BodyAccess, BodyMode, FilterAction, FilterError, FilterPipeline, HttpFilter, HttpFilterContext, Rejection,
+    body::MAX_JSON_BODY_BYTES, parse_filter_config,
+};
+use tracing::{debug, trace, warn};
+
+use self::{
+    config::{FileResolveConfig, FileUrlMode, validate_config},
+    resolve::{
+        FilesApiClient, FilesApiClientOptions, ResolutionBudget, ResolveError, body_has_file_id_reference,
+        items_have_file_id_reference, resolve_input_with_budget, resolve_items,
+    },
+    resolve_url::{FileUrlResolver, NormalizedOrigin},
+};
+use super::{
+    body_limits::reject_rewritten_body_too_large, openai_responses_proxy::serialized_outbound_body_len,
+    state::ResponsesState,
+};
+use crate::{
+    callout_headers::effective_body_callout_headers,
+    callout_identity::{CalloutContextMissing, CalloutIdentity, credential_authority, stage_callout_identity},
+    callout_policy::{MISSING_CALLOUT_CONTEXT, OnMissing},
+    classifier::is_responses_create,
+    json_body::serialize_json_body,
+    openai::api_client::{ApiClient, ApiClientConfig, DownstreamRuntime, OutboundExecution},
+    subrequest::SubRequestClient,
+};
+
+/// Resolves `file_id` and `file_url` references in Responses API input
+/// by fetching content from a Files API or remote URL via
+/// `ApiClient` and inlining the base64-encoded content in the
+/// provider-native field.
+///
+/// The inference backend must support the resulting inline content
+/// part. This filter does not extract documents into backend-specific
+/// representations such as `input_text`.
+///
+/// This filter resolves references inside Responses requests; it does
+/// not proxy client-facing Files API operations. Route `/v1/files` and
+/// its subresources to the configured Files API with the standard
+/// `router` and `load_balancer` filters.
+///
+/// # YAML
+///
+/// ```yaml
+/// filter: openai_file_resolve
+/// files_api_url: "http://files-api:8321"
+/// allow_pre_security_callout: true
+/// outbound_chain:
+///   name: files-api-outbound
+///   filters:
+///     - filter: headers
+///       request_set:
+///         - name: x-file-callout
+///           value: file-resolve
+/// ```
+///
+/// `outbound_chain` is optional and may be defined inline or reference a
+/// top-level named chain. When omitted it defaults to an empty inline chain
+/// (pure passthrough); configured `file_id` callouts still run through the
+/// bound outbound pipeline.
+///
+/// # Full YAML
+///
+/// ```yaml
+/// filter: openai_file_resolve
+/// files_api_url: "http://files-api:8321"
+/// allow_pre_security_callout: true
+/// outbound_chain:
+///   name: files-api-outbound
+///   filters:
+///     - filter: headers
+///       request_set:
+///         - name: x-file-callout
+///           value: file-resolve
+/// forward_headers:
+///   - authorization
+///   - x-tenant-id
+/// on_missing: continue
+/// timeout_ms: 30000
+/// max_rewritten_body_bytes: 67108864
+/// max_resolved_bytes: 67108864
+/// max_file_references: 32
+/// ```
+///
+/// # File URL Resolution YAML
+///
+/// ```yaml
+/// filter: openai_file_resolve
+/// files_api_url: "http://ogx:8321"
+/// allow_pre_security_callout: true
+/// outbound_chain:
+///   name: ogx-outbound
+///   filters:
+///     - filter: headers
+///       request_set:
+///         - name: x-file-callout
+///           value: file-resolve
+/// file_url: resolve
+/// allowed_file_url_origins:
+///   - "https://files.internal:8443"
+/// ```
+pub struct FileResolveFilter {
+    /// Files API HTTP client backed by shared API callout.
+    client: FilesApiClient,
+    /// Parsed and validated configuration.
+    config: FileResolveConfig,
+    /// URL resolver for `file_url` references.
+    url_resolver: Option<FileUrlResolver>,
+    /// Outbound filter chain applied to configured Files API
+    /// (`file_id`) callouts. Bound at registration through
+    /// [`ChainBindingContext::bind_chain`]; `None` on the
+    /// direct-construction paths that lack a binding context.
+    ///
+    /// [`ChainBindingContext::bind_chain`]: praxis_filter::ChainBindingContext::bind_chain
+    outbound: Option<Arc<FilterPipeline>>,
+    /// Optional caller-scoped credential slot required by `file_id` callouts.
+    user_credential_slot: Option<String>,
+    /// Exact Files API authority for deferred caller credentials.
+    credential_authority: String,
+}
+
+impl FileResolveFilter {
+    /// Create a filter from parsed YAML config.
+    ///
+    /// Uses an isolated [`SubRequestClient`] with a default pool
+    /// size of 4. Prefer [`from_config_with_client`] when a shared
+    /// client is available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the YAML config is invalid or the
+    /// callout client cannot be constructed.
+    ///
+    /// [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
+    /// [`from_config_with_client`]: Self::from_config_with_client
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let client = crate::subrequest::isolated_client(4);
+        Self::build(config, client, None)
+    }
+
+    /// Create a filter using the shared [`SubRequestClient`].
+    ///
+    /// The shared client inherits the server-level pool size and
+    /// connection limits from the runtime configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the YAML config is invalid or the
+    /// callout client cannot be constructed.
+    ///
+    /// [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
+    pub fn from_config_with_client(
+        config: &serde_yaml::Value,
+        client: SubRequestClient,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
+        Self::build(config, client, None)
+    }
+
+    /// Create a filter with a pre-bound outbound filter chain.
+    ///
+    /// Used by the chain-binding registration path, which resolves the
+    /// `outbound_chain` reference through [`ChainBindingContext::bind_chain`]
+    /// (failing the build when the chain cannot be constructed) and passes
+    /// the resulting pipeline here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the YAML config is invalid or the
+    /// callout client cannot be constructed.
+    ///
+    /// [`ChainBindingContext::bind_chain`]: praxis_filter::ChainBindingContext::bind_chain
+    pub fn from_config_with_outbound(
+        config: &serde_yaml::Value,
+        client: SubRequestClient,
+        outbound: Arc<FilterPipeline>,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
+        Self::build(config, client, Some(outbound))
+    }
+
+    /// Extract the configured `outbound_chain` reference from raw filter
+    /// YAML.
+    ///
+    /// The chain-binding registration path calls this to resolve and bind
+    /// the chain (via [`ChainBindingContext::bind_chain`]) before
+    /// constructing the filter, keeping the private config type inside this
+    /// module. `outbound_chain` is optional; when omitted the config layer
+    /// substitutes an empty inline chain (pure passthrough), so this always
+    /// yields a bindable reference and never signals "missing".
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the YAML config cannot be parsed.
+    ///
+    /// [`ChainBindingContext::bind_chain`]: praxis_filter::ChainBindingContext::bind_chain
+    pub fn outbound_chain_ref(config: &serde_yaml::Value) -> Result<ChainRef, FilterError> {
+        let cfg: FileResolveConfig = parse_filter_config("openai_file_resolve", config)?;
+        Ok(cfg.outbound_chain)
+    }
+
+    /// Shared constructor body for the public constructors.
+    #[expect(clippy::too_many_lines, reason = "filter construction boilerplate")]
+    fn build(
+        config: &serde_yaml::Value,
+        subrequest_client: SubRequestClient,
+        outbound: Option<Arc<FilterPipeline>>,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let cfg: FileResolveConfig = parse_filter_config("openai_file_resolve", config)?;
+        let validated = validate_config(cfg)?;
+        if validated.user_credential.is_some() && outbound.is_none() {
+            return Err(
+                "openai_file_resolve: user_credential requires the registered outbound-chain construction path".into(),
+            );
+        }
+        let credential_authority = credential_authority("openai_file_resolve", &validated.files_api_url)?;
+        let user_credential_slot = validated.user_credential.clone();
+        let forward_header_names = prepare_forward_header_names(&validated.forward_headers)?;
+
+        let api_client = ApiClient::new(ApiClientConfig {
+            api_base_url: validated.files_api_url.clone(),
+            client: subrequest_client,
+            timeout: std::time::Duration::from_millis(validated.timeout_ms),
+            max_response_bytes: 1_048_576,
+            forward_header_names,
+            // Configured Files API (`file_id`) callouts derive their SSRF
+            // protection from the bound outbound pipeline
+            // (`allow_private_upstreams`), not from this policy. It only
+            // governs the chain-less fallback in `from_config*`, so it stays
+            // conservative; `file_url` downloads use the hardened resolver.
+            address_policy: crate::callout_target::AddressPolicy::PublicOnly,
+        });
+
+        let client = FilesApiClient::new(
+            api_client,
+            FilesApiClientOptions {
+                max_file_references: validated.max_file_references,
+                max_resolved_bytes: validated.max_resolved_bytes,
+            },
+        );
+
+        let url_resolver = if validated.file_url == FileUrlMode::Resolve {
+            let origins = validated
+                .allowed_file_url_origins
+                .iter()
+                .map(|raw| NormalizedOrigin::parse(raw))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| -> FilterError { format!("openai_file_resolve: {e}").into() })?;
+            Some(FileUrlResolver {
+                allowed_private_origins: origins,
+            })
+        } else {
+            None
+        };
+
+        Ok(Box::new(Self {
+            client,
+            config: validated,
+            url_resolver,
+            outbound,
+            user_credential_slot,
+            credential_authority,
+        }))
+    }
+}
+
+/// Parse header names after configuration validation so outbound
+/// requests do not repeat that work.
+fn prepare_forward_header_names(names: &[String]) -> Result<Vec<http::HeaderName>, FilterError> {
+    names
+        .iter()
+        .map(|name| name.parse::<http::HeaderName>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("openai_file_resolve: failed to prepare forwarded headers: {e}").into())
+}
+
+#[async_trait]
+impl HttpFilter for FileResolveFilter {
+    fn name(&self) -> &'static str {
+        "openai_file_resolve"
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        // Accept up to the absolute ceiling; the pipeline's body_limits
+        // decides the real raw cap. max_rewritten_body_bytes bounds only
+        // the body produced after inlining resolved file content.
+        BodyMode::StreamBuffer {
+            max_bytes: Some(MAX_JSON_BODY_BYTES),
+        }
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
+        }
+
+        if !is_responses_create(&ctx.request.method, ctx.request.uri.path()) {
+            trace!("skipping non-create request");
+            return Ok(FilterAction::Release);
+        }
+
+        if ctx.get_metadata("openai_responses_format.format") != Some("openai_responses") {
+            trace!("skipping non-responses request");
+            return Ok(FilterAction::Release);
+        }
+
+        let Some(raw) = body.as_ref() else {
+            trace!("no body, releasing");
+            return Ok(FilterAction::Release);
+        };
+
+        let parsed: serde_json::Value = match serde_json::from_slice(raw) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(error = %e, "body is not valid JSON, releasing");
+                return Ok(FilterAction::Release);
+            },
+        };
+
+        resolve_and_rewrite(self, ctx, body, parsed).await
+    }
+
+    fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
+        // Reach the bound outbound pipeline so the runtime can propagate
+        // `allow_private_upstreams` and other nested-pipeline configuration
+        // into the Files API callout chain.
+        if let Some(outbound) = self.outbound.as_mut() {
+            if let Some(pipeline) = Arc::get_mut(outbound) {
+                visitor(pipeline);
+            } else {
+                debug_assert!(false, "outbound pipeline must be uniquely owned during configuration");
+            }
+        }
+    }
+
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        match self.outbound.as_ref() {
+            Some(outbound) => outbound.referenced_files(),
+            None => Vec::new(),
+        }
+    }
+
+    fn apply_insecure_options(&self, options: &praxis_core::config::InsecureOptions) {
+        if let Some(outbound) = self.outbound.as_ref() {
+            outbound.apply_insecure_options(options);
+        }
+    }
+}
+
+/// Run resolution and rewrite the body if any references were resolved.
+///
+/// Takes ownership of the parsed body so the resolved value can be moved
+/// into [`ResponsesState`] instead of deep-cloned; nothing reads it after
+/// state synchronization.
+#[expect(
+    clippy::too_many_lines,
+    reason = "sequential credential staging, resolution, body rewrite, and state synchronization"
+)]
+async fn resolve_and_rewrite(
+    filter: &FileResolveFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    body: &mut Option<Bytes>,
+    mut parsed: serde_json::Value,
+) -> Result<FilterAction, FilterError> {
+    let max_bytes = filter.config.max_rewritten_body_bytes;
+    let needs_files_api = body_has_file_id_reference(&parsed)
+        || ctx.extensions.get::<ResponsesState>().is_some_and(|state| {
+            items_have_file_id_reference(&state.messages) || items_have_file_id_reference(&state.persisted_messages)
+        });
+    let identity = if needs_files_api {
+        match stage_callout_identity(ctx, filter.user_credential_slot.as_deref()) {
+            Ok(identity) => Some(identity),
+            Err(CalloutContextMissing::Credential { slot }) => {
+                return Ok(reject_missing_callout_context(&slot));
+            },
+        }
+    } else {
+        None
+    };
+    let mut budget = filter
+        .client
+        .resolution_budget(identity.and_then(|identity| build_outbound_execution(filter, ctx, identity)));
+    // Body pre-read mutations have not reached `ctx.request` yet. Materialize
+    // their effective view once so every Files API call observes trusted
+    // removals and projections while `ctx` is subsequently mutated.
+    let request_headers = effective_body_callout_headers(ctx, Cow::Borrowed(&ctx.request.headers)).into_owned();
+    let count = match resolve_current_input(filter, &request_headers, &mut parsed, &mut budget).await {
+        Ok(count) => count,
+        Err(e) => return Ok(reject_resolve_error(&e)),
+    };
+    if count == 0 {
+        trace!("no file_id references found");
+        if let Err(e) = update_state(filter, ctx, &request_headers, None, &mut budget).await {
+            return Ok(reject_resolve_error(&e));
+        }
+        if let Some(rejection) = reject_oversized_state_body(ctx, max_bytes)? {
+            return Ok(rejection);
+        }
+        return Ok(FilterAction::Continue);
+    }
+
+    debug!(count, "resolved file_id references");
+    if let Some(rejection) = rewrite_body(body, &parsed, max_bytes, filter.name())? {
+        return Ok(rejection);
+    }
+    if let Err(e) = update_state(filter, ctx, &request_headers, Some(parsed), &mut budget).await {
+        return Ok(reject_resolve_error(&e));
+    }
+    if let Some(rejection) = reject_oversized_state_body(ctx, max_bytes)? {
+        return Ok(rejection);
+    }
+
+    Ok(FilterAction::Continue)
+}
+
+/// Snapshot the downstream request context and build the outbound
+/// execution for configured Files API (`file_id`) callouts.
+///
+/// Returns `None` when no outbound chain is bound (the chain-less
+/// `from_config*` construction paths), leaving `file_id` resolution on the
+/// direct client transport.
+fn build_outbound_execution(
+    filter: &FileResolveFilter,
+    ctx: &HttpFilterContext<'_>,
+    identity: CalloutIdentity,
+) -> Option<OutboundExecution> {
+    let pipeline = filter.outbound.clone()?;
+    let runtime = DownstreamRuntime {
+        client_addr: ctx.client_addr,
+        downstream_tls: ctx.downstream_tls,
+        peer_identity: ctx.peer_identity.clone(),
+        request_start: ctx.request_start,
+    };
+    Some(
+        filter
+            .client
+            .outbound_execution(pipeline, runtime)
+            .with_callout_identity(identity, filter.credential_authority.clone()),
+    )
+}
+
+/// Reject a missing managed credential before any configured Files API request.
+/// File resolution always runs before inference, so a direct 401 works for both
+/// agentic and ordinary Responses pipelines without relying on a later loop owner.
+fn reject_missing_callout_context(slot: &str) -> FilterAction {
+    let message = format!("file resolution requires the '{slot}' per-user credential, which was not provided");
+    FilterAction::Reject(super::error::responses_error_rejection(
+        401,
+        MISSING_CALLOUT_CONTEXT,
+        &message,
+    ))
+}
+
+/// Enforce the resolver's body limit against the exact request shape
+/// that `openai_responses_proxy` will later serialize from state.
+fn reject_oversized_state_body(
+    ctx: &HttpFilterContext<'_>,
+    max_rewritten_body_bytes: usize,
+) -> Result<Option<FilterAction>, FilterError> {
+    let Some(state) = ctx.extensions.get::<ResponsesState>() else {
+        return Ok(None);
+    };
+    let len = serialized_outbound_body_len(state).map_err(|e| -> FilterError {
+        format!("openai_file_resolve: failed to measure rebuilt request body: {e}").into()
+    })?;
+    Ok((len > max_rewritten_body_bytes).then(|| {
+        warn!(
+            actual = len,
+            limit = max_rewritten_body_bytes,
+            "rebuilt state body exceeds configured limit"
+        );
+        reject_rewritten_body_too_large(len, max_rewritten_body_bytes)
+    }))
+}
+
+/// Resolve references in the request body's current input.
+async fn resolve_current_input(
+    filter: &FileResolveFilter,
+    request_headers: &http::HeaderMap,
+    parsed: &mut serde_json::Value,
+    budget: &mut ResolutionBudget,
+) -> Result<usize, ResolveError> {
+    Box::pin(resolve_input_with_budget(
+        parsed,
+        &filter.client,
+        filter.config.on_missing,
+        request_headers,
+        filter.url_resolver.as_ref(),
+        budget,
+    ))
+    .await
+}
+
+/// Resolve history and synchronize state after the body walk.
+async fn update_state(
+    filter: &FileResolveFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    request_headers: &http::HeaderMap,
+    resolved_body: Option<serde_json::Value>,
+    budget: &mut ResolutionBudget,
+) -> Result<(), ResolveError> {
+    let resolver = HistoryResolver {
+        client: &filter.client,
+        on_missing: filter.config.on_missing,
+        request_headers,
+        url_resolver: filter.url_resolver.as_ref(),
+    };
+    match resolved_body {
+        Some(body) => Box::pin(sync_state_with_budget(ctx, body, resolver, budget)).await,
+        None => Box::pin(resolve_state_history(ctx, resolver, budget)).await,
+    }
+}
+
+/// Serialize the resolved JSON and replace the buffered request body.
+fn rewrite_body(
+    body: &mut Option<Bytes>,
+    parsed: &serde_json::Value,
+    max_rewritten_body_bytes: usize,
+    filter_name: &'static str,
+) -> Result<Option<FilterAction>, FilterError> {
+    let rewritten = serialize_json_body(parsed)
+        .map_err(|e| -> FilterError { format!("{filter_name}: failed to serialize body: {e}").into() })?;
+    if rewritten.len() > max_rewritten_body_bytes {
+        warn!(
+            actual = rewritten.len(),
+            limit = max_rewritten_body_bytes,
+            "rewritten request body exceeds configured limit"
+        );
+        return Ok(Some(reject_rewritten_body_too_large(
+            rewritten.len(),
+            max_rewritten_body_bytes,
+        )));
+    }
+    rewritten.commit(body, filter_name, "input");
+    Ok(None)
+}
+
+/// Sync resolved content back into [`ResponsesState`] so that
+/// `responses_proxy` does not overwrite the rewritten body with
+/// stale data when it rebuilds from state.
+///
+/// Updates `request_body`, and replaces the current-input tail of
+/// `messages` / `persisted_messages` with the resolved items.
+/// History messages prepended by rehydrate are also walked so
+/// that any `file_id` references in them are resolved.
+///
+/// Takes `resolved_body` by value and moves it into `request_body`
+/// rather than deep-cloning a tree that may carry inlined file data.
+async fn sync_state_with_budget(
+    ctx: &mut HttpFilterContext<'_>,
+    resolved_body: serde_json::Value,
+    resolver: HistoryResolver<'_>,
+    budget: &mut ResolutionBudget,
+) -> Result<(), ResolveError> {
+    let Some(state) = ctx.extensions.get_mut::<ResponsesState>() else {
+        return Ok(());
+    };
+
+    state.request_body = resolved_body;
+
+    let input_len = state.input.len();
+    let ResponsesState {
+        request_body,
+        messages,
+        persisted_messages,
+        ..
+    } = state;
+
+    let Some(resolved_input) = request_body.get("input").and_then(serde_json::Value::as_array) else {
+        return Ok(());
+    };
+
+    sync_message_history(messages, input_len, Some(resolved_input), resolver, budget).await?;
+    sync_persisted_history(persisted_messages, input_len, Some(resolved_input), resolver, budget).await
+}
+
+/// Test helper that creates an isolated request resolution budget.
+#[cfg(test)]
+async fn sync_state(
+    ctx: &mut HttpFilterContext<'_>,
+    resolved_body: serde_json::Value,
+    client: &FilesApiClient,
+    on_missing: OnMissing,
+) -> Result<(), ResolveError> {
+    let mut budget = client.resolution_budget(None);
+    let request_headers = ctx.request.headers.clone();
+    let resolver = HistoryResolver {
+        client,
+        on_missing,
+        request_headers: &request_headers,
+        url_resolver: None,
+    };
+    sync_state_with_budget(ctx, resolved_body, resolver, &mut budget).await
+}
+
+/// Resolve file references in rehydrated history when the
+/// current input did not require a body rewrite.
+async fn resolve_state_history(
+    ctx: &mut HttpFilterContext<'_>,
+    resolver: HistoryResolver<'_>,
+    budget: &mut ResolutionBudget,
+) -> Result<(), ResolveError> {
+    let Some(state) = ctx.extensions.get_mut::<ResponsesState>() else {
+        return Ok(());
+    };
+
+    let input_len = state.input.len();
+    sync_message_history(&mut state.messages, input_len, None, resolver, budget).await?;
+    sync_persisted_history(&mut state.persisted_messages, input_len, None, resolver, budget).await
+}
+
+/// Shared dependencies for resolving one state history vector.
+#[derive(Clone, Copy)]
+struct HistoryResolver<'a> {
+    /// Files API client used for history references.
+    client: &'a FilesApiClient,
+    /// Configured behavior when a history reference cannot resolve.
+    on_missing: OnMissing,
+    /// Original request headers available for configured forwarding.
+    request_headers: &'a http::HeaderMap,
+    /// URL resolver for `file_url` references.
+    url_resolver: Option<&'a FileUrlResolver>,
+}
+
+/// Resolve the persistence mirror with independent count and byte
+/// accounting while reusing the request-wide cache and deadline.
+async fn sync_persisted_history(
+    messages: &mut [serde_json::Value],
+    input_len: usize,
+    resolved_input: Option<&[serde_json::Value]>,
+    resolver: HistoryResolver<'_>,
+    budget: &mut ResolutionBudget,
+) -> Result<(), ResolveError> {
+    let saved = budget.begin_independent_accounting();
+    let result = sync_message_history(messages, input_len, resolved_input, resolver, budget).await;
+    budget.restore_accounting(saved);
+    result
+}
+
+/// Update the current-input tail, when provided, then resolve the
+/// independently sized history prefix.
+async fn sync_message_history(
+    messages: &mut [serde_json::Value],
+    input_len: usize,
+    resolved_input: Option<&[serde_json::Value]>,
+    resolver: HistoryResolver<'_>,
+    budget: &mut ResolutionBudget,
+) -> Result<(), ResolveError> {
+    let Some(history_end) = messages.len().checked_sub(input_len) else {
+        return Ok(());
+    };
+    if let Some(resolved_input) = resolved_input {
+        replace_tail(messages, history_end, resolved_input);
+    }
+    resolve_history(messages, history_end, resolver, budget).await
+}
+
+/// Copy resolved input items into the current-input tail of a
+/// message vector, starting at `history_end`.
+fn replace_tail(messages: &mut [serde_json::Value], history_end: usize, resolved_input: &[serde_json::Value]) {
+    for (i, item) in resolved_input.iter().enumerate() {
+        if let Some(slot) = messages.get_mut(history_end + i) {
+            *slot = item.clone();
+        }
+    }
+}
+
+/// Resolve file references in history messages (the prefix
+/// before the current input).
+async fn resolve_history(
+    messages: &mut [serde_json::Value],
+    history_end: usize,
+    resolver: HistoryResolver<'_>,
+    budget: &mut ResolutionBudget,
+) -> Result<(), ResolveError> {
+    if history_end == 0 {
+        return Ok(());
+    }
+    let Some(history) = messages.get_mut(..history_end) else {
+        return Ok(());
+    };
+    resolve_items(
+        history,
+        resolver.client,
+        resolver.on_missing,
+        resolver.request_headers,
+        resolver.url_resolver,
+        budget,
+    )
+    .await
+    .map(|_count| ())
+}
+
+/// Map one resolution error to an HTTP status and safe client message.
+fn resolve_error_response(err: &ResolveError) -> (u16, String) {
+    match err {
+        ResolveError::CalloutFailed { file_id, detail } => callout_error_response(file_id, detail),
+        ResolveError::InvalidFileId { file_id, detail } => invalid_id_error_response(file_id, detail),
+        ResolveError::TooManyReferences { limit } => too_many_error_response(*limit),
+        ResolveError::TooLarge { reference, limit } => too_large_error_response(reference, *limit),
+        ResolveError::FileUrlBlocked { label } => file_url_blocked_response(label),
+        ResolveError::FileUrlFailed { label, detail } => file_url_failed_response(label, detail),
+    }
+}
+
+/// Report a Files API failure to the caller.
+fn callout_error_response(file_id: &str, detail: &str) -> (u16, String) {
+    warn!(file_id, detail, "callout failed during file resolution");
+    (
+        502,
+        format!("failed to resolve file '{file_id}': Files API request failed"),
+    )
+}
+
+/// Report an invalid file ID to the caller.
+fn invalid_id_error_response(file_id: &str, detail: &str) -> (u16, String) {
+    warn!(file_id, detail, "invalid file id during file resolution");
+    (400, format!("failed to resolve file '{file_id}': {detail}"))
+}
+
+/// Report an exceeded reference-count cap to the caller.
+fn too_many_error_response(limit: usize) -> (u16, String) {
+    warn!(limit, "request exceeds file reference limit");
+    (413, format!("request exceeds {limit} file references"))
+}
+
+/// Report an exceeded resolved-body size cap to the caller.
+fn too_large_error_response(reference: &str, limit: usize) -> (u16, String) {
+    warn!(reference, limit, "resolved file exceeds configured limit");
+    (
+        413,
+        format!("failed to resolve file reference '{reference}': resolved content exceeds {limit} bytes"),
+    )
+}
+
+/// Report a file URL blocked by SSRF policy to the caller.
+fn file_url_blocked_response(label: &str) -> (u16, String) {
+    warn!(url = %label, "file URL blocked by security policy");
+    (403, format!("file URL '{label}' blocked by security policy"))
+}
+
+/// Report a file URL fetch failure to the caller.
+fn file_url_failed_response(label: &str, detail: &str) -> (u16, String) {
+    warn!(url = %label, detail, "file URL fetch failed");
+    (502, format!("failed to fetch file URL '{label}': request failed"))
+}
+
+/// Build a rejection response from a resolution error.
+fn reject_resolve_error(err: &ResolveError) -> FilterAction {
+    let (status, message) = resolve_error_response(err);
+
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "file_resolve_error"
+        }
+    })
+    .to_string();
+
+    FilterAction::Reject(
+        Rejection::status(status)
+            .with_header("content-type", "application/json")
+            .with_body(Bytes::from(body)),
+    )
+}

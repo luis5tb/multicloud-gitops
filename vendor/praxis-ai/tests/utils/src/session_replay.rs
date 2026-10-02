@@ -1,0 +1,1373 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! Load and import stored-session replay fixtures for integration tests.
+//!
+//! A replay fixture captures one or more sanitized turns from an agent
+//! session and replays those turns through an example configuration.
+
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::{Component, PathBuf},
+    str::FromStr,
+};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Number, Value};
+
+use crate::inference_fixture::{RecordedBody, RecordedExchange, RecordedRequest, RecordedResponse};
+
+/// Stored-session protocol represented by a replay fixture.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayProtocol {
+    /// Anthropic Messages API traffic.
+    AnthropicMessages,
+    /// OpenAI Responses API traffic.
+    OpenaiResponses,
+}
+
+/// A stored-session replay fixture loaded from JSON.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionReplay {
+    /// Human-readable description of where the replay sample came from.
+    pub source: String,
+    /// API protocol used by all turns in the fixture.
+    pub protocol: ReplayProtocol,
+    /// Ordered request/response turns in the session.
+    pub turns: Vec<ReplayTurn>,
+}
+
+/// A single request/response turn in a stored-session replay fixture.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayTurn {
+    /// Stable fixture-local turn name.
+    pub name: String,
+    /// HTTP path to replay this turn against.
+    pub path: String,
+    /// Request body sent by the agent.
+    pub request: Value,
+    /// JSON response body returned by the upstream model service.
+    pub response: Value,
+    /// Original session records used to derive this replay turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_records: Option<Vec<Value>>,
+}
+
+/// Pending Claude Code turn state while scanning JSONL records.
+#[derive(Debug)]
+struct PendingClaudeTurn {
+    /// User message selected for the Anthropic Messages request.
+    request_message: Value,
+    /// Original Claude Code records that contributed to this turn.
+    source_records: Vec<Value>,
+    /// Text-only assistant response that may be followed by a split
+    /// `tool_use` record with the same message id.
+    deferred_response: Option<Value>,
+}
+
+/// How to transfer a pending request message into a generated replay turn.
+#[derive(Clone, Copy, Debug)]
+enum ClaudeRequestMessageMode {
+    /// Clone the request message because more assistant responses may still use
+    /// the same pending user request.
+    Clone,
+    /// Move the request message because the pending turn is being consumed.
+    Take,
+}
+
+/// Raw session log content plus optional source metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionInput<'a> {
+    /// Raw session log content.
+    content: &'a str,
+    /// Optional human-readable source name, usually the input path.
+    source_name: Option<&'a str>,
+}
+
+/// Session provider family recognized by replay importers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionProvider {
+    /// Claude Code JSONL session logs.
+    ClaudeCode,
+    /// Codex JSONL session logs.
+    Codex,
+}
+
+/// Provider hint supplied by callers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProviderHint {
+    /// Detect the provider from the session envelope.
+    #[default]
+    Auto,
+    /// Force Claude Code import.
+    ClaudeCode,
+    /// Force Codex import.
+    Codex,
+}
+
+/// Detection result from an importer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Detection {
+    /// The importer recognized the input as this provider.
+    Detected(SessionProvider),
+    /// The importer did not recognize the input.
+    NotDetected,
+}
+
+/// Options for converting raw session logs into replay fixtures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImportOptions {
+    /// Provider selection strategy.
+    pub provider: ProviderHint,
+    /// Fallback `max_tokens` for Claude Code transcript imports.
+    pub default_claude_max_tokens: u32,
+}
+
+/// Error returned while importing session logs.
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    /// A provider hint string was not recognized.
+    #[error("unknown provider hint {hint:?}; expected auto, claude, claude_code, or codex")]
+    UnknownProviderHint {
+        /// User-provided provider hint.
+        hint: String,
+    },
+    /// No importer recognized the session envelope.
+    #[error("session log was not recognized as Claude Code or Codex")]
+    UnrecognizedProvider,
+    /// More than one importer recognized the session envelope.
+    #[error("session log matched multiple providers")]
+    AmbiguousProvider,
+    /// The session matched a provider but did not contain importable turns.
+    #[error("{provider} session did not contain importable request/response turns")]
+    UnsupportedShape {
+        /// Provider that recognized the session.
+        provider: SessionProvider,
+    },
+    /// A selected importer found malformed JSONL.
+    #[error("line {line}: invalid JSON: {source}")]
+    InvalidJson {
+        /// 1-based JSONL line number.
+        line: usize,
+        /// JSON parser error.
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// Convert one provider-specific session log into a replay fixture.
+pub trait SessionReplayImporter {
+    /// Return the provider handled by this importer.
+    fn provider(&self) -> SessionProvider;
+
+    /// Detect whether this importer recognizes the input envelope.
+    fn detect(&self, input: &SessionInput<'_>) -> Detection;
+
+    /// Import an input session into the replay fixture schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImportError`] when the input is malformed or does not contain
+    /// turns this importer can convert safely.
+    fn import(&self, input: &SessionInput<'_>, options: ImportOptions) -> Result<SessionReplay, ImportError>;
+}
+
+/// Importer for Codex session logs.
+#[derive(Debug, Default)]
+pub struct CodexSessionImporter;
+
+/// Importer for Claude Code session logs.
+#[derive(Debug, Default)]
+pub struct ClaudeCodeSessionImporter;
+
+/// Shared Codex importer instance for auto-detection.
+static CODEX_IMPORTER: CodexSessionImporter = CodexSessionImporter;
+
+/// Shared Claude Code importer instance for auto-detection.
+static CLAUDE_CODE_IMPORTER: ClaudeCodeSessionImporter = ClaudeCodeSessionImporter;
+
+impl<'a> SessionInput<'a> {
+    /// Create input from raw session content.
+    #[must_use]
+    pub const fn new(content: &'a str) -> Self {
+        Self {
+            content,
+            source_name: None,
+        }
+    }
+
+    /// Attach a human-readable source name.
+    #[must_use]
+    pub const fn with_source_name(mut self, source_name: &'a str) -> Self {
+        self.source_name = Some(source_name);
+        self
+    }
+
+    /// Return the raw session content.
+    #[must_use]
+    pub const fn content(&self) -> &'a str {
+        self.content
+    }
+
+    /// Return the optional source name.
+    #[must_use]
+    pub const fn source_name(&self) -> Option<&'a str> {
+        self.source_name
+    }
+}
+
+impl fmt::Display for SessionProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ClaudeCode => "claude_code",
+            Self::Codex => "codex",
+        })
+    }
+}
+
+impl FromStr for ProviderHint {
+    type Err = ImportError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "claude" | "claude_code" | "claude-code" => Ok(Self::ClaudeCode),
+            "codex" => Ok(Self::Codex),
+            hint => Err(ImportError::UnknownProviderHint { hint: hint.to_owned() }),
+        }
+    }
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            provider: ProviderHint::Auto,
+            default_claude_max_tokens: 1024,
+        }
+    }
+}
+
+impl SessionReplayImporter for CodexSessionImporter {
+    fn provider(&self) -> SessionProvider {
+        SessionProvider::Codex
+    }
+
+    fn detect(&self, input: &SessionInput<'_>) -> Detection {
+        if input
+            .content()
+            .lines()
+            .filter_map(parse_jsonl_line_lossy)
+            .any(|value| is_codex_record(&value))
+        {
+            Detection::Detected(self.provider())
+        } else {
+            Detection::NotDetected
+        }
+    }
+
+    fn import(&self, input: &SessionInput<'_>, _options: ImportOptions) -> Result<SessionReplay, ImportError> {
+        let mut turns = Vec::new();
+
+        for (line_index, line) in input.content().lines().enumerate() {
+            let line_number = line_index + 1;
+            let record = parse_jsonl_line(line, line_number)?;
+            if let Some(turn) = codex_turn_from_record(record, turns.len() + 1) {
+                turns.push(turn);
+            }
+        }
+
+        replay_from_turns(
+            input,
+            self.provider(),
+            "Converted Codex session log",
+            ReplayProtocol::OpenaiResponses,
+            turns,
+        )
+    }
+}
+
+impl SessionReplayImporter for ClaudeCodeSessionImporter {
+    fn provider(&self) -> SessionProvider {
+        SessionProvider::ClaudeCode
+    }
+
+    fn detect(&self, input: &SessionInput<'_>) -> Detection {
+        if input
+            .content()
+            .lines()
+            .filter_map(parse_jsonl_line_lossy)
+            .any(|value| is_claude_code_record(&value))
+        {
+            Detection::Detected(self.provider())
+        } else {
+            Detection::NotDetected
+        }
+    }
+
+    fn import(&self, input: &SessionInput<'_>, options: ImportOptions) -> Result<SessionReplay, ImportError> {
+        let mut turns = Vec::new();
+        let mut pending_turn = None;
+
+        for (line_index, line) in input.content().lines().enumerate() {
+            let line_number = line_index + 1;
+            let record = parse_jsonl_line(line, line_number)?;
+            if let Some(user_message) = claude_user_message_from_record(&record) {
+                if let Some(turn) = flush_deferred_claude_turn(&mut pending_turn, turns.len() + 1, options) {
+                    turns.push(turn);
+                }
+                update_pending_claude_turn(&mut pending_turn, user_message, record);
+                continue;
+            }
+            turns.extend(claude_turns_from_assistant_record(
+                record,
+                &mut pending_turn,
+                turns.len() + 1,
+                options,
+            ));
+        }
+        if let Some(turn) = flush_deferred_claude_turn(&mut pending_turn, turns.len() + 1, options) {
+            turns.push(turn);
+        }
+
+        replay_from_turns(
+            input,
+            self.provider(),
+            "Converted Claude Code session log",
+            ReplayProtocol::AnthropicMessages,
+            turns,
+        )
+    }
+}
+
+/// Import a session replay using either a provider hint or auto-detection.
+///
+/// # Errors
+///
+/// Returns [`ImportError`] when no provider is recognized, multiple providers
+/// match, JSONL parsing fails, or the selected importer cannot extract safe
+/// request/response turns.
+pub fn import_session_replay(input: &SessionInput<'_>, options: ImportOptions) -> Result<SessionReplay, ImportError> {
+    match options.provider {
+        ProviderHint::Auto => import_with_auto_detection(input, options),
+        ProviderHint::ClaudeCode => CLAUDE_CODE_IMPORTER.import(input, options),
+        ProviderHint::Codex => CODEX_IMPORTER.import(input, options),
+    }
+}
+
+/// Import by scanning all registered importers and selecting one match.
+fn import_with_auto_detection(input: &SessionInput<'_>, options: ImportOptions) -> Result<SessionReplay, ImportError> {
+    let mut matched = None;
+
+    for importer in importers() {
+        if matches!(importer.detect(input), Detection::Detected(_)) {
+            if matched.is_some() {
+                return Err(ImportError::AmbiguousProvider);
+            }
+            matched = Some(importer);
+        }
+    }
+
+    let Some(importer) = matched else {
+        return Err(ImportError::UnrecognizedProvider);
+    };
+    importer.import(input, options)
+}
+
+/// Return the built-in importer registry.
+fn importers() -> [&'static dyn SessionReplayImporter; 2] {
+    [&CODEX_IMPORTER, &CLAUDE_CODE_IMPORTER]
+}
+
+/// Parse a JSONL line for detection, ignoring malformed records.
+fn parse_jsonl_line_lossy(line: &str) -> Option<Value> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    serde_json::from_str(trimmed).ok()
+}
+
+/// Parse a JSONL line for an active import.
+fn parse_jsonl_line(line: &str, line_number: usize) -> Result<Value, ImportError> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str(trimmed).map_err(|source| ImportError::InvalidJson {
+        line: line_number,
+        source,
+    })
+}
+
+/// Return true when a JSON object has the Codex session envelope.
+fn is_codex_record(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("payload")
+            && matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("event_msg" | "response_item" | "session_meta" | "turn_context")
+            )
+    })
+}
+
+/// Return true when a JSON object has the Claude Code session envelope.
+fn is_claude_code_record(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("uuid")
+            && object.contains_key("sessionId")
+            && object.contains_key("message")
+            && matches!(object.get("type").and_then(Value::as_str), Some("assistant" | "user"))
+    })
+}
+
+/// Extract an importable Codex turn from a JSONL record.
+fn codex_turn_from_record(record: Value, turn_number: usize) -> Option<ReplayTurn> {
+    let record_object = record.as_object()?;
+    if record_object.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+    let payload_object = record_object.get("payload")?.as_object()?;
+    let request = payload_object.get("request")?.clone();
+    let response = payload_object.get("response")?.clone();
+
+    Some(ReplayTurn {
+        name: replay_turn_name("codex-turn", turn_number),
+        path: "/v1/responses".to_owned(),
+        request,
+        response,
+        source_records: Some(vec![record]),
+    })
+}
+
+/// Add a Claude Code user record to the pending turn without dropping earlier
+/// records from the same turn.
+fn update_pending_claude_turn(pending: &mut Option<PendingClaudeTurn>, user_message: Value, record: Value) {
+    let Some(existing) = pending else {
+        *pending = Some(PendingClaudeTurn {
+            request_message: user_message,
+            source_records: vec![record],
+            deferred_response: None,
+        });
+        return;
+    };
+
+    if should_replace_pending_claude_user(Some(&existing.request_message), &user_message) {
+        existing.request_message = user_message;
+    }
+    existing.source_records.push(record);
+}
+
+/// Accumulate a Claude assistant record and return a replay turn once the
+/// assistant message contains client-visible content.
+fn claude_turns_from_assistant_record(
+    record: Value,
+    pending_turn: &mut Option<PendingClaudeTurn>,
+    turn_number: usize,
+    options: ImportOptions,
+) -> Vec<ReplayTurn> {
+    if !is_claude_assistant_record(&record) {
+        return Vec::new();
+    }
+    let Some(mut pending) = pending_turn.take() else {
+        return Vec::new();
+    };
+
+    if !is_importable_claude_assistant_record(&record) {
+        return defer_non_importable_claude_assistant_record(record, pending, pending_turn, turn_number, options);
+    }
+
+    emit_importable_claude_assistant_record(record, &mut pending, turn_number, options)
+}
+
+/// Keep non-importable split text records pending until a matching `tool_use`,
+/// new assistant id, user boundary, or EOF determines how to emit them.
+fn defer_non_importable_claude_assistant_record(
+    record: Value,
+    mut pending: PendingClaudeTurn,
+    pending_turn: &mut Option<PendingClaudeTurn>,
+    turn_number: usize,
+    options: ImportOptions,
+) -> Vec<ReplayTurn> {
+    let mut turns = Vec::new();
+    if let Some(message) = record.get("message")
+        && is_anthropic_assistant_message(message)
+        && is_split_tool_use_text_prelude(message)
+    {
+        flush_deferred_if_assistant_id_differs(&mut pending, message, &mut turns, turn_number, options);
+        pending.deferred_response = Some(message.clone());
+    }
+    pending.source_records.push(record);
+    *pending_turn = Some(pending);
+    turns
+}
+
+/// Emit an importable assistant record, flushing a previously deferred response
+/// first when the ids prove they are separate assistant messages.
+fn emit_importable_claude_assistant_record(
+    record: Value,
+    pending: &mut PendingClaudeTurn,
+    turn_number: usize,
+    options: ImportOptions,
+) -> Vec<ReplayTurn> {
+    let mut turns = Vec::new();
+    let Some(response) = record.get("message").cloned() else {
+        return turns;
+    };
+    flush_deferred_if_assistant_id_differs(pending, &response, &mut turns, turn_number, options);
+    pending.source_records.push(record);
+    if let Some(turn) = build_claude_replay_turn(
+        response,
+        pending,
+        ClaudeRequestMessageMode::Take,
+        turn_number + turns.len(),
+        options,
+    ) {
+        turns.push(turn);
+    }
+    turns
+}
+
+/// Flush the currently deferred response when a later assistant message has a
+/// known different id.
+fn flush_deferred_if_assistant_id_differs(
+    pending: &mut PendingClaudeTurn,
+    message: &Value,
+    turns: &mut Vec<ReplayTurn>,
+    turn_number: usize,
+    options: ImportOptions,
+) {
+    if pending
+        .deferred_response
+        .as_ref()
+        .is_some_and(|deferred| claude_message_ids_differ(deferred, message))
+        && let Some(turn) = take_deferred_claude_turn(pending, turn_number, options)
+    {
+        turns.push(turn);
+    }
+}
+
+/// Emit a deferred text-only Claude response when no matching split `tool_use`
+/// record arrived before the turn boundary.
+fn flush_deferred_claude_turn(
+    pending_turn: &mut Option<PendingClaudeTurn>,
+    turn_number: usize,
+    options: ImportOptions,
+) -> Option<ReplayTurn> {
+    pending_turn.as_ref()?.deferred_response.as_ref()?;
+    let turn = {
+        let pending = pending_turn.as_mut().expect("pending turn exists");
+        take_deferred_claude_turn(pending, turn_number, options)
+    };
+    let _pending = pending_turn.take();
+    turn
+}
+
+/// Emit and clear a deferred Claude response from a pending turn without
+/// consuming the pending request. This is used when the next assistant record
+/// proves the deferred text belongs to a different response id.
+fn take_deferred_claude_turn(
+    pending: &mut PendingClaudeTurn,
+    turn_number: usize,
+    options: ImportOptions,
+) -> Option<ReplayTurn> {
+    let response = pending.deferred_response.take()?;
+    build_claude_replay_turn(response, pending, ClaudeRequestMessageMode::Clone, turn_number, options)
+}
+
+/// Build a replay turn from a Claude assistant response and the pending user
+/// request state.
+fn build_claude_replay_turn(
+    response: Value,
+    pending: &mut PendingClaudeTurn,
+    request_message_mode: ClaudeRequestMessageMode,
+    turn_number: usize,
+    options: ImportOptions,
+) -> Option<ReplayTurn> {
+    let source_records = source_records_for_claude_response(&pending.source_records, &response);
+    let response =
+        normalize_claude_replay_response(accumulate_split_claude_assistant_content(response, &source_records));
+    let request_message = match request_message_mode {
+        ClaudeRequestMessageMode::Clone => pending.request_message.clone(),
+        ClaudeRequestMessageMode::Take => std::mem::take(&mut pending.request_message),
+    };
+    let response_pending = PendingClaudeTurn {
+        request_message,
+        source_records,
+        deferred_response: None,
+    };
+    claude_turn_from_response(response, response_pending, turn_number, options)
+}
+
+/// Extract a Claude Code user message from a JSONL record.
+fn claude_user_message_from_record(record: &Value) -> Option<Value> {
+    let record_object = record.as_object()?;
+    if record_object.get("type").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    let message = record_object.get("message")?;
+    is_claude_user_message(message).then_some(message.clone())
+}
+
+/// Return true when a record is a Claude Code assistant record.
+fn is_claude_assistant_record(record: &Value) -> bool {
+    record.as_object().is_some_and(|object| {
+        object.get("type").and_then(Value::as_str) == Some("assistant") && object.contains_key("message")
+    })
+}
+
+/// Return true when a Claude Code assistant record should become a replay
+/// response rather than an intermediate thinking-only update.
+fn is_importable_claude_assistant_record(record: &Value) -> bool {
+    record.get("message").is_some_and(|message| {
+        is_anthropic_assistant_message(message) && has_replayable_claude_assistant_content(message)
+    })
+}
+
+/// Build a replay turn from an importable Claude Code assistant response.
+fn claude_turn_from_response(
+    response: Value,
+    pending: PendingClaudeTurn,
+    turn_number: usize,
+    options: ImportOptions,
+) -> Option<ReplayTurn> {
+    if !is_anthropic_assistant_message(&response) {
+        return None;
+    }
+    let request = claude_request_from_response(&response, pending.request_message, options)?;
+
+    Some(ReplayTurn {
+        name: replay_turn_name("claude-code-turn", turn_number),
+        path: "/v1/messages".to_owned(),
+        request,
+        response,
+        source_records: Some(pending.source_records),
+    })
+}
+
+/// Return true when a Claude Code message is user-authored.
+fn is_claude_user_message(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("user")
+}
+
+/// Return true when a newly observed Claude user message should become the
+/// request paired with the next assistant response.
+fn should_replace_pending_claude_user(pending: Option<&Value>, candidate: &Value) -> bool {
+    claude_message_contains_content_type(candidate, "image")
+        || !pending.is_some_and(|message| claude_message_contains_content_type(message, "image"))
+}
+
+/// Return true when a Claude message content array contains a block type.
+fn claude_message_contains_content_type(message: &Value, block_type: &str) -> bool {
+    message.get("content").and_then(Value::as_array).is_some_and(|content| {
+        content
+            .iter()
+            .any(|block| block.get("type").and_then(Value::as_str) == Some(block_type))
+    })
+}
+
+/// Return true when assistant content includes client-visible replay content.
+fn has_replayable_claude_assistant_content(message: &Value) -> bool {
+    if is_split_tool_use_text_prelude(message) {
+        return false;
+    }
+
+    match message.get("content") {
+        Some(Value::String(content)) => !content.is_empty(),
+        Some(Value::Array(content)) => content.iter().any(is_replayable_claude_assistant_block),
+        _ => false,
+    }
+}
+
+/// Return true when Claude Code split the assistant text prelude from a
+/// following `tool_use` record for the same assistant response.
+fn is_split_tool_use_text_prelude(message: &Value) -> bool {
+    if message
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .is_some_and(|stop_reason| stop_reason != "tool_use")
+    {
+        return false;
+    }
+
+    let Some(Value::Array(content)) = message.get("content") else {
+        return false;
+    };
+
+    !content.is_empty()
+        && content
+            .iter()
+            .all(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+}
+
+/// Return true for assistant blocks that should appear in generated replay
+/// responses rather than only in `source_records`.
+fn is_replayable_claude_assistant_block(block: &Value) -> bool {
+    !matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("thinking" | "redacted_thinking")
+    )
+}
+
+/// Return the Anthropic message id from a Claude Code message.
+fn claude_message_id(message: &Value) -> Option<&str> {
+    message.get("id").and_then(Value::as_str)
+}
+
+/// Return true when two Claude assistant messages have different known ids.
+fn claude_message_ids_differ(left: &Value, right: &Value) -> bool {
+    match (claude_message_id(left), claude_message_id(right)) {
+        (Some(left), Some(right)) => left != right,
+        _ => false,
+    }
+}
+
+/// Return source records that belong to the given response id, while retaining
+/// user records needed to reconstruct the request.
+fn source_records_for_claude_response(source_records: &[Value], response: &Value) -> Vec<Value> {
+    let Some(response_id) = claude_message_id(response) else {
+        return source_records.to_vec();
+    };
+
+    source_records
+        .iter()
+        .filter(|record| match record.get("type").and_then(Value::as_str) {
+            Some("user") => true,
+            Some("assistant") => record
+                .get("message")
+                .and_then(claude_message_id)
+                .is_some_and(|message_id| message_id == response_id),
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+/// Reconstruct assistant content when Claude Code stored one model response as
+/// multiple assistant records with the same message id.
+fn accumulate_split_claude_assistant_content(mut response: Value, source_records: &[Value]) -> Value {
+    let Some(response_id) = response.get("id").and_then(Value::as_str) else {
+        return response;
+    };
+
+    if !response.get("content").is_some_and(Value::is_array) {
+        return response;
+    }
+
+    let mut content = Vec::new();
+    for record in source_records {
+        let Some(message) = record.get("message") else {
+            continue;
+        };
+        if message.get("id").and_then(Value::as_str) != Some(response_id) {
+            continue;
+        }
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        content.extend(
+            blocks
+                .iter()
+                .filter(|block| is_replayable_claude_assistant_block(block))
+                .cloned(),
+        );
+    }
+
+    if let Some(obj) = response.as_object_mut()
+        && !content.is_empty()
+    {
+        obj.insert("content".to_owned(), Value::Array(content));
+    }
+
+    response
+}
+
+/// Normalize Claude Code's incremental assistant log records into replayable
+/// Anthropic Messages responses.
+fn normalize_claude_replay_response(mut response: Value) -> Value {
+    if response
+        .get("stop_reason")
+        .is_some_and(|stop_reason| !stop_reason.is_null())
+    {
+        return response;
+    }
+
+    let has_tool_use = response.get("content").and_then(Value::as_array).is_some_and(|blocks| {
+        blocks
+            .iter()
+            .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+    });
+
+    if has_tool_use && let Some(obj) = response.as_object_mut() {
+        obj.insert("stop_reason".to_owned(), Value::String("tool_use".to_owned()));
+    }
+
+    response
+}
+
+/// Return true when a Claude Code assistant message is an Anthropic response.
+fn is_anthropic_assistant_message(message: &Value) -> bool {
+    message.get("type").and_then(Value::as_str) == Some("message")
+        && message.get("role").and_then(Value::as_str) == Some("assistant")
+}
+
+/// Build an Anthropic Messages request from a Claude Code transcript pair.
+fn claude_request_from_response(response: &Value, user_message: Value, options: ImportOptions) -> Option<Value> {
+    let model = response.get("model").and_then(Value::as_str)?;
+    let mut request = Map::new();
+    request.insert("model".to_owned(), Value::String(model.to_owned()));
+    request.insert(
+        "max_tokens".to_owned(),
+        Value::Number(Number::from(options.default_claude_max_tokens)),
+    );
+    request.insert("messages".to_owned(), Value::Array(vec![user_message]));
+    Some(Value::Object(request))
+}
+
+/// Build a stable generated turn name.
+fn replay_turn_name(prefix: &str, number: usize) -> String {
+    format!("{prefix}-{number}")
+}
+
+/// Build a fixture or return a provider-specific unsupported-shape error.
+fn replay_from_turns(
+    input: &SessionInput<'_>,
+    provider: SessionProvider,
+    fallback_source: &str,
+    protocol: ReplayProtocol,
+    turns: Vec<ReplayTurn>,
+) -> Result<SessionReplay, ImportError> {
+    if turns.is_empty() {
+        return Err(ImportError::UnsupportedShape { provider });
+    }
+
+    Ok(SessionReplay {
+        source: replay_source(input, fallback_source),
+        protocol,
+        turns,
+    })
+}
+
+/// Build the fixture source text.
+fn replay_source(input: &SessionInput<'_>, fallback: &str) -> String {
+    input.source_name().map_or_else(
+        || fallback.to_owned(),
+        |source_name| format!("{fallback}: {source_name}"),
+    )
+}
+
+impl SessionReplay {
+    /// Load a session replay fixture relative to
+    /// `tests/integration/fixtures/`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file cannot be read or parsed, or if the replay has
+    /// no turns.
+    pub fn load(relative_path: &str) -> Self {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("..");
+        path.push("integration");
+        path.push("fixtures");
+        for component in std::path::Path::new(relative_path).components() {
+            let Component::Normal(component) = component else {
+                panic!("invalid session replay fixture path {relative_path:?}");
+            };
+            path.push(component);
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
+        let replay: Self =
+            serde_json::from_str(&content).unwrap_or_else(|e| panic!("parse fixture {relative_path}: {e}"));
+        assert!(
+            !replay.turns.is_empty(),
+            "session replay fixture {relative_path} must have at least one turn"
+        );
+        replay
+    }
+
+    /// Return the only turn in a single-turn replay fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the replay fixture has zero or multiple turns.
+    pub fn single_turn(&self) -> &ReplayTurn {
+        assert_eq!(
+            self.turns.len(),
+            1,
+            "single-turn replay fixture should contain exactly one turn"
+        );
+        &self.turns[0]
+    }
+}
+
+impl ReplayTurn {
+    /// Return the HTTP path for this replay turn.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Return the request body as compact JSON.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the request value cannot be serialized.
+    pub fn request_body(&self) -> String {
+        serde_json::to_string(&self.request).unwrap_or_else(|e| panic!("serialize replay request: {e}"))
+    }
+
+    /// Return the response body as compact JSON.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the response value cannot be serialized.
+    pub fn response_body(&self) -> String {
+        serde_json::to_string(&self.response).unwrap_or_else(|e| panic!("serialize replay response: {e}"))
+    }
+
+    /// Convert this legacy replay turn into the shared client exchange schema.
+    ///
+    /// This is lossy because replay fixtures do not retain an HTTP method or
+    /// response status; the adapter uses `POST` and status `200`. It preserves
+    /// the stored path, unlike [`crate::Recording::to_recorded_exchange`].
+    ///
+    /// The adapter borrows the replay turn, so its request, response, and path
+    /// are cloned only because the returned shared exchange owns them.
+    #[must_use]
+    pub fn to_client_exchange(&self) -> RecordedExchange {
+        RecordedExchange {
+            request: RecordedRequest {
+                method: "POST".to_owned(),
+                path: self.path.clone(),
+                headers: BTreeMap::new(),
+                body: RecordedBody::Json {
+                    value: self.request.clone(),
+                },
+            },
+            response: RecordedResponse {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: RecordedBody::Json {
+                    value: self.response.clone(),
+                },
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    const CODEX_JSONL: &str = r#"{"timestamp":"2026-07-07T00:00:00Z","type":"session_meta","payload":{"id":"session_import_codex"}}
+{"timestamp":"2026-07-07T00:00:01Z","type":"response_item","payload":{"request":{"model":"gpt-4.1","input":"hello"},"response":{"id":"resp_import_codex","object":"response","status":"completed","model":"gpt-4.1","output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}}}"#;
+
+    const CODEX_COMPLEX_JSONL: &str = r#"{"timestamp":"2026-07-07T00:00:00Z","type":"session_meta","payload":{"id":"session_import_codex_complex"}}
+{"timestamp":"2026-07-07T00:00:01Z","type":"response_item","payload":{"request":{"model":"gpt-4.1","store":false,"metadata":{"suite":"passthrough"},"input":[{"role":"user","content":[{"type":"input_text","text":"use the tool"}]},{"type":"function_call_output","call_id":"call_1","output":"{\"ok\":true}"}],"tools":[{"type":"function","name":"lookup","description":"Lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}}],"previous_response_id":null},"response":{"id":"resp_import_codex_complex","object":"response","created_at":1000,"status":"completed","model":"gpt-4.1","parallel_tool_calls":true,"incomplete_details":null,"usage":{"input_tokens":10,"output_tokens":12,"output_tokens_details":{"reasoning_tokens":3}},"output":[{"type":"reasoning","id":"rs_1","summary":[]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"query\":\"x\"}","status":"completed"},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}]}}}"#;
+
+    const CLAUDE_CODE_JSONL: &str = r#"{"uuid":"turn_user","sessionId":"session_import_claude","timestamp":"2026-07-07T00:00:00Z","type":"user","message":{"role":"user","content":"hello"}}
+{"uuid":"turn_assistant","sessionId":"session_import_claude","timestamp":"2026-07-07T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}"#;
+
+    const CLAUDE_CODE_STRING_ASSISTANT_JSONL: &str = r#"{"uuid":"turn_user","sessionId":"session_import_claude_string","timestamp":"2026-07-07T00:00:00Z","type":"user","message":{"role":"user","content":"hello"}}
+{"uuid":"turn_assistant","sessionId":"session_import_claude_string","timestamp":"2026-07-07T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude_string","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":"hi","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}"#;
+
+    const CLAUDE_CODE_IMAGE_JSONL: &str = r#"{"uuid":"turn_image_user","sessionId":"session_import_claude_image","timestamp":"2026-07-08T00:00:00Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"What's in this image?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}]}}
+{"uuid":"turn_image_placeholder","sessionId":"session_import_claude_image","timestamp":"2026-07-08T00:00:00Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"[Image: source: /tmp/screenshot.png]"}]}}
+{"uuid":"turn_image_thinking","sessionId":"session_import_claude_image","timestamp":"2026-07-08T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude_image","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"thinking","thinking":"Looking at the image.","signature":"sig"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}
+{"uuid":"turn_image_redacted_thinking","sessionId":"session_import_claude_image","timestamp":"2026-07-08T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude_image","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"redacted_thinking","data":"encrypted-reasoning"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}
+{"uuid":"turn_image_assistant","sessionId":"session_import_claude_image","timestamp":"2026-07-08T00:00:02Z","type":"assistant","message":{"id":"msg_import_claude_image","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"a terminal screenshot"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}}"#;
+
+    const CLAUDE_CODE_SPLIT_TEXT_TOOL_USE_JSONL: &str = r#"{"uuid":"turn_split_user","sessionId":"session_import_claude_split_tool","timestamp":"2026-07-08T00:00:00Z","type":"user","message":{"role":"user","content":"inspect the fixture"}}
+{"uuid":"turn_split_text","sessionId":"session_import_claude_split_tool","timestamp":"2026-07-08T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude_split_tool","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"I will inspect it."}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":5}}}
+{"uuid":"turn_split_tool","sessionId":"session_import_claude_split_tool","timestamp":"2026-07-08T00:00:02Z","type":"assistant","message":{"id":"msg_import_claude_split_tool","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"tool_use","id":"toolu_import_split_01","name":"Read","input":{"file_path":"fixture-file"}}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":12}}}"#;
+
+    const CLAUDE_CODE_TEXT_NULL_STOP_EOF_JSONL: &str = r#"{"uuid":"turn_null_text_user","sessionId":"session_import_claude_null_text","timestamp":"2026-07-08T00:00:00Z","type":"user","message":{"role":"user","content":"summarize the fixture"}}
+{"uuid":"turn_null_text_assistant","sessionId":"session_import_claude_null_text","timestamp":"2026-07-08T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude_null_text","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"fixture summary"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":5}}}"#;
+
+    const CLAUDE_CODE_TEXT_NULL_STOP_BEFORE_NEXT_USER_JSONL: &str = r#"{"uuid":"turn_null_text_user_a","sessionId":"session_import_claude_null_text_boundary","timestamp":"2026-07-08T00:00:00Z","type":"user","message":{"role":"user","content":"first request"}}
+{"uuid":"turn_null_text_assistant_a","sessionId":"session_import_claude_null_text_boundary","timestamp":"2026-07-08T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude_null_text_a","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"first response"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":5}}}
+{"uuid":"turn_null_text_user_b","sessionId":"session_import_claude_null_text_boundary","timestamp":"2026-07-08T00:00:02Z","type":"user","message":{"role":"user","content":"second request"}}
+{"uuid":"turn_null_text_assistant_b","sessionId":"session_import_claude_null_text_boundary","timestamp":"2026-07-08T00:00:03Z","type":"assistant","message":{"id":"msg_import_claude_null_text_b","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"second response"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":5}}}"#;
+
+    const CLAUDE_CODE_TEXT_NULL_STOP_BEFORE_DIFFERENT_ASSISTANT_JSONL: &str = r#"{"uuid":"turn_null_text_same_user","sessionId":"session_import_claude_null_text_assistant_boundary","timestamp":"2026-07-08T00:00:00Z","type":"user","message":{"role":"user","content":"same user request"}}
+{"uuid":"turn_null_text_assistant_a","sessionId":"session_import_claude_null_text_assistant_boundary","timestamp":"2026-07-08T00:00:01Z","type":"assistant","message":{"id":"msg_import_claude_null_text_a","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"first response"}],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":5}}}
+{"uuid":"turn_null_text_assistant_b","sessionId":"session_import_claude_null_text_assistant_boundary","timestamp":"2026-07-08T00:00:02Z","type":"assistant","message":{"id":"msg_import_claude_null_text_b","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"second response"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":4,"output_tokens":5}}}"#;
+
+    #[test]
+    fn load_claude_messages_replay() {
+        let replay = SessionReplay::load("replay/claude/messages-basic.json");
+
+        assert_eq!(replay.protocol, ReplayProtocol::AnthropicMessages);
+        assert_eq!(replay.turns.len(), 1);
+        assert_eq!(replay.single_turn().path(), "/v1/messages");
+    }
+
+    #[test]
+    fn load_codex_responses_replay() {
+        let replay = SessionReplay::load("replay/codex/responses-basic.json");
+
+        assert_eq!(replay.protocol, ReplayProtocol::OpenaiResponses);
+        assert_eq!(replay.turns.len(), 1);
+        assert_eq!(replay.single_turn().path(), "/v1/responses");
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid session replay fixture path")]
+    fn load_rejects_parent_directory_components() {
+        let _replay = SessionReplay::load("../replay/codex/responses-basic.json");
+    }
+
+    #[test]
+    fn bodies_are_valid_json() {
+        let replay = SessionReplay::load("replay/codex/responses-basic.json");
+        let turn = replay.single_turn();
+
+        serde_json::from_str::<Value>(&turn.request_body()).expect("request body should be JSON");
+        serde_json::from_str::<Value>(&turn.response_body()).expect("response body should be JSON");
+    }
+
+    #[test]
+    fn replay_turn_adapter_preserves_body_direction_and_lossy_http_defaults() {
+        // Catches swapping request and response bodies or dropping the stored replay route.
+        let turn = ReplayTurn {
+            name: "legacy-turn".to_owned(),
+            path: "/v1/responses?include=usage".to_owned(),
+            request: json!({"request_model": "request-only-model"}),
+            response: json!({"response_id": "response-only-id", "content": "answer"}),
+            source_records: None,
+        };
+
+        let exchange = turn.to_client_exchange();
+
+        assert_eq!(exchange.request.method, "POST");
+        assert_eq!(exchange.request.path, "/v1/responses?include=usage");
+        assert!(exchange.request.headers.is_empty());
+        assert_eq!(
+            exchange.request.body,
+            RecordedBody::Json {
+                value: json!({"request_model": "request-only-model"})
+            }
+        );
+        assert_eq!(exchange.response.status, 200);
+        assert!(exchange.response.headers.is_empty());
+        assert_eq!(
+            exchange.response.body,
+            RecordedBody::Json {
+                value: json!({"response_id": "response-only-id", "content": "answer"})
+            }
+        );
+    }
+
+    #[test]
+    fn replay_turn_json_shape_omits_and_defaults_optional_source_records() {
+        // Catches changing the existing replay-turn on-disk shape while adding its adapter.
+        let literal = json!({
+            "name": "legacy-turn",
+            "path": "/v1/responses",
+            "request": {"request_marker": "request"},
+            "response": {"response_marker": "response"}
+        });
+
+        let turn: ReplayTurn = serde_json::from_value(literal.clone()).expect("legacy replay turn should deserialize");
+
+        assert_eq!(turn.source_records, None);
+        assert_eq!(
+            serde_json::to_value(&turn).expect("legacy replay turn should serialize"),
+            literal
+        );
+    }
+
+    #[test]
+    fn committed_replay_source_records_do_not_include_local_paths() {
+        let mut fixture_paths = Vec::new();
+        collect_replay_fixture_paths(&replay_fixture_root(), &mut fixture_paths);
+        assert!(!fixture_paths.is_empty(), "expected replay fixtures to be present");
+
+        for path in fixture_paths {
+            let content =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()));
+            let replay: SessionReplay =
+                serde_json::from_str(&content).unwrap_or_else(|e| panic!("parse fixture {}: {e}", path.display()));
+
+            for (turn_index, turn) in replay.turns.iter().enumerate() {
+                let Some(source_records) = &turn.source_records else {
+                    continue;
+                };
+
+                for (record_index, record) in source_records.iter().enumerate() {
+                    assert_value_has_no_local_path(
+                        record,
+                        &path,
+                        &format!("turns[{turn_index}].source_records[{record_index}]"),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn session_replay_import_detects_codex_jsonl() {
+        let input = SessionInput::new(CODEX_JSONL);
+
+        let detection = CodexSessionImporter.detect(&input);
+
+        assert_eq!(detection, Detection::Detected(SessionProvider::Codex));
+    }
+
+    #[test]
+    fn session_replay_import_detects_claude_code_jsonl() {
+        let input = SessionInput::new(CLAUDE_CODE_JSONL);
+
+        let detection = ClaudeCodeSessionImporter.detect(&input);
+
+        assert_eq!(detection, Detection::Detected(SessionProvider::ClaudeCode));
+    }
+
+    #[test]
+    fn session_replay_import_converts_codex_turns() {
+        let input = SessionInput::new(CODEX_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+        let turn = replay.single_turn();
+
+        assert_eq!(replay.protocol, ReplayProtocol::OpenaiResponses);
+        assert_eq!(turn.path(), "/v1/responses");
+        assert_eq!(turn.request["input"], "hello");
+        assert_eq!(turn.response["id"], "resp_import_codex");
+    }
+
+    #[test]
+    fn session_replay_import_preserves_codex_responses_payload() {
+        let input = SessionInput::new(CODEX_COMPLEX_JSONL);
+        let source_record: Value = serde_json::from_str(CODEX_COMPLEX_JSONL.lines().nth(1).expect("response item"))
+            .expect("response item should be valid JSON");
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+        let turn = replay.single_turn();
+
+        assert_eq!(replay.protocol, ReplayProtocol::OpenaiResponses);
+        assert_eq!(turn.path(), "/v1/responses");
+        assert_eq!(turn.request, source_record["payload"]["request"]);
+        assert_eq!(turn.response, source_record["payload"]["response"]);
+        assert_eq!(
+            turn.source_records.as_ref().expect("source record should be preserved")[0],
+            source_record
+        );
+    }
+
+    #[test]
+    fn session_replay_import_converts_claude_code_turns() {
+        let input = SessionInput::new(CLAUDE_CODE_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+        let turn = replay.single_turn();
+
+        assert_eq!(replay.protocol, ReplayProtocol::AnthropicMessages);
+        assert_eq!(turn.path(), "/v1/messages");
+        assert_eq!(turn.request["model"], "claude-sonnet-4-5");
+        assert_eq!(turn.request["messages"][0]["role"], "user");
+        assert_eq!(turn.response["id"], "msg_import_claude");
+    }
+
+    #[test]
+    fn session_replay_import_accepts_claude_code_string_assistant_content() {
+        let input = SessionInput::new(CLAUDE_CODE_STRING_ASSISTANT_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+        let turn = replay.single_turn();
+
+        assert_eq!(replay.protocol, ReplayProtocol::AnthropicMessages);
+        assert_eq!(turn.response["id"], "msg_import_claude_string");
+        assert_eq!(turn.response["content"], "hi");
+        assert_eq!(
+            turn.source_records
+                .as_ref()
+                .expect("source records should be preserved")[1]["message"]["content"],
+            "hi"
+        );
+    }
+
+    #[test]
+    fn session_replay_import_preserves_claude_code_image_turn() {
+        let input = SessionInput::new(CLAUDE_CODE_IMAGE_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+        let turn = replay.single_turn();
+
+        assert_eq!(turn.request["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(turn.request["messages"][0]["content"][1]["type"], "image");
+        assert_eq!(
+            turn.request["messages"][0]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert_eq!(turn.response["id"], "msg_import_claude_image");
+        assert_eq!(turn.response["content"][0]["type"], "text");
+        assert_eq!(turn.response["content"][0]["text"], "a terminal screenshot");
+
+        let source_records = turn
+            .source_records
+            .as_ref()
+            .expect("source records should be preserved");
+        assert_eq!(source_records.len(), 5);
+        assert_eq!(source_records[0]["message"]["content"][1]["type"], "image");
+        assert_eq!(
+            source_records[1]["message"]["content"][0]["text"],
+            "[Image: source: /tmp/screenshot.png]"
+        );
+        assert_eq!(source_records[2]["message"]["content"][0]["type"], "thinking");
+        assert_eq!(source_records[3]["message"]["content"][0]["type"], "redacted_thinking");
+        assert_eq!(source_records[4]["message"]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn session_replay_import_preserves_split_text_before_tool_use() {
+        let input = SessionInput::new(CLAUDE_CODE_SPLIT_TEXT_TOOL_USE_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+        let turn = replay.single_turn();
+
+        assert_eq!(turn.response["id"], "msg_import_claude_split_tool");
+        assert_eq!(turn.response["stop_reason"], "tool_use");
+        assert_eq!(turn.response["content"][0]["type"], "text");
+        assert_eq!(turn.response["content"][1]["type"], "tool_use");
+        assert_eq!(turn.response["content"][1]["id"], "toolu_import_split_01");
+        assert_eq!(
+            turn.source_records
+                .as_ref()
+                .expect("source records should be preserved")
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn session_replay_import_flushes_text_null_stop_at_eof() {
+        let input = SessionInput::new(CLAUDE_CODE_TEXT_NULL_STOP_EOF_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+        let turn = replay.single_turn();
+
+        assert_eq!(turn.response["id"], "msg_import_claude_null_text");
+        assert_eq!(turn.response["stop_reason"], Value::Null);
+        assert_eq!(turn.response["content"][0]["type"], "text");
+        assert_eq!(turn.response["content"][0]["text"], "fixture summary");
+    }
+
+    #[test]
+    fn session_replay_import_flushes_text_null_stop_before_next_user() {
+        let input = SessionInput::new(CLAUDE_CODE_TEXT_NULL_STOP_BEFORE_NEXT_USER_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+
+        assert_eq!(replay.turns.len(), 2);
+        assert_eq!(replay.turns[0].request["messages"][0]["content"], "first request");
+        assert_eq!(replay.turns[0].response["id"], "msg_import_claude_null_text_a");
+        assert_eq!(replay.turns[0].response["content"][0]["text"], "first response");
+        assert_eq!(replay.turns[1].request["messages"][0]["content"], "second request");
+        assert_eq!(replay.turns[1].response["id"], "msg_import_claude_null_text_b");
+        assert_eq!(replay.turns[1].response["content"][0]["text"], "second response");
+    }
+
+    #[test]
+    fn session_replay_import_flushes_text_null_stop_before_different_assistant_id() {
+        let input = SessionInput::new(CLAUDE_CODE_TEXT_NULL_STOP_BEFORE_DIFFERENT_ASSISTANT_JSONL);
+
+        let replay = import_session_replay(&input, ImportOptions::default()).expect("import should succeed");
+
+        assert_eq!(replay.turns.len(), 2);
+        assert_eq!(replay.turns[0].request["messages"][0]["content"], "same user request");
+        assert_eq!(replay.turns[0].response["id"], "msg_import_claude_null_text_a");
+        assert_eq!(replay.turns[0].response["content"][0]["text"], "first response");
+        let first_sources = replay.turns[0]
+            .source_records
+            .as_ref()
+            .expect("first turn source records");
+        assert_eq!(first_sources[1]["message"]["id"], "msg_import_claude_null_text_a");
+        assert_eq!(first_sources.len(), 2);
+        assert_eq!(replay.turns[1].request["messages"][0]["content"], "same user request");
+        assert_eq!(replay.turns[1].response["id"], "msg_import_claude_null_text_b");
+        assert_eq!(replay.turns[1].response["content"][0]["text"], "second response");
+        let second_sources = replay.turns[1]
+            .source_records
+            .as_ref()
+            .expect("second turn source records");
+        assert_eq!(second_sources[1]["message"]["id"], "msg_import_claude_null_text_b");
+        assert_eq!(second_sources.len(), 2);
+    }
+
+    fn replay_fixture_root() -> PathBuf {
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("..");
+        path.push("integration");
+        path.push("fixtures");
+        path.push("replay");
+        path
+    }
+
+    fn collect_replay_fixture_paths(dir: &std::path::Path, fixture_paths: &mut Vec<PathBuf>) {
+        let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read fixture dir {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("read fixture dir entry {}: {e}", dir.display()));
+            let path = entry.path();
+            if path.is_dir() {
+                collect_replay_fixture_paths(&path, fixture_paths);
+            } else if path.extension().is_some_and(|extension| extension == "json") {
+                fixture_paths.push(path);
+            }
+        }
+    }
+
+    fn assert_value_has_no_local_path(value: &Value, fixture_path: &std::path::Path, json_path: &str) {
+        match value {
+            Value::String(text) => assert_text_has_no_local_path(text, fixture_path, json_path),
+            Value::Array(items) => assert_array_has_no_local_path(items, fixture_path, json_path),
+            Value::Object(object) => assert_object_has_no_local_path(object, fixture_path, json_path),
+            Value::Null | Value::Bool(_) | Value::Number(_) => {},
+        }
+    }
+
+    fn assert_text_has_no_local_path(text: &str, fixture_path: &std::path::Path, json_path: &str) {
+        const LOCAL_PATH_PATTERNS: &[&str] = &[
+            "/Users/",
+            "/var/folders/",
+            "/private/var/",
+            "/tmp/",
+            "TemporaryItems",
+            "C:\\Users\\",
+            "\\Users\\",
+            "\\AppData\\",
+        ];
+
+        for pattern in LOCAL_PATH_PATTERNS {
+            assert!(
+                !text.contains(pattern),
+                "fixture {} contains local path pattern {pattern:?} at {json_path}: {text:?}",
+                fixture_path.display()
+            );
+        }
+    }
+
+    fn assert_array_has_no_local_path(items: &[Value], fixture_path: &std::path::Path, json_path: &str) {
+        for (index, item) in items.iter().enumerate() {
+            assert_value_has_no_local_path(item, fixture_path, &format!("{json_path}[{index}]"));
+        }
+    }
+
+    fn assert_object_has_no_local_path(object: &Map<String, Value>, fixture_path: &std::path::Path, json_path: &str) {
+        for (key, item) in object {
+            if is_base64_data_field(object, key) {
+                continue;
+            }
+            assert_value_has_no_local_path(item, fixture_path, &format!("{json_path}.{key}"));
+        }
+    }
+
+    fn is_base64_data_field(object: &Map<String, Value>, key: &str) -> bool {
+        key == "data" && object.get("type").and_then(Value::as_str) == Some("base64")
+    }
+}

@@ -1,0 +1,137 @@
+# syntax=docker/dockerfile:1
+
+# ------------------------------------------------------------------------------
+# Stage 1: Build
+# ------------------------------------------------------------------------------
+
+FROM rust:1.98-alpine3.24 AS builder
+
+# Cargo features for the published binary. `full` keeps every non-experimental
+# filter; the crate default (`standard`) leaves the heavier OpenAI groups out.
+ARG PRAXIS_AI_FEATURES=full
+
+# praxis-ai performs all of its cryptography in the system OpenSSL and links it
+# dynamically, so the musl target must not produce a static executable (the
+# Alpine Rust image's default) and the builder needs the OpenSSL headers. The
+# builder and the runtime image are the same Alpine release, so the libraries
+# the binary was linked against are the ones it finds at runtime.
+ENV RUSTFLAGS="-C target-feature=-crt-static"
+
+RUN apk add --no-cache musl-dev openssl-dev pkgconf cmake make g++
+
+WORKDIR /src
+
+# ------------------------------------------------------------------------------
+# Cache Build
+# ------------------------------------------------------------------------------
+
+# Cache dependency builds: copy only manifests first, then
+# create stub source files so `cargo build` resolves and
+# compiles all dependencies without the real source code.
+
+# Workspace manifests
+COPY Cargo.toml Cargo.lock ./
+COPY apis/Cargo.toml ./apis/Cargo.toml
+COPY filters/Cargo.toml ./filters/Cargo.toml
+COPY server/Cargo.toml ./server/Cargo.toml
+COPY server/build_support/Cargo.toml ./server/build_support/Cargo.toml
+
+# The server crate has a build.rs that discovers external filter
+# crates via cargo metadata for build-time auto-registration,
+# backed by the praxis-ai-build-support crate. build.rs is a
+# build-dependency of the server crate, not an ordinary crate under
+# test: cargo compiles it (and everything it depends on) up front,
+# so praxis-ai-build-support needs its real source here too, not a
+# stub — a stub would compile but export none of the functions
+# build.rs calls, breaking compilation of the build script itself.
+COPY server/build.rs ./server/build.rs
+COPY server/build_support/src ./server/build_support/src
+
+# Copy the optional llm-d ext_proc manifest and generated protobuf inputs so
+# Cargo can resolve the workspace during the dependency-cache build.
+COPY integrations/llmd/ext-proc/Cargo.toml ./integrations/llmd/ext-proc/Cargo.toml
+COPY integrations/llmd/ext-proc/build.rs ./integrations/llmd/ext-proc/build.rs
+COPY integrations/llmd/ext-proc/proto ./integrations/llmd/ext-proc/proto
+
+# Strip workspace members not needed for the binary.
+RUN sed -i '/xtask/d; /tests\//d; /benchmarks/d' Cargo.toml
+
+# Create stub source files for the crates whose real source isn't
+# needed until after dependencies are cached.
+RUN mkdir -p apis/src filters/src server/src integrations/llmd/ext-proc/src \
+    && echo '//! stub' > apis/src/lib.rs \
+    && echo '//! stub' > filters/src/lib.rs \
+    && echo '//! stub' > server/src/lib.rs \
+    && echo '//! stub' > integrations/llmd/ext-proc/src/lib.rs \
+    && printf '//! stub\nfn main() {}\n' > server/src/main.rs
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p praxis-ai-proxy --features "${PRAXIS_AI_FEATURES}"
+
+# ------------------------------------------------------------------------------
+# Cache Tricks
+# ------------------------------------------------------------------------------
+
+# Replace stubs with real source, then rebuild. Only the project
+# crates recompile; all external dependencies are cached.
+# build_support/src was already real (see above), so it is not
+# copied again here.
+COPY apis/src ./apis/src
+COPY filters/src ./filters/src
+COPY server/src ./server/src
+COPY integrations/llmd/ext-proc/src ./integrations/llmd/ext-proc/src
+
+RUN find apis/src filters/src server/src integrations/llmd/ext-proc/src \
+    -name '*.rs' -exec touch {} +
+
+# ------------------------------------------------------------------------------
+# Build
+# ------------------------------------------------------------------------------
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p praxis-ai-proxy --features "${PRAXIS_AI_FEATURES}" \
+    && cp target/release/praxis-ai /usr/local/bin/praxis-ai
+
+# ------------------------------------------------------------------------------
+# Stage 2: Runtime
+# ------------------------------------------------------------------------------
+
+FROM alpine:3.24
+
+LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/ai" \
+    org.opencontainers.image.description="Praxis AI proxy server" \
+    org.opencontainers.image.licenses="Apache-2.0"
+
+# Runtime dependencies:
+#   ca-certificates: TLS certificate validation
+#   libcrypto3, libssl3: the system OpenSSL the binary links dynamically
+#   libgcc: the unwinder (libgcc_s) a dynamically linked musl binary needs
+RUN apk add --no-cache ca-certificates libcrypto3 libssl3 libgcc \
+    && addgroup -S praxis \
+    && adduser -S -G praxis -h /nonexistent -s /sbin/nologin praxis \
+    && mkdir -p /etc/praxis
+
+# Apache-2.0 (section 4) requires object-form recipients to receive the License
+# and the applicable NOTICE attributions. Ship them with the image. The root
+# NOTICE references integrations/llmd/ext-proc/NOTICE relative to this
+# directory, so preserve that subpath to keep the pointer resolvable.
+COPY --chown=root:root --chmod=0444 LICENSE /usr/share/licenses/praxis-ai/LICENSE
+COPY --chown=root:root --chmod=0444 NOTICE /usr/share/licenses/praxis-ai/NOTICE
+COPY --chown=root:root --chmod=0444 integrations/llmd/ext-proc/NOTICE \
+    /usr/share/licenses/praxis-ai/integrations/llmd/ext-proc/NOTICE
+
+COPY --from=builder --chown=root:root --chmod=0555 \
+    /usr/local/bin/praxis-ai /usr/local/bin/praxis-ai
+
+USER praxis:praxis
+
+WORKDIR /etc/praxis
+
+EXPOSE 8080 9901
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=2s \
+    CMD wget -qO- http://127.0.0.1:9901/healthy || exit 1
+
+ENTRYPOINT ["praxis-ai"]

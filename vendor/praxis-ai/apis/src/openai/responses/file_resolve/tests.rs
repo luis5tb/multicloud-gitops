@@ -1,0 +1,1818 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! Unit tests for the `openai_file_resolve` filter.
+
+use std::{
+    io::{Read as _, Write as _},
+    net::TcpListener,
+    time::Duration,
+};
+
+use bytes::Bytes;
+use secrecy::SecretString;
+use serde_json::json;
+
+use super::*;
+use crate::{
+    CalloutCredentials,
+    openai::{
+        api_client::{ApiClient, ApiClientConfig},
+        responses::state::ResponsesState,
+    },
+};
+
+// -----------------------------------------------------------------------------
+// Config Parsing
+// -----------------------------------------------------------------------------
+
+#[test]
+fn from_config_with_valid_url_succeeds() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("files_api_url: \"http://files-api:8321\"\nallow_pre_security_callout: true").unwrap();
+    let filter = FileResolveFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "openai_file_resolve", "filter name should match");
+}
+
+#[test]
+fn from_config_missing_url_rejected() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
+    let result = FileResolveFilter::from_config(&yaml);
+    assert!(result.is_err(), "missing files_api_url should be rejected");
+}
+
+#[test]
+fn from_config_empty_url_rejected() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("files_api_url: ''").unwrap();
+    let result = FileResolveFilter::from_config(&yaml);
+    assert!(result.is_err(), "empty files_api_url should be rejected");
+}
+
+#[test]
+fn from_config_unknown_field_rejected() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("files_api_url: \"http://files-api:8321\"\non_mising: reject").unwrap();
+    let result = FileResolveFilter::from_config(&yaml);
+    assert!(result.is_err(), "typo in config field should be rejected");
+}
+
+// -----------------------------------------------------------------------------
+// Body Access
+// -----------------------------------------------------------------------------
+
+#[test]
+fn body_access_is_read_write() {
+    let filter = make_filter();
+    assert_eq!(
+        filter.request_body_access(),
+        BodyAccess::ReadWrite,
+        "file_resolve must have read-write body access"
+    );
+}
+
+#[test]
+fn body_mode_is_stream_buffer() {
+    let filter = make_filter();
+    match filter.request_body_mode() {
+        BodyMode::StreamBuffer { max_bytes } => {
+            assert_eq!(
+                max_bytes,
+                Some(67_108_864),
+                "StreamBuffer should default to 64 MiB limit"
+            );
+        },
+        other => panic!("expected StreamBuffer, got {other:?}"),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Reject Helpers
+// -----------------------------------------------------------------------------
+
+#[test]
+fn reject_callout_failed_returns_502() {
+    let err = ResolveError::CalloutFailed {
+        file_id: "file-abc".to_owned(),
+        detail: "content download failed for http://files.internal:8321/v1/files/file-abc/content: connection refused"
+            .to_owned(),
+    };
+    let action = reject_resolve_error(&err);
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 502, "callout failure should produce 502");
+            let body = std::str::from_utf8(r.body.as_deref().unwrap()).unwrap();
+            assert!(
+                body.contains("Files API request failed"),
+                "client response should describe the failure generically"
+            );
+            assert!(
+                !body.contains("files.internal"),
+                "client response must not expose callout URL"
+            );
+            assert!(
+                !body.contains("connection refused"),
+                "client response must not expose internal transport details"
+            );
+        },
+        _ => panic!("expected Reject action"),
+    }
+}
+
+#[test]
+fn reject_invalid_file_id_returns_400() {
+    let err = ResolveError::InvalidFileId {
+        file_id: "..".to_owned(),
+        detail: "dot path segments are not valid file IDs".to_owned(),
+    };
+    let action = reject_resolve_error(&err);
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 400, "invalid file IDs should produce 400");
+        },
+        _ => panic!("expected Reject action"),
+    }
+}
+
+#[test]
+fn reject_too_many_references_returns_413() {
+    let err = ResolveError::TooManyReferences { limit: 32 };
+    let action = reject_resolve_error(&err);
+
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 413, "too many file references should produce 413");
+        },
+        _ => panic!("expected Reject action"),
+    }
+}
+
+#[test]
+fn reject_too_large_returns_413() {
+    let err = ResolveError::TooLarge {
+        reference: "file-abc".to_owned(),
+        limit: 1024,
+    };
+    let action = reject_resolve_error(&err);
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 413, "oversized resolved content should produce 413");
+            let body = std::str::from_utf8(r.body.as_deref().unwrap()).unwrap();
+            assert!(
+                body.contains("file reference 'file-abc'"),
+                "oversized response should identify a generic file reference"
+            );
+        },
+        _ => panic!("expected Reject action"),
+    }
+}
+
+#[test]
+fn reject_file_url_blocked_returns_403() {
+    let err = ResolveError::FileUrlBlocked {
+        label: "https://evil.example.com/file.pdf".to_owned(),
+    };
+    let action = reject_resolve_error(&err);
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 403, "blocked file URL should produce 403");
+            let body = std::str::from_utf8(r.body.as_deref().unwrap()).unwrap();
+            assert!(
+                body.contains("blocked by security policy"),
+                "client response should describe the block reason"
+            );
+        },
+        _ => panic!("expected Reject action"),
+    }
+}
+
+#[test]
+fn reject_file_url_failed_returns_502() {
+    let err = ResolveError::FileUrlFailed {
+        label: "https://files.example.com/report.pdf?token=[REDACTED]".to_owned(),
+        detail: "connection refused".to_owned(),
+    };
+    let action = reject_resolve_error(&err);
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 502, "failed file URL fetch should produce 502");
+            let body = std::str::from_utf8(r.body.as_deref().unwrap()).unwrap();
+            assert!(
+                !body.contains("connection refused"),
+                "client response must not expose internal transport details"
+            );
+            assert!(body.contains("file URL"), "client response should identify a URL fetch");
+            assert!(
+                !body.contains("Files API"),
+                "URL fetch failures must not be described as Files API failures"
+            );
+        },
+        _ => panic!("expected Reject action"),
+    }
+}
+
+#[test]
+fn reject_rewritten_body_too_large_returns_413() {
+    let action = reject_rewritten_body_too_large(2048, 1024);
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 413, "oversized rewritten body should produce 413");
+        },
+        _ => panic!("expected Reject action"),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// on_request_body
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn skips_non_responses_request() {
+    let filter = make_filter();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/chat/completions",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_chat_completions");
+    let mut body = Some(Bytes::from(r#"{"messages":[]}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "non-responses request should be released"
+    );
+}
+
+#[tokio::test]
+async fn skips_non_create_responses_endpoint() {
+    let filter = make_filter();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses/compact",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(
+        r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-abc"}]}]}"#,
+    ));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "non-create responses endpoint should be released"
+    );
+}
+
+#[tokio::test]
+async fn skips_missing_format_metadata() {
+    let filter = make_filter();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let mut body = Some(Bytes::from(r#"{"input":"test"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "request without format metadata should be released"
+    );
+}
+
+#[tokio::test]
+async fn releases_missing_body() {
+    let filter = make_filter();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body: Option<Bytes> = None;
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "missing body should be released"
+    );
+}
+
+#[tokio::test]
+async fn releases_invalid_json() {
+    let filter = make_filter();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from("not json"));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "invalid JSON should be released"
+    );
+}
+
+#[tokio::test]
+async fn continues_on_no_file_id() {
+    let filter = make_filter();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let original = r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}"#;
+    let mut body = Some(Bytes::from(original));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "request with no file_id should continue"
+    );
+    assert_eq!(body.as_deref(), Some(original.as_bytes()), "body should be unchanged");
+}
+
+#[tokio::test]
+async fn not_end_of_stream_continues() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(r#"{"input":"partial"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-end-of-stream should continue"
+    );
+}
+
+#[tokio::test]
+async fn string_input_passes_through() {
+    let filter = make_filter();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let original = r#"{"input":"Hello, world!"}"#;
+    let mut body = Some(Bytes::from(original));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "string input should continue");
+}
+
+// -----------------------------------------------------------------------------
+// sync_state
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sync_state_updates_responses_state() {
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+
+    let request_body = json!({
+        "model": "gpt-4o",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_file", "file_id": "file-abc"}]
+            }
+        ]
+    });
+    let mut state = ResponsesState::from_request_body(request_body);
+
+    let history = vec![json!({"role": "user", "content": "earlier turn"})];
+    state.messages.splice(0..0, history.clone());
+    state.persisted_messages.splice(0..0, history);
+    ctx.extensions.insert(state);
+
+    let resolved_body = json!({
+        "model": "gpt-4o",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_file", "file_data": "SGVsbG8="}]
+            }
+        ]
+    });
+
+    let client = make_client();
+    // Clone so the assertion below can compare against the pre-move value.
+    sync_state(&mut ctx, resolved_body.clone(), &client, OnMissing::Continue)
+        .await
+        .unwrap();
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(
+        state.request_body, resolved_body,
+        "request_body should be updated with resolved content"
+    );
+
+    let tail = &state.messages[1];
+    assert!(
+        tail["content"][0].get("file_id").is_none(),
+        "file_id should be removed from messages tail"
+    );
+    assert_eq!(
+        tail["content"][0]["file_data"], "SGVsbG8=",
+        "resolved file_data should appear in messages"
+    );
+
+    let persisted_tail = &state.persisted_messages[1];
+    assert_eq!(
+        persisted_tail["content"][0]["file_data"], "SGVsbG8=",
+        "resolved file_data should appear in persisted_messages"
+    );
+}
+
+#[tokio::test]
+async fn file_url_resolution_updates_responses_state_with_data_uri() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _read = stream.read(&mut request).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nHello World",
+            )
+            .unwrap();
+    });
+
+    let origin = format!("http://{address}");
+    let file_url = format!("{origin}/state.txt");
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"files_api_url: "http://127.0.0.1:1"
+allow_pre_security_callout: true
+file_url: resolve
+allowed_file_url_origins:
+  - "{origin}"
+on_missing: reject
+timeout_ms: 2000"#
+    ))
+    .unwrap();
+    let filter = FileResolveFilter::from_config(&yaml).unwrap();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let request_body = json!({
+        "model": "gpt-4o",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_url": file_url}]
+        }]
+    });
+    ctx.extensions
+        .insert(ResponsesState::from_request_body(request_body.clone()));
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    server.join().unwrap();
+
+    assert!(matches!(action, FilterAction::Continue));
+    let rewritten: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
+    let expected_data_uri = "data:text/plain;base64,SGVsbG8gV29ybGQ=";
+    let rewritten_part = &rewritten["input"][0]["content"][0];
+    assert!(
+        rewritten_part.get("file_url").is_none(),
+        "the buffered body must remove file_url"
+    );
+    assert_eq!(rewritten_part["file_data"], expected_data_uri);
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(state.request_body, rewritten);
+    for (name, part) in [
+        ("messages", &state.messages[0]["content"][0]),
+        ("persisted_messages", &state.persisted_messages[0]["content"][0]),
+    ] {
+        assert!(part.get("file_url").is_none(), "{name} must remove file_url");
+        assert_eq!(
+            part["file_data"], expected_data_uri,
+            "{name} must retain the resolved data URI"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sync_state_uses_independent_history_offsets() {
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+
+    let request_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file-abc"}]
+        }]
+    });
+    let mut state = ResponsesState::from_request_body(request_body);
+    state
+        .messages
+        .insert(0, json!({"role": "user", "content": "replay history"}));
+    state.persisted_messages.splice(
+        0..0,
+        [
+            json!({"role": "user", "content": "persisted history"}),
+            json!({"type": "mcp_list_tools", "tools": []}),
+        ],
+    );
+    ctx.extensions.insert(state);
+
+    let resolved_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_data": "SGVsbG8="}]
+        }]
+    });
+    sync_state(&mut ctx, resolved_body, &make_client(), OnMissing::Continue)
+        .await
+        .unwrap();
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(state.messages[1]["content"][0]["file_data"], "SGVsbG8=");
+    assert_eq!(state.persisted_messages[1]["type"], "mcp_list_tools");
+    assert_eq!(
+        state.persisted_messages[2]["content"][0]["file_data"], "SGVsbG8=",
+        "persisted input tail should use its own history length"
+    );
+}
+
+#[tokio::test]
+async fn resolves_history_when_current_input_has_no_file_id() {
+    let files_api_url = start_files_api_stub();
+    let filter = make_filter_with_outbound_for_url(&files_api_url);
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    let request_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "summarize the prior file"}]
+        }]
+    });
+    let history = json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_file", "file_id": "file-history"}]
+    });
+    let mut state = ResponsesState::from_request_body(request_body.clone());
+    state.messages.insert(0, history.clone());
+    state.persisted_messages.insert(0, history);
+    ctx.extensions.insert(state);
+    let original = Bytes::from(serde_json::to_vec(&request_body).unwrap());
+    let mut body = Some(original.clone());
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "history-only resolution should continue the request"
+    );
+    assert_eq!(body, Some(original), "current request body should remain unchanged");
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    for resolved_history in [&state.messages[0], &state.persisted_messages[0]] {
+        let part = &resolved_history["content"][0];
+        assert!(
+            part.get("file_id").is_none(),
+            "history file_id should be removed after resolution"
+        );
+        assert_eq!(
+            part["file_data"], "aGlzdG9yeQ==",
+            "resolved history should contain inline base64"
+        );
+        assert_eq!(
+            part["filename"], "history.txt",
+            "resolved history should preserve metadata filename"
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_scoped_credential_rejects_before_file_id_dispatch() {
+    let files_api_url = start_files_api_stub();
+    let filter = make_filter_with_outbound_from_yaml(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true\nuser_credential: ogx_files\non_missing: continue"
+    ));
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let request_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file-history"}]
+        }]
+    });
+    ctx.extensions
+        .insert(ResponsesState::from_request_body(request_body.clone()));
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    let FilterAction::Reject(rejection) = action else {
+        panic!("missing slot must reject directly, got {action:?}");
+    };
+    assert_eq!(rejection.status, 401);
+    let rejection_body: serde_json::Value =
+        serde_json::from_slice(rejection.body.as_ref().expect("JSON error body")).unwrap();
+    assert_eq!(rejection_body["error"]["code"], MISSING_CALLOUT_CONTEXT);
+    assert_eq!(
+        body,
+        Some(Bytes::from(serde_json::to_vec(&request_body).unwrap())),
+        "missing security context must stop before rewriting or dispatch"
+    );
+}
+
+#[tokio::test]
+async fn scoped_credential_arrives_on_file_id_metadata_and_content_requests() {
+    let files_api_url = start_files_api_stub_requiring_auth("Bearer scoped-user-a");
+    let filter = make_filter_with_outbound_from_yaml(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true\nuser_credential: ogx_files\non_missing: reject"
+    ));
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let request_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file-history"}]
+        }]
+    });
+    let mut credentials = CalloutCredentials::new();
+    credentials.insert("ogx_files".to_owned(), SecretString::from("Bearer scoped-user-a"));
+    ctx.extensions.insert(credentials);
+    ctx.extensions
+        .insert(ResponsesState::from_request_body(request_body.clone()));
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Continue));
+    let rewritten: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
+    assert_eq!(rewritten["input"][0]["content"][0]["file_data"], "aGlzdG9yeQ==");
+    assert!(
+        !String::from_utf8_lossy(body.as_ref().unwrap()).contains("scoped-user-a"),
+        "credential material must not enter the rewritten inference body"
+    );
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    let retained_state = serde_json::to_string(&(
+        &state.request_body,
+        &state.messages,
+        &state.persisted_messages,
+        &state.accumulated_output,
+    ))
+    .unwrap();
+    assert!(
+        !retained_state.contains("scoped-user-a"),
+        "credential material must not enter request or persistence state"
+    );
+}
+
+#[tokio::test]
+async fn two_user_file_id_contexts_are_isolated() {
+    let (files_api_url, requests) = start_recording_files_api_stub();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true\nuser_credential: ogx_files\non_missing: reject"
+    ))
+    .unwrap();
+    let filter = FileResolveFilter::from_config_with_outbound(
+        &yaml,
+        crate::subrequest::isolated_client(4),
+        owner_projecting_outbound_pipeline(),
+    )
+    .unwrap();
+
+    for suffix in ["a", "b"] {
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let request_body = json!({
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_file", "file_id": "file-history"}]
+            }]
+        });
+        let mut credentials = CalloutCredentials::new();
+        credentials.insert(
+            "ogx_files".to_owned(),
+            SecretString::from(format!("Bearer scoped-user-{suffix}")),
+        );
+        ctx.extensions.insert(credentials);
+        ctx.extensions.insert(
+            crate::StateOwner::from_trusted_parts(
+                format!("tenant-{suffix}"),
+                "urn:integration:test",
+                format!("user-{suffix}"),
+            )
+            .unwrap(),
+        );
+        ctx.extensions
+            .insert(ResponsesState::from_request_body(request_body.clone()));
+        let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+        assert!(matches!(
+            filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+            FilterAction::Continue
+        ));
+    }
+
+    let captured = (0..4)
+        .map(|_| requests.recv_timeout(Duration::from_secs(1)).unwrap())
+        .collect::<Vec<_>>();
+    for (pair, suffix) in captured.chunks_exact(2).zip(["a", "b"]) {
+        for request in pair {
+            for expected in [
+                format!("authorization: Bearer scoped-user-{suffix}"),
+                format!("x-tenant-id: tenant-{suffix}"),
+                format!("x-user-id: user-{suffix}"),
+            ] {
+                assert!(
+                    request.lines().any(|line| line.eq_ignore_ascii_case(&expected)),
+                    "user {suffix} file callout must carry only its scoped context: {request}"
+                );
+            }
+            let other = if suffix == "a" { "b" } else { "a" };
+            assert!(
+                !request.contains(&format!("scoped-user-{other}"))
+                    && !request.contains(&format!("tenant-{other}"))
+                    && !request.contains(&format!("user-{other}")),
+                "user {suffix} callout leaked user {other} context: {request}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn scoped_file_id_credential_is_not_replayed_to_redirect_authority() {
+    let redirect_target = TcpListener::bind("127.0.0.1:0").unwrap();
+    redirect_target.set_nonblocking(true).unwrap();
+    let redirect_address = redirect_target.local_addr().unwrap();
+    let source = TcpListener::bind("127.0.0.1:0").unwrap();
+    let source_address = source.local_addr().unwrap();
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = source.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let read = stream.read(&mut request).unwrap();
+        request_tx
+            .send(String::from_utf8_lossy(&request[..read]).into_owned())
+            .unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 302 Found\r\nLocation: http://{redirect_address}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+    });
+    let filter = make_filter_with_outbound_from_yaml(&format!(
+        "files_api_url: \"http://{source_address}\"\nallow_pre_security_callout: true\nuser_credential: ogx_files\non_missing: continue"
+    ));
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let request_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file-history"}]
+        }]
+    });
+    let mut credentials = CalloutCredentials::new();
+    credentials.insert("ogx_files".to_owned(), SecretString::from("Bearer scoped-user-a"));
+    ctx.extensions.insert(credentials);
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Continue
+    ));
+    let source_request = request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(
+        source_request
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("authorization: Bearer scoped-user-a")),
+        "credential should reach only the configured Files API authority"
+    );
+    assert_eq!(
+        redirect_target.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "redirect authority must never receive a replayed request"
+    );
+}
+
+#[tokio::test]
+async fn mirrored_history_has_independent_inline_budget() {
+    let files_api_url = start_files_api_stub();
+    let client = make_client_for_url_with_max(&files_api_url, 16);
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let request_body = json!({"input": []});
+    let history = json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_file", "file_id": "file-history"}]
+    });
+    let mut state = ResponsesState::from_request_body(request_body);
+    state.messages.push(history.clone());
+    state.persisted_messages.push(history);
+    ctx.extensions.insert(state);
+    let mut budget = client.resolution_budget(None);
+
+    let request_headers = ctx.request.headers.clone();
+    let resolver = HistoryResolver {
+        client: &client,
+        on_missing: OnMissing::Reject,
+        request_headers: &request_headers,
+        url_resolver: None,
+    };
+    resolve_state_history(&mut ctx, resolver, &mut budget).await.unwrap();
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    assert_eq!(state.messages[0]["content"][0]["file_data"], "aGlzdG9yeQ==");
+    assert_eq!(
+        state.persisted_messages[0]["content"][0]["file_data"], "aGlzdG9yeQ==",
+        "the persistence mirror should not consume the outbound representation's byte budget"
+    );
+}
+
+#[tokio::test]
+async fn rejects_resolved_history_when_rebuilt_body_exceeds_limit() {
+    let files_api_url = start_files_api_stub();
+    let request_body = json!({"input": "continue"});
+    let history = json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_file", "file_id": "file-history"}]
+    });
+    let mut state = ResponsesState::from_request_body(request_body.clone());
+    state.messages.insert(0, history.clone());
+    state.persisted_messages.insert(0, history);
+    let unresolved_len = serialized_outbound_body_len(&state).unwrap();
+
+    let filter = make_filter_with_outbound_from_yaml(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true\nmax_rewritten_body_bytes: {unresolved_len}"
+    ));
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    ctx.extensions.insert(state);
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 413),
+        "resolved rehydrated history should respect the resolver's final body limit"
+    );
+}
+
+#[tokio::test]
+async fn max_resolved_bytes_bounds_individual_content_independent_of_rewritten_limit() {
+    let files_api_url = start_files_api_stub();
+    // The stub serves 7 bytes of content for file-history. A tiny
+    // max_resolved_bytes must reject it even though the rewritten-body
+    // limit is left at the 64 MiB ceiling: the two limits are decoupled.
+    let filter = make_filter_with_outbound_from_yaml(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true\non_missing: reject\nmax_resolved_bytes: 1\nmax_rewritten_body_bytes: 67108864"
+    ));
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    let request_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file-history"}]
+        }]
+    });
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 413),
+        "a small max_resolved_bytes must reject oversized inline content regardless of max_rewritten_body_bytes"
+    );
+}
+
+#[tokio::test]
+async fn max_resolved_bytes_default_allows_resolution() {
+    let files_api_url = start_files_api_stub();
+    // Same request as the decoupling reject test, but with a large
+    // max_resolved_bytes: the content now fits and resolution succeeds,
+    // proving the previous rejection was attributable to max_resolved_bytes.
+    let filter = make_filter_with_outbound_from_yaml(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true\nmax_resolved_bytes: 67108864\nmax_rewritten_body_bytes: 67108864"
+    ));
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    let request_body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file-history"}]
+        }]
+    });
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a large max_resolved_bytes should allow the same content to resolve"
+    );
+    let rewritten: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
+    let part = &rewritten["input"][0]["content"][0];
+    assert!(
+        part.get("file_id").is_none(),
+        "file_id should be removed after resolution"
+    );
+    assert_eq!(
+        part["file_data"], "aGlzdG9yeQ==",
+        "resolved content should be inlined as base64"
+    );
+}
+
+#[tokio::test]
+async fn rejects_unresolvable_history_when_configured_to_reject() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "files_api_url: \"http://files-api:8321\"\nallow_pre_security_callout: true\non_missing: reject",
+    )
+    .unwrap();
+    let filter = FileResolveFilter::from_config(&yaml).unwrap();
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    let request_body = json!({"input": "continue"});
+    let history = json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_file", "file_id": ".."}]
+    });
+    let mut state = ResponsesState::from_request_body(request_body.clone());
+    state.messages.insert(0, history.clone());
+    state.persisted_messages.insert(0, history);
+    ctx.extensions.insert(state);
+    let mut body = Some(Bytes::from(serde_json::to_vec(&request_body).unwrap()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 400),
+        "on_missing: reject should also reject unresolved rehydrated history"
+    );
+}
+
+#[tokio::test]
+async fn sync_state_leaves_original_input_untouched() {
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+
+    let request_body = json!({
+        "model": "gpt-4o",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_id": "file-abc"}]
+        }]
+    });
+    let mut state = ResponsesState::from_request_body(request_body);
+    state
+        .messages
+        .insert(0, json!({"role": "user", "content": "replay history"}));
+    state
+        .persisted_messages
+        .insert(0, json!({"role": "user", "content": "replay history"}));
+    ctx.extensions.insert(state);
+
+    let resolved_body = json!({
+        "model": "gpt-4o",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_file", "file_data": "SGVsbG8="}]
+        }]
+    });
+    sync_state(&mut ctx, resolved_body, &make_client(), OnMissing::Continue)
+        .await
+        .unwrap();
+
+    let state = ctx.extensions.get::<ResponsesState>().unwrap();
+    let part = &state.input[0]["content"][0];
+    assert_eq!(
+        part["file_id"], "file-abc",
+        "state.input should keep the original client file_id"
+    );
+    assert!(
+        part.get("file_data").is_none(),
+        "state.input should not receive resolved file_data"
+    );
+    assert_eq!(
+        state.messages[1]["content"][0]["file_data"], "SGVsbG8=",
+        "the rewritten tail should still reach messages"
+    );
+}
+
+#[tokio::test]
+async fn sync_state_skipped_without_responses_state() {
+    let req = Box::leak(Box::new(crate::test_utils::make_request(
+        http::Method::POST,
+        "/v1/responses",
+    )));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+
+    let resolved_body = json!({"model": "gpt-4o", "input": []});
+    let client = make_client();
+
+    sync_state(&mut ctx, resolved_body, &client, OnMissing::Continue)
+        .await
+        .unwrap();
+
+    assert!(
+        ctx.extensions.get::<ResponsesState>().is_none(),
+        "should not create state when none exists"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+fn make_filter() -> Box<dyn HttpFilter> {
+    make_filter_for_url("http://files-api:8321")
+}
+
+fn make_filter_for_url(files_api_url: &str) -> Box<dyn HttpFilter> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true"
+    ))
+    .unwrap();
+    FileResolveFilter::from_config(&yaml).unwrap()
+}
+
+/// Build a minimal outbound pipeline that permits private upstreams, so
+/// `file_id` callouts through the chain path can reach a loopback stub the
+/// way the production `register_file_resolve` path does.
+///
+/// The configured Files API destination is staged through Praxis core, so the
+/// operator chain can be empty. SSRF policy (`allow_private_upstreams`) is what
+/// these resolution tests otherwise exercise.
+fn private_outbound_pipeline() -> Arc<FilterPipeline> {
+    let registry = praxis_filter::FilterRegistry::with_builtins();
+    let mut entries = [];
+    let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.set_allow_private_upstreams(true);
+    Arc::new(pipeline)
+}
+
+fn owner_projecting_outbound_pipeline() -> Arc<FilterPipeline> {
+    let mut registry = praxis_filter::FilterRegistry::with_builtins();
+    praxis_filter::register_filters!(
+        @register registry,
+        http "project_state_owner_headers" => crate::ProjectStateOwnerHeadersFilter::from_config
+    );
+    let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
+        "- filter: project_state_owner_headers\n  tenant_header: x-tenant-id\n  subject_header: x-user-id\n",
+    )
+    .unwrap();
+    let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.set_allow_private_upstreams(true);
+    Arc::new(pipeline)
+}
+
+/// Build a filter whose `file_id` callouts traverse a private-upstream
+/// outbound chain, mirroring the production chain-binding path against a
+/// loopback Files API stub.
+fn make_filter_with_outbound_for_url(files_api_url: &str) -> Box<dyn HttpFilter> {
+    make_filter_with_outbound_from_yaml(&format!(
+        "files_api_url: \"{files_api_url}\"\nallow_pre_security_callout: true"
+    ))
+}
+
+/// Build a filter with a private-upstream outbound chain from arbitrary
+/// filter YAML.
+fn make_filter_with_outbound_from_yaml(yaml_str: &str) -> Box<dyn HttpFilter> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+    let client = crate::subrequest::isolated_client(4);
+    FileResolveFilter::from_config_with_outbound(&yaml, client, private_outbound_pipeline()).unwrap()
+}
+
+fn make_client() -> FilesApiClient {
+    make_client_for_url_with_max("http://test:9999", 64 * 1024 * 1024)
+}
+
+fn make_client_for_url_with_max(files_api_url: &str, max_resolved_bytes: usize) -> FilesApiClient {
+    let api = ApiClient::new(ApiClientConfig {
+        api_base_url: files_api_url.to_owned(),
+        client: crate::subrequest::isolated_client(4),
+        timeout: Duration::from_secs(5),
+        max_response_bytes: 1_048_576,
+        forward_header_names: vec![],
+        address_policy: crate::callout_target::AddressPolicy::AllowPrivate,
+    });
+    FilesApiClient::new(
+        api,
+        FilesApiClientOptions {
+            max_file_references: 32,
+            max_resolved_bytes,
+        },
+    )
+}
+
+fn start_files_api_stub() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || serve_file_request(stream));
+        }
+    });
+
+    format!("http://{address}")
+}
+
+fn start_files_api_stub_requiring_auth(expected: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || serve_file_request_requiring_auth(stream, expected));
+        }
+    });
+
+    format!("http://{address}")
+}
+
+fn start_recording_files_api_stub() -> (String, std::sync::mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let raw = String::from_utf8_lossy(&request[..read]).into_owned();
+                tx.send(raw.clone()).unwrap();
+                let path = raw
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap();
+                let (content_type, body): (&str, &[u8]) = if path.ends_with("/content") {
+                    ("text/plain", b"history")
+                } else {
+                    (
+                        "application/json",
+                        br#"{"id":"file-history","filename":"history.txt","content_type":"text/plain","bytes":7}"#,
+                    )
+                };
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+            });
+        }
+    });
+    (format!("http://{address}"), rx)
+}
+
+fn serve_file_request_requiring_auth(mut stream: std::net::TcpStream, expected: &str) {
+    let mut request = [0_u8; 4096];
+    let read = stream.read(&mut request).unwrap();
+    let request = String::from_utf8_lossy(&request[..read]);
+    let expected_header = format!("authorization: {expected}");
+    if !request.lines().any(|line| line.eq_ignore_ascii_case(&expected_header)) {
+        let body = br#"{"error":"missing scoped credential"}"#;
+        let headers = format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        return;
+    }
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap();
+    let (content_type, body): (&str, &[u8]) = if path.ends_with("/content") {
+        ("text/plain", b"history")
+    } else {
+        (
+            "application/json",
+            br#"{"id":"file-history","filename":"history.txt","content_type":"text/plain","bytes":7}"#,
+        )
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+}
+
+fn serve_file_request(mut stream: std::net::TcpStream) {
+    let mut request = [0_u8; 4096];
+    let read = stream.read(&mut request).unwrap();
+    let request = String::from_utf8_lossy(&request[..read]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap();
+
+    let (content_type, body): (&str, &[u8]) = if path.ends_with("/content") {
+        ("text/plain", b"history")
+    } else {
+        (
+            "application/json",
+            br#"{"id":"file-history","filename":"history.txt","content_type":"text/plain","bytes":7}"#,
+        )
+    };
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+}
+
+// -----------------------------------------------------------------------------
+// Integration-level tests using TCP stubs
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn file_url_resolved_to_data_uri() {
+    use crate::{
+        callout_policy::OnMissing,
+        openai::responses::file_resolve::{
+            resolve::resolve_input,
+            resolve_url::{FileUrlResolver, NormalizedOrigin},
+        },
+    };
+
+    // Start TCP stub serving file content
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub_url = format!("http://{address}/file.txt");
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut request = [0_u8; 4096];
+                let mut stream = stream;
+                let _read = stream.read(&mut request).unwrap();
+                let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nHello World";
+                stream.write_all(response).unwrap();
+            });
+        }
+    });
+
+    // Build request body with input_file containing file_url
+    let mut body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_file",
+                "file_url": stub_url.clone()
+            }]
+        }]
+    });
+
+    // Create FilesApiClient
+    let client = make_client_for_url_with_max("http://unused:9999", 64 * 1024 * 1024);
+
+    // Create FileUrlResolver with allowed private origins (localhost)
+    let localhost_origin = NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap();
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![localhost_origin],
+    };
+
+    // Call resolve_input with url_resolver
+    let count = resolve_input(
+        &mut body,
+        &client,
+        OnMissing::Reject,
+        &http::HeaderMap::new(),
+        Some(&resolver),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(count, 1, "should resolve one file_url reference");
+
+    // Assert file_url removed and file_data is data URI
+    let part = &body["input"][0]["content"][0];
+    assert!(part.get("file_url").is_none(), "file_url should be removed");
+    let file_data = part["file_data"].as_str().unwrap();
+    assert!(
+        file_data.starts_with("data:text/plain;base64,"),
+        "file_data should be a data URI"
+    );
+    let base64_part = file_data.strip_prefix("data:text/plain;base64,").unwrap();
+    let decoded = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_part).unwrap();
+    assert_eq!(decoded, b"Hello World", "data URI should contain the file content");
+}
+
+#[tokio::test]
+async fn file_url_truncated_body_reports_url_failure() {
+    use crate::openai::responses::file_resolve::{
+        resolve::ResolveError,
+        resolve_url::{FileUrlResolver, NormalizedOrigin},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub_url = format!("http://{address}/file.txt?sig=secret");
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _read = stream.read(&mut request).unwrap();
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: close\r\n\r\nShort";
+        stream.write_all(response).unwrap();
+    });
+
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![
+            NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap(),
+        ],
+    };
+    let result = resolver
+        .resolve_url(
+            &stub_url,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            64 * 1024 * 1024,
+        )
+        .await;
+
+    match result {
+        Err(ResolveError::FileUrlFailed { label, detail }) => {
+            assert!(label.contains("[REDACTED]"), "signed query value should be redacted");
+            assert!(!label.contains("secret"), "signed query value must not be exposed");
+            assert!(
+                detail.contains("read error"),
+                "failure should retain URL body read context"
+            );
+        },
+        Err(other) => panic!("expected FileUrlFailed for a truncated URL body, got {other}"),
+        Ok(_) => panic!("expected FileUrlFailed for a truncated URL body"),
+    }
+}
+
+#[tokio::test]
+async fn file_url_oversized_content_length_reports_generic_too_large() {
+    use crate::openai::responses::file_resolve::{
+        resolve::ResolveError,
+        resolve_url::{FileUrlResolver, NormalizedOrigin},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub_url = format!("http://{address}/file.txt?sig=secret");
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _read = stream.read(&mut request).unwrap();
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\nConnection: close\r\n\r\n";
+        stream.write_all(response).unwrap();
+    });
+
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![
+            NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap(),
+        ],
+    };
+    let result = resolver
+        .resolve_url(&stub_url, tokio::time::Instant::now() + Duration::from_secs(5), 64)
+        .await;
+
+    match result {
+        Err(ResolveError::TooLarge { reference, limit }) => {
+            assert_eq!(limit, 64, "error should report the configured resolved-body limit");
+            assert!(
+                reference.contains("[REDACTED]"),
+                "signed query value should be redacted"
+            );
+            assert!(!reference.contains("secret"), "signed query value must not be exposed");
+        },
+        Err(other) => panic!("expected TooLarge for an oversized URL response, got {other}"),
+        Ok(_) => panic!("expected TooLarge for an oversized URL response"),
+    }
+}
+
+#[tokio::test]
+async fn file_url_passthrough_when_no_resolver() {
+    use crate::{callout_policy::OnMissing, openai::responses::file_resolve::resolve::resolve_input};
+
+    // Build body with file_url
+    let mut body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_file",
+                "file_url": "http://example.com/file.txt"
+            }]
+        }]
+    });
+    let original = body.clone();
+
+    // Create FilesApiClient
+    let client = make_client_for_url_with_max("http://unused:9999", 64 * 1024 * 1024);
+
+    // Call resolve_input without url_resolver (None)
+    let count = resolve_input(&mut body, &client, OnMissing::Reject, &http::HeaderMap::new(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(count, 0, "should not resolve when url_resolver is None");
+    assert_eq!(body, original, "body should be unchanged");
+}
+
+#[tokio::test]
+async fn file_url_in_shorthand_message_resolved() {
+    use crate::{
+        callout_policy::OnMissing,
+        openai::responses::file_resolve::{
+            resolve::resolve_input,
+            resolve_url::{FileUrlResolver, NormalizedOrigin},
+        },
+    };
+
+    // Start TCP stub
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub_url = format!("http://{address}/file.txt");
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut request = [0_u8; 4096];
+                let mut stream = stream;
+                let _read = stream.read(&mut request).unwrap();
+                let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nConnection: close\r\n\r\nShort";
+                stream.write_all(response).unwrap();
+            });
+        }
+    });
+
+    // Build body with shorthand message format (no "type" field)
+    let mut body = json!({
+        "model": "m",
+        "input": [{
+            "role": "user",
+            "content": [{
+                "type": "input_file",
+                "file_url": stub_url.clone()
+            }]
+        }]
+    });
+
+    let client = make_client_for_url_with_max("http://unused:9999", 64 * 1024 * 1024);
+
+    let localhost_origin = NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap();
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![localhost_origin],
+    };
+
+    let count = resolve_input(
+        &mut body,
+        &client,
+        OnMissing::Reject,
+        &http::HeaderMap::new(),
+        Some(&resolver),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(count, 1, "should resolve file_url in shorthand message");
+
+    let part = &body["input"][0]["content"][0];
+    assert!(part.get("file_url").is_none(), "file_url should be removed");
+    let file_data = part["file_data"].as_str().unwrap();
+    assert!(
+        file_data.starts_with("data:text/plain;base64,"),
+        "file_data should be a data URI"
+    );
+}
+
+#[tokio::test]
+async fn file_url_in_function_call_output_resolved() {
+    use crate::{
+        callout_policy::OnMissing,
+        openai::responses::file_resolve::{
+            resolve::resolve_input,
+            resolve_url::{FileUrlResolver, NormalizedOrigin},
+        },
+    };
+
+    // Start TCP stub
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub_url = format!("http://{address}/doc.pdf");
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut request = [0_u8; 4096];
+                let mut stream = stream;
+                let _read = stream.read(&mut request).unwrap();
+                let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: 8\r\nConnection: close\r\n\r\n%PDF-1.4";
+                stream.write_all(response).unwrap();
+            });
+        }
+    });
+
+    // Build body with function_call_output containing input_file with file_url
+    let mut body = json!({
+        "model": "m",
+        "input": [{
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [{
+                "type": "input_file",
+                "file_url": stub_url.clone()
+            }]
+        }]
+    });
+
+    let client = make_client_for_url_with_max("http://unused:9999", 64 * 1024 * 1024);
+
+    let localhost_origin = NormalizedOrigin::parse(&format!("http://127.0.0.1:{}", address.port())).unwrap();
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![localhost_origin],
+    };
+
+    let count = resolve_input(
+        &mut body,
+        &client,
+        OnMissing::Reject,
+        &http::HeaderMap::new(),
+        Some(&resolver),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(count, 1, "should resolve file_url in function_call_output");
+
+    let part = &body["input"][0]["output"][0];
+    assert!(part.get("file_url").is_none(), "file_url should be removed");
+    let file_data = part["file_data"].as_str().unwrap();
+    assert!(
+        file_data.starts_with("data:application/pdf;base64,"),
+        "file_data should be a data URI with correct MIME type"
+    );
+}
+
+#[tokio::test]
+async fn file_url_blocked_is_not_swallowed_by_on_missing_continue() {
+    use crate::{
+        callout_policy::OnMissing,
+        openai::responses::file_resolve::{resolve::resolve_input, resolve_url::FileUrlResolver},
+    };
+
+    let mut body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_file",
+                "file_url": "http://169.254.169.254/latest/meta-data/"
+            }]
+        }]
+    });
+
+    let client = make_client_for_url_with_max("http://unused:9999", 64 * 1024 * 1024);
+
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![],
+    };
+
+    let result = resolve_input(
+        &mut body,
+        &client,
+        OnMissing::Continue,
+        &http::HeaderMap::new(),
+        Some(&resolver),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "FileUrlBlocked must propagate even with on_missing: continue"
+    );
+}
+
+#[tokio::test]
+async fn file_url_failed_is_not_swallowed_by_on_missing_continue() {
+    use crate::{
+        callout_policy::OnMissing,
+        openai::responses::file_resolve::{resolve::resolve_input, resolve_url::FileUrlResolver},
+    };
+
+    // Regression test for #542: simulate an attacker-controlled origin
+    // that redirects to a metadata-style target. Praxis's resolver
+    // never follows the redirect and reports FileUrlFailed for the
+    // 302. That failure must reject the request instead of silently
+    // forwarding the original attacker file_url to the backend.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _read = stream.read(&mut request).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+    });
+
+    let attacker_url = format!("http://{address}/file.pdf");
+    let mut body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_file",
+                "file_url": attacker_url,
+            }]
+        }]
+    });
+    let original = body.clone();
+
+    let client = make_client_for_url_with_max("http://unused:9999", 64 * 1024 * 1024);
+    // Default posture: file_url: resolve, on_missing: continue.
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![NormalizedOrigin::parse(&format!("http://{address}")).unwrap()],
+    };
+
+    let err = resolve_input(
+        &mut body,
+        &client,
+        OnMissing::Continue,
+        &http::HeaderMap::new(),
+        Some(&resolver),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ResolveError::FileUrlFailed { .. }),
+        "FileUrlFailed must propagate even with on_missing: continue, got {err}"
+    );
+    assert_eq!(
+        body, original,
+        "the request body must be left untouched (and therefore never proxied) when file_url resolution fails"
+    );
+}
+
+#[tokio::test]
+async fn file_url_too_large_is_not_swallowed_by_on_missing_continue() {
+    use crate::{
+        callout_policy::OnMissing,
+        openai::responses::file_resolve::{resolve::resolve_input, resolve_url::FileUrlResolver},
+    };
+
+    // Regression test for #542: an oversized file_url response must
+    // also reject the request under on_missing: continue, not just
+    // under on_missing: reject.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _read = stream.read(&mut request).unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+    });
+
+    let url = format!("http://{address}/file.pdf");
+    let mut body = json!({
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_file",
+                "file_url": url,
+            }]
+        }]
+    });
+    let original = body.clone();
+
+    let client = make_client_for_url_with_max("http://unused:9999", 64);
+    let resolver = FileUrlResolver {
+        allowed_private_origins: vec![NormalizedOrigin::parse(&format!("http://{address}")).unwrap()],
+    };
+
+    let err = resolve_input(
+        &mut body,
+        &client,
+        OnMissing::Continue,
+        &http::HeaderMap::new(),
+        Some(&resolver),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(err, ResolveError::TooLarge { .. }),
+        "TooLarge must propagate even with on_missing: continue, got {err}"
+    );
+    assert_eq!(
+        body, original,
+        "the request body must be left untouched when an oversized file_url response is rejected"
+    );
+}
+
+#[test]
+fn display_redacts_signed_file_url() {
+    use crate::openai::responses::file_resolve::resolve::ReferenceSource;
+
+    let source =
+        ReferenceSource::FileUrl("https://storage.example.com/file.pdf?sig=SECRET_TOKEN&exp=1234567890".to_owned());
+    let displayed = format!("{source}");
+    assert!(
+        !displayed.contains("SECRET_TOKEN"),
+        "Display must not expose signed query parameters: {displayed}"
+    );
+    assert!(
+        displayed.contains("[REDACTED]"),
+        "query values should be redacted: {displayed}"
+    );
+}

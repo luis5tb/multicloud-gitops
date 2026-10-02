@@ -1,0 +1,23 @@
+{{- if .Values.enabled }}
+{{- if .Values.policy.caBundleSync.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-ca-bootstrap
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        {{- include "praxis-proxy.labels" . | nindent 8 }}
+    spec:
+{{ include "praxis-proxy.caSyncPodSpec" . | nindent 6 }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,50 @@
+# GCP ADC upstream authentication (experimental)
+#
+# Acquires an OAuth2 access token from the GCE/GKE metadata server
+# (source: adc or metadata) and injects "Authorization: Bearer
+# <token>" on every proxied request to Vertex AI. The token is
+# cached in memory (cache-through: a request that finds the cache
+# stale fetches a fresh token inline before proceeding); the
+# downstream client never sees GCP credentials.
+#
+# source: key_file (a service-account key JSON file) is not
+# implemented yet -- it needs JWT signing -- and fails closed with
+# a clear "not implemented" reason.
+#
+# This filter only injects Authorization — it does NOT set Host
+# or path. Point the cluster at your Vertex regional endpoint
+# (and tls.sni) the same way as any other upstream.
+#
+# Experimental: rebuild with --features gcp-adc-filter.
+# Configuration may change before graduation.
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy --features gcp-adc-filter -- \
+#     -c examples/configs/gcp-adc.yaml
+
+listeners:
+  - name: gateway
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - vertex
+
+filter_chains:
+  - name: vertex
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: vertex
+      - filter: load_balancer
+        clusters:
+          - name: vertex
+            endpoints:
+              - "127.0.0.1:3000"
+      - filter: gcp_adc
+        # source: adc   # default: GOOGLE_APPLICATION_CREDENTIALS, else GKE metadata
+        # scope: https://www.googleapis.com/auth/cloud-platform
+        # Metadata authentication uses only the fixed metadata endpoint;
+        # redirects and ambient HTTP proxies are disabled.
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

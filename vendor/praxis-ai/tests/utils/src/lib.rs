@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024 Praxis Contributors
+
+#![allow(
+    clippy::disallowed_methods,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::missing_assert_message,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "test utility code"
+)]
+#![allow(let_underscore_drop, reason = "test utility code")]
+
+//! Shared test utilities for the Praxis workspace.
+
+pub mod agentic;
+pub mod cli_process;
+pub mod example_config;
+pub mod filters;
+pub mod fips;
+/// Versioned wire fixtures and inference scenarios for integration tests.
+pub mod inference_fixture;
+pub mod net;
+pub mod proxy;
+pub mod recording;
+pub mod session_replay;
+pub mod sqlite;
+pub mod tls_probe;
+
+pub use agentic::{
+    A2aMockConfig, A2aMockServerGuard, A2aRecordedRequest, McpMockConfig, McpMockServerGuard, McpRecordedRequest,
+    McpToolFixture, start_a2a_mock_server, start_a2a_mock_server_with_config, start_mcp_mock_server,
+    start_mcp_mock_server_with_config,
+};
+pub use cli_process::{
+    CHILD_CLEANUP_TIMEOUT, CapturedChildOutput, DEFAULT_MAX_CAPTURED_STREAM_BYTES, capture_child_output,
+    capture_child_output_with_limit, configure_isolated_process_group,
+};
+pub use example_config::{allow_loopback_endpoints, example_config_path, load_example_config, patch_yaml};
+pub use fips::{approved_mode, assert_fips_host_if_declared, expect_approved_mode, fips_host, fips_host_declared};
+pub use net::*;
+pub use proxy::{
+    PRAXIS_AI_BIN_ENV, ProxyGuard, ProxyShutdownError, ReloadableProxyGuard, build_pipeline, custom_filter_yaml,
+    praxis_ai_bin, registry_with, simple_proxy_yaml, start_full_proxy, start_proxy, start_proxy_no_wait,
+    start_proxy_with_registry, start_reloadable_proxy, start_tls_proxy, start_tls_proxy_no_wait,
+    test_subrequest_client,
+};
+pub use recording::Recording;
+pub use session_replay::{
+    ClaudeCodeSessionImporter, CodexSessionImporter, Detection, ImportError, ImportOptions, ProviderHint,
+    ReplayProtocol, ReplayTurn, SessionInput, SessionProvider, SessionReplay, SessionReplayImporter,
+    import_session_replay,
+};
+pub use sqlite::TempSqlite;

@@ -1,0 +1,68 @@
+name: Container
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Build & Run Container
+  # ----------------------------------------------------------------------------
+
+  build-and-run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build container image
+        run: docker build -t praxis-ai:ci -f Containerfile .
+
+      - name: Verify image license label and legal files
+        run: |
+          label=$(docker inspect \
+            --format='{{ index .Config.Labels "org.opencontainers.image.licenses" }}' \
+            praxis-ai:ci)
+          echo "License label: ${label}"
+          [ "${label}" = "Apache-2.0" ] \
+            || { echo "::error::expected Apache-2.0 license label, got '${label}'"; exit 1; }
+          docker run --rm --entrypoint sh praxis-ai:ci -c '
+            set -e
+            test -s /usr/share/licenses/praxis-ai/LICENSE
+            test -s /usr/share/licenses/praxis-ai/NOTICE
+            test -s /usr/share/licenses/praxis-ai/integrations/llmd/ext-proc/NOTICE
+          ' || { echo "::error::missing legal files in runtime image"; exit 1; }
+          echo "License label and legal files verified"
+
+      - name: Run container
+        run: docker run -d --name praxis-ai praxis-ai:ci
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' praxis-ai 2>/dev/null || echo "starting")
+            if [ "${status}" = "healthy" ]; then
+              echo "Container is healthy"
+              exit 0
+            fi
+            echo "Waiting for container health (${i}/30): ${status}"
+            sleep 2
+          done
+          echo "Container failed to become healthy"
+          docker inspect --format='{{json .State.Health}}' praxis-ai
+          docker logs praxis-ai
+          exit 1
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f praxis-ai

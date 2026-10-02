@@ -1,0 +1,559 @@
+{
+  "schema_version": 3,
+  "scope": {
+    "areas": [
+      "Conversations"
+    ],
+    "include_deprecated": false,
+    "include_beta": false
+  },
+  "reference": {
+    "source": "docs/conformance/specs/openai-openapi.yaml",
+    "source_sha256": "0bf136e5f8e135a04f4b4bda93c13e75d83e98954da48ccb1e3b4b080b47b068",
+    "upstream": {
+      "repository": "https://github.com/openai/openai-openapi",
+      "revision": "db3e53198a66732cfe161339ea63bf36fc0137ad",
+      "path": "openapi.yaml",
+      "source_sha256": "0bf136e5f8e135a04f4b4bda93c13e75d83e98954da48ccb1e3b4b080b47b068"
+    }
+  },
+  "area_projections": [
+    {
+      "area_id": "conversations",
+      "area": "Conversations",
+      "projection_sha256": "b5b8af413e9cc84597d300f41789b6fb988f328baa531a61df8877fe321dc856",
+      "operations": 8,
+      "inherited_security": "deployment"
+    }
+  ],
+  "capability_coverage": {
+    "total_operations": 8,
+    "covered_operations_count": 8,
+    "missing_operations_count": 0,
+    "coverage_percent": 100.0,
+    "ignored": {
+      "deprecated": 0,
+      "beta": 0
+    },
+    "by_area": [
+      {
+        "area": "Conversations",
+        "total": 8,
+        "covered": 8,
+        "missing": 0,
+        "coverage_percent": 100.0
+      }
+    ],
+    "by_mode": [
+      {
+        "mode": "passthrough",
+        "operations": 0
+      },
+      {
+        "mode": "inspect",
+        "operations": 0
+      },
+      {
+        "mode": "transform",
+        "operations": 0
+      },
+      {
+        "mode": "local",
+        "operations": 8
+      }
+    ],
+    "covered_operations": [
+      {
+        "operation": {
+          "method": "DELETE",
+          "path": "/conversations/{conversation_id}",
+          "operation": "DELETE /conversations/{conversation_id}",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "deleteConversation",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "DELETE",
+          "path": "/conversations/{conversation_id}",
+          "operation": "DELETE /conversations/{conversation_id}",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::DeleteConversation"
+        }
+      },
+      {
+        "operation": {
+          "method": "DELETE",
+          "path": "/conversations/{conversation_id}/items/{item_id}",
+          "operation": "DELETE /conversations/{conversation_id}/items/{item_id}",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "deleteConversationItem",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "DELETE",
+          "path": "/conversations/{conversation_id}/items/{item_id}",
+          "operation": "DELETE /conversations/{conversation_id}/items/{item_id}",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::DeleteConversationItem"
+        }
+      },
+      {
+        "operation": {
+          "method": "GET",
+          "path": "/conversations/{conversation_id}",
+          "operation": "GET /conversations/{conversation_id}",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "getConversation",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "GET",
+          "path": "/conversations/{conversation_id}",
+          "operation": "GET /conversations/{conversation_id}",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::GetConversation"
+        }
+      },
+      {
+        "operation": {
+          "method": "GET",
+          "path": "/conversations/{conversation_id}/items",
+          "operation": "GET /conversations/{conversation_id}/items",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "listConversationItems",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "GET",
+          "path": "/conversations/{conversation_id}/items",
+          "operation": "GET /conversations/{conversation_id}/items",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::ListConversationItems"
+        }
+      },
+      {
+        "operation": {
+          "method": "GET",
+          "path": "/conversations/{conversation_id}/items/{item_id}",
+          "operation": "GET /conversations/{conversation_id}/items/{item_id}",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "getConversationItem",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "GET",
+          "path": "/conversations/{conversation_id}/items/{item_id}",
+          "operation": "GET /conversations/{conversation_id}/items/{item_id}",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::GetConversationItem"
+        }
+      },
+      {
+        "operation": {
+          "method": "POST",
+          "path": "/conversations",
+          "operation": "POST /conversations",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "createConversation",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "POST",
+          "path": "/conversations",
+          "operation": "POST /conversations",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::CreateConversation"
+        }
+      },
+      {
+        "operation": {
+          "method": "POST",
+          "path": "/conversations/{conversation_id}",
+          "operation": "POST /conversations/{conversation_id}",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "updateConversation",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "POST",
+          "path": "/conversations/{conversation_id}",
+          "operation": "POST /conversations/{conversation_id}",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::UpdateConversation"
+        }
+      },
+      {
+        "operation": {
+          "method": "POST",
+          "path": "/conversations/{conversation_id}/items",
+          "operation": "POST /conversations/{conversation_id}/items",
+          "area": "Conversations",
+          "tag": "Conversations",
+          "operation_id": "createConversationItems",
+          "deprecated": false,
+          "beta": false
+        },
+        "support": {
+          "method": "POST",
+          "path": "/conversations/{conversation_id}/items",
+          "operation": "POST /conversations/{conversation_id}/items",
+          "area": "Conversations",
+          "mode": "local",
+          "evidence": "praxis_ai_apis::openai::conversations_operation_specs::CreateConversationItems"
+        }
+      }
+    ],
+    "missing_operations": [],
+    "claims_outside_reference": []
+  },
+  "owned_contract_conformance": {
+    "enabled": true,
+    "applicable_modes": [
+      "transform",
+      "local"
+    ],
+    "tool": {
+      "name": "oasdiff",
+      "version": "1.23.0",
+      "external_refs": false,
+      "flatten_path_parameters": true,
+      "excluded_elements": [
+        "description",
+        "examples",
+        "extensions",
+        "summary",
+        "title"
+      ]
+    },
+    "areas": [
+      {
+        "area_id": "conversations",
+        "area": "Conversations",
+        "implementation_source": "generated:praxis-ai-apis/openai/conversations",
+        "operation_contracts": {
+          "total": 8,
+          "exact": 8,
+          "missing": 0,
+          "drifted": 0,
+          "request_drifted": 0,
+          "response_drifted": 0,
+          "other_drifted": 0,
+          "exact_percent": 100.0,
+          "missing_operations": [],
+          "drifted_operations": []
+        },
+        "inherited_contract": {
+          "exact": true,
+          "details": []
+        },
+        "upstream_spec_exceptions": [
+          {
+            "kind": "response",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations",
+              "operation": "POST /conversations"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.type.added",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations",
+              "operation": "POST /conversations"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.additionalProperties.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations",
+              "operation": "POST /conversations"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.propertyNames.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "GET",
+              "path": "/conversations/{conversation_id}",
+              "operation": "GET /conversations/{conversation_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.type.added",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "GET",
+              "path": "/conversations/{conversation_id}",
+              "operation": "GET /conversations/{conversation_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.additionalProperties.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "GET",
+              "path": "/conversations/{conversation_id}",
+              "operation": "GET /conversations/{conversation_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.propertyNames.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.type.added",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.additionalProperties.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.propertyNames.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "DELETE",
+              "path": "/conversations/{conversation_id}/items/{item_id}",
+              "operation": "DELETE /conversations/{conversation_id}/items/{item_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.type.added",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "DELETE",
+              "path": "/conversations/{conversation_id}/items/{item_id}",
+              "operation": "DELETE /conversations/{conversation_id}/items/{item_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.additionalProperties.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "response",
+            "operation": {
+              "method": "DELETE",
+              "path": "/conversations/{conversation_id}/items/{item_id}",
+              "operation": "DELETE /conversations/{conversation_id}/items/{item_id}"
+            },
+            "detail": "responses.200.content.application/json.schema.properties.metadata.propertyNames.schemaAdded",
+            "rationale": "OpenAI returns metadata as a string map, while the upstream response property has no schema",
+            "evidence": "api.openai.com probe on 2026-07-27: omitted and null metadata returned {}, populated metadata returned the supplied string map"
+          },
+          {
+            "kind": "request",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "requestBody.required.from",
+            "rationale": "OpenAI's live update endpoint requires the request body, while the pinned upstream omits requestBody.required",
+            "evidence": "api.openai.com probe on 2026-07-27: update with no body or {} returned 400 missing_required_parameter for metadata"
+          },
+          {
+            "kind": "request",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "requestBody.required.to",
+            "rationale": "OpenAI's live update endpoint requires the request body, while the pinned upstream omits requestBody.required",
+            "evidence": "api.openai.com probe on 2026-07-27: update with no body or {} returned 400 missing_required_parameter for metadata"
+          },
+          {
+            "kind": "request",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "requestBody.content.application/json.schema.properties.metadata.anyOf.deleted",
+            "rationale": "OpenAI's live update endpoint rejects null metadata, while the pinned upstream Metadata schema is nullable",
+            "evidence": "api.openai.com probe on 2026-07-27: update with null metadata returned 400 invalid_type, update with object metadata returned 200"
+          },
+          {
+            "kind": "request",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "requestBody.content.application/json.schema.properties.metadata.type.added",
+            "rationale": "OpenAI's live update endpoint rejects null metadata, while the pinned upstream Metadata schema is nullable",
+            "evidence": "api.openai.com probe on 2026-07-27: update with null metadata returned 400 invalid_type, update with object metadata returned 200"
+          },
+          {
+            "kind": "request",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "requestBody.content.application/json.schema.properties.metadata.additionalProperties.schemaAdded",
+            "rationale": "OpenAI's live update endpoint rejects null metadata, while the pinned upstream Metadata schema is nullable",
+            "evidence": "api.openai.com probe on 2026-07-27: update with null metadata returned 400 invalid_type, update with object metadata returned 200"
+          },
+          {
+            "kind": "request",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "requestBody.content.application/json.schema.properties.metadata.propertyNames.schemaAdded",
+            "rationale": "OpenAI's live update endpoint rejects null metadata, while the pinned upstream Metadata schema is nullable",
+            "evidence": "api.openai.com probe on 2026-07-27: update with null metadata returned 400 invalid_type, update with object metadata returned 200"
+          },
+          {
+            "kind": "request",
+            "operation": {
+              "method": "POST",
+              "path": "/conversations/{conversation_id}",
+              "operation": "POST /conversations/{conversation_id}"
+            },
+            "detail": "requestBody.content.application/json.schema.properties.metadata.listOfTypes.deleted",
+            "rationale": "OpenAI's live update endpoint rejects null metadata, while the pinned upstream Metadata schema is nullable",
+            "evidence": "api.openai.com probe on 2026-07-27: update with null metadata returned 400 invalid_type, update with object metadata returned 200"
+          }
+        ],
+        "all_exact": true
+      }
+    ],
+    "operation_contracts": {
+      "total": 8,
+      "exact": 8,
+      "missing": 0,
+      "drifted": 0,
+      "request_drifted": 0,
+      "response_drifted": 0,
+      "other_drifted": 0,
+      "exact_percent": 100.0,
+      "by_area": [
+        {
+          "area": "Conversations",
+          "total": 8,
+          "conformant": 8,
+          "missing": 0,
+          "drifted": 0,
+          "request_drifted": 0,
+          "response_drifted": 0,
+          "other_drifted": 0,
+          "conformance_percent": 100.0
+        }
+      ]
+    },
+    "area_contracts": [
+      {
+        "area": "Conversations",
+        "exact": true,
+        "details": []
+      }
+    ],
+    "all_exact": true,
+    "fixes_required": {
+      "summary": {
+        "operations_to_fix": 0,
+        "area_contracts_to_fix": 0,
+        "missing_operations": 0,
+        "request_drift_operations": 0,
+        "response_drift_operations": 0,
+        "other_drift_operations": 0
+      },
+      "by_operation": [],
+      "by_area": []
+    }
+  },
+  "runtime_verification": {
+    "all_passed": true,
+    "areas": [
+      {
+        "area": "Conversations",
+        "modes": [
+          "local"
+        ],
+        "status": "passed",
+        "command": "cargo test -p praxis-ai-apis --no-default-features --features openai-conversations,store-all --lib conformance_conversations_ -- --show-output",
+        "checks": [
+          {
+            "kind": "route_dispatch",
+            "evidence": "openai::conversations::tests::conformance_conversations_routes_match_runtime_registry"
+          },
+          {
+            "kind": "success_response_contract",
+            "evidence": "openai::conversations::tests::conformance_conversations_success_payloads_match_generated_response_schemas"
+          },
+          {
+            "kind": "schema_check_sensitivity",
+            "evidence": "openai::conversations::tests::conformance_conversations_generated_schema_check_rejects_wrong_discriminator"
+          },
+          {
+            "kind": "request_item_contract",
+            "evidence": "openai::conversations::tests::conformance_conversations_item_requests_reject_unknown_and_malformed_contracts"
+          }
+        ]
+      }
+    ]
+  }
+}

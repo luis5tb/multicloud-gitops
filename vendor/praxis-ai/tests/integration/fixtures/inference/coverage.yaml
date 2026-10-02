@@ -1,0 +1,406 @@
+version: 1
+scope:
+  - messages_to_chat_completions
+  - messages_native_passthrough
+  - responses_agentic_loop
+  - responses_native_passthrough
+  - responses_to_chat_completions
+  - responses_client_tool_compat
+features:
+  - id: messages.request.minimal
+    scopes:
+      - messages_to_chat_completions
+    status: live_covered
+    scenarios:
+      - messages/basic-nonstream
+      - messages/basic-stream
+    providers:
+      openai:
+        status: covered
+      vllm:
+        status: live_covered
+  - id: messages.request.client_tool_ownership
+    scopes:
+      - messages_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - messages/typed-server-tools
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.response.text
+    scopes:
+      - messages_to_chat_completions
+    status: live_covered
+    scenarios:
+      - messages/basic-nonstream
+      - messages/basic-stream
+    providers:
+      openai:
+        status: covered
+      vllm:
+        status: live_covered
+  - id: messages.response.malformed_tool_arguments
+    scopes:
+      - messages_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - messages/malformed-tool-arguments
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.response.invalid_tool_id
+    scopes:
+      - messages_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - messages/invalid-tool-id
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.streaming.usage
+    scopes:
+      - messages_to_chat_completions
+    status: live_covered
+    scenarios:
+      - messages/basic-stream
+    providers:
+      openai:
+        status: live_covered
+      vllm:
+        status: live_covered
+  - id: messages.error.upstream
+    scopes:
+      - messages_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - messages/upstream-error
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.error.malformed_success
+    scopes:
+      - messages_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - messages/malformed-success
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.request.provider_parameter_passthrough
+    scopes:
+      - messages_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - messages/provider-parameter-passthrough
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.request.unrepresentable_parameters
+    scopes:
+      - messages_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - messages/unrepresentable-parameters
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.native.request
+    scopes:
+      - messages_native_passthrough
+    status: live_covered
+    scenarios:
+      - messages/native-basic-nonstream
+      - messages/native-basic-stream
+      - messages/native-tool-use
+    providers:
+      anthropic:
+        status: live_covered
+  - id: messages.native.response.text
+    scopes:
+      - messages_native_passthrough
+    status: live_covered
+    scenarios:
+      - messages/native-basic-nonstream
+      - messages/native-basic-stream
+    providers:
+      anthropic:
+        status: live_covered
+  - id: messages.native.tool_use
+    scopes:
+      - messages_native_passthrough
+    status: live_covered
+    scenarios:
+      - messages/native-tool-use
+    providers:
+      anthropic:
+        status: live_covered
+  - id: messages.native.count_tokens
+    scopes:
+      - messages_native_passthrough
+    status: synthetic_only
+    scenarios:
+      - messages/native-count-tokens
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.native.request
+    scopes:
+      - responses_native_passthrough
+    status: live_covered
+    scenarios:
+      - responses/native-basic-nonstream
+      - responses/native-basic-stream
+      - responses/native-tool-call
+    providers:
+      openai:
+        status: live_covered
+      vllm:
+        status: live_covered
+  - id: responses.native.response.text
+    scopes:
+      - responses_native_passthrough
+    status: live_covered
+    scenarios:
+      - responses/native-basic-nonstream
+      - responses/native-basic-stream
+    providers:
+      openai:
+        status: live_covered
+      vllm:
+        status: live_covered
+  - id: responses.native.tool_call
+    scopes:
+      - responses_native_passthrough
+    status: live_covered
+    scenarios:
+      - responses/native-tool-call
+    providers:
+      openai:
+        status: live_covered
+      vllm:
+        status: live_covered
+  - id: responses.request.background_unsupported
+    scopes:
+      - responses_native_passthrough
+    status: synthetic_only
+    scenarios:
+      - responses/background-unsupported
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.native.continuation
+    scopes:
+      - responses_native_passthrough
+    status: synthetic_only
+    scenarios:
+      - responses/native-continuation
+      - responses/native-continuation-stream
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.request
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-basic-nonstream
+      - responses/chat-basic-stream
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.response.text
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-basic-nonstream
+      - responses/chat-basic-stream
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.web_search
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-web-search
+      - responses/chat-web-search-stream
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.file_search
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-file-search
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.agentic.parallel_tool_calls
+    scopes:
+      - responses_agentic_loop
+    status: synthetic_only
+    scenarios:
+      - responses/agentic-parallel-tool-calls
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.agentic.status_less_function_call
+    scopes:
+      - responses_agentic_loop
+    status: synthetic_only
+    scenarios:
+      - responses/agentic-status-less-function-call
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.agentic.irr_terminal_streaming
+    scopes:
+      - responses_agentic_loop
+    status: synthetic_only
+    scenarios:
+      - responses/irr-terminal-streaming
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.agentic.deferred_mcp_connectors
+    scopes:
+      - responses_agentic_loop
+    status: synthetic_only
+    scenarios:
+      - responses/agentic-deferred-mcp-connectors
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.continuation
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-basic-nonstream
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.reasoning.request
+    scopes:
+      - responses_to_chat_completions
+    status: live_covered
+    scenarios:
+      - responses/chat-reasoning-nonstream
+    providers:
+      vllm:
+        status: live_covered
+  - id: responses.chat.reasoning.response
+    scopes:
+      - responses_to_chat_completions
+    status: live_covered
+    scenarios:
+      - responses/chat-reasoning-nonstream
+    providers:
+      vllm:
+        status: live_covered
+  - id: responses.chat.malformed_compaction
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-malformed-compaction
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.unrepresentable_parameters
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-unrepresentable-parameters
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.tools.function_echo
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-tool-echo
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.null_tool_choice
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-null-tool-choice
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.reasoning.replay
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-reasoning-replay
+      - responses/chat-reasoning-disabled
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.chat.structured_output_with_tools
+    scopes:
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/chat-structured-output-with-tools
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.client_tool_compat.lower_restore
+    scopes:
+      - responses_client_tool_compat
+    status: synthetic_only
+    scenarios:
+      - responses/client-tool-compat
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.client_tool_compat.stream_restore
+    scopes:
+      - responses_client_tool_compat
+    status: synthetic_only
+    scenarios:
+      - responses/client-tool-compat-stream
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.client_tool_compat.chat_lower_restore
+    scopes:
+      - responses_client_tool_compat
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/client-tool-compat-chat
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: responses.client_tool_compat.chat_stream_restore
+    scopes:
+      - responses_client_tool_compat
+      - responses_to_chat_completions
+    status: synthetic_only
+    scenarios:
+      - responses/client-tool-compat-chat-stream
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.response.stop_sequence
+    scopes:
+      - messages_to_chat_completions
+    status: live_covered
+    scenarios:
+      - messages/stop-sequence-nonstream
+      - messages/stop-sequence-stream
+    providers:
+      vllm:
+        status: live_covered

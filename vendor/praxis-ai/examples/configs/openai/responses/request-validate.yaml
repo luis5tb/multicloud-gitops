@@ -1,0 +1,55 @@
+# Responses API Request Validation
+# Requires `--features openai-responses` because these filters are opt-in.
+#
+# Validates Responses API JSON and enriches request metadata.
+#
+# Build:
+#   cargo build -p praxis-ai-proxy --features openai-responses
+#
+# openai_responses_request recognizes the Responses create operation from
+# the request head, then deserializes the body exactly once. That single
+# parse produces every downstream fact: it buffers the body, classifies the
+# request as Responses API, promotes model/stream/store/background to
+# openai_responses_format.* metadata, extracts conversation.id when present,
+# generates response and conversation IDs, and writes responses.* metadata
+# for downstream pipeline filters.
+#
+# Valid supported JSON requests are forwarded to the upstream backend with
+# the original body unchanged. Invalid JSON and unsupported background-mode
+# requests receive a 400 error response.
+#
+# Example valid request:
+#
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4.1","input":"Hello, world!"}'
+#
+# Example unsupported background request (rejected before the backend):
+#
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4.1","input":"test","stream":true,"background":true}'
+#
+listeners:
+  - name: responses-gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - validate-and-route
+
+filter_chains:
+  - name: validate-and-route
+    filters:
+      - filter: openai_responses_request
+        on_invalid: reject
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            cluster: inference
+      - filter: load_balancer
+        clusters:
+          - name: inference
+            endpoints:
+              - "127.0.0.1:8000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

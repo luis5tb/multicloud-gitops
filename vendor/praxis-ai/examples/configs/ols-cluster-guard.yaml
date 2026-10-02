@@ -1,0 +1,54 @@
+# OLS Cluster Selector Guard
+#
+# Accepts one allow-listed, stable X-OLS-Cluster ID before routing, except for
+# the explicitly opted-in, cluster-neutral public agent-card GET.
+# The final catch-all route demonstrates that other invalid or missing
+# selectors are rejected rather than sent to a fallback.
+#
+# In an authenticated deployment, keep the security pipeline ordered as:
+# policy (including JWT/PPE checks) -> ols_cluster_guard -> router -> load_balancer.
+# This standalone example omits the policy filter and does not replace it.
+
+listeners:
+  - name: ols-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [ols-routing]
+
+filter_chains:
+  - name: ols-routing
+    filters:
+      - filter: ols_cluster_guard
+        allow_public_agent_card: true
+        allowed_clusters:
+          - cluster-a
+          - cluster-b
+
+      - filter: router
+        routes:
+          # The exact discovery path goes to one static, cluster-neutral backend.
+          - path: "/.well-known/agent-card.json"
+            cluster: agent-card
+          - path_prefix: "/"
+            headers:
+              x-ols-cluster: "cluster-a"
+            cluster: cluster-a
+          - path_prefix: "/"
+            headers:
+              x-ols-cluster: "cluster-b"
+            cluster: cluster-b
+          - path_prefix: "/"
+            cluster: fallback
+
+      - filter: load_balancer
+        clusters:
+          - name: agent-card
+            endpoints: ["127.0.0.1:9104"]
+          - name: cluster-a
+            endpoints: ["127.0.0.1:9101"]
+          - name: cluster-b
+            endpoints: ["127.0.0.1:9102"]
+          - name: fallback
+            endpoints: ["127.0.0.1:9103"]
+
+insecure_options:
+  allow_private_endpoints: true # local backend endpoints in this example

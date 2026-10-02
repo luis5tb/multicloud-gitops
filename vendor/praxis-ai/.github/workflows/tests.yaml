@@ -1,0 +1,103 @@
+name: Tests
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  merge_group:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Enable verbose test output (V=1)"
+        required: false
+        type: boolean
+        default: false
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  V: ${{ inputs.debug && '1' || '' }}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Lint (fmt + clippy)
+  # ----------------------------------------------------------------------------
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        uses: ./.github/actions/install-actionlint
+
+      - name: Lint GitHub Actions workflows
+        run: actionlint
+
+      - name: Setup Rust (lint)
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        with:
+          cache-suffix: lint-cargo
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Lint
+        run: make lint
+
+  # ----------------------------------------------------------------------------
+  # Build + test
+  # ----------------------------------------------------------------------------
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        with:
+          cache-suffix: test-cargo
+
+      - name: Unit tests
+        run: make test-unit
+
+  store-features:
+    runs-on: ubuntu-24.04
+    # Also lints each opt-in feature group on its own (one clippy pass each).
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        with:
+          cache-suffix: store-features-cargo
+
+      - name: Store backend feature matrix
+        run: make test-store-features

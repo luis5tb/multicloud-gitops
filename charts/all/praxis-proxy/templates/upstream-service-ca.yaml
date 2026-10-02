@@ -1,0 +1,15 @@
+{{- if .Values.enabled }}
+{{- if .Values.clusterRouting.enabled }}
+# OpenShift injects the cluster service-ca trust bundle into this ConfigMap.
+# It is used by default for the operator-managed in-cluster OLS Service; a
+# target may instead name its own trusted CA ConfigMap in global.olsClusters.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.clusterRouting.serviceCAConfigMapName | quote }}
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+{{- end }}
+{{- end }}

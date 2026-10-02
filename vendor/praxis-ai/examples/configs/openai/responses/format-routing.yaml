@@ -1,0 +1,85 @@
+# Responses Format Routing
+#
+# Routes AI API traffic by request-head operation identity and body format.
+# The `openai_operation` filter classifies supported OpenAI operations from
+# the HTTP method and path alone, without reading the body. Chat Completions
+# traffic branches on `application_protocol: openai_chat_completions`.
+#
+# The `openai_responses_format` filter parses JSON request bodies and
+# classifies them as `openai_responses` (Responses API) or `unknown` (valid
+# JSON but unrecognized format). Chat Completions routing no longer depends
+# on body heuristics for `/v1/chat/completions`.
+#
+# POST /v1/responses (create) is authoritative: a valid create body that
+# omits every discriminator the body heuristics key on (`input`, `prompt`
+# object, `previous_response_id`, `conversation`) — e.g. `{"model":"gpt-5"}` —
+# is classified as `openai_responses` on that endpoint rather than
+# `unknown`, so it routes to the responses cluster below instead of
+# falling through to the default one.
+#
+# Classification facts are promoted to internal routing headers
+# (x-praxis-ai-*) that the router matches for cluster selection.
+# These internal headers are stripped before upstream by header hygiene.
+#
+# Non-JSON, invalid JSON, and unrecognized JSON bodies continue by
+# default so mixed-traffic listeners do not reject non-AI requests.
+# Set `on_invalid: reject` for listeners that only accept AI API
+# traffic (rejects anything without `input`, except on the
+# authoritative POST /v1/responses create endpoint). Chat Completions
+# is identified from the request head and never reaches this filter.
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [ai-routing]
+
+filter_chains:
+  - name: ai-routing
+    filters:
+      - filter: openai_operation
+        branch_chains:
+          - name: chat-completions
+            on_result:
+              filter: openai_operation
+              key: application_protocol
+              result: openai_chat_completions
+            chains:
+              - name: chat-chain
+                filters:
+                  - filter: router
+                    routes:
+                      - path_prefix: "/"
+                        cluster: "chat-backend"
+            rejoin: shared_load_balancer
+
+      - filter: openai_responses_format
+        on_invalid: continue
+        headers:
+          format: x-praxis-ai-format
+          model: x-praxis-ai-model
+          stream: x-praxis-ai-stream
+
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            headers:
+              x-praxis-ai-format: "openai_responses"
+            cluster: "responses-backend"
+          - path_prefix: "/"
+            cluster: "default-backend"
+
+      - name: shared_load_balancer
+        filter: load_balancer
+        clusters:
+          - name: "responses-backend"
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: "chat-backend"
+            endpoints:
+              - "127.0.0.1:3002"
+          - name: "default-backend"
+            endpoints:
+              - "127.0.0.1:3003"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

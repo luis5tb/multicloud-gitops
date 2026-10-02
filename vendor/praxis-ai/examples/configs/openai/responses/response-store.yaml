@@ -1,0 +1,110 @@
+# Response Store
+# Requires `--features store-sqlite` because these filters are opt-in.
+#
+# Persists non-streaming Responses API responses to a database
+# and serves stored data via GET endpoints and handles
+# DELETE /v1/responses/{id} locally. Supports SQLite
+# (file-backed or in-memory) and PostgreSQL backends:
+#
+#   POST /v1/responses          — proxied to backend, response persisted
+#   GET  /v1/responses/{id}     — served from local store (200 or 404)
+#   GET  /v1/responses/{id}/input_items — paginated input items
+#   DELETE /v1/responses/{id}   — deleted from local store (200 or 404)
+#
+# The `openai_responses_format` filter must run before the store to classify
+# the request body — `openai_response_store` reads its metadata to decide
+# whether to persist POST responses.
+#
+# Persisted state always requires an explicit owner source. This standalone
+# example uses `single_tenant`, which deliberately shares one owner and
+# is not user isolation. See `state-ownership.yaml` for a trusted multi-user
+# boundary and the versioned assertion format.
+#
+# POST persistence:
+#   The `openai_responses_format` filter must run before the store to
+#   classify the request body — `openai_response_store` reads its
+#   metadata to decide whether to persist. Streaming responses
+#   (`stream: true`) are skipped; streaming persistence will be
+#   handled by a separate filter. Non-2xx responses and non-JSON
+#   content types are also skipped.
+#
+# DELETE handling:
+#   DELETE /v1/responses/{id} is intercepted during `on_request`
+#   and short-circuited with a 200 (deleted) or 404 (not found)
+#   JSON response. The request never reaches the backend.
+#
+#   curl -X DELETE http://127.0.0.1:8080/v1/responses/resp_abc
+#
+# The store is lazily initialized on the first qualifying
+# request. If initialization fails (bad URL, permissions),
+# the failure is permanent and the filter becomes a no-op.
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [responses-pipeline]
+
+filter_chains:
+  - name: responses-pipeline
+    filters:
+      - filter: openai_responses_format
+
+      - filter: state_owner
+        mode: single_tenant
+        tenant_id: default
+
+      - filter: openai_response_store
+        backend: sqlite
+        # In-memory:
+        #   database_url: "sqlite::memory:"
+        # File-backed:
+        database_url: "sqlite://responses.db?mode=rwc"
+        responses_table: openai_responses
+        conversations_table: openai_conversations
+        #
+        # Connection pool tuning (optional, sqlx defaults apply when omitted):
+        #   pool:
+        #     max_connections: 10      # maximum pool connections (default: 10)
+        #     min_connections: 0       # minimum idle connections (default: 0)
+        #     idle_timeout_secs: 600   # seconds before idle connections close (default: 600, 0 to disable)
+        #     acquire_timeout_secs: 30 # seconds to wait for a connection (default: 30)
+        #
+        # At-rest payload compression (optional, defaults to none):
+        #   Compresses the responses table's stored JSON payloads
+        #   (response_object, input, messages) with zstd. These columns are
+        #   binary (BLOB on sqlite, BYTEA on postgres): uncompressed rows hold
+        #   raw JSON bytes and compressed rows hold a raw zstd frame. The read
+        #   path detects the zstd frame magic and decompresses transparently, so
+        #   uncompressed rows stay readable after enabling compression. Works
+        #   with both the sqlite and postgres backends.
+        #   compression:
+        #     algorithm: zstd          # none (default) or zstd
+        #     level: 3                 # optional zstd level (default: 3)
+        #
+        #   Upgrading an existing database: schema version 3 stores these
+        #   responses columns as binary. Databases created under version 2
+        #   (TEXT columns) must be migrated before the proxy will start — see
+        #   docs/store/schema-migration.md.
+        #
+        # PostgreSQL backend:
+        #   backend: postgres
+        #   database_url: "postgres://user:pass@db.example.com:5432/praxis"
+        #   responses_table: openai_responses
+        #   conversations_table: openai_conversations
+        #   allow_private_database_url: true  # required for DNS, local, or private DB targets
+        #   ssl_mode: verify-full      # disable, prefer, require, verify-ca, verify-full (default: verify-full)
+        #   ssl_root_cert: /path/to/ca.pem  # optional, for verify-ca / verify-full
+
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            cluster: "inference-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "inference-backend"
+            endpoints:
+              - "127.0.0.1:8000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

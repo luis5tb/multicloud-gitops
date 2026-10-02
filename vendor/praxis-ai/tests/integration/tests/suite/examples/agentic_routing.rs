@@ -1,0 +1,813 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024 Praxis Contributors
+
+//! Integration tests for agentic protocol example configurations.
+
+use std::collections::HashMap;
+
+use praxis_test_utils::{
+    Backend, free_port, http_get, http_send, json_post, load_example_config, parse_body, parse_status,
+    start_backend_with_shutdown, start_proxy,
+};
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn json_rpc_routing_routes_mcp_tools() {
+    // The mcp-tools and a2a-send clusters each declare two replicas, so every
+    // example endpoint gets its own backend; collapsing replicas onto one port
+    // would make the cluster reject the config as a duplicate endpoint.
+    let mcp_tools_a_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_tools_b_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_discovery_guard = start_backend_with_shutdown("mcp-discovery-response");
+    let a2a_send_a_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_send_b_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_tasks_guard = start_backend_with_shutdown("a2a-tasks-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_json_rpc_example_config(
+        proxy_port,
+        mcp_tools_a_guard.port(),
+        mcp_tools_b_guard.port(),
+        mcp_discovery_guard.port(),
+        a2a_send_a_guard.port(),
+        a2a_send_b_guard.port(),
+        a2a_tasks_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &json_post(
+            "/mcp/",
+            r#"{"jsonrpc":"2.0","id":"req-1","method":"tools/call","params":{"name":"calculator"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "MCP tools/call should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "mcp-tools-response",
+        "JSON-RPC method=tools/call should route to mcp-tools cluster"
+    );
+}
+
+#[test]
+fn json_rpc_routing_routes_a2a_send() {
+    let mcp_tools_a_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_tools_b_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_discovery_guard = start_backend_with_shutdown("mcp-discovery-response");
+    let a2a_send_a_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_send_b_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_tasks_guard = start_backend_with_shutdown("a2a-tasks-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_json_rpc_example_config(
+        proxy_port,
+        mcp_tools_a_guard.port(),
+        mcp_tools_b_guard.port(),
+        mcp_discovery_guard.port(),
+        a2a_send_a_guard.port(),
+        a2a_send_b_guard.port(),
+        a2a_tasks_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &json_post(
+            "/a2a/",
+            r#"{"jsonrpc":"2.0","id":"msg-123","method":"SendMessage","params":{"recipient":"agent-42"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "A2A SendMessage should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "a2a-send-response",
+        "JSON-RPC method=SendMessage should route to a2a-send cluster"
+    );
+}
+
+#[test]
+fn json_rpc_routing_falls_through_to_default() {
+    let mcp_tools_a_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_tools_b_guard = start_backend_with_shutdown("mcp-tools-response");
+    let mcp_discovery_guard = start_backend_with_shutdown("mcp-discovery-response");
+    let a2a_send_a_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_send_b_guard = start_backend_with_shutdown("a2a-send-response");
+    let a2a_tasks_guard = start_backend_with_shutdown("a2a-tasks-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_json_rpc_example_config(
+        proxy_port,
+        mcp_tools_a_guard.port(),
+        mcp_tools_b_guard.port(),
+        mcp_discovery_guard.port(),
+        a2a_send_a_guard.port(),
+        a2a_send_b_guard.port(),
+        a2a_tasks_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &json_post(
+            "/unknown/",
+            r#"{"jsonrpc":"2.0","id":"unknown-1","method":"UnknownMethod"}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "unknown method should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "default-response",
+        "unknown method should route to default cluster"
+    );
+}
+
+#[test]
+fn mcp_classifier_routing_routes_by_tool_name() {
+    let weather_guard = start_backend_with_shutdown("weather-response");
+    let weather_port = weather_guard.port();
+    let calendar_guard = start_backend_with_shutdown("calendar-response");
+    let calendar_port = calendar_guard.port();
+    let default_guard = start_backend_with_shutdown("default-response");
+    let default_port = default_guard.port();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "mcp-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", weather_port),
+            ("127.0.0.1:9002", calendar_port),
+            ("127.0.0.1:9003", default_port),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &mcp_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#,
+            &[("Mcp-Method", "tools/call"), ("Mcp-Name", "get_weather")],
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "tools/call get_weather should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "weather-response",
+        "tools/call with name=get_weather should route to weather-tools cluster"
+    );
+}
+
+#[test]
+fn mcp_classifier_routing_default_fallback() {
+    let weather_guard = start_backend_with_shutdown("weather-response");
+    let weather_port = weather_guard.port();
+    let calendar_guard = start_backend_with_shutdown("calendar-response");
+    let calendar_port = calendar_guard.port();
+    let default_guard = start_backend_with_shutdown("default-response");
+    let default_port = default_guard.port();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "mcp-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", weather_port),
+            ("127.0.0.1:9002", calendar_port),
+            ("127.0.0.1:9003", default_port),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &mcp_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            &[("Mcp-Method", "tools/list")],
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "tools/list should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "default-response",
+        "tools/list should route to default-mcp cluster"
+    );
+}
+
+#[test]
+fn mcp_classifier_routing_routes_calendar_without_client_mcp_headers() {
+    let weather_guard = start_backend_with_shutdown("weather-response");
+    let weather_port = weather_guard.port();
+    let calendar_guard = start_backend_with_shutdown("calendar-response");
+    let calendar_port = calendar_guard.port();
+    let default_guard = start_backend_with_shutdown("default-response");
+    let default_port = default_guard.port();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "mcp-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", weather_port),
+            ("127.0.0.1:9002", calendar_port),
+            ("127.0.0.1:9003", default_port),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &mcp_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_calendar"}}"#,
+            &[],
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "tools/call get_calendar should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "calendar-response",
+        "tools/call with name=get_calendar should route to calendar-tools cluster without client Mcp-* headers"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_routes_send_message() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "SendMessage should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "agent-response",
+        "SendMessage should route to agent-backend cluster"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_routes_context_id() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"contextId":"ctx-123","role":"ROLE_USER","parts":[{"text":"hello"}]}}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "SendMessage with context ID should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "message-response",
+        "contextId=ctx-123 should route before the broader SendMessage method route"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_routes_streaming_context_id() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"SendStreamingMessage","params":{"message":{"contextId":"ctx-123","role":"ROLE_USER","parts":[{"text":"hello"}]}}}"#,
+        ),
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "SendStreamingMessage with context ID should return 200"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "message-response",
+        "contextId=ctx-123 should route before the broader streaming method route"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_routes_list_tasks_context_id() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":3,"method":"ListTasks","params":{"contextId":"ctx-123"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "ListTasks with context ID should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "message-response",
+        "contextId=ctx-123 should route before the broader task family route"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_routes_streaming() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"SendStreamingMessage","params":{}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "SendStreamingMessage should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "streaming-response",
+        "SendStreamingMessage should route to streaming-backend via x-praxis-a2a-streaming: true"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_default_fallback() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(proxy.addr(), &a2a_json_post("/", r#"{"not":"json-rpc"}"#));
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "non-A2A traffic should return 200 with on_invalid: continue"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "default-response",
+        "non-A2A traffic should route to default-backend"
+    );
+}
+
+#[test]
+fn a2a_task_routing_example_routes_send_message_to_agent_a() {
+    let task_json =
+        r#"{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"task-example-1","status":{"state":"TASK_STATE_WORKING"}}}}"#;
+    let agent_a_guard = Backend::fixed(task_json)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let agent_b_guard = start_backend_with_shutdown("agent-b-response");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "a2a-task-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_a_guard.port()),
+            ("127.0.0.1:9002", agent_b_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "SendMessage should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        task_json,
+        "SendMessage should route to agent-a cluster and return task JSON"
+    );
+}
+
+#[test]
+fn a2a_task_routing_example_routes_get_task_to_owning_cluster() {
+    let task_json =
+        r#"{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"task-example-2","status":{"state":"TASK_STATE_WORKING"}}}}"#;
+    let agent_a_guard = Backend::fixed(task_json)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let agent_b_guard = start_backend_with_shutdown("agent-b-response");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "a2a-task-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_a_guard.port()),
+            ("127.0.0.1:9002", agent_b_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let send_raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&send_raw), 200, "SendMessage should succeed");
+
+    let get_raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"task-example-2"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&get_raw), 200, "GetTask should succeed");
+    assert_eq!(
+        parse_body(&get_raw),
+        task_json,
+        "GetTask for task-example-2 should route back to agent-a (which created the task)"
+    );
+}
+
+#[test]
+fn a2a_task_routing_example_unknown_task_follows_fallback() {
+    let agent_a_guard = start_backend_with_shutdown("agent-a-response");
+    let agent_b_guard = start_backend_with_shutdown("agent-b-response");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "a2a-task-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_a_guard.port()),
+            ("127.0.0.1:9002", agent_b_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"nonexistent"}}"#,
+        ),
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "GetTask for unknown should succeed via fallback"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "agent-b-response",
+        "unknown task should route to fallback (agent-b)"
+    );
+}
+
+#[test]
+fn a2a_agent_card_routing_routes_public_card() {
+    let public_guard = start_backend_with_shutdown("public-agent-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-agent-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/.well-known/agent-card.json", Some("localhost"));
+    assert_eq!(status, 200, "public agent card GET should return 200");
+    assert_eq!(
+        body, "public-agent-card-response",
+        "GET /.well-known/agent-card.json should route to public-agent-card cluster"
+    );
+}
+
+#[test]
+fn a2a_agent_card_routing_falls_through_on_path_suffix() {
+    let public_guard = start_backend_with_shutdown("public-agent-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-agent-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/.well-known/agent-card.json-extra", Some("localhost"));
+    assert_eq!(status, 200, "path with suffix should return 200");
+    assert_eq!(
+        body, "default-response",
+        "path suffix past .json must not match the exact route"
+    );
+}
+
+#[test]
+fn a2a_agent_card_routing_routes_get_extended_agent_card() {
+    let public_guard = start_backend_with_shutdown("public-agent-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-agent-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/a2a/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"GetExtendedAgentCard","params":{}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "GetExtendedAgentCard should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "extended-agent-card-response",
+        "GetExtendedAgentCard should route to extended-agent-card cluster"
+    );
+}
+
+#[test]
+fn a2a_agent_card_routing_default_fallback_for_send_message() {
+    let public_guard = start_backend_with_shutdown("public-agent-card-response");
+    let extended_guard = start_backend_with_shutdown("extended-agent-card-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_agent_card_example_config(
+        proxy_port,
+        public_guard.port(),
+        extended_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/a2a/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "SendMessage with no card route should return 200"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "default-response",
+        "SendMessage should fall through to default cluster"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+#[expect(clippy::too_many_arguments, reason = "test utility with all json-rpc example ports")]
+fn load_json_rpc_example_config(
+    proxy_port: u16,
+    mcp_tools_port_a: u16,
+    mcp_tools_port_b: u16,
+    mcp_discovery_port: u16,
+    a2a_send_port_a: u16,
+    a2a_send_port_b: u16,
+    a2a_tasks_port: u16,
+    default_port: u16,
+) -> praxis_core::config::Config {
+    load_example_config(
+        "json-rpc-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", mcp_tools_port_a),
+            ("127.0.0.1:9002", mcp_tools_port_b),
+            ("127.0.0.1:9101", mcp_discovery_port),
+            ("127.0.0.1:9201", a2a_send_port_a),
+            ("127.0.0.1:9202", a2a_send_port_b),
+            ("127.0.0.1:9301", a2a_tasks_port),
+            ("127.0.0.1:9000", default_port),
+        ]),
+    )
+}
+
+#[expect(clippy::too_many_arguments, reason = "test utility with all A2A example ports")]
+fn load_a2a_example_config(
+    proxy_port: u16,
+    agent_port: u16,
+    streaming_port: u16,
+    task_specific_port: u16,
+    task_port: u16,
+    message_port: u16,
+    notification_port: u16,
+    agent_info_port: u16,
+    default_port: u16,
+) -> praxis_core::config::Config {
+    load_example_config(
+        "a2a-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_port),
+            ("127.0.0.1:9002", streaming_port),
+            ("127.0.0.1:9003", task_specific_port),
+            ("127.0.0.1:9004", task_port),
+            ("127.0.0.1:9005", message_port),
+            ("127.0.0.1:9006", notification_port),
+            ("127.0.0.1:9007", agent_info_port),
+            ("127.0.0.1:9000", default_port),
+        ]),
+    )
+}
+
+fn a2a_json_post(path: &str, body: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len(),
+    )
+}
+
+fn mcp_json_post(path: &str, body: &str, headers: &[(&str, &str)]) -> String {
+    let mut extra = String::new();
+    for (name, value) in headers {
+        extra.push_str(&format!("{name}: {value}\r\n"));
+    }
+    format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         {extra}\
+         \r\n\
+         {body}",
+        body.len(),
+    )
+}
+
+fn load_agent_card_example_config(
+    proxy_port: u16,
+    public_port: u16,
+    extended_port: u16,
+    default_port: u16,
+) -> praxis_core::config::Config {
+    load_example_config(
+        "a2a-agent-card-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", public_port),
+            ("127.0.0.1:9002", extended_port),
+            ("127.0.0.1:9000", default_port),
+        ]),
+    )
+}

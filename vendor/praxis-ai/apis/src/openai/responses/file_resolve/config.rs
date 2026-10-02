@@ -1,0 +1,777 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! Configuration types for the `openai_file_resolve` filter.
+
+use praxis_core::config::ChainRef;
+use praxis_filter::{FilterError, body::MAX_JSON_BODY_BYTES};
+use serde::Deserialize;
+
+use super::resolve_url::NormalizedOrigin;
+use crate::{
+    callout_identity::credential_authority,
+    callout_policy::OnMissing,
+    openai::{api_client, responses::body_limits::validate_size_limit},
+};
+
+/// Default HTTP timeout for Files API callout requests (30 000 ms).
+const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Default maximum number of file references resolved per request.
+const DEFAULT_MAX_FILE_REFERENCES: usize = 32;
+
+/// Maximum configurable file reference count per request.
+const MAX_CONFIGURABLE_FILE_REFERENCES: usize = 128;
+
+/// Maximum allowed timeout (300 000 ms / 5 minutes).
+const MAX_TIMEOUT_MS: u64 = 300_000;
+
+/// Mode for handling `file_url` content parts.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileUrlMode {
+    /// Fetch the URL and inline content as `file_data` (data URI).
+    #[default]
+    Resolve,
+
+    /// Leave `file_url` unchanged for native-compatible backends.
+    Passthrough,
+}
+
+/// YAML configuration for the [`FileResolveFilter`].
+///
+/// [`FileResolveFilter`]: super::FileResolveFilter
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FileResolveConfig {
+    /// Outbound filter chain applied to configured Files API
+    /// (`file_id`) metadata and content requests.
+    ///
+    /// The chain runs through the `FilteredSubrequestExecutor`, so its
+    /// filters observe and can mutate the outbound callout before it is
+    /// dialed. SSRF protection for `files_api_url` derives from the
+    /// pipeline's `allow_private_upstreams`, enforced both when the
+    /// callout target is pinned and at connect time.
+    ///
+    /// Client-controlled `file_url` downloads never traverse this
+    /// chain; they stay on the credential-free hardened resolver.
+    ///
+    /// Optional. Configured `file_id` callouts always run through the
+    /// bound outbound pipeline; this chain only adds filters along the
+    /// way. When omitted it defaults to an empty inline chain (pure
+    /// passthrough) via `default_outbound_chain`, so registration never
+    /// fails for a missing chain — matching `openai_file_search_callout`.
+    /// Provide it only to attach cross-cutting concerns such as
+    /// credential injection, tracing, or request tagging.
+    ///
+    /// May be defined inline (`name` + `filters`) or reference a
+    /// top-level named chain; a named reference resolves because this
+    /// filter runs at the top pipeline level, not nested inside an
+    /// `iterative_request_router` step. Registration still fails the
+    /// build when a provided chain cannot be bound.
+    #[serde(default = "default_outbound_chain")]
+    pub outbound_chain: ChainRef,
+
+    /// Allow Files API callouts from the `StreamBuffer` pre-read
+    /// phase, before header-phase security filters execute.
+    ///
+    /// This must be explicitly enabled only when an outer trust
+    /// boundary authenticates and authorizes requests before they
+    /// reach this listener. Forwarded headers are the original
+    /// downstream values, not mutations from request filters.
+    #[serde(default)]
+    pub allow_pre_security_callout: bool,
+
+    /// Base URL of the Files API endpoint.
+    ///
+    /// Example: `http://files-api:8321`
+    pub files_api_url: String,
+
+    /// Optional callout-credential slot. When configured, Files API `file_id`
+    /// requests use that caller-scoped value as their `Authorization` header.
+    /// Client-controlled `file_url` fetches never use this credential.
+    #[serde(default)]
+    pub user_credential: Option<String>,
+
+    /// Headers to forward from the original request to the
+    /// Files API for authentication and tenant isolation. No
+    /// downstream headers are forwarded by default.
+    #[serde(default)]
+    pub forward_headers: Vec<String>,
+
+    /// Maximum size in bytes of the request body this filter *produces*
+    /// after inlining resolved `file_id` / `file_url` content (default 64
+    /// MiB).
+    ///
+    /// Raw request body size is governed by the pipeline's `body_limits`,
+    /// not this field. The resolved body can grow larger than the raw
+    /// input because references are replaced with inline content.
+    #[serde(default = "default_max_rewritten_body_bytes")]
+    pub max_rewritten_body_bytes: usize,
+
+    /// Maximum total size in bytes of inline file content this filter
+    /// adds to one request (default 64 MiB).
+    ///
+    /// Charged against the *encoded* inline form — base64 `file_data`
+    /// and `data:` URL `image_url` values — not the raw bytes fetched
+    /// from the Files API or remote URL, and shared as a single budget
+    /// across every reference resolved in the request rather than
+    /// applied per file. A file whose raw content would fit can still be
+    /// rejected once base64 expansion is counted, and several
+    /// individually small files can exhaust the budget together.
+    ///
+    /// Bounds inline expansion independently of the total rewritten body
+    /// size (`max_rewritten_body_bytes`).
+    #[serde(default = "default_max_resolved_bytes")]
+    pub max_resolved_bytes: usize,
+
+    /// Maximum number of distinct content-part / `file_id` pairs to
+    /// resolve in one request, including rehydrated history.
+    #[serde(default = "default_max_file_references")]
+    pub max_file_references: usize,
+
+    /// Behavior when a `file_id` reference cannot be fetched. Does not
+    /// apply to `file_url`: a failed `file_url` fetch is always
+    /// rejected, regardless of this setting.
+    #[serde(default)]
+    pub on_missing: OnMissing,
+
+    /// HTTP timeout in milliseconds for Files API callout requests. Inside an
+    /// iterative request router, the effective timeout is capped by the
+    /// router's remaining deadline.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+
+    /// Mode for `file_url` content parts in `input_file`.
+    #[serde(default)]
+    pub file_url: FileUrlMode,
+
+    /// Exact origins allowed to resolve to private addresses.
+    /// Cloud metadata, unspecified, and multicast remain blocked.
+    #[serde(default)]
+    pub allowed_file_url_origins: Vec<String>,
+}
+
+/// Default `outbound_chain` when the field is omitted: an empty inline chain.
+///
+/// Configured `file_id` callouts always run through the bound outbound
+/// pipeline; an empty chain simply applies no extra filters (pure passthrough).
+/// Operators supply a chain only to attach cross-cutting concerns such as
+/// credential injection, tracing, or request tagging. The name is a label only
+/// — inline chains are not looked up, so it never needs to be globally unique.
+fn default_outbound_chain() -> ChainRef {
+    ChainRef::Inline {
+        name: "openai_file_resolve_outbound".to_owned(),
+        filters: Vec::new(),
+    }
+}
+
+/// Default max rewritten body bytes (64 MiB).
+fn default_max_rewritten_body_bytes() -> usize {
+    MAX_JSON_BODY_BYTES
+}
+
+/// Default max total inline resolved bytes per request (64 MiB).
+fn default_max_resolved_bytes() -> usize {
+    MAX_JSON_BODY_BYTES
+}
+
+/// Default maximum file reference count.
+fn default_max_file_references() -> usize {
+    DEFAULT_MAX_FILE_REFERENCES
+}
+
+/// Default timeout in milliseconds.
+fn default_timeout_ms() -> u64 {
+    DEFAULT_TIMEOUT_MS
+}
+
+/// Validate the parsed configuration.
+pub(crate) fn validate_config(mut cfg: FileResolveConfig) -> Result<FileResolveConfig, FilterError> {
+    if cfg.files_api_url.is_empty() {
+        return Err("openai_file_resolve: 'files_api_url' must not be empty".into());
+    }
+
+    if cfg.files_api_url.ends_with('/') {
+        return Err("openai_file_resolve: 'files_api_url' must not end with '/'".into());
+    }
+
+    // Structural checks (scheme, credentials, query, fragment) still apply.
+    // Private-IP rejection for the configured Files API now derives from the
+    // outbound pipeline's `allow_private_upstreams`, enforced when the callout
+    // target is pinned (`prepare_url_target`) and at connect time
+    // (`build_peer`), so the config-time private-IP gate is disabled here.
+    api_client::validate_base_url("openai_file_resolve", &cfg.files_api_url, true)?;
+    if cfg.user_credential.as_ref().is_some_and(String::is_empty) {
+        return Err("openai_file_resolve: user_credential must not be empty".into());
+    }
+    if cfg.user_credential.is_some() {
+        credential_authority("openai_file_resolve", &cfg.files_api_url)?;
+    }
+    api_client::validate_forward_headers("openai_file_resolve", &mut cfg.forward_headers)?;
+    if cfg.user_credential.is_some()
+        && cfg
+            .forward_headers
+            .iter()
+            .any(|name| name == http::header::AUTHORIZATION.as_str())
+    {
+        return Err(
+            "openai_file_resolve: forward_headers must not include authorization when user_credential is configured"
+                .into(),
+        );
+    }
+    validate_limits(&cfg)?;
+    validate_pre_security_callout(&cfg)?;
+    validate_file_url_config(&cfg)?;
+
+    Ok(cfg)
+}
+
+/// Require explicit acknowledgement of the pre-read security boundary.
+fn validate_pre_security_callout(cfg: &FileResolveConfig) -> Result<(), FilterError> {
+    if !cfg.allow_pre_security_callout {
+        return Err(
+            "openai_file_resolve: 'allow_pre_security_callout' must be true because StreamBuffer body callouts run before header-phase security filters; place authentication and authorization in an outer trust boundary"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Validate numeric limits applied while buffering and resolving.
+fn validate_limits(cfg: &FileResolveConfig) -> Result<(), FilterError> {
+    validate_size_limit(
+        "openai_file_resolve",
+        "max_rewritten_body_bytes",
+        cfg.max_rewritten_body_bytes,
+    )?;
+    validate_size_limit("openai_file_resolve", "max_resolved_bytes", cfg.max_resolved_bytes)?;
+
+    validate_resolution_limits(cfg)
+}
+
+/// Validate callout count and time limits.
+fn validate_resolution_limits(cfg: &FileResolveConfig) -> Result<(), FilterError> {
+    if cfg.max_file_references == 0 {
+        return Err("openai_file_resolve: 'max_file_references' must be greater than 0".into());
+    }
+
+    if cfg.max_file_references > MAX_CONFIGURABLE_FILE_REFERENCES {
+        return Err(format!(
+            "openai_file_resolve: 'max_file_references' ({}) exceeds maximum ({MAX_CONFIGURABLE_FILE_REFERENCES})",
+            cfg.max_file_references
+        )
+        .into());
+    }
+
+    if cfg.timeout_ms == 0 {
+        return Err("openai_file_resolve: 'timeout_ms' must be greater than 0".into());
+    }
+
+    if cfg.timeout_ms > MAX_TIMEOUT_MS {
+        return Err(format!(
+            "openai_file_resolve: 'timeout_ms' ({}) exceeds maximum ({MAX_TIMEOUT_MS})",
+            cfg.timeout_ms
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+/// Validate `file_url` mode and `allowed_file_url_origins`.
+fn validate_file_url_config(cfg: &FileResolveConfig) -> Result<(), FilterError> {
+    if cfg.file_url == FileUrlMode::Passthrough && !cfg.allowed_file_url_origins.is_empty() {
+        return Err(
+            "openai_file_resolve: 'allowed_file_url_origins' cannot be set when 'file_url' is 'passthrough'".into(),
+        );
+    }
+
+    let mut seen = Vec::new();
+    for raw in &cfg.allowed_file_url_origins {
+        let origin = NormalizedOrigin::parse(raw).map_err(|e| -> FilterError {
+            format!("openai_file_resolve: invalid 'allowed_file_url_origins' entry '{raw}': {e}").into()
+        })?;
+        if seen.contains(&origin) {
+            return Err(format!("openai_file_resolve: duplicate 'allowed_file_url_origins' entry '{raw}'").into());
+        }
+        seen.push(origin);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::too_many_lines,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+
+    const MINIMAL_YAML: &str = r#"
+files_api_url: "http://files-api:8321"
+allow_pre_security_callout: true
+"#;
+
+    #[test]
+    fn config_defaults_omitted_outbound_chain_to_empty_inline() {
+        // `outbound_chain` is optional: omitting it yields an empty inline chain
+        // (pure passthrough) rather than a config error, matching
+        // `openai_file_search_callout`. Registration binds this empty chain, so a
+        // missing `outbound_chain` never fails the build.
+        let cfg: FileResolveConfig = serde_yaml::from_str(MINIMAL_YAML).unwrap();
+        assert!(
+            matches!(&cfg.outbound_chain, ChainRef::Inline { filters, .. } if filters.is_empty()),
+            "omitted outbound_chain should default to an empty inline chain"
+        );
+    }
+
+    #[test]
+    fn minimal_config_parses() {
+        let cfg: FileResolveConfig = serde_yaml::from_str(MINIMAL_YAML).unwrap();
+        let validated = validate_config(cfg).unwrap();
+        assert_eq!(
+            validated.files_api_url, "http://files-api:8321",
+            "files_api_url should match"
+        );
+        assert_eq!(
+            validated.max_rewritten_body_bytes, MAX_JSON_BODY_BYTES,
+            "max_rewritten_body_bytes should default to 64 MiB"
+        );
+        assert_eq!(
+            validated.max_resolved_bytes, MAX_JSON_BODY_BYTES,
+            "max_resolved_bytes should default to 64 MiB"
+        );
+        assert_eq!(
+            validated.timeout_ms, DEFAULT_TIMEOUT_MS,
+            "timeout_ms should default to 30000"
+        );
+        assert_eq!(
+            validated.max_file_references, DEFAULT_MAX_FILE_REFERENCES,
+            "max_file_references should default to 32"
+        );
+        assert_eq!(
+            validated.on_missing,
+            OnMissing::Continue,
+            "on_missing should default to continue"
+        );
+        assert_eq!(
+            validated.forward_headers,
+            Vec::<String>::new(),
+            "forward_headers should default to empty"
+        );
+    }
+
+    #[test]
+    fn full_config_parses() {
+        let yaml = r#"
+files_api_url: "http://files:9090"
+allow_pre_security_callout: true
+forward_headers:
+  - authorization
+  - x-custom-tenant
+max_rewritten_body_bytes: 1048576
+max_resolved_bytes: 524288
+max_file_references: 16
+on_missing: reject
+timeout_ms: 10000
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let validated = validate_config(cfg).unwrap();
+        assert_eq!(
+            validated.files_api_url, "http://files:9090",
+            "files_api_url should match"
+        );
+        assert_eq!(
+            validated.forward_headers,
+            vec!["authorization", "x-custom-tenant"],
+            "forward_headers should match"
+        );
+        assert_eq!(
+            validated.max_rewritten_body_bytes, 1_048_576,
+            "max_rewritten_body_bytes should match"
+        );
+        assert_eq!(validated.max_resolved_bytes, 524_288, "max_resolved_bytes should match");
+        assert_eq!(validated.max_file_references, 16, "max_file_references should match");
+        assert_eq!(validated.on_missing, OnMissing::Reject, "on_missing should match");
+        assert_eq!(validated.timeout_ms, 10_000, "timeout_ms should match");
+    }
+
+    #[test]
+    fn deny_unknown_fields_rejects_typo() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+on_mising: reject"#;
+        let result: Result<FileResolveConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "typo in config field should be rejected");
+    }
+
+    #[test]
+    fn empty_files_api_url_rejected() {
+        let yaml = "files_api_url: ''";
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_config(cfg);
+        assert!(result.is_err(), "empty files_api_url should be rejected");
+    }
+
+    #[test]
+    fn trailing_slash_files_api_url_rejected() {
+        let yaml = r#"files_api_url: "http://files-api:8321/""#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_config(cfg);
+        assert!(result.is_err(), "trailing slash should be rejected");
+    }
+
+    #[test]
+    fn zero_max_rewritten_body_bytes_rejected() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+max_rewritten_body_bytes: 0"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_config(cfg);
+        assert!(result.is_err(), "zero max_rewritten_body_bytes should be rejected");
+    }
+
+    #[test]
+    fn zero_max_resolved_bytes_rejected() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+max_resolved_bytes: 0"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_config(cfg);
+        assert!(result.is_err(), "zero max_resolved_bytes should be rejected");
+    }
+
+    #[test]
+    fn legacy_max_body_bytes_rejected_as_unknown_field() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+max_body_bytes: 1024"#;
+        let result: Result<FileResolveConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "legacy max_body_bytes should be rejected as an unknown field"
+        );
+    }
+
+    #[test]
+    fn zero_timeout_rejected() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+timeout_ms: 0"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_config(cfg);
+        assert!(result.is_err(), "zero timeout should be rejected");
+    }
+
+    #[test]
+    fn zero_max_file_references_rejected() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+max_file_references: 0"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(
+            validate_config(cfg).is_err(),
+            "zero max_file_references should be rejected"
+        );
+    }
+
+    #[test]
+    fn max_file_references_above_ceiling_rejected() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+max_file_references: 129"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(
+            validate_config(cfg).is_err(),
+            "max_file_references above the ceiling should be rejected"
+        );
+    }
+
+    #[test]
+    fn timeout_above_ceiling_rejected() {
+        let yaml = r#"files_api_url: "http://files-api:8321"
+timeout_ms: 300001"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = validate_config(cfg);
+        assert!(result.is_err(), "timeout above ceiling should be rejected");
+    }
+
+    #[test]
+    fn valid_config_passes() {
+        let cfg = FileResolveConfig {
+            outbound_chain: default_outbound_chain(),
+            allow_pre_security_callout: true,
+            files_api_url: "http://files-api:8321".to_owned(),
+            user_credential: None,
+            forward_headers: Vec::new(),
+            max_rewritten_body_bytes: MAX_JSON_BODY_BYTES,
+            max_resolved_bytes: MAX_JSON_BODY_BYTES,
+            max_file_references: DEFAULT_MAX_FILE_REFERENCES,
+            on_missing: OnMissing::Continue,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            file_url: FileUrlMode::Resolve,
+            allowed_file_url_origins: Vec::new(),
+        };
+        assert!(validate_config(cfg).is_ok(), "valid config should pass validation");
+    }
+
+    #[test]
+    fn user_credential_requires_nonempty_slot_and_valid_exact_authority() {
+        let cfg: FileResolveConfig = serde_yaml::from_str(
+            "files_api_url: https://ogx.example:8443\nallow_pre_security_callout: true\nuser_credential: ogx_files\n",
+        )
+        .unwrap();
+        let validated = validate_config(cfg).unwrap();
+        assert_eq!(validated.user_credential.as_deref(), Some("ogx_files"));
+
+        let empty: FileResolveConfig = serde_yaml::from_str(
+            "files_api_url: https://ogx.example\nallow_pre_security_callout: true\nuser_credential: ''\n",
+        )
+        .unwrap();
+        assert!(validate_config(empty).is_err());
+
+        let ambient_authorization: FileResolveConfig = serde_yaml::from_str(
+            "files_api_url: https://ogx.example\nallow_pre_security_callout: true\nuser_credential: ogx_files\nforward_headers: [authorization]\n",
+        )
+        .unwrap();
+        assert!(validate_config(ambient_authorization).is_err());
+    }
+
+    #[test]
+    fn forward_headers_are_normalized() {
+        let yaml = r#"
+files_api_url: "http://files-api:8321"
+allow_pre_security_callout: true
+forward_headers:
+  - Authorization
+  - X-Tenant-ID
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let validated = validate_config(cfg).unwrap();
+
+        assert_eq!(
+            validated.forward_headers,
+            vec!["authorization", "x-tenant-id"],
+            "forwarded header names should be normalized once during validation"
+        );
+    }
+
+    #[test]
+    fn invalid_forward_header_rejected() {
+        let yaml = r#"
+files_api_url: "http://files-api:8321"
+forward_headers: ["bad header"]
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(
+            validate_config(cfg).is_err(),
+            "syntactically invalid forwarded header names should be rejected"
+        );
+    }
+
+    #[test]
+    fn unsafe_forward_headers_rejected() {
+        for name in [
+            "host",
+            "content-length",
+            "transfer-encoding",
+            "proxy-authorization",
+            "x-praxis-route",
+        ] {
+            let yaml = format!("files_api_url: \"http://files-api:8321\"\nforward_headers: [\"{name}\"]");
+            let cfg: FileResolveConfig = serde_yaml::from_str(&yaml).unwrap();
+
+            assert!(
+                validate_config(cfg).is_err(),
+                "unsafe forwarded header '{name}' should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_forward_headers_rejected_case_insensitively() {
+        let yaml = r#"
+files_api_url: "http://files-api:8321"
+forward_headers: ["Authorization", "authorization"]
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(
+            validate_config(cfg).is_err(),
+            "duplicate forwarded header names should be rejected after normalization"
+        );
+    }
+
+    #[test]
+    fn pre_security_callout_requires_explicit_opt_in() {
+        let yaml = r#"
+files_api_url: "http://files-api:8321"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(
+            validate_config(cfg).is_err(),
+            "pre-security external callouts should be disabled by default"
+        );
+    }
+
+    // Config-time validation keeps only structural checks (scheme,
+    // credentials, query, fragment). Private-IP rejection for the
+    // configured Files API now lives on the outbound pipeline's
+    // `allow_private_upstreams`, enforced when the callout target is
+    // pinned (`prepare_url_target`) and at connect time (`build_peer`),
+    // so a loopback `files_api_url` passes config validation.
+
+    #[test]
+    fn loopback_files_api_url_passes_config_validation() {
+        let yaml = r#"files_api_url: "http://127.0.0.1:8321"
+allow_pre_security_callout: true"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            validate_config(cfg).is_ok(),
+            "loopback files_api_url is accepted at config time; SSRF is enforced by the outbound pipeline"
+        );
+    }
+
+    #[test]
+    fn public_files_api_url_passes_config_validation() {
+        let yaml = r#"files_api_url: "http://8.8.8.8:8321"
+allow_pre_security_callout: true"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(validate_config(cfg).is_ok(), "public IPv4 should be allowed");
+    }
+
+    #[test]
+    fn ssrf_rejects_non_http_scheme() {
+        let yaml = r#"files_api_url: "ftp://files-api:8321""#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(validate_config(cfg).is_err(), "non-http scheme should be rejected");
+    }
+
+    #[test]
+    fn files_api_url_rejects_embedded_credentials() {
+        let yaml = r#"
+files_api_url: "http://user:password@files-api:8321"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            validate_config(cfg).is_err(),
+            "embedded URL credentials should be rejected"
+        );
+    }
+
+    #[test]
+    fn files_api_url_rejects_query_string() {
+        let yaml = r#"
+files_api_url: "http://files-api:8321/base?tenant=abc"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            validate_config(cfg).is_err(),
+            "query strings would make appended Files API paths ambiguous"
+        );
+    }
+
+    #[test]
+    fn files_api_url_rejects_fragment() {
+        let yaml = r#"
+files_api_url: "http://files-api:8321/base#v2"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            validate_config(cfg).is_err(),
+            "fragments would hide appended Files API paths from the HTTP request"
+        );
+    }
+
+    #[test]
+    fn file_url_defaults_to_resolve() {
+        let cfg: FileResolveConfig = serde_yaml::from_str(MINIMAL_YAML).unwrap();
+        assert_eq!(cfg.file_url, FileUrlMode::Resolve, "file_url should default to resolve");
+    }
+
+    #[test]
+    fn file_url_passthrough_accepted() {
+        let yaml = r#"
+files_api_url: "http://ogx:8321"
+allow_pre_security_callout: true
+file_url: passthrough
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        let validated = validate_config(cfg).unwrap();
+        assert_eq!(validated.file_url, FileUrlMode::Passthrough);
+    }
+
+    #[test]
+    fn allowed_origins_with_passthrough_rejected() {
+        let yaml = r#"
+files_api_url: "http://ogx:8321"
+allow_pre_security_callout: true
+file_url: passthrough
+allowed_file_url_origins:
+  - "https://files.internal:8443"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            validate_config(cfg).is_err(),
+            "allowed_file_url_origins should be rejected with passthrough mode"
+        );
+    }
+
+    #[test]
+    fn valid_allowed_origins_accepted() {
+        let yaml = r#"
+files_api_url: "http://ogx:8321"
+allow_pre_security_callout: true
+file_url: resolve
+allowed_file_url_origins:
+  - "https://files.internal:8443"
+  - "http://10.0.0.1:9000"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(validate_config(cfg).is_ok(), "valid origins should be accepted");
+    }
+
+    #[test]
+    fn duplicate_origins_rejected() {
+        let yaml = r#"
+files_api_url: "http://ogx:8321"
+allow_pre_security_callout: true
+allowed_file_url_origins:
+  - "https://files.example.com"
+  - "https://files.example.com"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(validate_config(cfg).is_err(), "duplicate origins should be rejected");
+    }
+
+    #[test]
+    fn origin_with_path_rejected() {
+        let yaml = r#"
+files_api_url: "http://ogx:8321"
+allow_pre_security_callout: true
+allowed_file_url_origins:
+  - "https://files.example.com/api"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(validate_config(cfg).is_err(), "origins with paths should be rejected");
+    }
+
+    #[test]
+    fn origin_cloud_metadata_rejected() {
+        let yaml = r#"
+files_api_url: "http://ogx:8321"
+allow_pre_security_callout: true
+allowed_file_url_origins:
+  - "http://169.254.169.254"
+"#;
+        let cfg: FileResolveConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            validate_config(cfg).is_err(),
+            "cloud metadata origins should be rejected"
+        );
+    }
+}

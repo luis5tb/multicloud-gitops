@@ -1,0 +1,45 @@
+# Token Usage Response Headers
+#
+# Inject Praxis-Token-Input, Praxis-Token-Output, and
+# Praxis-Token-Total headers into downstream responses when
+# token counts are available in filter metadata.
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy -- -c examples/configs/token-usage-headers.yaml
+#   curl -v http://localhost:8080/v1/chat/completions
+#
+# The filter reads token.input, token.output, and token.total from
+# filter metadata and injects them as response headers. When no token
+# data is present the filter is a no-op.
+#
+# NOTE: response hooks run in reverse declared order (the last filter's
+# on_response fires first), so a token-counting filter (or any filter
+# that calls set_token_usage()) must be declared AFTER token_usage_headers
+# in the pipeline for headers to appear. Without it the filter is always
+# a no-op. See token-counting.yaml for a filter that populates
+# token.input/token.output/token.total.
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: token_usage_headers
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

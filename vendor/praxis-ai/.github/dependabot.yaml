@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"
+      codeql-action-security:
+        applies-to: security-updates
+        patterns:
+          - "github/codeql-action/*"
+
+  - package-ecosystem: "github-actions"
+    directory: ".github/actions/install-nightly-rust"
+    schedule:
+      interval: "weekly"

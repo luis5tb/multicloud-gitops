@@ -1,0 +1,28 @@
+{{- if .Values.enabled }}
+{{- if .Values.policy.caBundleSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-ca-sync
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  schedule: {{ .Values.policy.caBundleSync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 180
+      template:
+        metadata:
+          labels:
+            {{- include "praxis-proxy.labels" . | nindent 12 }}
+        spec:
+{{ include "praxis-proxy.caSyncPodSpec" . | nindent 10 }}
+{{- end }}
+{{- end }}

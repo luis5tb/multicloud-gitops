@@ -1,0 +1,69 @@
+listeners:
+  - name: a2a-gateway
+    address: "0.0.0.0:{{ .Values.service.port }}"
+    filter_chains: [authorization-and-routing]
+
+filter_chains:
+  - name: authorization-and-routing
+    filters:
+      - filter: policy
+        config_path: /etc/praxis/config/policy.yaml
+        # This is separate from insecure_options below: it permits the policy
+        # engine's configured IdP/JWKS callouts to resolve to private IPs.
+        allow_private_idp: {{ .Values.policy.allowPrivateIdp }}
+        # This gateway authorizes generic HTTP/A2A requests, not MCP entity
+        # requests, so it intentionally has no protocol-classifier requirement.
+        require_protocol_metadata: false
+        init_timeout_secs: 30
+
+      # Reject duplicate, missing, malformed, or unregistered target selectors
+      # before the router can choose an upstream. This filter exists only in
+      # the explicitly selected downstream Praxis AI build.
+      - filter: ols_cluster_guard
+        allow_public_agent_card: true
+        allowed_clusters:
+          {{ range $id, $_ := .Values.global.olsClusters }}
+          - {{ $id | quote }}
+          {{ end }}
+
+      - filter: router
+        routes:
+          # Agent-card discovery is deliberately cluster-neutral and has one
+          # explicitly configured static backend. It is not a default for RPC.
+          - path: "/.well-known/agent-card.json"
+            cluster: {{ .Values.clusterRouting.discoveryCluster | quote }}
+          {{ range $id, $cluster := .Values.global.olsClusters }}
+          - path_prefix: "/"
+            headers:
+              x-ols-cluster: {{ $id | quote }}
+            cluster: {{ $id | quote }}
+          {{ end }}
+
+      - filter: load_balancer
+        clusters:
+          {{ range $id, $cluster := .Values.global.olsClusters }}
+          - name: {{ $id | quote }}
+            endpoints:
+              - {{ printf "%s:%d" $cluster.upstreamHost (int $cluster.upstreamPort) | quote }}
+            http:
+              authority: {{ printf "%s:%d" $cluster.upstreamHost (int $cluster.upstreamPort) | quote }}
+            tls:
+              verify: true
+              sni: {{ $cluster.upstreamSNI | quote }}
+              ca:
+                ca_path: {{ printf "/etc/praxis/upstream-ca/%s/ca.crt" $id | quote }}
+          {{ end }}
+
+admin:
+  # Kept on loopback: only container-local health probes can access it.
+  address: "127.0.0.1:9901"
+
+# Praxis currently requires both opt-ins for its static in-cluster
+# upstream: allow_private_endpoints for config-load-time validation of the
+# load_balancer cluster endpoint, and allow_private_upstreams for the
+# runtime connection check. These flags do not configure policy-engine
+# callouts. All destinations remain fixed chart/registry values; never derive
+# them from a request header or URL.
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true

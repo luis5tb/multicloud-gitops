@@ -1,0 +1,82 @@
+# Unified AI Gateway
+#
+# Routes traffic by classifier-promoted headers so a single
+# listener handles Anthropic Messages, OpenAI Chat Completions,
+# and OpenAI Responses requests.
+#
+# `openai_operation` classifies Chat Completions from the request head
+# without reading the body. `anthropic_messages_format` classifies every
+# request body and promotes `x-praxis-ai-format` for router-based cluster
+# selection. `openai_responses_format` runs for its own filter results
+# but does not promote a format header (avoids overwriting).
+
+listeners:
+  - name: unified-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [unified-routing]
+
+filter_chains:
+  - name: unified-routing
+    filters:
+      - filter: openai_operation
+        branch_chains:
+          - name: chat-completions
+            on_result:
+              filter: openai_operation
+              key: application_protocol
+              result: openai_chat_completions
+            chains:
+              - name: chat-chain
+                filters:
+                  - filter: router
+                    routes:
+                      - path_prefix: "/"
+                        cluster: "openai-backend"
+            rejoin: shared_load_balancer
+
+      - filter: anthropic_messages_format
+        on_invalid: continue
+        headers:
+          format: x-praxis-ai-format
+          model: x-praxis-ai-model
+          stream: x-praxis-ai-stream
+
+      - filter: openai_responses_format
+        on_invalid: continue
+        headers:
+          format: ~
+          model: ~
+          stream: ~
+
+      - name: body_classifiers
+        filter: router
+        routes:
+          - path: "/v1/messages"
+            headers:
+              x-praxis-ai-format: "anthropic_messages"
+            cluster: "anthropic-backend"
+          - path: "/v1/responses"
+            headers:
+              x-praxis-ai-format: "openai_responses"
+            cluster: "responses-backend"
+          - path_prefix: "/"
+            cluster: "default-backend"
+
+      - name: shared_load_balancer
+        filter: load_balancer
+        clusters:
+          - name: "anthropic-backend"
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: "openai-backend"
+            endpoints:
+              - "127.0.0.1:3002"
+          - name: "responses-backend"
+            endpoints:
+              - "127.0.0.1:3003"
+          - name: "default-backend"
+            endpoints:
+              - "127.0.0.1:3004"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

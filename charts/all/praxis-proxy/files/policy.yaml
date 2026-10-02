@@ -1,0 +1,52 @@
+{{- $denyTerms := list -}}
+{{- range .Values.policy.allowedCallers -}}
+{{- $denyTerms = append $denyTerms (printf "claim.azp != '%s'" .) -}}
+{{- end }}
+plugins:
+  - name: jwt-client
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    capabilities:
+      - perform_http
+    on_error: fail
+    config:
+      role: user
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{{ trimSuffix "/" .Values.identity.keycloak.issuerUrl }}"
+          audiences:
+            - {{ .Values.identity.keycloak.audience | quote }}
+          algorithms:
+            - RS256
+          decoding_key:
+            kind: jwks_url
+            url: "{{ printf "%s/protocol/openid-connect/certs" (trimSuffix "/" .Values.identity.keycloak.issuerUrl) }}"
+      claim_mapper: keycloak
+
+routes:
+  # The A2A discovery document is public by design. Its RPC URL still points
+  # at the public Praxis Route, never directly at an OLS Service.
+  - http:
+      path: /.well-known/agent-card.json
+      method: GET
+    authorization:
+      pre_invocation:
+        - "allow"
+
+  # All ordinary HTTP/A2A requests require a valid Keycloak client token and
+  # an explicit caller allow-list match. In routing mode, the router has no
+  # catch-all/default backend for absent or unregistered target IDs.
+  #
+  # The explicit deny action is required; a bare predicate is not an
+  # authorization decision. Keycloak access tokens carry the authorized party
+  # as `azp`; no custom `client_id` protocol mapper is configured here. The
+  # joined inequalities deny only when `azp` matches none of the allow-list.
+  - http:
+      path_prefix: /
+    authentication:
+      steps:
+        - jwt-client
+    authorization:
+      pre_invocation:
+        - {{ printf "deny(%s)" (join " && " $denyTerms) | quote }}

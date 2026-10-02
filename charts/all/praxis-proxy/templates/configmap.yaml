@@ -1,0 +1,98 @@
+{{- if .Values.enabled }}
+{{- if empty .Values.policy.allowedCallers }}
+{{- fail "policy.allowedCallers must contain at least one client; an empty allow-list would only require a valid token" }}
+{{- end }}
+{{- range .Values.policy.allowedCallers }}
+{{- if or (not (kindIs "string" .)) (not (regexMatch "^[A-Za-z0-9._-]+$" .)) }}
+{{- fail "policy.allowedCallers entries must be safe Keycloak client IDs" }}
+{{- end }}
+{{- end }}
+{{- if not .Values.clusterRouting.enabled }}
+{{- fail "Praxis must use static clusterRouting; the legacy RCA fallback has been removed" }}
+{{- end }}
+{{- if not (regexMatch "^https://[^/@?#]+/realms/[^/?#]+$" .Values.identity.keycloak.issuerUrl) }}
+{{- fail "identity.keycloak.issuerUrl must be a verified Keycloak HTTPS realm issuer" }}
+{{- end }}
+{{- if .Values.clusterRouting.enabled }}
+{{- if not .Values.clusterRouting.guardFilterEnabled }}
+{{- fail "clusterRouting.enabled requires a Praxis AI image containing the tested ols_cluster_guard filter" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .Values.clusterRouting.serviceCAConfigMapName) }}
+{{- fail "clusterRouting.serviceCAConfigMapName must be a valid ConfigMap name" }}
+{{- end }}
+{{- if empty .Values.image.digest }}
+{{- fail "clusterRouting.enabled requires an immutable digest for the Praxis AI image" }}
+{{- end }}
+{{- if eq .Values.image.digest "sha256:83c86c059162cd17a0ee7bc3e5146e4be02f811bada6d38027acc6668b8be903" }}
+{{- fail "clusterRouting cannot use the stock Praxis AI 0.4.1 digest; select the reviewed image containing ols_cluster_guard" }}
+{{- end }}
+{{- $clusters := default dict .Values.global.olsClusters }}
+{{- if not (kindIs "map" $clusters) }}
+{{- fail "global.olsClusters must be a map keyed by the exact X-OLS-Cluster routing ID" }}
+{{- end }}
+{{- if empty $clusters }}
+{{- fail "global.olsClusters must contain at least one configured cluster when clusterRouting.enabled is true" }}
+{{- end }}
+{{- if not .Values.clusterRouting.discoveryCluster }}
+{{- fail "clusterRouting.discoveryCluster must explicitly name a registered target; the chart never defaults discovery to the first target" }}
+{{- end }}
+{{- if not (hasKey $clusters .Values.clusterRouting.discoveryCluster) }}
+{{- fail "clusterRouting.discoveryCluster must match a key in global.olsClusters" }}
+{{- end }}
+{{- range $id, $cluster := $clusters }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $id) }}
+{{- fail (printf "global.olsClusters key %q must be a DNS-safe routing ID of at most 63 lowercase letters, digits, or hyphens" $id) }}
+{{- end }}
+{{- if not (kindIs "map" $cluster) }}
+{{- fail (printf "global.olsClusters[%s] must be a map" $id) }}
+{{- end }}
+{{- if or (not (kindIs "string" $cluster.upstreamHost)) (gt (len $cluster.upstreamHost) 253) (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$" $cluster.upstreamHost)) }}
+{{- fail (printf "global.olsClusters[%s].upstreamHost must be a static hostname or IPv4 address, not a URL" $id) }}
+{{- end }}
+{{- if or (not (kindIs "string" $cluster.upstreamSNI)) (gt (len $cluster.upstreamSNI) 253) (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$" $cluster.upstreamSNI)) }}
+{{- fail (printf "global.olsClusters[%s].upstreamSNI must be a static TLS server name" $id) }}
+{{- end }}
+{{- if not (or (kindIs "int" $cluster.upstreamPort) (kindIs "int64" $cluster.upstreamPort) (kindIs "float64" $cluster.upstreamPort)) }}
+{{- fail (printf "global.olsClusters[%s].upstreamPort must be an integer from 1 through 65535" $id) }}
+{{- end }}
+{{- $port := int $cluster.upstreamPort }}
+{{- if and (kindIs "float64" $cluster.upstreamPort) (ne $cluster.upstreamPort (float64 $port)) }}
+{{- fail (printf "global.olsClusters[%s].upstreamPort must not contain a fractional value" $id) }}
+{{- end }}
+{{- if or (lt $port 1) (gt $port 65535) }}
+{{- fail (printf "global.olsClusters[%s].upstreamPort must be an integer from 1 through 65535" $id) }}
+{{- end }}
+{{- with $cluster.upstreamCA }}
+{{- if not (kindIs "map" .) }}
+{{- fail (printf "global.olsClusters[%s].upstreamCA must be a map with configMapName and optional key" $id) }}
+{{- end }}
+{{- if or (gt (len .configMapName) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" .configMapName)) }}
+{{- fail (printf "global.olsClusters[%s].upstreamCA.configMapName must be a valid ConfigMap name" $id) }}
+{{- end }}
+{{- if and .key (or (gt (len .key) 253) (not (regexMatch "^[A-Za-z0-9._-]+$" .key))) }}
+{{- fail (printf "global.olsClusters[%s].upstreamCA.key contains invalid ConfigMap key characters" $id) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (not .Values.policy.caBundleConfigMap.name) }}
+{{- fail "policy.caBundleConfigMap.name is required when policy.caBundleSync.enabled is true" }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (not .Values.policy.caBundleSync.targetConfigMapName) }}
+{{- fail "policy.caBundleSync.targetConfigMapName is required when policy.caBundleSync.enabled is true" }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (ne .Values.policy.caBundleConfigMap.name .Values.policy.caBundleSync.targetConfigMapName) }}
+{{- fail "policy.caBundleConfigMap.name must match policy.caBundleSync.targetConfigMapName" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+data:
+  praxis.yaml: |
+{{ tpl (.Files.Get "files/praxis.yaml") . | indent 4 }}
+  policy.yaml: |
+{{ tpl (.Files.Get "files/policy.yaml") . | indent 4 }}
+{{- end }}

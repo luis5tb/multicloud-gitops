@@ -1,0 +1,66 @@
+# MCP Stateless Broker (2026-07-28 Profile)
+#
+# Configurable stateless MCP broker using the final
+# MCP 2026-07-28 stateless profile. No protocol sessions,
+# no initialize handshake. Clients use server/discover
+# for capability discovery and include
+# MCP-Protocol-Version, Mcp-Method, and Mcp-Name
+# headers on every request.
+#
+# The broker serves server/discover and tools/list from
+# the configured static catalog. tools/call routes to the
+# backend cluster by exposed tool name, stripping the tool
+# prefix before forwarding.
+#
+#   cargo run -p praxis-ai-proxy -- -c examples/configs/mcp-stateless-broker.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: mcp
+        path: /mcp
+        max_body_bytes: 65536
+        protocol_profile: stateless
+        cache_ttl_ms: 300000
+        cache_scope: public
+        servers:
+          - name: weather
+            cluster: weather-mcp
+            path: /mcp
+            tool_prefix: "weather_"
+            tools:
+              - name: get_weather
+                description: Get current weather
+                inputSchema:
+                  type: object
+                  properties:
+                    city:
+                      type: string
+              - name: forecast
+                description: Get weather forecast
+          - name: calendar
+            cluster: calendar-mcp
+            path: /mcp
+            tool_prefix: "cal_"
+            tools:
+              - name: create_event
+                description: Create a calendar event
+              - name: list_events
+                description: List calendar events
+
+      - filter: load_balancer
+        clusters:
+          - name: weather-mcp
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: calendar-mcp
+            endpoints:
+              - "127.0.0.1:3002"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

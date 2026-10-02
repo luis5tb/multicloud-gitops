@@ -1,0 +1,100 @@
+fullnameOverride: praxis-proxy
+
+# Inert until a published guard-enabled Praxis AI image, verified cluster
+# registry, Keycloak issuer, and OLS backend are supplied.
+enabled: false
+
+replicaCount: 1
+
+# Standalone-rendering stub for the shared cluster registry. The parent
+# Pattern can populate this global map; this chart only reads each map key and
+# its fixed upstream fields. In particular, apiURL is not used by Praxis.
+global:
+  olsClusters: {}
+
+image:
+  repository: ghcr.io/praxis-proxy/ai
+  # Pin an upstream release; do not use latest for the authorization gateway.
+  tag: "0.4.1"
+  digest: sha256:83c86c059162cd17a0ee7bc3e5146e4be02f811bada6d38027acc6668b8be903
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+service:
+  port: 8080
+
+route:
+  enabled: false
+  host: ""
+  # Optional OpenShift HAProxy route timeout for long-running A2A requests.
+  timeout: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+clusterRouting:
+  # There is no legacy/RCA fallback. Enabling Praxis requires explicit static
+  # OLS backends and the selector guard.
+  enabled: false
+  # Set true only when image.repository/tag/digest refer to a build containing
+  # the locally added ols_cluster_guard filter. Stock AI 0.4.1 lacks it.
+  guardFilterEnabled: false
+  # The chart creates this service-ca-injected ConfigMap in the Praxis
+  # namespace and uses it for same-cluster OLS Service TLS by default.
+  serviceCAConfigMapName: praxis-ols-service-ca
+  # Public agent-card discovery has no cluster header. This must explicitly
+  # name a registered target; the chart never chooses the first registry item.
+  discoveryCluster: ""
+
+identity:
+  keycloak:
+    # Override with the exact issuer URL used by the access tokens.
+    issuerUrl: ""
+    audience: lightspeed-a2a
+
+policy:
+  allowedCallers:
+    - acme-agent
+  # Praxis AI 0.4.1 only exposes a filter-wide private-destination opt-in.
+  # Enable only when a statically configured policy endpoint (such as the
+  # Keycloak JWKS URL) resolves to a non-public cluster address. This also
+  # permits loopback and link-local destinations, so keep policy callouts
+  # operator-controlled and never user-supplied.
+  allowPrivateIdp: false
+  caBundleConfigMap:
+    name: ""
+    key: ca-bundle.crt
+  caBundleSync:
+    enabled: false
+    sourceNamespace: openshift-config-managed
+    sourceConfigMap: default-ingress-cert
+    sourceKey: ca-bundle.crt
+    targetConfigMapName: praxis-keycloak-ca
+    schedule: "*/5 * * * *"
+    image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+securityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

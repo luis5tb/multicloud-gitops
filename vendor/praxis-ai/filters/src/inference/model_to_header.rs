@@ -1,0 +1,456 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024 Praxis Contributors
+
+//! Model-to-header filter: promotes the "model" JSON body field to a request header for routing.
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use http::HeaderName;
+use praxis_filter::{
+    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, builtins::JsonBodyFieldFilter,
+    parse_filter_config,
+};
+use serde::Deserialize;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Default header name for the promoted model value.
+const DEFAULT_HEADER: &str = "X-Model";
+
+// -----------------------------------------------------------------------------
+// Config
+// -----------------------------------------------------------------------------
+
+/// Deserialized YAML config for the model-to-header filter.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelToHeaderConfig {
+    /// Header name for the promoted model value.
+    ///
+    /// Must not be a hop-by-hop, framing, Host, credential, API-key, or
+    /// internal `x-praxis-*` header. Defaults to `X-Model`.
+    #[serde(default = "default_header")]
+    header: String,
+}
+
+/// Default header name.
+fn default_header() -> String {
+    DEFAULT_HEADER.to_owned()
+}
+
+// -----------------------------------------------------------------------------
+// ModelToHeaderFilter
+// -----------------------------------------------------------------------------
+
+/// Promotes the JSON `"model"` field from the request body to a request header.
+///
+/// Promotion is deferred until end-of-stream so a later body-writing filter
+/// (for example `llmisvc_model_provider_resolver`) can observe the pending
+/// header in the same `StreamBuffer` pre-read pass.
+///
+/// # YAML configuration
+///
+/// ```yaml
+/// filter: model_to_header
+/// header: X-Model   # optional, defaults to X-Model
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// use praxis_ai_filters::ModelToHeaderFilter;
+///
+/// let yaml = serde_yaml::Value::Null;
+/// let filter = ModelToHeaderFilter::from_config(&yaml).unwrap();
+/// assert_eq!(filter.name(), "model_to_header");
+/// ```
+pub struct ModelToHeaderFilter {
+    /// Delegated body-field extraction filter (type-erased
+    /// `JsonBodyFieldFilter`).
+    inner: Box<dyn HttpFilter>,
+    /// The promotion-target header this filter owns; a client-supplied copy is
+    /// stripped before promotion so routing cannot be spoofed. See #1039.
+    header: HeaderName,
+}
+
+impl ModelToHeaderFilter {
+    /// Create from parsed YAML config.
+    ///
+    /// Accepts an optional `header` field (defaults to `X-Model`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the header name is unsafe or the inner
+    /// `JsonBodyFieldFilter` config is invalid.
+    ///
+    /// [`FilterError`]: praxis_filter::FilterError
+    ///
+    /// ```ignore
+    /// use praxis_ai_filters::ModelToHeaderFilter;
+    ///
+    /// let yaml: serde_yaml::Value = serde_yaml::from_str("header: X-AI-Model").unwrap();
+    /// let filter = ModelToHeaderFilter::from_config(&yaml).unwrap();
+    /// assert_eq!(filter.name(), "model_to_header");
+    /// ```
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let cfg: ModelToHeaderConfig = parse_filter_config("model_to_header", config)?;
+        let header =
+            praxis_ai_apis::promotion::parse_dedicated_promotion_header("model_to_header", "header", &cfg.header, &[])?;
+
+        let mut inner_config = serde_yaml::Mapping::new();
+        inner_config.insert(
+            serde_yaml::Value::String("field".into()),
+            serde_yaml::Value::String("model".into()),
+        );
+        inner_config.insert(
+            serde_yaml::Value::String("header".into()),
+            serde_yaml::Value::String(cfg.header.clone()),
+        );
+
+        let inner = JsonBodyFieldFilter::from_config(&serde_yaml::Value::Mapping(inner_config))?;
+
+        Ok(Box::new(Self { inner, header }))
+    }
+}
+
+#[async_trait]
+impl HttpFilter for ModelToHeaderFilter {
+    fn name(&self) -> &'static str {
+        "model_to_header"
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.inner.on_request(ctx).await
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.inner.on_response(ctx).await
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        self.inner.request_body_access()
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        self.inner.response_body_access()
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        self.inner.request_body_mode()
+    }
+
+    fn response_body_mode(&self) -> BodyMode {
+        self.inner.response_body_mode()
+    }
+
+    fn needs_request_context(&self) -> bool {
+        self.inner.needs_request_context()
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
+        }
+        if !ctx.request_headers_to_remove.contains(&self.header) {
+            ctx.request_headers_to_remove.push(self.header.clone());
+            tracing::debug!(
+                header = %self.header,
+                "model_to_header: dropping client-supplied promotion header (anti-spoofing)"
+            );
+        }
+        self.inner.on_request_body(ctx, body, end_of_stream).await
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        self.inner.on_response_body(ctx, body, end_of_stream)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_config_default_header() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        assert_eq!(
+            filter.name(),
+            "model_to_header",
+            "default config should produce model_to_header"
+        );
+    }
+
+    #[test]
+    fn from_config_custom_header() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("header: X-AI-Model").unwrap();
+        let filter = ModelToHeaderFilter::from_config(&yaml).unwrap();
+        assert_eq!(filter.name(), "model_to_header", "custom header config should parse");
+    }
+
+    #[test]
+    fn from_config_rejects_api_key_header() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("header: x-api-key").unwrap();
+        let err = ModelToHeaderFilter::from_config(&yaml)
+            .err()
+            .expect("x-api-key should be rejected");
+        assert!(
+            err.to_string().contains("x-api-key"),
+            "x-api-key promotion header should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_rejects_format_routing_header() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("header: x-praxis-ai-format").unwrap();
+        let err = ModelToHeaderFilter::from_config(&yaml)
+            .err()
+            .expect("x-praxis-ai-format should be rejected");
+        assert!(
+            err.to_string().contains("x-praxis-ai-format"),
+            "x-praxis-ai-format promotion header should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn body_access_delegates_to_inner() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        assert_eq!(
+            filter.request_body_access(),
+            BodyAccess::ReadOnly,
+            "body access should delegate to inner"
+        );
+        assert!(
+            matches!(
+                filter.request_body_mode(),
+                BodyMode::StreamBuffer {
+                    max_bytes: Some(limit)
+                } if limit > 0
+            ),
+            "body mode should be StreamBuffer with a default size limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn waits_for_end_of_stream() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let json = br#"{"model":"mistral-large-latest","prompt":"hello"}"#;
+        let mut body = Some(Bytes::from_static(json));
+        let original = body.clone();
+
+        let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+        assert_eq!(body, original, "must not promote before end_of_stream");
+        assert!(ctx.extra_request_headers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extracts_model_field() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let json = br#"{"model":"mistral-large-latest","prompt":"hello"}"#;
+        let mut body = Some(Bytes::from_static(json));
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+        assert!(
+            matches!(action, FilterAction::BodyDone),
+            "should complete with BodyDone after extracting model"
+        );
+        assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
+        let (name, value) = &ctx.extra_request_headers[0];
+        assert_eq!(name, "X-Model", "header name should be X-Model");
+        assert_eq!(
+            value, "mistral-large-latest",
+            "model value should be promoted to X-Model header"
+        );
+    }
+
+    #[tokio::test]
+    async fn strips_client_header_alongside_promotion() {
+        // A body-derived promotion must queue a Remove of the owned header in
+        // the same pre-read pass as the Add, so the pass's remove -> set -> add
+        // application drops any spoofed client copy. See praxis-proxy/ai#1039.
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let json = br#"{"model":"llama-3.2-8b","messages":[]}"#;
+        let mut body = Some(Bytes::from_static(json));
+
+        let _action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+        assert!(
+            ctx.request_headers_to_remove.iter().any(|h| h == "x-model"),
+            "the owned header must be queued for removal before promotion"
+        );
+        let (name, value) = &ctx.extra_request_headers[0];
+        assert_eq!(name, "X-Model", "the body-derived value must still be promoted");
+        assert_eq!(value, "llama-3.2-8b", "the promoted value must be the body model");
+    }
+
+    #[tokio::test]
+    async fn strips_client_header_even_without_body_model() {
+        // Fail-closed: the client header is never trusted, so it is removed
+        // even when the body carries no model to promote.
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let json = br#"{"prompt":"hello"}"#;
+        let mut body = Some(Bytes::from_static(json));
+
+        let _action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+        assert!(
+            ctx.request_headers_to_remove.iter().any(|h| h == "x-model"),
+            "the owned header must be removed even when no body model is promoted"
+        );
+        assert!(
+            ctx.extra_request_headers.is_empty(),
+            "no header is promoted when the body has no model"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_header_name_used() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("header: X-AI-Model").unwrap();
+        let filter = ModelToHeaderFilter::from_config(&yaml).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let json = br#"{"model":"claude-3","messages":[]}"#;
+        let mut body = Some(Bytes::from_static(json));
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+        assert!(
+            matches!(action, FilterAction::BodyDone),
+            "should complete with BodyDone after extracting model"
+        );
+        let (name, value) = &ctx.extra_request_headers[0];
+        assert_eq!(name, "X-AI-Model", "header name should be X-AI-Model");
+        assert_eq!(value, "claude-3", "model should be promoted to custom header name");
+    }
+
+    #[tokio::test]
+    async fn continues_when_model_absent() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let json = br#"{"prompt":"hello"}"#;
+        let mut body = Some(Bytes::from_static(json));
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "absent model field should continue"
+        );
+        assert!(
+            ctx.extra_request_headers.is_empty(),
+            "no headers when model field absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_request_is_noop() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+
+        assert!(matches!(action, FilterAction::Continue), "on_request should be a no-op");
+    }
+
+    #[tokio::test]
+    async fn on_response_delegates_to_inner() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut resp);
+
+        let action = filter.on_response(&mut ctx).await.unwrap();
+
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "on_response should delegate to inner and return Continue"
+        );
+    }
+
+    #[test]
+    fn response_body_access_delegates_to_inner() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        assert_eq!(
+            filter.response_body_access(),
+            BodyAccess::None,
+            "response body access should delegate to inner"
+        );
+    }
+
+    #[test]
+    fn response_body_mode_delegates_to_inner() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        assert!(
+            matches!(filter.response_body_mode(), BodyMode::Stream),
+            "response body mode should delegate to inner"
+        );
+    }
+
+    #[test]
+    fn needs_request_context_delegates_to_inner() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        // JsonBodyFieldFilter does not need request context on the
+        // response path; verify the delegate forwards the inner value.
+        assert!(
+            !filter.needs_request_context(),
+            "needs_request_context should delegate to inner and return false"
+        );
+    }
+
+    #[test]
+    fn on_response_body_delegates_to_inner() {
+        let filter = ModelToHeaderFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut body = Some(Bytes::from_static(b"response data"));
+
+        let action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "on_response_body should delegate to inner and return Continue"
+        );
+    }
+}

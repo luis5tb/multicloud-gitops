@@ -1,0 +1,2182 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+//! `OpenAI` Responses API translation for Chat Completions-compatible providers.
+
+use serde::Deserialize;
+use serde_json::{Map, Number, Value, json};
+use thiserror::Error;
+
+use super::reasoning::{
+    ReasoningOptions, ReplayBuffer, extract_reasoning_item, message_has_reasoning, reasoning_item_id, requested_summary,
+};
+use crate::web_search::is_web_search_tool_type;
+
+/// Default prefix prepended to the summary when translating
+/// compaction items to backend-compatible messages.
+///
+/// Lives with the translation helpers (always compiled) so the stateless
+/// Responses path does not depend on the optional compaction filter.
+pub const DEFAULT_SUMMARY_PREFIX: &str = "[Previous conversation summary]\n\n";
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Default `Responses` truncation behavior for translated responses.
+const DEFAULT_TRUNCATION: &str = "disabled";
+
+/// Default service tier for providers that omit it.
+const DEFAULT_SERVICE_TIER: &str = "default";
+
+/// Default `Responses` tool choice when the request did not specify one.
+const DEFAULT_TOOL_CHOICE: &str = "auto";
+
+/// Default text format for translated responses.
+const DEFAULT_TEXT_FORMAT: &str = "text";
+
+/// Maximum query length accepted by the synthesized web-search function.
+const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 4_096;
+
+/// Maximum query length advertised by the synthesized file-search function.
+///
+/// The executor also applies a byte limit before issuing a vector-store
+/// request, so multi-byte input remains bounded at the callout boundary.
+const FILE_SEARCH_QUERY_MAX_LENGTH: usize = 65_536;
+
+/// Description advertised by both synthesized file-search functions so the Chat
+/// Completions (nested) and Responses (flat) shapes never diverge.
+const FILE_SEARCH_FUNCTION_DESCRIPTION: &str = "Search the configured vector stores for relevant files.";
+
+/// Maximum number of vector stores a single hosted file-search tool may target.
+///
+/// `openai_file_search_callout` issues an upstream vector-store query per id on
+/// every inference round, so an unbounded array would amplify one inbound
+/// request into many outbound searches. The OpenAI API currently caps this at
+/// 1; a small generous bound keeps proxy fan-out finite without enforcing the
+/// exact backend range. Keep the rejection message below in sync with this
+/// value.
+const MAX_VECTOR_STORE_IDS: usize = 10;
+
+/// Build the default `Responses` text configuration.
+fn default_text_config() -> Value {
+    json!({"format": {"type": DEFAULT_TEXT_FORMAT}})
+}
+
+// -----------------------------------------------------------------------------
+// Public Types
+// -----------------------------------------------------------------------------
+
+/// Request-scoped context needed to build a `Responses` resource from a provider
+/// Chat Completions response.
+#[derive(Debug, Clone)]
+pub(crate) struct ResponseContext<'a> {
+    /// Stable `Responses` resource id assigned by the caller.
+    pub(crate) response_id: String,
+    /// Creation timestamp for the `Responses` resource.
+    pub(crate) created_at: u64,
+    /// Terminal timestamp for completed or incomplete `Responses` resources.
+    pub(crate) completed_at: Option<u64>,
+    /// Requested model name to expose on the `Responses` resource.
+    pub(crate) model: &'a str,
+    /// Optional `Responses` instructions carried from the original request.
+    pub(crate) instructions: Option<&'a str>,
+    /// Original `Responses` input value.
+    pub(crate) input: Option<&'a Value>,
+    /// Original request metadata to carry onto the response.
+    pub(crate) metadata: Option<&'a Value>,
+    /// Original `Responses` text configuration to carry onto the response.
+    pub(crate) text: Option<&'a Value>,
+    /// Request temperature to echo, or the `Responses` default when absent.
+    pub(crate) temperature: Option<&'a Value>,
+    /// Request top-p value to echo, or the `Responses` default when absent.
+    pub(crate) top_p: Option<&'a Value>,
+    /// Request output token limit to echo.
+    pub(crate) max_output_tokens: Option<u64>,
+    /// Request tool-call limit to echo.
+    pub(crate) max_tool_calls: Option<u64>,
+    /// Whether the original request allowed parallel tool calls.
+    pub(crate) parallel_tool_calls: bool,
+    /// Optional predecessor response id from the original request.
+    pub(crate) previous_response_id: Option<&'a str>,
+    /// Whether the caller asked the `Responses` API to store the response.
+    pub(crate) store: bool,
+    /// Original `Responses` tool definitions.
+    pub(crate) tools: &'a [Value],
+    /// Original `Responses` tool choice value.
+    pub(crate) tool_choice: Option<&'a Value>,
+    /// Request presence penalty to echo on the `Responses` resource.
+    pub(crate) presence_penalty: Option<&'a Value>,
+    /// Request frequency penalty to echo on the `Responses` resource.
+    pub(crate) frequency_penalty: Option<&'a Value>,
+    /// Request top-logprobs value to echo on the `Responses` resource.
+    pub(crate) top_logprobs: Option<u64>,
+    /// Request service tier to echo when the provider omits one.
+    pub(crate) service_tier: Option<&'a Value>,
+    /// Request safety identifier to echo on the `Responses` resource.
+    pub(crate) safety_identifier: Option<&'a Value>,
+    /// Request prompt cache key to echo on the `Responses` resource.
+    pub(crate) prompt_cache_key: Option<&'a Value>,
+    /// Original `Responses` reasoning controls to echo on the `Responses` resource.
+    pub(crate) reasoning: Option<&'a Value>,
+    /// Reasoning dialect behavior applied while translating the response.
+    pub(crate) reasoning_options: ReasoningOptions,
+}
+
+impl<'a> ResponseContext<'a> {
+    /// Build a response context from the original `Responses` request.
+    pub(crate) fn from_responses_request(request: &'a Value, response_id: String, created_at: u64) -> Self {
+        let request = ResponseRequestFields::new(request);
+        Self {
+            response_id,
+            created_at,
+            completed_at: None,
+            model: request.string("model").unwrap_or_default(),
+            instructions: request.string("instructions"),
+            input: request.value("input"),
+            metadata: request.value("metadata"),
+            text: request.value("text"),
+            temperature: request.value("temperature"),
+            top_p: request.value("top_p"),
+            max_output_tokens: request.u64("max_output_tokens"),
+            max_tool_calls: request.u64("max_tool_calls"),
+            parallel_tool_calls: request.bool("parallel_tool_calls").unwrap_or(true),
+            previous_response_id: request.string("previous_response_id"),
+            store: request.bool("store").unwrap_or(true),
+            tools: request.array("tools").unwrap_or_default(),
+            tool_choice: request.value("tool_choice").filter(|v| !v.is_null()),
+            presence_penalty: request.value("presence_penalty"),
+            frequency_penalty: request.value("frequency_penalty"),
+            top_logprobs: request.u64("top_logprobs"),
+            service_tier: request.value("service_tier"),
+            safety_identifier: request.value("safety_identifier"),
+            prompt_cache_key: request.value("prompt_cache_key"),
+            reasoning: request.value("reasoning"),
+            reasoning_options: ReasoningOptions::default(),
+        }
+    }
+
+    /// Return a response context with a terminal completion timestamp.
+    #[must_use]
+    pub(crate) fn with_completed_at(mut self, completed_at: u64) -> Self {
+        self.completed_at = Some(completed_at);
+        self
+    }
+
+    /// Return a response context configured with a reasoning dialect.
+    #[must_use]
+    pub(crate) fn with_reasoning_options(mut self, reasoning_options: ReasoningOptions) -> Self {
+        self.reasoning_options = reasoning_options;
+        self
+    }
+}
+
+/// Borrowed accessor for optional fields in a Responses request.
+#[derive(Debug, Clone, Copy)]
+struct ResponseRequestFields<'a> {
+    /// Optional request object.
+    obj: Option<&'a Map<String, Value>>,
+}
+
+impl<'a> ResponseRequestFields<'a> {
+    /// Create accessors for a request value.
+    fn new(request: &'a Value) -> Self {
+        Self {
+            obj: request.as_object(),
+        }
+    }
+
+    /// Borrow a field value.
+    fn value(self, key: &str) -> Option<&'a Value> {
+        self.obj.and_then(|obj| obj.get(key))
+    }
+
+    /// Borrow a string field.
+    fn string(self, key: &str) -> Option<&'a str> {
+        self.obj.and_then(|obj| obj.get(key)).and_then(Value::as_str)
+    }
+
+    /// Read an unsigned integer field.
+    fn u64(self, key: &str) -> Option<u64> {
+        self.obj.and_then(|obj| obj.get(key)).and_then(Value::as_u64)
+    }
+
+    /// Read a boolean field.
+    fn bool(self, key: &str) -> Option<bool> {
+        self.obj.and_then(|obj| obj.get(key)).and_then(Value::as_bool)
+    }
+
+    /// Borrow an array field.
+    fn array(self, key: &str) -> Option<&'a [Value]> {
+        self.obj
+            .and_then(|obj| obj.get(key))
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+    }
+}
+
+/// Errors produced while translating between `Responses` and Chat Completions.
+#[derive(Debug, Error)]
+pub(crate) enum TranslationError {
+    /// The provided JSON value was not the expected object type.
+    #[error("{0} must be a JSON object")]
+    ExpectedObject(&'static str),
+    /// A Responses input value has no valid Chat Completions representation.
+    #[error("unsupported Responses input type for Chat Completions translation: {0}")]
+    UnsupportedInputType(&'static str),
+    /// A Responses input item omitted a field required for faithful translation.
+    #[error("Responses {item_type} input item is missing required field `{field}`")]
+    MissingInputItemField {
+        /// Stable Responses input item type.
+        item_type: &'static str,
+        /// Required field that was absent.
+        field: &'static str,
+    },
+    /// A Responses input item field has the wrong type for translation.
+    #[error("Responses {item_type} input item field `{field}` must be a string")]
+    InvalidInputItemStringField {
+        /// Stable Responses input item type.
+        item_type: &'static str,
+        /// String field whose value had another JSON type.
+        field: &'static str,
+    },
+    /// A compaction item's `encrypted_content` is not valid base64 or UTF-8.
+    #[error("Responses compaction input item field `encrypted_content` {0}")]
+    InvalidCompactionContent(&'static str),
+    /// A Responses message `content` field is neither a string nor an array of parts.
+    #[error("Responses message input item field `content` must be a string or array of content parts")]
+    InvalidMessageContent,
+    /// A Responses input item `type` discriminator is present but not a string.
+    #[error("Responses input item field `type` must be a string")]
+    InvalidInputItemType,
+    /// A Responses input item has no Chat Completions-compatible representation.
+    #[error("unsupported Responses input item type for Chat Completions translation: {0}")]
+    UnsupportedInputItemType(String),
+    /// A Responses content part has no Chat Completions-compatible representation.
+    #[error("unsupported Responses content part type for Chat Completions translation: {0}")]
+    UnsupportedContentPartType(String),
+    /// A Responses content part has a supported type but unsupported fields.
+    #[error("unsupported Responses content part for Chat Completions translation: {0}")]
+    UnsupportedContentPart(String),
+    /// A Responses tool has no Chat Completions-compatible representation.
+    #[error("unsupported Responses tool type for Chat Completions translation: {0}")]
+    UnsupportedToolType(String),
+    /// A Responses tool choice has no Chat Completions-compatible representation.
+    #[error("unsupported Responses tool_choice type for Chat Completions translation: {0}")]
+    UnsupportedToolChoiceType(String),
+    /// A successful Chat Completions response is missing required translation state.
+    #[error("invalid Chat Completions response: {0}")]
+    InvalidChatResponse(&'static str),
+    /// A client function would be indistinguishable from synthesized web search.
+    #[error("Responses function tool name `web_search` conflicts with the synthesized web_search function")]
+    WebSearchFunctionNameCollision,
+    /// A web-search definition cannot be executed by the local callout.
+    #[error("invalid Responses web-search tool for Chat Completions translation: {0}")]
+    InvalidWebSearchTool(String),
+    /// A synthesized web-search function call cannot be normalized safely.
+    #[error("invalid synthesized web_search function call: {0}")]
+    InvalidWebSearchCall(&'static str),
+    /// A client function would be indistinguishable from synthesized file search.
+    #[error("Responses function tool name `file_search` conflicts with the synthesized file_search function")]
+    FileSearchFunctionNameCollision,
+    /// A file-search definition cannot be executed by the local callout.
+    #[error("invalid Responses file_search tool for Chat Completions translation: {0}")]
+    InvalidFileSearchTool(&'static str),
+    /// A reasoning summary was requested for a dialect without a safe-summary contract.
+    #[error("reasoning.summary is not supported by the configured reasoning dialect")]
+    UnsupportedReasoningSummary,
+    /// The request specified conflicting reasoning summary controls.
+    #[error("reasoning.summary and reasoning.generate_summary conflict")]
+    ConflictingReasoningSummary,
+    /// The provider returned more raw reasoning than the configured limit allows.
+    #[error("raw reasoning content ({bytes} bytes) exceeds the configured maximum of {max_bytes} bytes")]
+    ReasoningTooLarge {
+        /// Observed raw reasoning size in bytes.
+        bytes: usize,
+        /// Configured maximum raw reasoning size in bytes.
+        max_bytes: usize,
+    },
+    /// The provider returned raw reasoning in an unexpected shape.
+    #[error("provider returned malformed raw reasoning content: expected string, found {0}")]
+    MalformedReasoning(String),
+    /// A client-supplied reasoning input item carried raw reasoning in an
+    /// unexpected shape.
+    #[error("malformed reasoning input item: reasoning_text must be a string, found {0}")]
+    MalformedReasoningInput(String),
+    /// A reasoning input item cannot be faithfully replayed.
+    #[error("unsupported reasoning input item: {0}")]
+    UnsupportedReasoningInput(&'static str),
+    /// A reasoning summary control was present but not a string or null.
+    #[error("reasoning.{field} must be a string or null, found {actual}")]
+    MalformedReasoningSummary {
+        /// The summary control field name.
+        field: &'static str,
+        /// The observed JSON type.
+        actual: String,
+    },
+    /// The `reasoning` request field was present but not an object or null.
+    #[error("reasoning must be an object or null, found {0}")]
+    MalformedReasoningBlock(String),
+    /// A Responses request parameter describes behavior this adapter cannot provide.
+    #[error(
+        "Responses `{parameter}` has no Chat Completions representation: got {value}, \
+         this adapter supports only {supported}"
+    )]
+    UnrepresentableRequestParameter {
+        /// Responses request parameter that cannot be honored.
+        parameter: &'static str,
+        /// Bounded description of the requested value: either a recognized
+        /// literal or the JSON type. Never the value itself, which is
+        /// client-controlled and can be megabytes of JSON.
+        value: &'static str,
+        /// The only value this adapter can represent, rendered as JSON.
+        supported: &'static str,
+    },
+}
+
+/// Borrowed canonical request fields that supersede their original request values.
+#[derive(Debug, Clone, Copy, Default)]
+struct RequestOverrides<'a> {
+    /// Canonical enriched message items.
+    messages: Option<&'a [Value]>,
+    /// Canonical processed tool definitions.
+    tools: Option<&'a [Value]>,
+    /// Canonical current tool choice.
+    tool_choice: Option<&'a Value>,
+}
+
+// -----------------------------------------------------------------------------
+// Request Translation
+// -----------------------------------------------------------------------------
+
+/// Convert an `OpenAI` `Responses` create request into a Chat Completions request.
+pub(crate) fn responses_request_to_chat_request(
+    request: &Value,
+    reasoning: &ReasoningOptions,
+) -> Result<Value, TranslationError> {
+    translate_responses_request(request, RequestOverrides::default(), reasoning)
+}
+
+/// Convert canonical Responses state into a Chat Completions request.
+pub(crate) fn responses_state_to_chat_request(
+    request: &Value,
+    messages: &[Value],
+    tools: &[Value],
+    tool_choice: &Value,
+    reasoning: &ReasoningOptions,
+) -> Result<Value, TranslationError> {
+    translate_responses_request(
+        request,
+        RequestOverrides {
+            messages: Some(messages),
+            tools: Some(tools),
+            tool_choice: Some(tool_choice),
+        },
+        reasoning,
+    )
+}
+
+/// Convert a Responses request using optional borrowed canonical state overrides.
+fn translate_responses_request(
+    request: &Value,
+    overrides: RequestOverrides<'_>,
+    reasoning: &ReasoningOptions,
+) -> Result<Value, TranslationError> {
+    let obj = request
+        .as_object()
+        .ok_or(TranslationError::ExpectedObject("Responses request"))?;
+    validate_input_container(obj.get("input"))?;
+    validate_representable_parameters(obj)?;
+
+    let mut chat = Map::new();
+    map_request_parameters(obj, &mut chat);
+
+    let messages = build_chat_messages(obj, overrides.messages, reasoning)?;
+    chat.insert("messages".to_owned(), Value::Array(messages));
+
+    let tools = overrides
+        .tools
+        .or_else(|| obj.get("tools").and_then(Value::as_array).map(Vec::as_slice));
+    let BuiltChatTools {
+        value: built_tools,
+        has_web_search,
+        has_file_search,
+    } = tools.map(build_chat_tools).transpose()?.unwrap_or_default();
+    if let Some(tools) = built_tools {
+        chat.insert("tools".to_owned(), tools);
+    }
+    insert_chat_tool_choice(obj, &mut chat, overrides, has_web_search, has_file_search)?;
+
+    Ok(Value::Object(chat))
+}
+
+/// Resolve and insert the Chat Completions `tool_choice`, when one applies.
+///
+/// A synthesized canonical `auto` is omitted when the request carried no tools
+/// and no explicit choice of its own, so translation does not invent a field the
+/// caller never sent.
+fn insert_chat_tool_choice(
+    obj: &Map<String, Value>,
+    chat: &mut Map<String, Value>,
+    overrides: RequestOverrides<'_>,
+    has_web_search: bool,
+    has_file_search: bool,
+) -> Result<(), TranslationError> {
+    let tool_choice = overrides.tool_choice.or_else(|| obj.get("tool_choice"));
+    let omit_synthesized_default = !chat.contains_key("tools")
+        && obj.get("tool_choice").is_none()
+        && overrides.tool_choice.and_then(Value::as_str) == Some("auto");
+    if !omit_synthesized_default
+        && let Some(tool_choice) = build_chat_tool_choice(tool_choice, has_web_search, has_file_search)?
+    {
+        chat.insert("tool_choice".to_owned(), tool_choice);
+    }
+    Ok(())
+}
+
+/// Copy supported scalar parameters into the Chat Completions request.
+fn map_request_parameters(obj: &Map<String, Value>, chat: &mut Map<String, Value>) {
+    copy_field(obj, chat, "model");
+    copy_field(obj, chat, "temperature");
+    copy_field(obj, chat, "top_p");
+    copy_field(obj, chat, "presence_penalty");
+    copy_field(obj, chat, "frequency_penalty");
+    copy_field(obj, chat, "parallel_tool_calls");
+    copy_field(obj, chat, "prompt_cache_key");
+    copy_field(obj, chat, "service_tier");
+    copy_field(obj, chat, "extra_body");
+    map_top_logprobs(obj, chat);
+    map_reasoning_effort(obj, chat);
+    map_text_format(obj, chat);
+    map_stream_options(obj, chat);
+
+    if let Some(max_output_tokens) = obj.get("max_output_tokens") {
+        chat.insert("max_completion_tokens".to_owned(), max_output_tokens.clone());
+    }
+}
+
+/// Reject request parameters this adapter cannot represent.
+///
+/// `background`, `truncation`, and `prompt` describe behaviors the Chat
+/// Completions translation does not implement. Accepting an unsupported value
+/// would silently change the request semantics, so the request fails closed
+/// instead. Rejecting `background` and `truncation` here is what lets
+/// [`response_resource`] state their defaults truthfully.
+///
+/// Unlike parameters this translator forwards, these fields are dropped rather
+/// than sent upstream, so the backend never sees them and cannot validate them
+/// on our behalf. A malformed value is therefore rejected too: anything that is
+/// not demonstrably the default would otherwise be silently discarded and then
+/// reported back as the default.
+fn validate_representable_parameters(obj: &Map<String, Value>) -> Result<(), TranslationError> {
+    validate_prompt_parameter(obj)?;
+
+    if let Some(background) = obj.get("background").filter(|value| !value.is_null())
+        && background.as_bool() != Some(false)
+    {
+        return Err(TranslationError::UnrepresentableRequestParameter {
+            parameter: "background",
+            value: if background.as_bool() == Some(true) {
+                "true"
+            } else {
+                json_type_name(background)
+            },
+            supported: "`background` false",
+        });
+    }
+
+    if let Some(truncation) = obj.get("truncation").filter(|value| !value.is_null())
+        && truncation.as_str() != Some(DEFAULT_TRUNCATION)
+    {
+        return Err(TranslationError::UnrepresentableRequestParameter {
+            parameter: "truncation",
+            value: if truncation.as_str() == Some("auto") {
+                "\"auto\""
+            } else {
+                json_type_name(truncation)
+            },
+            supported: "`truncation` \"disabled\"",
+        });
+    }
+
+    Ok(())
+}
+
+/// Reject a non-null prompt because Chat Completions cannot resolve it.
+fn validate_prompt_parameter(obj: &Map<String, Value>) -> Result<(), TranslationError> {
+    let Some(prompt) = obj.get("prompt").filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    Err(TranslationError::UnrepresentableRequestParameter {
+        parameter: "prompt",
+        value: json_type_name(prompt),
+        supported: "`prompt` null",
+    })
+}
+
+/// Copy a field from one JSON object to another.
+fn copy_field(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
+    if let Some(value) = source.get(key) {
+        target.insert(key.to_owned(), value.clone());
+    }
+}
+
+/// Map `top_logprobs` and required Chat Completions `logprobs` toggle together.
+fn map_top_logprobs(source: &Map<String, Value>, target: &mut Map<String, Value>) {
+    if let Some(top_logprobs) = source.get("top_logprobs") {
+        target.insert("top_logprobs".to_owned(), top_logprobs.clone());
+        target.insert("logprobs".to_owned(), Value::Bool(true));
+    }
+}
+
+/// Convert `Responses` reasoning controls to the Chat Completions field shape.
+fn map_reasoning_effort(source: &Map<String, Value>, target: &mut Map<String, Value>) {
+    if let Some(effort) = source.get("reasoning").and_then(|reasoning| reasoning.get("effort")) {
+        target.insert("reasoning_effort".to_owned(), effort.clone());
+    }
+}
+
+/// Convert `Responses` structured-output text format to Chat `response_format`.
+fn map_text_format(source: &Map<String, Value>, target: &mut Map<String, Value>) {
+    let Some(format) = source
+        .get("text")
+        .and_then(|text| text.get("format"))
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+
+    let Some(format_type) = format.get("type").and_then(Value::as_str) else {
+        return;
+    };
+
+    match format_type {
+        "json_object" => {
+            target.insert("response_format".to_owned(), json!({"type": "json_object"}));
+        },
+        "json_schema" => {
+            target.insert("response_format".to_owned(), json_schema_response_format(format));
+        },
+        _ => {},
+    }
+}
+
+/// Preserve streaming controls while requiring token usage in streaming responses.
+fn map_stream_options(source: &Map<String, Value>, target: &mut Map<String, Value>) {
+    let stream = source.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    if let Some(value) = source.get("stream") {
+        target.insert("stream".to_owned(), value.clone());
+    }
+    if !stream {
+        return;
+    }
+
+    let mut options = source
+        .get("stream_options")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    options.insert("include_usage".to_owned(), Value::Bool(true));
+    target.insert("stream_options".to_owned(), Value::Object(options));
+}
+
+/// Build Chat Completions `json_schema` response format from a Responses format.
+fn json_schema_response_format(format: &Map<String, Value>) -> Value {
+    if let Some(json_schema) = format.get("json_schema").and_then(Value::as_object) {
+        return json!({
+            "type": "json_schema",
+            "json_schema": Value::Object(json_schema.clone())
+        });
+    }
+
+    let mut json_schema = Map::new();
+    copy_field(format, &mut json_schema, "name");
+    copy_field(format, &mut json_schema, "description");
+    copy_field(format, &mut json_schema, "schema");
+    copy_field(format, &mut json_schema, "strict");
+
+    json!({
+        "type": "json_schema",
+        "json_schema": Value::Object(json_schema)
+    })
+}
+
+/// Build Chat Completions messages from `Responses` instructions and input.
+fn build_chat_messages(
+    obj: &Map<String, Value>,
+    messages_override: Option<&[Value]>,
+    reasoning: &ReasoningOptions,
+) -> Result<Vec<Value>, TranslationError> {
+    let mut messages = Vec::new();
+
+    if let Some(instructions) = obj.get("instructions").and_then(Value::as_str)
+        && !instructions.is_empty()
+    {
+        messages.push(json!({"role": "system", "content": instructions}));
+    }
+
+    if let Some(override_messages) = messages_override {
+        append_input_item_sequence(&mut messages, override_messages, reasoning)?;
+    } else if let Some(input) = obj.get("input") {
+        append_input_messages(&mut messages, input, reasoning)?;
+    }
+
+    Ok(messages)
+}
+
+/// Append converted input messages to a Chat Completions message list.
+fn append_input_messages(
+    messages: &mut Vec<Value>,
+    input: &Value,
+    reasoning: &ReasoningOptions,
+) -> Result<(), TranslationError> {
+    match input {
+        Value::String(text) => messages.push(json!({"role": "user", "content": text})),
+        Value::Array(items) => append_input_item_sequence(messages, items, reasoning)?,
+        Value::Object(_) => append_input_item_sequence(messages, std::slice::from_ref(input), reasoning)?,
+        Value::Null => {},
+        _ => return Err(unsupported_input_type(input)),
+    }
+
+    Ok(())
+}
+
+/// Append a sequence of Responses input items, batching adjacent function calls.
+fn append_input_item_sequence(
+    messages: &mut Vec<Value>,
+    items: &[Value],
+    reasoning: &ReasoningOptions,
+) -> Result<(), TranslationError> {
+    let mut pending_tool_calls = Vec::new();
+    let mut replay = ReplayBuffer::new(reasoning);
+    for item in items {
+        if let Some(obj) = item.as_object() {
+            match obj.get("type").and_then(Value::as_str) {
+                Some("function_call") => {
+                    pending_tool_calls.push(function_call_tool_call(obj)?);
+                    continue;
+                },
+                Some("reasoning") => {
+                    replay.buffer(obj)?;
+                    continue;
+                },
+                _ => {},
+            }
+        }
+
+        flush_pending_function_calls(messages, &mut pending_tool_calls, &mut replay)?;
+        append_input_item(messages, item, &mut replay)?;
+    }
+    flush_pending_function_calls(messages, &mut pending_tool_calls, &mut replay)?;
+    replay.flush_standalone(messages)?;
+    Ok(())
+}
+
+/// Flush adjacent Responses function calls and buffered reasoning into one assistant message.
+fn flush_pending_function_calls(
+    messages: &mut Vec<Value>,
+    pending_tool_calls: &mut Vec<Value>,
+    replay: &mut ReplayBuffer<'_>,
+) -> Result<(), TranslationError> {
+    if pending_tool_calls.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = json!({
+        "role": "assistant",
+        "content": null,
+        "tool_calls": std::mem::take(pending_tool_calls),
+    });
+    replay.attach(&mut message)?;
+    messages.push(message);
+    Ok(())
+}
+
+/// Convert a single `Responses` input item into one Chat Completions message.
+fn append_input_item(
+    messages: &mut Vec<Value>,
+    item: &Value,
+    replay: &mut ReplayBuffer<'_>,
+) -> Result<(), TranslationError> {
+    let Some(obj) = item.as_object() else {
+        return Err(TranslationError::ExpectedObject("Responses input item"));
+    };
+
+    match input_item_type(obj)? {
+        Some("function_call_output") => {
+            replay.flush_standalone(messages)?;
+            append_tool_output(messages, obj)?;
+        },
+        Some("message") => append_message_item(messages, obj, replay)?,
+        Some("compaction") => {
+            replay.flush_standalone(messages)?;
+            append_compaction_item(messages, obj)?;
+        },
+        None if obj.contains_key("role") || obj.contains_key("content") => {
+            append_message_item(messages, obj, replay)?;
+        },
+        None => return Err(TranslationError::UnsupportedInputItemType("unknown".to_owned())),
+        Some(input_type) => return Err(TranslationError::UnsupportedInputItemType(input_type.to_owned())),
+    }
+
+    Ok(())
+}
+
+/// Read a Responses input item `type` discriminator.
+///
+/// A missing `type` is allowed (the caller falls back to message detection),
+/// but a present non-string discriminator fails closed rather than being
+/// treated as an untyped message that silently drops the invalid value.
+fn input_item_type(obj: &Map<String, Value>) -> Result<Option<&str>, TranslationError> {
+    match obj.get("type") {
+        Some(Value::String(item_type)) => Ok(Some(item_type)),
+        Some(_) => Err(TranslationError::InvalidInputItemType),
+        None => Ok(None),
+    }
+}
+
+/// Convert a Responses message item into a Chat Completions message.
+fn append_message_item(
+    messages: &mut Vec<Value>,
+    obj: &Map<String, Value>,
+    replay: &mut ReplayBuffer<'_>,
+) -> Result<(), TranslationError> {
+    let role = required_input_item_string(obj, "message", "role")?;
+    let content = obj.get("content").ok_or(TranslationError::MissingInputItemField {
+        item_type: "message",
+        field: "content",
+    })?;
+    let content = convert_input_content(content)?;
+    let mut message = json!({"role": role, "content": content});
+    if role == "assistant" {
+        replay.attach(&mut message)?;
+    } else {
+        replay.flush_standalone(messages)?;
+    }
+    messages.push(message);
+    Ok(())
+}
+
+/// Convert a Responses compaction item into a Chat Completions assistant message.
+///
+/// Uses assistant role (not system) to avoid elevating the summary's
+/// instruction priority — it is informational context, not instructions.
+/// Empty decoded summaries are omitted; malformed content fails closed.
+fn append_compaction_item(messages: &mut Vec<Value>, obj: &Map<String, Value>) -> Result<(), TranslationError> {
+    let encoded = required_input_item_string(obj, "compaction", "encrypted_content")?;
+    let summary = decode_compaction_summary(encoded)?;
+    if !summary.is_empty() {
+        let prefix = obj
+            .get("summary_prefix")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_SUMMARY_PREFIX);
+        messages.push(json!({
+            "role": "assistant",
+            "content": format!("{prefix}{summary}")
+        }));
+    }
+    Ok(())
+}
+
+/// Decode compaction `encrypted_content` as standard base64 UTF-8 text.
+fn decode_compaction_summary(encoded: &str) -> Result<String, TranslationError> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_decode| TranslationError::InvalidCompactionContent("must be valid base64"))?;
+    String::from_utf8(bytes).map_err(|_utf8| TranslationError::InvalidCompactionContent("must be valid UTF-8"))
+}
+
+/// Convert one Responses function-call item to a Chat tool-call object.
+fn function_call_tool_call(obj: &Map<String, Value>) -> Result<Value, TranslationError> {
+    let call_id = required_input_item_string(obj, "function_call", "call_id")?;
+    let name = required_input_item_string(obj, "function_call", "name")?;
+    // Responses function-call `arguments` is always a JSON-encoded string; a
+    // non-string value fails closed instead of being stringified into the
+    // Chat Completions request.
+    let arguments = required_input_item_string(obj, "function_call", "arguments")?;
+
+    Ok(json!({
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
+    }))
+}
+
+/// Convert a `Responses` function call output item into a Chat tool message.
+fn append_tool_output(messages: &mut Vec<Value>, obj: &Map<String, Value>) -> Result<(), TranslationError> {
+    let call_id = required_input_item_string(obj, "function_call_output", "call_id")?;
+    let output = obj.get("output").ok_or(TranslationError::MissingInputItemField {
+        item_type: "function_call_output",
+        field: "output",
+    })?;
+
+    messages.push(json!({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": chat_string_field(Some(output))
+    }));
+    Ok(())
+}
+
+/// Validate the outer Responses input shape before canonical state overrides
+/// can hide an invalid scalar value.
+fn validate_input_container(input: Option<&Value>) -> Result<(), TranslationError> {
+    match input {
+        None | Some(Value::Null | Value::String(_) | Value::Array(_) | Value::Object(_)) => Ok(()),
+        Some(input) => Err(unsupported_input_type(input)),
+    }
+}
+
+/// Build a stable error for an unsupported outer input value.
+fn unsupported_input_type(input: &Value) -> TranslationError {
+    TranslationError::UnsupportedInputType(json_type_name(input))
+}
+
+/// Read a required string field from a Responses input item.
+fn required_input_item_string<'a>(
+    obj: &'a Map<String, Value>,
+    item_type: &'static str,
+    field: &'static str,
+) -> Result<&'a str, TranslationError> {
+    match obj.get(field) {
+        Some(Value::String(value)) => Ok(value),
+        Some(_) => Err(TranslationError::InvalidInputItemStringField { item_type, field }),
+        None => Err(TranslationError::MissingInputItemField { item_type, field }),
+    }
+}
+
+/// Convert an optional JSON field to Chat's string-valued history fields.
+fn chat_string_field(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::String(text)) => Value::String(text.clone()),
+        Some(value) => Value::String(value.to_string()),
+        None => Value::String(String::new()),
+    }
+}
+
+/// Convert `Responses` text content into the most compatible Chat form.
+///
+/// Message content must be a plain string or an array of content parts; any
+/// other JSON type (number, boolean, object, null) has no faithful Chat
+/// Completions representation and fails closed rather than passing through.
+fn convert_input_content(content: &Value) -> Result<Value, TranslationError> {
+    match content {
+        Value::String(_) => Ok(content.clone()),
+        Value::Array(parts) => convert_input_content_parts(parts),
+        _ => Err(TranslationError::InvalidMessageContent),
+    }
+}
+
+/// Convert `Responses` content parts, collapsing text-only content to a string.
+fn convert_input_content_parts(parts: &[Value]) -> Result<Value, TranslationError> {
+    let mut converted = ConvertedContentParts::default();
+
+    for part in parts {
+        converted.push(part)?;
+    }
+
+    Ok(converted.finish())
+}
+
+/// Accumulates converted Chat content parts.
+#[derive(Debug)]
+struct ConvertedContentParts {
+    /// Raw text fragments for text-only content.
+    text_parts: Vec<String>,
+    /// Chat content parts for mixed content.
+    chat_parts: Vec<Value>,
+    /// Whether every observed part was a text part.
+    all_text: bool,
+}
+
+impl ConvertedContentParts {
+    /// Push one Responses content part.
+    fn push(&mut self, part: &Value) -> Result<(), TranslationError> {
+        match part.get("type").and_then(Value::as_str) {
+            Some("input_text" | "output_text" | "text") => self.push_text(part)?,
+            Some("input_image") => {
+                self.push_non_text(convert_input_image_part(part)?);
+            },
+            Some("input_file") => {
+                self.push_non_text(convert_input_file_part(part)?);
+            },
+            Some(part_type) => return Err(TranslationError::UnsupportedContentPartType(part_type.to_owned())),
+            None => return Err(TranslationError::UnsupportedContentPartType("unknown".to_owned())),
+        }
+
+        Ok(())
+    }
+
+    /// Push a text content part.
+    ///
+    /// A supported text part must carry a string `text` field; a missing or
+    /// non-string value fails closed instead of silently contributing nothing.
+    fn push_text(&mut self, part: &Value) -> Result<(), TranslationError> {
+        let Some(text) = part.get("text").and_then(Value::as_str) else {
+            return Err(TranslationError::UnsupportedContentPart(
+                "text content part requires a string `text` field".to_owned(),
+            ));
+        };
+        self.text_parts.push(text.to_owned());
+        self.chat_parts.push(json!({"type": "text", "text": text}));
+        Ok(())
+    }
+
+    /// Push a content part that prevents text-only collapse.
+    fn push_non_text(&mut self, part: Value) {
+        self.all_text = false;
+        self.chat_parts.push(part);
+    }
+
+    /// Finish as either a collapsed text string or mixed content parts.
+    fn finish(self) -> Value {
+        if self.all_text {
+            Value::String(self.text_parts.join(""))
+        } else {
+            Value::Array(self.chat_parts)
+        }
+    }
+}
+
+impl Default for ConvertedContentParts {
+    fn default() -> Self {
+        Self {
+            text_parts: Vec::new(),
+            chat_parts: Vec::new(),
+            all_text: true,
+        }
+    }
+}
+
+/// Convert a `Responses` image part into a Chat Completions image part.
+fn convert_input_image_part(part: &Value) -> Result<Value, TranslationError> {
+    let Some(obj) = part.as_object() else {
+        return Err(TranslationError::UnsupportedContentPartType("input_image".to_owned()));
+    };
+    let Some(url) = obj.get("image_url").cloned() else {
+        let reason = if obj.contains_key("file_id") {
+            "input_image requires image_url; file_id references are not supported"
+        } else {
+            "input_image requires image_url"
+        };
+        return Err(TranslationError::UnsupportedContentPart(reason.to_owned()));
+    };
+
+    let mut image_url = Map::new();
+    image_url.insert("url".to_owned(), url);
+    copy_field(obj, &mut image_url, "detail");
+
+    Ok(json!({
+        "type": "image_url",
+        "image_url": Value::Object(image_url)
+    }))
+}
+
+/// Convert a `Responses` file content part into Chat Completions shape.
+fn convert_input_file_part(part: &Value) -> Result<Value, TranslationError> {
+    let Some(obj) = part.as_object() else {
+        return Err(TranslationError::UnsupportedContentPartType("input_file".to_owned()));
+    };
+    let mut file = Map::new();
+    copy_field(obj, &mut file, "file_id");
+    copy_field(obj, &mut file, "filename");
+    copy_field(obj, &mut file, "file_data");
+    // Praxis executors can resolve Responses file URLs before making the
+    // provider call, so keep them explicit in the translated file part.
+    copy_field(obj, &mut file, "file_url");
+
+    if file.is_empty() {
+        return Err(TranslationError::UnsupportedContentPart(
+            "input_file requires file_id, filename, file_data, or file_url".to_owned(),
+        ));
+    }
+
+    Ok(json!({
+        "type": "file",
+        "file": Value::Object(file)
+    }))
+}
+
+/// Chat tool translation plus facts needed to validate `tool_choice`.
+#[derive(Default)]
+struct BuiltChatTools {
+    /// Translated Chat Completions tools, omitted when empty.
+    value: Option<Value>,
+    /// Whether the request declared a valid hosted web-search tool.
+    has_web_search: bool,
+    /// Whether the request declared a valid hosted file-search tool.
+    has_file_search: bool,
+}
+
+/// Build Chat Completions tool definitions from `Responses` tools.
+fn build_chat_tools(tools: &[Value]) -> Result<BuiltChatTools, TranslationError> {
+    validate_web_search_tools(tools)?;
+    validate_file_search_tools(tools)?;
+
+    let mut chat_tools = Vec::new();
+    let mut has_web_search = false;
+    let mut has_file_search = false;
+
+    for tool in tools {
+        let Some(tool_obj) = tool.as_object() else {
+            continue;
+        };
+
+        match tool_obj.get("type").and_then(Value::as_str) {
+            Some("function") => chat_tools.push(convert_function_tool(tool_obj)),
+            Some(tool_type) if is_web_search_tool_type(tool_type) => {
+                chat_tools.push(synthesized_web_search_tool());
+                has_web_search = true;
+            },
+            Some("file_search") => {
+                chat_tools.push(synthesized_file_search_tool());
+                has_file_search = true;
+            },
+            Some(tool_type) => return Err(TranslationError::UnsupportedToolType(tool_type.to_owned())),
+            None => return Err(TranslationError::UnsupportedToolType("unknown".to_owned())),
+        }
+    }
+
+    Ok(BuiltChatTools {
+        value: (!chat_tools.is_empty()).then_some(Value::Array(chat_tools)),
+        has_web_search,
+        has_file_search,
+    })
+}
+
+/// Reject ambiguous or structurally unusable web-search declarations.
+fn validate_web_search_tools(tools: &[Value]) -> Result<(), TranslationError> {
+    let mut web_search_count = 0_usize;
+    let mut has_web_search_function = false;
+
+    for tool in tools.iter().filter_map(Value::as_object) {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") if function_tool_name(tool) == Some("web_search") => {
+                has_web_search_function = true;
+            },
+            Some(tool_type) if is_web_search_tool_type(tool_type) => {
+                web_search_count = web_search_count.saturating_add(1);
+                validate_web_search_tool(tool)?;
+            },
+            _ => {},
+        }
+    }
+
+    if web_search_count > 1 {
+        return Err(TranslationError::InvalidWebSearchTool(
+            "only one web-search tool may be declared".to_owned(),
+        ));
+    }
+    if web_search_count == 1 && has_web_search_function {
+        return Err(TranslationError::WebSearchFunctionNameCollision);
+    }
+
+    Ok(())
+}
+
+/// Reject ambiguous or structurally unusable file-search declarations.
+///
+/// Shared by the Chat Completions translation and the native
+/// `openai_file_search_callout` lowering so both paths reject identical
+/// malformed hosted-tool declarations (collisions, duplicates, bad fields).
+pub(crate) fn validate_file_search_tools(tools: &[Value]) -> Result<(), TranslationError> {
+    let mut file_search_count = 0_usize;
+    let mut has_file_search_function = false;
+
+    for tool in tools.iter().filter_map(Value::as_object) {
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") if function_tool_name(tool) == Some("file_search") => {
+                has_file_search_function = true;
+            },
+            Some("file_search") => {
+                file_search_count = file_search_count.saturating_add(1);
+                validate_file_search_tool(tool)?;
+            },
+            _ => {},
+        }
+    }
+
+    if file_search_count > 1 {
+        return Err(TranslationError::InvalidFileSearchTool(
+            "only one file_search tool may be declared",
+        ));
+    }
+    if file_search_count == 1 && has_file_search_function {
+        return Err(TranslationError::FileSearchFunctionNameCollision);
+    }
+
+    Ok(())
+}
+
+/// Return a function name from either Responses or pre-wrapped Chat shape.
+fn function_tool_name(tool: &Map<String, Value>) -> Option<&str> {
+    tool.get("name")
+        .and_then(Value::as_str)
+        .or_else(|| tool.get("function")?.get("name")?.as_str())
+}
+
+/// Validate fields understood by the existing local web-search executor.
+fn validate_web_search_tool(tool: &Map<String, Value>) -> Result<(), TranslationError> {
+    for field in tool.keys() {
+        if !matches!(field.as_str(), "type" | "search_context_size" | "user_location") {
+            return Err(TranslationError::InvalidWebSearchTool(format!(
+                "field `{field}` is not supported by openai_web_search"
+            )));
+        }
+    }
+
+    if let Some(context_size) = tool.get("search_context_size")
+        && !matches!(context_size.as_str(), Some("low" | "medium" | "high"))
+    {
+        return Err(TranslationError::InvalidWebSearchTool(
+            "search_context_size must be one of low, medium, or high".to_owned(),
+        ));
+    }
+
+    // `WebSearchApproximateLocation` is object-or-null in the pinned schema, so a
+    // null location is a valid "unset" and must be treated as omitted, not rejected.
+    if let Some(user_location) = tool.get("user_location")
+        && !user_location.is_null()
+    {
+        validate_web_search_user_location(user_location)?;
+    }
+
+    Ok(())
+}
+
+/// Validate fields required later by `openai_file_search_callout`.
+fn validate_file_search_tool(tool: &Map<String, Value>) -> Result<(), TranslationError> {
+    validate_vector_store_ids(tool)?;
+
+    if tool
+        .get("max_num_results")
+        .is_some_and(|value| !matches!(value.as_u64(), Some(1..=50)))
+    {
+        return Err(TranslationError::InvalidFileSearchTool(
+            "max_num_results must be an integer between 1 and 50",
+        ));
+    }
+    if tool
+        .get("filters")
+        .is_some_and(|value| !value.is_null() && !value.is_object())
+    {
+        return Err(TranslationError::InvalidFileSearchTool(
+            "filters must be an object or null",
+        ));
+    }
+    if tool.get("ranking_options").is_some_and(|value| !value.is_object()) {
+        return Err(TranslationError::InvalidFileSearchTool(
+            "ranking_options must be an object",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate the canonical approximate-location shape retained in state.
+fn validate_web_search_user_location(user_location: &Value) -> Result<(), TranslationError> {
+    let Some(location) = user_location.as_object() else {
+        return Err(TranslationError::InvalidWebSearchTool(
+            "user_location must be an object".to_owned(),
+        ));
+    };
+    for field in location.keys() {
+        if !matches!(field.as_str(), "type" | "city" | "country" | "region" | "timezone") {
+            return Err(TranslationError::InvalidWebSearchTool(format!(
+                "user_location field `{field}` is not supported"
+            )));
+        }
+    }
+    if location.get("type").and_then(Value::as_str) != Some("approximate") {
+        return Err(TranslationError::InvalidWebSearchTool(
+            "user_location.type must be approximate".to_owned(),
+        ));
+    }
+    // Each optional member is string-or-null in the pinned schema; a null member is
+    // a valid "unset", so only non-null values must be non-empty strings.
+    for field in ["city", "country", "region", "timezone"] {
+        if location
+            .get(field)
+            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
+        {
+            return Err(TranslationError::InvalidWebSearchTool(format!(
+                "user_location.{field} must be a non-empty string"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Build the private Chat Completions representation of hosted web search.
+fn synthesized_web_search_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for up-to-date information.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": WEB_SEARCH_QUERY_MAX_LENGTH
+                    }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    })
+}
+
+/// Validate the vector stores that the callout will search.
+fn validate_vector_store_ids(tool: &Map<String, Value>) -> Result<(), TranslationError> {
+    const ERROR: TranslationError =
+        TranslationError::InvalidFileSearchTool("vector_store_ids must be a non-empty array of non-empty strings");
+    let vector_store_ids = tool.get("vector_store_ids").and_then(Value::as_array).ok_or(ERROR)?;
+    if vector_store_ids.is_empty()
+        || vector_store_ids
+            .iter()
+            .any(|value| value.as_str().is_none_or(str::is_empty))
+    {
+        return Err(ERROR);
+    }
+    if vector_store_ids.len() > MAX_VECTOR_STORE_IDS {
+        return Err(TranslationError::InvalidFileSearchTool(
+            "vector_store_ids must contain at most 10 entries",
+        ));
+    }
+    Ok(())
+}
+
+/// Shared JSON Schema parameters for the synthesized file-search function.
+///
+/// Both the Chat Completions [`synthesized_file_search_tool`] and the native
+/// Responses [`synthesized_file_search_tool_responses`] build from this so the
+/// two lowered shapes carry an identical query bound.
+fn file_search_function_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": FILE_SEARCH_QUERY_MAX_LENGTH
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    })
+}
+
+/// Build the private Chat Completions representation of hosted file search.
+fn synthesized_file_search_tool() -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": "file_search",
+            "description": FILE_SEARCH_FUNCTION_DESCRIPTION,
+            "parameters": file_search_function_parameters(),
+            "strict": true
+        }
+    })
+}
+
+/// Build the private Responses representation of hosted file search.
+///
+/// The flat function shape (`{"type":"function","name":...}`) targets a native
+/// `/v1/responses` backend that cannot consume the hosted `file_search` tool. It
+/// shares the description and parameters schema with the Chat Completions
+/// [`synthesized_file_search_tool`] so the two never diverge; the native lowering
+/// in `openai_file_search_callout` substitutes it into the outbound request.
+pub(crate) fn synthesized_file_search_tool_responses() -> Value {
+    json!({
+        "type": "function",
+        "name": "file_search",
+        "description": FILE_SEARCH_FUNCTION_DESCRIPTION,
+        "parameters": file_search_function_parameters(),
+        "strict": true
+    })
+}
+
+/// Lower a Responses `tool_choice` for a native backend that cannot consume the
+/// hosted `file_search` choice.
+///
+/// Returns the flat function choice to substitute, or `None` when the choice
+/// needs no change (strings and object choices that do not target file search).
+/// Mirrors [`build_object_tool_choice`]'s file-search rules so the native
+/// lowering in `openai_file_search_callout` and the Chat translation reject the
+/// same mismatched choices. Callers must confirm a hosted `file_search` tool is
+/// declared before invoking this.
+pub(crate) fn responses_file_search_tool_choice_lowering(
+    tool_choice: &Value,
+) -> Result<Option<Value>, TranslationError> {
+    let Some(choice) = tool_choice.as_object() else {
+        return Ok(None);
+    };
+    match choice.get("type").and_then(Value::as_str) {
+        Some("file_search") => Ok(Some(json!({"type": "function", "name": "file_search"}))),
+        Some("function") if choice.get("name").and_then(Value::as_str) == Some("file_search") => Err(
+            TranslationError::InvalidFileSearchTool("tool_choice for hosted file_search must use type file_search"),
+        ),
+        _ => Ok(None),
+    }
+}
+
+/// Convert a `Responses` function tool to the Chat Completions nested shape.
+fn convert_function_tool(tool: &Map<String, Value>) -> Value {
+    if tool.contains_key("function") {
+        return Value::Object(tool.clone());
+    }
+
+    let mut function = Map::new();
+    copy_field(tool, &mut function, "name");
+    copy_field(tool, &mut function, "description");
+    copy_field(tool, &mut function, "parameters");
+    copy_field(tool, &mut function, "strict");
+
+    json!({
+        "type": "function",
+        "function": Value::Object(function)
+    })
+}
+
+/// Convert Responses `tool_choice` into Chat Completions-compatible shape.
+///
+/// An explicit JSON `null` (or absent `None`) is treated as absent/default per
+/// observed OpenAI compatibility, returning `Ok(None)` so translation omits the
+/// `tool_choice` field from the outbound Chat Completions request.
+fn build_chat_tool_choice(
+    choice: Option<&Value>,
+    has_web_search: bool,
+    has_file_search: bool,
+) -> Result<Option<Value>, TranslationError> {
+    let Some(choice) = choice else {
+        return Ok(None);
+    };
+
+    match choice {
+        Value::Null => Ok(None),
+        Value::String(_) => Ok(Some(choice.clone())),
+        Value::Object(choice_obj) => build_object_tool_choice(choice_obj, has_web_search, has_file_search).map(Some),
+        _ => Err(TranslationError::UnsupportedToolChoiceType(
+            json_type_name(choice).to_owned(),
+        )),
+    }
+}
+
+/// Convert an object-form Responses tool choice.
+fn build_object_tool_choice(
+    choice: &Map<String, Value>,
+    has_web_search: bool,
+    has_file_search: bool,
+) -> Result<Value, TranslationError> {
+    match choice.get("type").and_then(Value::as_str) {
+        Some("function") if has_web_search && function_tool_name(choice) == Some("web_search") => {
+            Err(TranslationError::InvalidWebSearchTool(
+                "tool_choice for hosted web search must use its hosted tool type".to_owned(),
+            ))
+        },
+        Some("function") if has_file_search && choice.get("name").and_then(Value::as_str) == Some("file_search") => {
+            Err(TranslationError::InvalidFileSearchTool(
+                "tool_choice for hosted file_search must use type file_search",
+            ))
+        },
+        Some("function") => {
+            let mut function = Map::new();
+            copy_field(choice, &mut function, "name");
+            Ok(json!({"type": "function", "function": Value::Object(function)}))
+        },
+        Some(tool_type) if is_web_search_tool_type(tool_type) && has_web_search => {
+            Ok(json!({"type": "function", "function": {"name": "web_search"}}))
+        },
+        Some(tool_type) if is_web_search_tool_type(tool_type) => Err(TranslationError::InvalidWebSearchTool(
+            "web-search tool_choice requires a declared web-search tool".to_owned(),
+        )),
+        Some("file_search") if has_file_search => Ok(json!({"type": "function", "function": {"name": "file_search"}})),
+        Some("file_search") => Err(TranslationError::InvalidFileSearchTool(
+            "tool_choice requires a declared file_search tool",
+        )),
+        Some(other) => Err(TranslationError::UnsupportedToolChoiceType(other.to_owned())),
+        None => Err(TranslationError::UnsupportedToolChoiceType("unknown".to_owned())),
+    }
+}
+
+/// Return a stable JSON type name for diagnostics.
+pub(crate) fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Response Translation
+// -----------------------------------------------------------------------------
+
+/// Convert a Chat Completions response into an `OpenAI` `Responses` resource.
+pub(crate) fn chat_response_to_response_resource(
+    response: &Value,
+    context: &ResponseContext<'_>,
+) -> Result<Value, TranslationError> {
+    let obj = response
+        .as_object()
+        .ok_or(TranslationError::ExpectedObject("Chat Completions response"))?;
+
+    let finish_reason = validate_chat_response(obj, &context.reasoning_options)?;
+    let status = response_status(finish_reason);
+    let incomplete_details = incomplete_details(finish_reason);
+    let output = build_output_items(obj, context, status)?;
+    let usage = build_usage(obj);
+    let service_tier = service_tier_value_with_context(obj, context);
+    let parts = ResponseResourceParts {
+        status,
+        incomplete_details: &incomplete_details,
+        output,
+        usage: &usage,
+        service_tier: &service_tier,
+    };
+
+    response_resource(context, parts)
+}
+
+/// Validate the minimum successful Chat Completions shape used by translation.
+fn validate_chat_response<'a>(
+    obj: &'a Map<String, Value>,
+    reasoning_options: &ReasoningOptions,
+) -> Result<&'a str, TranslationError> {
+    let choices = obj
+        .get("choices")
+        .and_then(Value::as_array)
+        .ok_or(TranslationError::InvalidChatResponse("choices must be an array"))?;
+    let choice = choices
+        .first()
+        .and_then(Value::as_object)
+        .ok_or(TranslationError::InvalidChatResponse("choices must contain an object"))?;
+    let finish_reason =
+        choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .ok_or(TranslationError::InvalidChatResponse(
+                "first choice must contain a string finish_reason",
+            ))?;
+    if !matches!(finish_reason, "stop" | "length" | "tool_calls" | "content_filter") {
+        return Err(TranslationError::InvalidChatResponse(
+            "first choice contains an unsupported finish_reason",
+        ));
+    }
+
+    validate_chat_message(choice, finish_reason, reasoning_options)?;
+    Ok(finish_reason)
+}
+
+/// Validate the assistant message fields that the translator consumes.
+fn validate_chat_message(
+    choice: &Map<String, Value>,
+    finish_reason: &str,
+    reasoning_options: &ReasoningOptions,
+) -> Result<(), TranslationError> {
+    let message = choice
+        .get("message")
+        .and_then(Value::as_object)
+        .ok_or(TranslationError::InvalidChatResponse(
+            "first choice must contain a message object",
+        ))?;
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Err(TranslationError::InvalidChatResponse(
+            "first choice message must have the assistant role",
+        ));
+    }
+
+    let has_content = validate_chat_content(message)?;
+    let has_refusal = validate_chat_refusal(message)?;
+    let has_tool_calls = validate_chat_tool_calls(message, finish_reason)?;
+    let has_reasoning = message_has_reasoning(choice.get("message"), reasoning_options)?;
+    // A completed terminal must carry at least one translatable output; without
+    // one the translator would synthesize a counterfeit `completed` response with
+    // an empty output array. Incomplete terminals (length, content_filter)
+    // truthfully carry empty output, so they are exempt.
+    let has_output = has_content || has_refusal || has_tool_calls || has_reasoning;
+    if response_status(finish_reason) == "completed" && !has_output {
+        return Err(TranslationError::InvalidChatResponse(
+            "first choice message has no supported output",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate optional assistant content and report whether it is present.
+///
+/// `null`, empty strings, and arrays that carry no non-empty text are all
+/// treated as absent, because the emitter produces no output for any of them.
+/// Counting them as content would let a completed terminal translate into a
+/// counterfeit success with an empty output array.
+fn validate_chat_content(message: &Map<String, Value>) -> Result<bool, TranslationError> {
+    match message.get("content") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::String(text)) => Ok(!text.is_empty()),
+        Some(Value::Array(parts)) if parts.iter().all(is_supported_text_part) => {
+            Ok(parts.iter().any(is_nonempty_text_part))
+        },
+        Some(_) => Err(TranslationError::InvalidChatResponse(
+            "first choice message contains unsupported content",
+        )),
+    }
+}
+
+/// Validate optional assistant refusal content and report whether it is present.
+///
+/// An empty refusal string is treated as absent to match the emitter, which
+/// drops it rather than producing a refusal item.
+fn validate_chat_refusal(message: &Map<String, Value>) -> Result<bool, TranslationError> {
+    match message.get("refusal") {
+        Some(Value::String(refusal)) => Ok(!refusal.is_empty()),
+        Some(Value::Null) | None => Ok(false),
+        Some(_) => Err(TranslationError::InvalidChatResponse(
+            "first choice message contains an invalid refusal",
+        )),
+    }
+}
+
+/// Return whether one provider-specific content part can be translated as text.
+fn is_supported_text_part(part: &Value) -> bool {
+    part.get("text").is_some_and(Value::is_string)
+}
+
+/// Return whether one content part carries non-empty text the emitter will keep.
+fn is_nonempty_text_part(part: &Value) -> bool {
+    part.get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty())
+}
+
+/// Validate optional function calls and require them for a tool-call terminal.
+fn validate_chat_tool_calls(message: &Map<String, Value>, finish_reason: &str) -> Result<bool, TranslationError> {
+    let tool_calls = match message.get("tool_calls") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(tool_calls)) => tool_calls.as_slice(),
+        Some(_) => {
+            return Err(TranslationError::InvalidChatResponse(
+                "message tool_calls must be an array",
+            ));
+        },
+    };
+    if tool_calls.is_empty() {
+        if finish_reason == "tool_calls" {
+            return Err(TranslationError::InvalidChatResponse(
+                "tool_calls finish_reason requires function tool calls",
+            ));
+        }
+        return Ok(false);
+    }
+    if !tool_calls.iter().all(is_supported_function_call) {
+        return Err(TranslationError::InvalidChatResponse(
+            "message contains an invalid function tool call",
+        ));
+    }
+    Ok(true)
+}
+
+/// Return whether one Chat Completions tool call has the fields we emit.
+fn is_supported_function_call(tool_call: &Value) -> bool {
+    tool_call.get("id").is_some_and(Value::is_string)
+        && tool_call.get("type").and_then(Value::as_str) == Some("function")
+        && tool_call
+            .get("function")
+            .and_then(Value::as_object)
+            .is_some_and(|function| {
+                function.get("name").is_some_and(Value::is_string)
+                    && function.get("arguments").is_some_and(Value::is_string)
+            })
+}
+
+/// Build an `in_progress` `Responses` resource snapshot for streaming lifecycle events.
+///
+/// Produces the same resource shape as the finite translation but with an empty
+/// output list, null usage, and `in_progress` status, matching the snapshot
+/// carried by `response.created` and `response.in_progress` streaming events.
+pub(crate) fn in_progress_response_resource(context: &ResponseContext<'_>) -> Result<Value, TranslationError> {
+    let service_tier = context
+        .service_tier
+        .filter(|value| value.is_string())
+        .cloned()
+        .unwrap_or_else(|| Value::String(DEFAULT_SERVICE_TIER.to_owned()));
+    let parts = ResponseResourceParts {
+        status: "in_progress",
+        incomplete_details: &Value::Null,
+        output: Vec::new(),
+        usage: &Value::Null,
+        service_tier: &service_tier,
+    };
+    response_resource(context, parts)
+}
+
+/// Values that vary between response resource snapshots.
+#[derive(Debug)]
+struct ResponseResourceParts<'a> {
+    /// Current `Responses` status.
+    status: &'a str,
+    /// Current incomplete details value.
+    incomplete_details: &'a Value,
+    /// Current output items.
+    output: Vec<Value>,
+    /// Current usage object.
+    usage: &'a Value,
+    /// Current service tier.
+    service_tier: &'a Value,
+}
+
+/// Build a full `Responses` resource snapshot.
+fn response_resource(
+    context: &ResponseContext<'_>,
+    parts: ResponseResourceParts<'_>,
+) -> Result<Value, TranslationError> {
+    let status = parts.status;
+    let mut resource = json!({
+        "id": context.response_id,
+        "object": "response",
+        "created_at": context.created_at,
+        "status": parts.status,
+        "error": Value::Null,
+        "incomplete_details": parts.incomplete_details,
+        "instructions": instructions_value(context),
+        "max_output_tokens": max_output_tokens_value(context),
+        "model": context.model,
+        "input": request_field_or_null(context.input),
+        "output": Value::Array(parts.output),
+        "parallel_tool_calls": context.parallel_tool_calls,
+        "previous_response_id": previous_response_id_value(context),
+        "reasoning": reasoning_value(context)?,
+        "store": context.store,
+        "temperature": number_or_default(context.temperature, 1.0),
+        "text": text_value(context),
+        "tool_choice": tool_choice_value(context),
+        "tools": Value::Array(normalize_response_tools(context.tools)),
+        "top_p": number_or_default(context.top_p, 1.0),
+        // Truthful because request translation rejects any other value:
+        // see validate_representable_parameters.
+        "truncation": DEFAULT_TRUNCATION,
+        "usage": parts.usage,
+        "metadata": metadata_value(context),
+        // Likewise truthful: a background request never reaches this translator,
+        // so every response it builds really is a foreground one.
+        "background": false,
+        "service_tier": parts.service_tier
+    });
+    insert_request_resource_fields(&mut resource, context, status);
+    Ok(resource)
+}
+
+/// Insert required response fields that are sourced from the original request.
+fn insert_request_resource_fields(resource: &mut Value, context: &ResponseContext<'_>, status: &str) {
+    if let Some(obj) = resource.as_object_mut() {
+        obj.insert("completed_at".to_owned(), completed_at_value(status, context));
+        obj.insert("max_tool_calls".to_owned(), max_tool_calls_value(context));
+        obj.insert(
+            "prompt_cache_key".to_owned(),
+            request_field_or_null(context.prompt_cache_key),
+        );
+        obj.insert(
+            "safety_identifier".to_owned(),
+            request_field_or_null(context.safety_identifier),
+        );
+        obj.insert(
+            "presence_penalty".to_owned(),
+            number_or_default(context.presence_penalty, 0.0),
+        );
+        obj.insert(
+            "frequency_penalty".to_owned(),
+            number_or_default(context.frequency_penalty, 0.0),
+        );
+        obj.insert(
+            "top_logprobs".to_owned(),
+            Value::Number(context.top_logprobs.unwrap_or(0).into()),
+        );
+    }
+}
+
+/// Extract the first Chat Completions choice.
+fn first_choice(obj: &Map<String, Value>) -> Option<&Value> {
+    obj.get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+}
+
+/// Extract Chat Completions token logprobs from one choice.
+fn chat_logprobs_content(choice: &Value) -> &[Value] {
+    choice
+        .get("logprobs")
+        .and_then(|logprobs| logprobs.get("content"))
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+/// Map a Chat Completions finish reason to a `Responses` status.
+fn response_status(finish_reason: &str) -> &'static str {
+    match finish_reason {
+        "length" | "content_filter" => "incomplete",
+        _ => "completed",
+    }
+}
+
+/// Build `Responses` incomplete details from a Chat Completions finish reason.
+fn incomplete_details(finish_reason: &str) -> Value {
+    match finish_reason {
+        "length" => json!({"reason": "max_output_tokens"}),
+        "content_filter" => json!({"reason": "content_filter"}),
+        _ => Value::Null,
+    }
+}
+
+/// Build the `instructions` response field.
+fn instructions_value(context: &ResponseContext<'_>) -> Value {
+    context
+        .instructions
+        .map_or(Value::Null, |instructions| Value::String(instructions.to_owned()))
+}
+
+/// Build the `max_output_tokens` response field.
+fn max_output_tokens_value(context: &ResponseContext<'_>) -> Value {
+    context
+        .max_output_tokens
+        .map_or(Value::Null, |max_output_tokens| Value::Number(max_output_tokens.into()))
+}
+
+/// Build the `max_tool_calls` response field.
+fn max_tool_calls_value(context: &ResponseContext<'_>) -> Value {
+    context
+        .max_tool_calls
+        .map_or(Value::Null, |max_tool_calls| Value::Number(max_tool_calls.into()))
+}
+
+/// Build the `completed_at` response field.
+///
+/// Only a `completed` response carries a completion timestamp. Every other
+/// status — `in_progress`, `incomplete`, `failed`, `cancelled` — has no
+/// completion moment, so `completed_at` is null, matching the OpenAI Responses
+/// schema where the field is populated only when the response actually completed.
+fn completed_at_value(status: &str, context: &ResponseContext<'_>) -> Value {
+    if status == "completed" {
+        Value::Number(context.completed_at.unwrap_or(context.created_at).into())
+    } else {
+        Value::Null
+    }
+}
+
+/// Clone nullable request fields onto the response resource.
+fn request_field_or_null(value: Option<&Value>) -> Value {
+    value.cloned().unwrap_or(Value::Null)
+}
+
+/// Build the `previous_response_id` response field.
+fn previous_response_id_value(context: &ResponseContext<'_>) -> Value {
+    context
+        .previous_response_id
+        .map_or(Value::Null, |response_id| Value::String(response_id.to_owned()))
+}
+
+/// Build the `reasoning` response field.
+fn reasoning_value(context: &ResponseContext<'_>) -> Result<Value, TranslationError> {
+    let Some(reasoning) = context.reasoning.and_then(Value::as_object) else {
+        return Ok(Value::Null);
+    };
+    let summary = requested_summary(reasoning)?.map_or(Value::Null, |summary| Value::String(summary.to_owned()));
+    Ok(json!({
+        "effort": reasoning.get("effort").cloned().unwrap_or(Value::Null),
+        "summary": summary,
+    }))
+}
+
+/// Build the `tool_choice` response field.
+fn tool_choice_value(context: &ResponseContext<'_>) -> Value {
+    context
+        .tool_choice
+        .filter(|v| !v.is_null())
+        .cloned()
+        .unwrap_or_else(|| Value::String(DEFAULT_TOOL_CHOICE.to_owned()))
+}
+
+/// Build the `metadata` response field.
+fn metadata_value(context: &ResponseContext<'_>) -> Value {
+    context
+        .metadata
+        .filter(|metadata| metadata.is_object())
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Build the `text` response field.
+fn text_value(context: &ResponseContext<'_>) -> Value {
+    context.text.cloned().unwrap_or_else(default_text_config)
+}
+
+/// Normalize echoed request tools to the Responses response-side tool schema.
+///
+/// The Responses request accepts a compact function-tool shape
+/// (`{"type":"function","name":...}`); the response resource must echo the
+/// canonical schema with `description`, `parameters`, and `strict` present.
+/// Non-function tools (e.g. hosted `web_search`) are echoed unchanged.
+fn normalize_response_tools(tools: &[Value]) -> Vec<Value> {
+    tools
+        .iter()
+        .map(|tool| match tool.as_object() {
+            Some(obj) if tool.get("type").and_then(Value::as_str) == Some("function") => {
+                let mut normalized = obj.clone();
+                normalized.entry("description").or_insert(Value::Null);
+                normalized.entry("parameters").or_insert(Value::Null);
+                normalized.entry("strict").or_insert(Value::Bool(false));
+                Value::Object(normalized)
+            },
+            _ => tool.clone(),
+        })
+        .collect()
+}
+
+/// Build provider service tier, falling back to the request context when absent.
+fn service_tier_value_with_context(obj: &Map<String, Value>, context: &ResponseContext<'_>) -> Value {
+    obj.get("service_tier")
+        .filter(|value| value.is_string())
+        .or_else(|| context.service_tier.filter(|value| value.is_string()))
+        .cloned()
+        .unwrap_or_else(|| Value::String(DEFAULT_SERVICE_TIER.to_owned()))
+}
+
+/// Use a JSON number when provided, otherwise emit a finite default.
+fn number_or_default(value: Option<&Value>, default: f64) -> Value {
+    value
+        .filter(|candidate| candidate.is_number())
+        .cloned()
+        .unwrap_or_else(|| number_value(default))
+}
+
+/// Convert a finite floating point value into a JSON number.
+fn number_value(value: f64) -> Value {
+    Number::from_f64(value).map_or(Value::Null, Value::Number)
+}
+
+/// Build all `Responses` output items from the first Chat choice.
+fn build_output_items(
+    obj: &Map<String, Value>,
+    context: &ResponseContext<'_>,
+    status: &str,
+) -> Result<Vec<Value>, TranslationError> {
+    let mut output = Vec::new();
+    let Some(choice) = first_choice(obj) else {
+        return Ok(output);
+    };
+
+    let message = choice.get("message");
+    let chat_completion_id = obj.get("id").and_then(Value::as_str);
+    if let Some(reasoning_item) = extract_reasoning_item(
+        message,
+        reasoning_item_id(&context.response_id, chat_completion_id),
+        status,
+        &context.reasoning_options,
+    )? {
+        output.push(reasoning_item);
+    }
+    let logprobs = chat_logprobs_content(choice);
+    append_message_output(&mut output, message, context, status, logprobs);
+    append_tool_call_outputs(&mut output, message, context, status)?;
+
+    Ok(output)
+}
+
+/// Append a message output item when the Chat response includes assistant text.
+fn append_message_output(
+    output: &mut Vec<Value>,
+    message: Option<&Value>,
+    context: &ResponseContext<'_>,
+    status: &str,
+    logprobs: &[Value],
+) {
+    let content_items = message_content_items(message, logprobs);
+
+    if content_items.is_empty() {
+        return;
+    }
+
+    output.push(message_output_item(context, status, content_items));
+}
+
+/// Build a stable assistant message output item id.
+pub(crate) fn message_item_id(context: &ResponseContext<'_>) -> String {
+    format!("msg_{}", context.response_id)
+}
+
+/// Build a schema-complete `Responses` assistant message item.
+pub(crate) fn message_output_item(context: &ResponseContext<'_>, status: &str, content: Vec<Value>) -> Value {
+    json!({
+        "id": message_item_id(context),
+        "type": "message",
+        "status": status,
+        "role": "assistant",
+        "content": Value::Array(content)
+    })
+}
+
+/// Convert Chat assistant message content into `Responses` message content items.
+fn message_content_items(message: Option<&Value>, logprobs: &[Value]) -> Vec<Value> {
+    let mut content_items = output_text_items(message.and_then(|message| message.get("content")), logprobs);
+
+    if let Some(refusal) = message
+        .and_then(|message| message.get("refusal"))
+        .and_then(Value::as_str)
+        && !refusal.is_empty()
+    {
+        content_items.push(refusal_item(refusal));
+    }
+
+    content_items
+}
+
+/// Convert Chat assistant content into `Responses` output text items.
+fn output_text_items(content: Option<&Value>, logprobs: &[Value]) -> Vec<Value> {
+    let Some(content) = content else {
+        return Vec::new();
+    };
+
+    match content {
+        Value::String(text) if !text.is_empty() => vec![output_text_item(text, logprobs)],
+        Value::Array(parts) => output_text_items_from_parts(parts, logprobs),
+        _ => Vec::new(),
+    }
+}
+
+/// Convert Chat content parts into `Responses` output text items.
+fn output_text_items_from_parts(parts: &[Value], logprobs: &[Value]) -> Vec<Value> {
+    let mut items = Vec::new();
+    let mut logprobs_used = false;
+
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            let part_logprobs = if logprobs_used { &[] } else { logprobs };
+            items.push(output_text_item(text, part_logprobs));
+            logprobs_used = true;
+        }
+    }
+
+    items
+}
+
+/// Build a single schema-complete `Responses` output text item.
+pub(crate) fn output_text_item(text: &str, logprobs: &[Value]) -> Value {
+    json!({
+        "type": "output_text",
+        "text": text,
+        "annotations": [],
+        "logprobs": logprobs
+    })
+}
+
+/// Build a single `Responses` refusal content item.
+pub(crate) fn refusal_item(refusal: &str) -> Value {
+    json!({
+        "type": "refusal",
+        "refusal": refusal
+    })
+}
+
+/// Append function call output items for Chat Completions tool calls.
+fn append_tool_call_outputs(
+    output: &mut Vec<Value>,
+    message: Option<&Value>,
+    context: &ResponseContext<'_>,
+    status: &str,
+) -> Result<(), TranslationError> {
+    let Some(tool_calls) = message
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+
+    for tool_call in tool_calls {
+        if context_has_web_search(context) && tool_call_function_name(tool_call) == Some("web_search") {
+            output.push(web_search_call_output_item(tool_call, status)?);
+        } else {
+            output.push(function_call_output_item(tool_call, status));
+        }
+    }
+    Ok(())
+}
+
+/// Return whether the original request declared hosted web search.
+pub(crate) fn context_has_web_search(context: &ResponseContext<'_>) -> bool {
+    context.tools.iter().any(|tool| {
+        tool.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(is_web_search_tool_type)
+    })
+}
+
+/// Read a Chat Completions function name from one tool call.
+fn tool_call_function_name(tool_call: &Value) -> Option<&str> {
+    tool_call
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+}
+
+/// Normalize the private web-search function into a canonical hosted call.
+fn web_search_call_output_item(tool_call: &Value, status: &str) -> Result<Value, TranslationError> {
+    let call_id = web_search_call_id(tool_call)?;
+    let arguments = tool_call
+        .get("function")
+        .and_then(|function| function.get("arguments"))
+        .and_then(Value::as_str)
+        .ok_or(TranslationError::InvalidWebSearchCall(
+            "arguments must be a JSON object encoded as a string",
+        ))?;
+    web_search_call_output_item_from_parts(call_id, arguments, status)
+}
+
+/// Build one canonical hosted web-search output item from normalized parts.
+pub(crate) fn web_search_call_output_item_from_parts(
+    call_id: &str,
+    arguments: &str,
+    status: &str,
+) -> Result<Value, TranslationError> {
+    if call_id.is_empty() {
+        return Err(TranslationError::InvalidWebSearchCall("missing call id"));
+    }
+    let query = web_search_query(arguments)?;
+    // The response can be incomplete because generation hit a token or content
+    // filter limit, but WebSearchToolCall has no `incomplete` item status.
+    // Preserve the response-level status and represent the interrupted hosted
+    // call with the schema's fail-closed `failed` status.
+    let status = if status == "incomplete" { "failed" } else { status };
+
+    Ok(json!({
+        "id": call_id,
+        "type": "web_search_call",
+        "status": status,
+        "action": {
+            "type": "search",
+            "query": query
+        }
+    }))
+}
+
+/// Read and validate the id of a synthesized web-search call.
+fn web_search_call_id(tool_call: &Value) -> Result<&str, TranslationError> {
+    tool_call
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or(TranslationError::InvalidWebSearchCall("missing call id"))
+}
+
+/// Strict arguments accepted from the private web-search function.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebSearchFunctionArguments {
+    /// Query to pass to the hosted search executor.
+    query: String,
+}
+
+/// Parse and bound the query emitted by a Chat Completions model.
+fn web_search_query(arguments: &str) -> Result<String, TranslationError> {
+    let parsed: WebSearchFunctionArguments = serde_json::from_str(arguments).map_err(|_error| {
+        TranslationError::InvalidWebSearchCall("arguments must contain only a string-valued query")
+    })?;
+    if parsed.query.is_empty() {
+        return Err(TranslationError::InvalidWebSearchCall(
+            "query must be a non-empty string",
+        ));
+    }
+    if parsed.query.chars().count() > WEB_SEARCH_QUERY_MAX_LENGTH {
+        return Err(TranslationError::InvalidWebSearchCall("query exceeds maximum length"));
+    }
+    Ok(parsed.query)
+}
+
+/// Build one `Responses` function call item from a Chat Completions tool call.
+fn function_call_output_item(tool_call: &Value, status: &str) -> Value {
+    let call_id = tool_call.get("id").and_then(Value::as_str).unwrap_or("");
+    let name = tool_call
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let arguments = tool_call
+        .get("function")
+        .and_then(|function| function.get("arguments"))
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+
+    function_call_output_item_from_parts(call_id, name, arguments, status)
+}
+
+/// Build one `Responses` function call item from normalized parts.
+pub(crate) fn function_call_output_item_from_parts(call_id: &str, name: &str, arguments: &str, status: &str) -> Value {
+    json!({
+        "id": format!("fc_{call_id}"),
+        "type": "function_call",
+        "status": status,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments
+    })
+}
+
+/// Build `Responses` usage from Chat Completions usage fields.
+fn build_usage(obj: &Map<String, Value>) -> Value {
+    let usage = obj.get("usage");
+    build_usage_from_value(usage)
+}
+
+/// Build `Responses` usage from an optional Chat Completions usage value.
+fn build_usage_from_value(usage: Option<&Value>) -> Value {
+    let input_tokens = usage_tokens(usage, "prompt_tokens");
+    let output_tokens = usage_tokens(usage, "completion_tokens");
+    let total_tokens = usage_tokens(usage, "total_tokens");
+    let cached_tokens = usage
+        .and_then(|usage| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_write_tokens = usage
+        .and_then(|usage| usage.get("prompt_tokens_details"))
+        .and_then(|details| details.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .and_then(|usage| usage.get("completion_tokens_details"))
+        .and_then(|details| details.get("reasoning_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    json!({
+        "input_tokens": input_tokens,
+        "input_tokens_details": {
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens
+        },
+        "output_tokens": output_tokens,
+        "output_tokens_details": {
+            "reasoning_tokens": reasoning_tokens
+        },
+        "total_tokens": total_tokens
+    })
+}
+
+/// Extract a token count from a Chat Completions usage object.
+fn usage_tokens(usage: Option<&Value>, field: &str) -> u64 {
+    usage
+        .and_then(|usage| usage.get(field))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}

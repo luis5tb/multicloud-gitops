@@ -1,0 +1,73 @@
+# Conversations
+# Requires `--features openai-conversations,store-sqlite` because these filters are opt-in.
+#
+# Local /v1/conversations endpoints for conversation lifecycle,
+# backed by the ConversationItemStore. All requests are handled
+# locally — none are forwarded upstream.
+#
+#   POST   /v1/conversations        — create conversation
+#   GET    /v1/conversations/{id}   — get conversation
+#   POST   /v1/conversations/{id}   — update conversation
+#   DELETE /v1/conversations/{id}   — delete conversation
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy --features openai-conversations,store-sqlite -- \
+#     -c examples/configs/openai/conversations/conversations.yaml
+#
+# This local example deliberately uses one shared owner. Deployments with
+# multiple authenticated users must use `trusted_owner`; see the
+# `openai/responses/state-ownership.yaml` example.
+
+listeners:
+  - name: conversations-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [conversations-pipeline]
+
+filter_chains:
+  - name: conversations-pipeline
+    filters:
+      # Standalone compatibility mode: all callers share one owner.
+      # Multi-user deployments should use a trusted owner mode instead.
+      - filter: state_owner
+        mode: single_tenant
+        tenant_id: default
+
+      # Required request-head classifier for openai_conversations.
+      - filter: openai_operation
+
+      - filter: openai_conversations
+        backend: sqlite
+        # In-memory:
+        #   database_url: "sqlite::memory:"
+        # File-backed:
+        database_url: "sqlite://conversations.db?mode=rwc"
+        # conversations_table defaults to "openai_conversations"
+        # items_table defaults to "openai_conversation_items"
+        #
+        # Connection pool tuning (optional, sqlx defaults apply when omitted):
+        #   pool:
+        #     max_connections: 10      # maximum pool connections (default: 10)
+        #     min_connections: 0       # minimum idle connections (default: 0)
+        #     idle_timeout_secs: 600   # seconds before idle connections close (default: 600, 0 to disable)
+        #     acquire_timeout_secs: 30 # seconds to wait for a connection (default: 30)
+        #
+        # PostgreSQL backend:
+        #   backend: postgres
+        #   database_url: "postgres://user:pass@db.example.com:5432/praxis"
+        #   allow_private_database_url: true
+        #   ssl_mode: verify-full      # default: verify-full
+        #   ssl_root_cert: /path/to/ca.pem
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "fallback-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "fallback-backend"
+            endpoints:
+              - "127.0.0.1:8000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

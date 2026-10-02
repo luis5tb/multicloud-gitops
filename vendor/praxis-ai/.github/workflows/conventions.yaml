@@ -1,0 +1,329 @@
+name: Coding Conventions
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # PR Description Check
+  # ----------------------------------------------------------------------------
+
+  pr-description-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Check for description
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/pr-conventions$'; then
+            echo "skip/pr-conventions label present — skipping description check"
+            exit 0
+          fi
+
+          word_count=$(echo "$PR_BODY" | wc -w)
+          if [ "$word_count" -lt 2 ]; then
+            marker="<!-- praxis:pr-description-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/developing/conventions.md)."
+            fi
+          fi
+
+  # ----------------------------------------------------------------------------
+  # Dependency Version Check
+  # ----------------------------------------------------------------------------
+
+  dep-version-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Check workspace dependency versions
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/dep-versioning$'; then
+            echo "skip/dep-versioning label present — skipping version check"
+            exit 0
+          fi
+
+          gh api "repos/${{ github.repository }}/contents/Cargo.toml?ref=$HEAD_SHA" \
+            --jq '.content' | base64 -d > /tmp/cargo.toml
+
+          in_ws=false
+          bad=0
+          skip_next=false
+          while IFS= read -r line; do
+            if [[ "$line" == "[workspace.dependencies]" ]]; then
+              in_ws=true
+              skip_next=false
+              continue
+            elif [[ "$line" == "["* ]]; then
+              in_ws=false
+              skip_next=false
+              continue
+            fi
+
+            $in_ws || continue
+            [[ -z "$line" ]] && continue
+
+            if [[ "$line" == "#"* ]]; then
+              [[ "$line" == *"semver:ignore"* ]] && skip_next=true
+              continue
+            fi
+
+            if $skip_next || [[ "$line" == *"semver:ignore"* ]]; then
+              skip_next=false
+              continue
+            fi
+            skip_next=false
+
+            ver=""
+            if [[ "$line" =~ ^[a-zA-Z][a-zA-Z0-9_-]*[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              ver="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ version[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              ver="${BASH_REMATCH[1]}"
+            fi
+
+            if [[ -n "$ver" ]]; then
+              dots="${ver//[^.]/}"
+              if [[ ${#dots} -ne 2 ]]; then
+                crate="${line%%[[:space:]]*=*}"
+                echo "::error::${crate} = \"${ver}\" is not three-component semver (expected MAJOR.MINOR.PATCH)"
+                bad=1
+              fi
+            fi
+          done < /tmp/cargo.toml
+
+          if [[ "$bad" -eq 1 ]]; then
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------------------
+  # Signed Commits Check
+  # ----------------------------------------------------------------------------
+
+  signed-commits-check:
+    if: |
+      !startsWith(github.head_ref, 'release-notes/pr-') ||
+      github.event.pull_request.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Check signed commits in PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/commit-signing$'; then
+            echo "skip/commit-signing label present — skipping signing check"
+            exit 0
+          fi
+
+          unsigned=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
+            --paginate --jq '[.[] | select(.parents | length == 1) | select(.commit.verification.verified == false) | .sha[:7]] | join(", ")')
+
+          if [ -n "$unsigned" ]; then
+            marker="<!-- praxis:signed-commits-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          **Unsigned commits**: ${unsigned}. Please [sign your commits](https://docs.github.com/en/authentication/managing-commit-signature-verification)."
+            fi
+            echo "::error::Unsigned commits found: ${unsigned}"
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------------------
+  # Signoff Check
+  # ----------------------------------------------------------------------------
+
+  signoff-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Check commits for Signed-off-by
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/signoff$'; then
+            echo "skip/signoff label present — skipping signoff check"
+            exit 0
+          fi
+
+          missing=$(gh api \
+            "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
+            --paginate \
+            --jq '[.[] | select(.parents | length == 1) | select(.commit.message | test("(?m)^Signed-off-by: ") | not) | .sha[:7]] | join(", ")')
+
+          if [ -n "$missing" ]; then
+            marker="<!-- praxis:signoff-check -->"
+            already=$(gh api \
+              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" \
+                --repo "${{ github.repository }}" \
+                --body "${marker}
+          **Missing Signed-off-by**: ${missing}. All commits require sign-off (via \`git commit --signoff\`)."
+            fi
+            echo "::error::Commits missing Signed-off-by: ${missing}"
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------------------
+  # AI Authorship Check
+  # ----------------------------------------------------------------------------
+
+  ai-authorship-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Check for AI tool authorship
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/ai-authorship$'; then
+            echo "skip/ai-authorship label present — skipping"
+            exit 0
+          fi
+
+          commits=$(gh api \
+            "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
+            --paginate)
+
+          AI_EMAIL='noreply@anthropic\.com'
+          AI_AUTHOR='claude (code|opus|sonnet|haiku)|\bcopilot\b|\bcodeium\b|\btabnine\b|\bwindsurf\b|\bamazon q\b|\bgemini code\b|\baider\b|\banthropic\b'
+          AI_TOOL='claude|anthropic|copilot|codeium|tabnine|windsurf|cursor|amazon\.q|gemini|aider|noreply@anthropic\.com'
+          CREDIT='^\s*(co-authored-by|assisted-by|generated-by|authored-by)\s*:'
+          ANY_TRAILER='^\s*(co-authored-by|assisted-by|generated-by|authored-by|signed-off-by)\s*:'
+
+          violations=$(echo "$commits" | jq -r \
+            --arg ai_email "$AI_EMAIL" \
+            --arg ai_author "$AI_AUTHOR" \
+            --arg ai_tool "$AI_TOOL" \
+            --arg credit "$CREDIT" \
+            --arg any_trailer "$ANY_TRAILER" '
+            [
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
+                select(
+                  (.commit.author.email |
+                    test($ai_email; "i")) or
+                  (.commit.committer.email |
+                    test($ai_email; "i"))
+                ) |
+                "- `\($sha)`: AI tool email in author/committer"),
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
+                select(
+                  (.commit.author.name |
+                    test($ai_author; "i")) or
+                  (.commit.committer.name |
+                    test($ai_author; "i"))
+                ) |
+                "- `\($sha)`: AI tool in author/committer name"),
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
+                .commit.message | split("\n")[] |
+                select(
+                  (test($any_trailer; "i") and
+                    test($ai_email; "i")) or
+                  (test($credit; "i") and
+                    test($ai_tool; "i"))
+                ) |
+                "- `\($sha)`: `\(gsub("^\\s+"; ""))`")
+            ] | join("\n")
+          ')
+
+          if [ -n "$violations" ]; then
+            marker="<!-- praxis:ai-authorship-check -->"
+            already=$(gh api \
+              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" \
+                --repo "${{ github.repository }}" \
+                --body "${marker}
+          **AI tool authorship detected**:
+
+          ${violations}
+
+          Sorry, this project does not accept commits authored by tools as valid.
+          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact."
+            fi
+            echo "::error::AI tool authorship found in PR commits"
+            exit 1
+          fi
+

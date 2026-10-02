@@ -1,0 +1,130 @@
+# Compact Filter Example
+# Requires `--features openai-file-resolve-filter,openai-compact,store-sqlite` because these filters are opt-in.
+#
+# Demonstrates compaction after rehydrate, file resolve, and document
+# extract so rewritten current-turn content survives history
+# replacement. Store a response, rehydrate it on the next turn, and
+# summarize when the token count exceeds the compact threshold.
+#
+# Pipeline order is required: file_resolve and doc_extract rewrite the
+# current-turn tail in place and leave `state.input` as the original
+# client payload. Compact preserves that rewritten tail rather than
+# restoring `file_url` or `input_file`.
+#
+# Security: StreamBuffer body callouts run before this listener's
+# header-phase filters. Deploy this example behind an outer
+# authentication and authorization boundary before enabling the
+# required allow_pre_security_callout acknowledgement below.
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy --features openai-file-resolve-filter,openai-compact,store-sqlite -- \
+#     -c examples/configs/openai/responses/compact.yaml
+#
+# Requires an OpenAI-compatible backend on port 11434 (e.g. Ollama).
+#
+# Test:
+#   # Step 1 — store a response
+#   RESP_ID=$(curl -s -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"llama3.2:1b","input":"Explain TCP vs UDP in detail"}' \
+#     | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+#
+#   # Step 2 — follow up with compaction (threshold=1000 tokens)
+#   curl -s -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d "{\"model\":\"llama3.2:1b\",\"input\":\"Compare with QUIC\",\"previous_response_id\":\"$RESP_ID\",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1000}],\"store\":false}"
+#
+#   # Step 3 — compact a follow-up that includes a file_url (needs a
+#   # Files API on 127.0.0.1:9999 only for file_id; file_url is fetched
+#   # directly). The upstream body must contain resolved file_data or
+#   # extracted input_text, never the original file_url.
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [compact-pipeline]
+
+filter_chains:
+  - name: compact-pipeline
+    filters:
+      - filter: openai_responses_format
+        on_invalid: continue
+        headers:
+          format: x-praxis-ai-format
+          model: x-praxis-ai-model
+          stream: x-praxis-ai-stream
+          mode: x-praxis-responses-mode
+
+      - filter: openai_responses_validate
+
+      - filter: openai_tool_parse
+
+      - filter: state_owner
+        mode: single_tenant
+        tenant_id: default
+
+      - filter: openai_response_store
+        backend: sqlite
+        database_url: "sqlite://responses.db?mode=rwc"
+        responses_table: openai_responses
+        conversations_table: openai_conversations
+
+      # `openai_stream_events` is intentionally absent: it composes streamed
+      # inference rounds into one logical Responses stream and is only valid
+      # inside an `iterative_request_router` step. This compaction demo proxies
+      # finite responses, so it would be inert here. See `stream-events.yaml`
+      # and `agentic-loop.yaml` for the in-IRR streaming examples.
+      - filter: openai_responses_rehydrate
+
+      - filter: openai_file_resolve
+        files_api_url: "http://127.0.0.1:9999"
+        allow_pre_security_callout: true
+        # file_id callouts run through this outbound filter chain via the
+        # filtered subrequest executor. SSRF protection for files_api_url
+        # derives from the pipeline's allow_private_upstreams; client
+        # file_url downloads never traverse this chain.
+        outbound_chain:
+          name: files-api-outbound
+          filters:
+            - filter: headers
+              request_set:
+                - name: x-file-callout
+                  value: file-resolve
+        file_url: resolve
+        forward_headers:
+          - authorization
+        on_missing: reject
+        timeout_ms: 10000
+
+      - filter: openai_doc_extract
+        allow_pre_security_callout: true
+        on_unsupported: continue
+
+      - filter: openai_responses_compact
+        # This direct summarization callout is anonymous; no downstream or
+        # cluster authentication headers are forwarded.
+        allow_pre_security_callout: true
+        inference_url: "http://localhost:11434/v1/chat/completions"
+        allow_private_inference_url: true
+        default_model: llama3.2:1b
+        timeout_ms: 60000
+
+      - filter: openai_responses_proxy
+        name: inference
+
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            headers:
+              x-praxis-ai-format: "openai_responses"
+            cluster: "inference-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "inference-backend"
+            endpoints:
+              - "127.0.0.1:11434"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
+  allow_private_upstreams: true # file_id callouts reach the loopback Files API

@@ -1,0 +1,793 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024 Praxis Contributors
+
+//! Simple fixed-response and routed backends.
+
+use std::{
+    io::{Read as _, Write as _},
+    net::{TcpListener, TcpStream},
+    time::Duration,
+};
+
+use praxis_core::config::{
+    Cluster, Config, Endpoint, FailureMode, FilterChainConfig, FilterEntry, Listener, ProtocolKind,
+};
+
+use super::specialized::{BackendGuard, read_until_headers_complete, spawn_tcp_server, spawn_tcp_server_with_shutdown};
+
+// -----------------------------------------------------------------------------
+// Backend
+// -----------------------------------------------------------------------------
+
+/// A HTTP backend for testing.
+pub struct Backend {
+    /// HTTP status code to return.
+    status: u16,
+
+    /// Response body content.
+    body: String,
+
+    /// Extra response headers as `(name, value)` pairs.
+    headers: Vec<(String, String)>,
+}
+
+impl Backend {
+    /// Create a backend returning a fixed 200 response.
+    pub fn fixed(body: &str) -> Self {
+        Self {
+            status: 200,
+            body: body.to_owned(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// Create a backend returning a custom status and body.
+    pub fn status(code: u16, body: &str) -> Self {
+        Self {
+            status: code,
+            body: body.to_owned(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// Create a backend returning a chunked transfer-encoded response
+    /// where each entry becomes a separate chunk.
+    pub fn chunked(chunks: Vec<String>) -> ChunkedBackend {
+        ChunkedBackend {
+            status: 200,
+            chunks,
+            headers: Vec::new(),
+            stall_after_first_chunk: None,
+        }
+    }
+
+    /// Add a response header.
+    #[must_use]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Start the backend and return the port.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server fails to bind or accept connections.
+    pub fn start(self) -> u16 {
+        let status = self.status;
+        let reason = reason_phrase(status);
+        let body = self.body;
+        let headers = self.headers;
+
+        spawn_tcp_server(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let _headers = read_until_headers_complete(&mut stream);
+
+            let mut resp = format!(
+                "HTTP/1.1 {status} {reason}\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 Server: praxis-test-backend\r\n",
+                body.len()
+            );
+            for (name, value) in &headers {
+                use std::fmt::Write as _;
+                let _written = write!(resp, "{name}: {value}\r\n");
+            }
+            resp.push_str("\r\n");
+            resp.push_str(&body);
+            let _sent = stream.write_all(resp.as_bytes());
+        })
+    }
+
+    /// Start the backend and return a [`BackendGuard`] that
+    /// shuts down the listener thread when dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server fails to bind.
+    pub fn start_with_shutdown(self) -> BackendGuard {
+        let status = self.status;
+        let reason = reason_phrase(status);
+        let body = self.body;
+        let headers = self.headers;
+
+        spawn_tcp_server_with_shutdown(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let _headers = read_until_headers_complete(&mut stream);
+
+            let mut resp = format!(
+                "HTTP/1.1 {status} {reason}\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 Server: praxis-test-backend\r\n",
+                body.len()
+            );
+            for (name, value) in &headers {
+                use std::fmt::Write as _;
+                let _written = write!(resp, "{name}: {value}\r\n");
+            }
+            resp.push_str("\r\n");
+            resp.push_str(&body);
+            let _sent = stream.write_all(resp.as_bytes());
+        })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// ChunkedBackend
+// -----------------------------------------------------------------------------
+
+/// A backend that sends a chunked transfer-encoded response.
+pub struct ChunkedBackend {
+    /// Response status code.
+    status: u16,
+
+    /// Response body chunks.
+    chunks: Vec<String>,
+
+    /// Extra response headers as `(name, value)` pairs.
+    headers: Vec<(String, String)>,
+
+    /// Optional pause after the first body chunk, to simulate a stalled SSE
+    /// upstream that has already committed headers.
+    stall_after_first_chunk: Option<Duration>,
+}
+
+impl ChunkedBackend {
+    /// Set the response status code (defaults to `200`).
+    #[must_use]
+    pub fn status(mut self, code: u16) -> Self {
+        self.status = code;
+        self
+    }
+
+    /// Add a response header.
+    #[must_use]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Sleep after writing the first chunk, without closing the connection.
+    ///
+    /// Use this to exercise idle-stream timeouts: the proxy has already
+    /// seen a valid SSE frame, then the backend goes silent.
+    #[must_use]
+    pub fn stall_after_first_chunk(mut self, stall: Duration) -> Self {
+        self.stall_after_first_chunk = Some(stall);
+        self
+    }
+
+    /// Start the backend and return a [`BackendGuard`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server fails to bind.
+    pub fn start_with_shutdown(self) -> BackendGuard {
+        let status = self.status;
+        let chunks = self.chunks;
+        let headers = self.headers;
+        let stall_after_first_chunk = self.stall_after_first_chunk;
+
+        spawn_tcp_server_with_shutdown(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            // Drain the entire request (headers + body) before responding. A
+            // streamed response is written chunk-by-chunk and the connection is
+            // closed at the end; if the request body were left unread in the
+            // kernel receive buffer, that close would surface as a TCP RST,
+            // which can race the proxy's incremental read and truncate the
+            // streamed body. A real upstream drains the request and sends a
+            // graceful FIN, so mirror that here to keep streaming tests stable.
+            let _request = read_full_request(&mut stream);
+            write_chunked_http_body(&mut stream, status, &headers, &chunks, stall_after_first_chunk);
+        })
+    }
+}
+
+/// Write a chunked HTTP response, optionally stalling after the first body chunk.
+fn write_chunked_http_body(
+    stream: &mut TcpStream,
+    status: u16,
+    headers: &[(String, String)],
+    chunks: &[String],
+    stall_after_first_chunk: Option<Duration>,
+) {
+    let reason = reason_phrase(status);
+    let mut resp = format!(
+        "HTTP/1.1 {status} {reason}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nServer: praxis-test-backend\r\n"
+    );
+    for (name, value) in headers {
+        use std::fmt::Write as _;
+        let _written = write!(resp, "{name}: {value}\r\n");
+    }
+    resp.push_str("\r\n");
+    let _sent = stream.write_all(resp.as_bytes());
+    let _flushed = stream.flush();
+    write_chunked_payload(stream, chunks, stall_after_first_chunk);
+}
+
+/// Write chunked-body payload bytes, including the terminating zero chunk.
+fn write_chunked_payload(stream: &mut TcpStream, chunks: &[String], stall_after_first_chunk: Option<Duration>) {
+    for (index, chunk) in chunks.iter().enumerate() {
+        let hex_len = format!("{:x}\r\n", chunk.len());
+        let _sent = stream.write_all(hex_len.as_bytes());
+        let _sent = stream.write_all(chunk.as_bytes());
+        let _sent = stream.write_all(b"\r\n");
+        let _flushed = stream.flush();
+        if index == 0
+            && let Some(stall) = stall_after_first_chunk
+        {
+            std::thread::sleep(stall);
+        }
+    }
+    let _sent = stream.write_all(b"0\r\n\r\n");
+    let _flushed = stream.flush();
+}
+
+// -----------------------------------------------------------------------------
+// RoutedBackend
+// -----------------------------------------------------------------------------
+
+/// Builder for a route-based mock backend.
+#[derive(Default)]
+pub struct RoutedBackend {
+    /// Route entries in match order.
+    routes: Vec<RoutedEntry>,
+}
+
+/// A single route entry for a [`RoutedBackend`], mapping a
+/// path prefix to a fixed response.
+///
+/// [`RoutedBackend`]: crate::net::backend::RoutedBackend
+struct RoutedEntry {
+    /// URL path prefix to match (e.g. `"/api"`).
+    path_prefix: String,
+
+    /// HTTP status code to return.
+    status: u16,
+
+    /// Response body content.
+    body: String,
+
+    /// Extra response headers as `(name, value)` pairs.
+    headers: Vec<(String, String)>,
+}
+
+impl RoutedBackend {
+    /// Create a new routed backend builder.
+    pub fn new() -> Self {
+        Self { routes: vec![] }
+    }
+
+    /// Add a route returning a fixed response.
+    #[must_use]
+    pub fn route(mut self, path_prefix: &str, status: u16, body: &str) -> Self {
+        self.routes.push(RoutedEntry {
+            path_prefix: path_prefix.to_owned(),
+            status,
+            body: body.to_owned(),
+            headers: Vec::new(),
+        });
+        self
+    }
+
+    /// Add a route with custom response headers.
+    #[must_use]
+    pub fn route_with_headers(
+        mut self,
+        path_prefix: &str,
+        status: u16,
+        body: &str,
+        headers: Vec<(&str, &str)>,
+    ) -> Self {
+        self.routes.push(RoutedEntry {
+            path_prefix: path_prefix.to_owned(),
+            status,
+            body: body.to_owned(),
+            headers: headers.into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
+        });
+        self
+    }
+
+    /// Start the backend and return the port.
+    pub fn start(self) -> u16 {
+        let config = build_routed_config("127.0.0.1:0", &self.routes);
+        start_server(config)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// StatefulBackend
+// -----------------------------------------------------------------------------
+
+/// A backend that returns a different response for each sequential
+/// request. Used for round-trip tests where the model backend must
+/// return tool calls on the first request and a final answer on
+/// the second.
+pub struct StatefulBackend {
+    /// Ordered responses: `(status, body)`. Each connection consumes
+    /// the next entry. Returns `(500, "exhausted")` when all entries
+    /// have been consumed.
+    responses: Vec<(u16, String)>,
+}
+
+impl StatefulBackend {
+    /// Create a stateful backend from an ordered list of
+    /// `(status, body)` responses.
+    pub fn new(responses: Vec<(u16, String)>) -> Self {
+        Self { responses }
+    }
+
+    /// Start the backend and return a [`BackendGuard`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server fails to bind.
+    pub fn start_with_shutdown(self) -> BackendGuard {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let responses = Arc::new(self.responses);
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        spawn_tcp_server_with_shutdown(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let _headers = read_until_headers_complete(&mut stream);
+
+            let idx = counter.fetch_add(1, Ordering::SeqCst);
+            let (status, body) = responses.get(idx).map_or((500, "exhausted"), |(s, b)| (*s, b.as_str()));
+            let reason = reason_phrase(status);
+
+            let resp = format!(
+                "HTTP/1.1 {status} {reason}\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 Server: praxis-test-backend\r\n\
+                 \r\n\
+                 {body}",
+                body.len()
+            );
+            let _sent = stream.write_all(resp.as_bytes());
+        })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// StatefulCapturingBackend
+// -----------------------------------------------------------------------------
+
+/// A captured HTTP request: method, URI, raw headers, and body.
+pub struct CapturedRequest {
+    /// HTTP method (e.g. `"POST"`).
+    pub method: String,
+    /// Request URI path (e.g. `"/v1/responses"`).
+    pub uri: String,
+    /// Raw request headers as a single string (lines separated by `\n`).
+    pub headers: String,
+    /// Request body as a string.
+    pub body: String,
+}
+
+/// Guard for a [`StatefulCapturingBackend`] that provides access to
+/// captured requests and the allocated port. Shuts down the backend
+/// on drop.
+pub struct StatefulCapturingGuard {
+    /// Inner backend guard that shuts down the listener on drop.
+    guard: BackendGuard,
+    /// All captured requests in order.
+    requests: std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>>,
+}
+
+impl StatefulCapturingGuard {
+    /// The allocated port number.
+    pub fn port(&self) -> u16 {
+        self.guard.port()
+    }
+
+    /// Return a snapshot of all captured requests so far.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    pub fn requests(&self) -> Vec<CapturedRequest> {
+        let lock = self.requests.lock().expect("captured requests mutex not poisoned");
+        lock.iter()
+            .map(|r| CapturedRequest {
+                method: r.method.clone(),
+                uri: r.uri.clone(),
+                headers: r.headers.clone(),
+                body: r.body.clone(),
+            })
+            .collect()
+    }
+}
+
+/// A backend that returns sequential responses while capturing each
+/// incoming request (method, URI, headers, body).
+pub struct StatefulCapturingBackend {
+    /// Ordered responses: `(status, body)`.
+    responses: Vec<(u16, String)>,
+}
+
+impl StatefulCapturingBackend {
+    /// Create from an ordered list of `(status, body)` responses.
+    pub fn new(responses: Vec<(u16, String)>) -> Self {
+        Self { responses }
+    }
+
+    /// Start the backend and return a [`StatefulCapturingGuard`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server fails to bind.
+    pub fn start_with_shutdown(self) -> StatefulCapturingGuard {
+        use std::sync::{Arc, Mutex, atomic::AtomicUsize};
+
+        let responses = Arc::new(self.responses);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        let guard = spawn_tcp_server_with_shutdown(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            capture_and_respond(&mut stream, &captured_clone, &counter, &responses);
+        });
+
+        StatefulCapturingGuard {
+            guard,
+            requests: captured,
+        }
+    }
+}
+
+/// Check if request is a probe.
+fn is_probe_request(method: &str, uri: &str) -> bool {
+    (method == "GET" && (uri == "/" || uri == "/api/hello")) || method == "HEAD"
+}
+
+/// Format a standard HTTP response payload.
+fn format_http_response(status: u16, resp_body: &str) -> Vec<u8> {
+    let reason = reason_phrase(status);
+    let content_type = if resp_body.starts_with("data: ") {
+        "text/event-stream"
+    } else {
+        "application/json"
+    };
+
+    format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Length: {}\r\n\
+         Content-Type: {content_type}\r\n\
+         Connection: close\r\n\
+         Server: praxis-test-backend\r\n\
+         \r\n\
+         {resp_body}",
+        resp_body.len()
+    )
+    .into_bytes()
+}
+
+/// Write an SSE response using chunked transfer encoding incrementally.
+fn write_incremental_sse_response(stream: &mut TcpStream, status: u16, resp_body: &str) -> std::io::Result<()> {
+    let reason = reason_phrase(status);
+    let headers = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nServer: praxis-test-backend\r\n\r\n"
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.flush()?;
+
+    let frames: Vec<&str> = resp_body.split("\n\n").collect();
+    for (i, frame) in frames.iter().enumerate() {
+        if frame.trim().is_empty() {
+            continue;
+        }
+        let chunk_data = if i < frames.len() - 1 {
+            format!("{frame}\n\n")
+        } else {
+            (*frame).to_owned()
+        };
+        let chunk_header = format!("{:x}\r\n", chunk_data.len());
+        stream.write_all(chunk_header.as_bytes())?;
+        stream.write_all(chunk_data.as_bytes())?;
+        stream.write_all(b"\r\n")?;
+        stream.flush()?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    stream.write_all(b"0\r\n\r\n")?;
+    stream.flush()
+}
+
+/// Handle a single capturing-backend connection: read the full
+/// request, store it, then write the next sequential response.
+fn capture_and_respond(
+    stream: &mut TcpStream,
+    captured: &std::sync::Mutex<Vec<CapturedRequest>>,
+    counter: &std::sync::atomic::AtomicUsize,
+    responses: &[(u16, String)],
+) {
+    use std::sync::atomic::Ordering;
+
+    let raw = read_full_request(stream);
+    let (method, uri, headers, body) = parse_raw_request(&raw);
+
+    captured.lock().expect("mutex not poisoned").push(CapturedRequest {
+        method: method.clone(),
+        uri: uri.clone(),
+        headers,
+        body,
+    });
+
+    if is_probe_request(&method, &uri) {
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nOK");
+        return;
+    }
+
+    let idx = counter.fetch_add(1, Ordering::SeqCst);
+    let (status, resp_body) = responses.get(idx).map_or((500, "exhausted"), |(s, b)| (*s, b.as_str()));
+
+    if resp_body.starts_with("data: ") {
+        let _ = write_incremental_sse_response(stream, status, resp_body);
+    } else {
+        let resp_bytes = format_http_response(status, resp_body);
+        let _sent = stream.write_all(&resp_bytes);
+    }
+}
+
+/// Read a full HTTP request (headers + body) from a TCP stream.
+fn read_full_request(stream: &mut TcpStream) -> String {
+    let mut data = Vec::new();
+    let mut buf = [0_u8; 8192];
+
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+        }
+        let raw = String::from_utf8_lossy(&data);
+        if let Some(header_section) = raw.split("\r\n\r\n").next() {
+            let content_length = super::specialized::parse_content_length(header_section);
+            let header_len = header_section.len() + 4;
+            if data.len() >= header_len + content_length {
+                break;
+            }
+        }
+    }
+
+    String::from_utf8_lossy(&data).into_owned()
+}
+
+/// Parse a raw HTTP request string into (method, uri, headers, body).
+fn parse_raw_request(raw: &str) -> (String, String, String, String) {
+    let (header_section, body) = raw.split_once("\r\n\r\n").unwrap_or((raw, ""));
+
+    let mut lines = header_section.lines();
+    let request_line = lines.next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_owned();
+    let uri = parts.next().unwrap_or("").to_owned();
+
+    let headers: String = lines.collect::<Vec<_>>().join("\n");
+
+    (method, uri, headers, body.to_owned())
+}
+
+// -----------------------------------------------------------------------------
+// IPv6 Backend
+// -----------------------------------------------------------------------------
+
+/// Spawn a raw TCP backend on `[::1]` that returns a fixed
+/// HTTP response body. Returns the port.
+///
+/// # Panics
+///
+/// Panics if binding to `[::1]:0` fails.
+pub fn start_backend_v6(body: &str) -> u16 {
+    let listener = TcpListener::bind("[::1]:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = body.to_owned();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let body = body.clone();
+            std::thread::spawn(move || {
+                handle_v6_connection(stream, &body);
+            });
+        }
+    });
+
+    port
+}
+
+/// Handle a single IPv6 TCP connection: read request headers,
+/// write a minimal HTTP 200 response.
+fn handle_v6_connection(mut stream: TcpStream, body: &str) {
+    drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
+    let mut buf = [0_u8; 4096];
+    let _bytes = stream.read(&mut buf);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _sent = stream.write_all(response.as_bytes());
+}
+
+/// Start a mock HTTP backend returning a fixed body.
+pub fn start_backend(body: &str) -> u16 {
+    Backend::fixed(body).start()
+}
+
+/// Start a mock HTTP backend returning a fixed body,
+/// with a [`BackendGuard`] that shuts down the listener
+/// thread when dropped.
+pub fn start_backend_with_shutdown(body: &str) -> BackendGuard {
+    Backend::fixed(body).start_with_shutdown()
+}
+
+// -----------------------------------------------------------------------------
+// Config Builders
+// -----------------------------------------------------------------------------
+
+/// Map an HTTP status code to its reason phrase.
+pub(super) fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        413 => "Content Too Large",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Unknown",
+    }
+}
+
+/// Build a [`Config`] with conditional `static_response`
+/// filters for each route, plus dummy clusters.
+///
+/// [`Config`]: praxis_core::config::Config
+fn build_routed_config(address: &str, routes: &[RoutedEntry]) -> Config {
+    let mut cluster_configs = Vec::new();
+    let mut chain_filters = Vec::new();
+
+    for (i, entry) in routes.iter().enumerate() {
+        let cluster_name = format!("route-{i}");
+        let (cluster, filter) = build_route_entry(entry, &cluster_name);
+        cluster_configs.push(cluster);
+        chain_filters.push(filter);
+    }
+
+    build_config(address, cluster_configs, chain_filters)
+}
+
+/// Build a cluster/filter pair from a [`RoutedEntry`].
+fn build_route_entry(entry: &RoutedEntry, cluster_name: &str) -> (Cluster, FilterEntry) {
+    let cluster = build_dummy_cluster(cluster_name);
+    let filter = build_static_response_filter(entry);
+    (cluster, filter)
+}
+
+/// Build a dummy cluster pointing at a placeholder address.
+fn build_dummy_cluster(cluster_name: &str) -> Cluster {
+    Cluster::with_defaults(cluster_name, vec![Endpoint::Simple("127.0.0.1:1".to_owned())])
+}
+
+/// Build a `static_response` filter entry from a [`RoutedEntry`].
+fn build_static_response_filter(entry: &RoutedEntry) -> FilterEntry {
+    let mut headers = vec![header_value("Server", "praxis-test-backend")];
+    for (k, v) in &entry.headers {
+        headers.push(header_value(k, v));
+    }
+
+    let conditions = if entry.path_prefix == "/" {
+        vec![]
+    } else {
+        let mut cond = serde_yaml::Mapping::new();
+        let mut when = serde_yaml::Mapping::new();
+        when.insert("path_prefix".into(), entry.path_prefix.clone().into());
+        cond.insert("when".into(), serde_yaml::Value::Mapping(when));
+        vec![serde_yaml::from_value(serde_yaml::Value::Mapping(cond)).expect("valid condition")]
+    };
+
+    let mut filter_config = serde_yaml::Mapping::new();
+    filter_config.insert("filter".into(), "static_response".into());
+    filter_config.insert("status".into(), entry.status.into());
+    filter_config.insert("headers".into(), serde_yaml::Value::Sequence(headers));
+    filter_config.insert("body".into(), entry.body.clone().into());
+
+    FilterEntry {
+        branch_chains: None,
+        filter_type: "static_response".to_owned(),
+        conditions,
+        config: serde_yaml::Value::Mapping(filter_config),
+        failure_mode: FailureMode::default(),
+        name: None,
+        response_conditions: vec![],
+    }
+}
+
+/// Assemble a [`Config`] from parts.
+///
+/// Uses serde round-trip so new `#[serde(default)]` fields in
+/// upstream praxis-core (e.g. `metrics`) are filled automatically,
+/// keeping this compatible with both crates.io and path deps.
+fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>) -> Config {
+    let listener = Listener {
+        address: address.to_owned(),
+        cluster: None,
+        downstream_keepalive_timeout_ms: None,
+        downstream_read_timeout_ms: None,
+        filter_chains: vec!["backend".to_owned()],
+        max_connections: None,
+        name: "backend".to_owned(),
+        protocol: ProtocolKind::default(),
+        tcp_session_timeout_ms: None,
+        tcp_max_duration_secs: None,
+        tls: None,
+        upstream: None,
+    };
+
+    let chain = FilterChainConfig {
+        name: "backend".to_owned(),
+        filters,
+    };
+
+    let mut map = serde_yaml::Mapping::new();
+    map.insert("clusters".into(), serde_yaml::to_value(clusters).unwrap());
+    map.insert("filter_chains".into(), serde_yaml::to_value(vec![chain]).unwrap());
+    map.insert("listeners".into(), serde_yaml::to_value(vec![listener]).unwrap());
+    map.insert("shutdown_timeout_secs".into(), serde_yaml::to_value(5_u64).unwrap());
+    serde_yaml::from_value(serde_yaml::Value::Mapping(map)).unwrap()
+}
+
+/// Build a YAML header mapping with `name` and `value` keys.
+fn header_value(name: &str, value: &str) -> serde_yaml::Value {
+    let mut m = serde_yaml::Mapping::new();
+    m.insert("name".into(), name.into());
+    m.insert("value".into(), value.into());
+    serde_yaml::Value::Mapping(m)
+}
+
+/// Start a Praxis server in a background thread and return the port it bound to.
+fn start_server(mut config: Config) -> u16 {
+    let port = crate::net::port::free_port();
+    let addr = format!("127.0.0.1:{port}");
+
+    for l in &mut config.listeners {
+        if l.address == "127.0.0.1:0" {
+            l.address.clone_from(&addr);
+        }
+    }
+
+    std::thread::spawn(move || {
+        praxis::run_server(config, None, None);
+    });
+
+    crate::net::wait::wait_for_http(&addr);
+    port
+}

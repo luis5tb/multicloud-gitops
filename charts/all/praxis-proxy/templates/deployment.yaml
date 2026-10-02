@@ -1,0 +1,143 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "praxis-proxy.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "praxis-proxy.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.policy.caBundleSync.enabled }}
+        ca-bundle-sync-sha256: ""
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: praxis-proxy
+          image: {{ include "praxis-proxy.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.policy.caBundleConfigMap.name }}
+          env:
+            - name: SSL_CERT_FILE
+              value: /etc/praxis/ca-bundle/ca-bundle.crt
+          {{- end }}
+          args:
+            - --config
+            - /etc/praxis/config/praxis.yaml
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: admin-local
+              containerPort: 9901
+              protocol: TCP
+          startupProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -O
+                - /dev/null
+                - http://127.0.0.1:9901/healthy
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 36
+          livenessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -O
+                - /dev/null
+                - http://127.0.0.1:9901/healthy
+            periodSeconds: 20
+            timeoutSeconds: 2
+          readinessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -O
+                - /dev/null
+                {{ if .Values.clusterRouting.enabled }}
+                # In routing mode readiness stays on the loopback-only admin
+                # listener; it does not create an unauthenticated OLS route.
+                - http://127.0.0.1:9901/healthy
+                {{ else }}
+                - http://127.0.0.1:{{ .Values.service.port }}/health/ready
+                {{ end }}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/praxis/config
+              readOnly: true
+            {{- if .Values.policy.caBundleConfigMap.name }}
+            - name: policy-ca-bundle
+              mountPath: /etc/praxis/ca-bundle
+              readOnly: true
+            {{- end }}
+            {{ if .Values.clusterRouting.enabled }}
+            {{ range $id, $cluster := .Values.global.olsClusters }}
+            {{- $caName := $.Values.clusterRouting.serviceCAConfigMapName -}}
+            {{- if $cluster.upstreamCA -}}
+              {{- $caName = $cluster.upstreamCA.configMapName -}}
+            {{- end }}
+            - name: {{ printf "upstream-ca-%s" (sha256sum $id | trunc 16) }}
+              mountPath: {{ printf "/etc/praxis/upstream-ca/%s" $id | quote }}
+              readOnly: true
+            {{ end }}
+            {{ end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "praxis-proxy.fullname" . }}
+            defaultMode: 0444
+        {{- if .Values.policy.caBundleConfigMap.name }}
+        - name: policy-ca-bundle
+          configMap:
+            name: {{ .Values.policy.caBundleConfigMap.name }}
+            items:
+              - key: {{ .Values.policy.caBundleConfigMap.key }}
+                path: ca-bundle.crt
+          {{- end }}
+        {{ if .Values.clusterRouting.enabled }}
+        {{ range $id, $cluster := .Values.global.olsClusters }}
+        {{- $caName := $.Values.clusterRouting.serviceCAConfigMapName -}}
+        {{- $caKey := "service-ca.crt" -}}
+        {{- if $cluster.upstreamCA -}}
+          {{- $caName = $cluster.upstreamCA.configMapName -}}
+          {{- $caKey = default "ca-bundle.crt" $cluster.upstreamCA.key -}}
+        {{- end }}
+        - name: {{ printf "upstream-ca-%s" (sha256sum $id | trunc 16) }}
+          configMap:
+            name: {{ $caName | quote }}
+            defaultMode: 0444
+            items:
+              - key: {{ $caKey | quote }}
+                path: ca.crt
+        {{ end }}
+        {{ end }}
+{{- end }}

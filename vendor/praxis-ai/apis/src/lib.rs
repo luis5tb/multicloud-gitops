@@ -1,0 +1,213 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![allow(unreachable_pub, reason = "migration: visibility will be tightened")]
+
+//! AI provider API types and persistence for Praxis.
+//!
+//! Contains provider-specific protocol types (OpenAI, Anthropic),
+//! request classification, shared hop-by-hop header sanitization,
+//! JSON body-mutation helpers, and response storage backends.
+
+pub mod anthropic;
+pub mod azure;
+mod callout_credentials;
+pub mod callout_headers;
+mod callout_identity;
+pub mod callout_policy;
+pub mod callout_target;
+pub mod classifier;
+pub mod hash;
+pub mod http_hop;
+pub mod json_body;
+#[cfg(feature = "openai-mcp-tools")]
+pub(crate) mod mcp_client;
+pub mod openai;
+pub mod operation;
+mod project_state_owner_headers;
+pub mod promotion;
+mod state_owner;
+#[cfg(feature = "store")]
+pub mod store;
+pub mod subrequest;
+pub mod token_cache;
+pub mod vertex;
+pub(crate) mod web_search;
+
+pub use callout_credentials::{CalloutCredentials, CalloutCredentialsFilter};
+pub use project_state_owner_headers::ProjectStateOwnerHeadersFilter;
+pub use state_owner::{StateOwner, StateOwnerError, StateOwnerFilter, project_state_owner};
+
+/// Whether a `Content-Type` header value indicates `text/event-stream`,
+/// ignoring parameters (e.g. `; charset=utf-8`) and ASCII case.
+pub fn is_event_stream_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .eq_ignore_ascii_case("text/event-stream")
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::expect_used, reason = "test utilities")]
+pub(crate) mod test_utils {
+    use std::sync::LazyLock;
+
+    use http::{HeaderMap, Method, Uri};
+    use praxis_core::id::IdGenerator;
+    use praxis_filter::{HttpFilterContext, Request, RequestExtensions, Response};
+
+    /// Deterministic ID generator for tests (seed=0).
+    static TEST_ID_GENERATOR: LazyLock<IdGenerator> = LazyLock::new(|| IdGenerator::with_seed(0));
+
+    /// Shared sub-request transport for filter unit tests.
+    ///
+    /// Filters that dial an outbound callout (e.g. the MCP `tools/list` and
+    /// `tools/call` filters) read their parent transport from
+    /// [`HttpFilterContext::subrequest_client`]; a `None` client makes them fail
+    /// closed. This static provides a real (loopback-capable) connector so tests
+    /// exercise the callout path. Whether a private/loopback destination is then
+    /// permitted is governed by the filter's bound outbound pipeline posture, not
+    /// this client.
+    static TEST_SUBREQUEST_CLIENT: LazyLock<praxis_core::subrequest::SubRequestClient> =
+        LazyLock::new(|| praxis_core::subrequest::SubRequestClient::new(connector(1)));
+
+    /// A sub-request connector for tests. The connector builds a rustls
+    /// client config, and rustls needs the process-wide crypto provider (the
+    /// system OpenSSL, installed by the binary at startup) before that; the
+    /// helper installs it, which is a no-op after the first call.
+    pub(crate) fn connector(pool_size: usize) -> praxis_core::subrequest::SubRequestConnector {
+        praxis_tls::provider::install();
+        praxis_core::subrequest::SubRequestConnector::new(pool_size, None)
+    }
+
+    /// Build a minimal request for filter unit tests.
+    pub(crate) fn make_request(method: Method, path: &str) -> Request {
+        Request {
+            method,
+            uri: path.parse::<Uri>().expect("invalid URI in test"),
+            headers: HeaderMap::new(),
+        }
+    }
+
+    /// Build a minimal filter context for unit tests.
+    #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "test context constructor mirrors all context fields"
+    )]
+    pub(crate) fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
+        HttpFilterContext {
+            buffered_request_body: None,
+            body_done_indices: Vec::new(),
+            branch_iterations: std::collections::HashMap::new(),
+            grpc_completion: None,
+            client_addr: None,
+            cluster: None,
+            current_filter_id: None,
+            downstream_tls: false,
+            extensions: RequestExtensions::default(),
+            executed_filter_indices: Vec::new(),
+            extra_request_headers: Vec::new(),
+            request_headers_to_remove: Vec::new(),
+            request_headers_to_set: Vec::new(),
+            filter_metadata: std::collections::HashMap::new(),
+            pre_read_mutations: Vec::new(),
+            prior_pre_read_mutations: Vec::new(),
+            structured_metadata: std::collections::HashMap::new(),
+            filter_results: std::collections::HashMap::new(),
+            filter_state: std::collections::HashMap::new(),
+            health_registry: None,
+            id_generator: &TEST_ID_GENERATOR,
+            kv_stores: None,
+            session_stores: None,
+            metrics_route: None,
+            peer_identity: None,
+            request: req,
+            request_body_bytes: 0,
+            request_body_mode: praxis_filter::BodyMode::Stream,
+            request_start: std::time::Instant::now(),
+            response_body_bytes: 0,
+            response_body_mode: praxis_filter::BodyMode::Stream,
+            response_header: None,
+            response_headers_modified: false,
+            subrequest_client: Some(&TEST_SUBREQUEST_CLIENT),
+            subrequest_response_mode: praxis_filter::SubRequestResponseMode::Buffered,
+            attempted_endpoints: Vec::new(),
+            retry_policy: None,
+            route_retry_policy: None,
+            cluster_retry_state: None,
+            cluster_retry_state_released: false,
+            endpoint_reselector: None,
+            pinned_endpoint_address: None,
+            rewritten_path: None,
+            selected_endpoint_index: None,
+            time_source: &praxis_core::time::SystemTimeSource,
+            upstream: None,
+            upstream_reached: false,
+        }
+    }
+
+    /// Build a minimal OK response for filter unit tests.
+    pub(crate) fn make_response() -> Response {
+        Response {
+            headers: HeaderMap::new(),
+            status: http::StatusCode::OK,
+        }
+    }
+
+    /// Build a stable owner for tests that previously supplied only a tenant.
+    #[cfg(feature = "store")]
+    pub(crate) fn test_owner(tenant_id: &str) -> crate::StateOwner {
+        crate::StateOwner::from_trusted_parts(tenant_id, "test-issuer", "test-subject")
+            .expect("test owner should be valid")
+    }
+
+    /// Build a filter context with the default trusted test owner installed.
+    #[cfg(feature = "store-sqlite")]
+    pub(crate) fn make_owned_filter_context(req: &Request) -> HttpFilterContext<'_> {
+        let mut ctx = make_filter_context(req);
+        ctx.extensions.insert(test_owner("default"));
+        ctx
+    }
+
+    /// Build a [`FilterRegistry`] with core builtins plus AI API filters
+    /// needed by pipeline integration tests.
+    ///
+    /// [`FilterRegistry`]: praxis_filter::FilterRegistry
+    #[cfg(feature = "store-sqlite")]
+    pub(crate) fn make_ai_registry() -> praxis_filter::FilterRegistry {
+        let mut registry = praxis_filter::FilterRegistry::with_builtins();
+        praxis_filter::register_filters!(
+            @register registry,
+            http "state_owner" => crate::StateOwnerFilter::from_config
+        );
+        praxis_filter::register_filters!(
+            @register registry,
+            http "project_state_owner_headers" => crate::ProjectStateOwnerHeadersFilter::from_config
+        );
+        praxis_filter::register_filters!(
+            @register registry,
+            http "openai_responses_format" => crate::openai::ResponsesFormatFilter::from_config
+        );
+        praxis_filter::register_filters!(
+            @register registry,
+            http "openai_response_store" => crate::openai::ResponseStoreFilter::from_config
+        );
+        praxis_filter::register_filters!(
+            @register registry,
+            http "openai_responses_rehydrate" => crate::openai::RehydrateFilter::from_config
+        );
+        praxis_filter::register_filters!(
+            @register registry,
+            http "openai_stream_events" => crate::openai::OpenaiStreamEventsFilter::from_config
+        );
+        registry
+    }
+}
