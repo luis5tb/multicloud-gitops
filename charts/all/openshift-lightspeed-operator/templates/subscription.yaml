@@ -1,0 +1,20 @@
+{{- include "openshift-lightspeed-operator.validate" . -}}
+{{- if .Values.subscription.enabled }}
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: {{ .Values.subscription.name | quote }}
+  namespace: {{ .Values.installNamespace.name | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    app.kubernetes.io/name: openshift-lightspeed-operator
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+spec:
+  name: {{ .Values.subscription.packageName | quote }}
+  channel: {{ .Values.subscription.channel | quote }}
+  startingCSV: {{ .Values.subscription.startingCSV | quote }}
+  installPlanApproval: {{ .Values.subscription.installPlanApproval | quote }}
+  source: {{ .Values.catalogSource.name | quote }}
+  sourceNamespace: {{ .Values.catalogSource.namespace | quote }}
+{{- end }}

@@ -1,0 +1,34 @@
+# This chart is intentionally inert until a versioned downstream bundle/catalog
+# is built, published, and its actual package/channel/CSV are confirmed.
+catalogSource:
+  enabled: false
+  name: lightspeed-downstream-catalog
+  namespace: openshift-marketplace
+  displayName: OpenShift Lightspeed downstream catalog
+  publisher: ""
+  # Must be a deployment-controlled immutable catalog image reference:
+  # <registry>/<repository>@sha256:<64 lowercase hex characters>
+  image: ""
+
+subscription:
+  enabled: false
+  name: lightspeed-operator
+  packageName: ""
+  channel: ""
+  startingCSV: ""
+  installPlanApproval: Manual
+
+# The pinned bundle supports OwnNamespace only. When Subscription is enabled,
+# the OperatorGroup targets exactly this namespace, never all namespaces.
+installNamespace:
+  name: openshift-lightspeed
+  create: true
+
+operatorGroup:
+  name: lightspeed-operator
+  create: true
+
+# Validated Patterns inject these trees into local charts. These stubs make
+# standalone Helm rendering independent of the parent clustergroup chart.
+global: {}
+clusterGroup: {}

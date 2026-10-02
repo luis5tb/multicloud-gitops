@@ -1,0 +1,103 @@
+{{- if .Values.olsConfig.enabled }}
+{{- if and .Values.olsConfig.introspectionEnabled (not .Values.olsConfig.mcpServerSecurity.enabled) }}
+{{- fail "OLS introspection requires olsConfig.mcpServerSecurity.enabled and a Keycloak issuer CA Secret" }}
+{{- end }}
+{{- if and .Values.olsConfig.mcpServerSecurity.enabled (not .Values.olsConfig.introspectionEnabled) }}
+{{- fail "olsConfig.mcpServerSecurity.enabled requires olsConfig.introspectionEnabled=true" }}
+{{- end }}
+{{- if .Values.olsConfig.mcpServerSecurity.enabled }}
+{{- if not (regexMatch "^https://[^/@?#]+/realms/[^/?#]+$" .Values.olsConfig.mcpServerSecurity.authorizationURL) }}
+{{- fail "olsConfig.mcpServerSecurity.authorizationURL must be the Keycloak HTTPS realm issuer URL" }}
+{{- end }}
+{{- if or (not .Values.olsConfig.mcpServerSecurity.caSecretName) (not .Values.olsConfig.mcpServerSecurity.caSecretKey) }}
+{{- fail "olsConfig.mcpServerSecurity requires a Keycloak CA Secret name and key" }}
+{{- end }}
+{{- if ne .Values.olsConfig.mcpServerSecurity.oauthAudience "openshift-mcp" }}
+{{- fail "olsConfig.mcpServerSecurity.oauthAudience must be openshift-mcp" }}
+{{- end }}
+{{- end }}
+{{- if .Values.olsConfig.a2a.enabled }}
+{{- if not .Values.olsConfig.introspectionEnabled }}
+{{- fail "olsConfig.a2a.enabled requires introspectionEnabled=true" }}
+{{- end }}
+{{- if not .Values.olsConfig.mcpServerSecurity.enabled }}
+{{- fail "olsConfig.a2a.enabled requires MCP OIDC security to be configured" }}
+{{- end }}
+{{- if or (not .Values.olsConfig.a2a.targetClusterID) (not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" .Values.olsConfig.a2a.targetClusterID)) }}
+{{- fail "olsConfig.a2a.targetClusterID must be a stable DNS-safe registry ID" }}
+{{- end }}
+{{- if not (regexMatch "^https://[^/@?#]+$" .Values.olsConfig.a2a.publicURL) }}
+{{- fail "olsConfig.a2a.publicURL must be the public Praxis HTTPS origin without a path" }}
+{{- end }}
+{{- if not (regexMatch "^[^@]+@sha256:[a-f0-9]{64}$" .Values.olsConfig.serviceImage) }}
+{{- fail "A2A requires olsConfig.serviceImage to be a digest-pinned custom Lightspeed image" }}
+{{- end }}
+{{- if not .Values.praxisIngress.enabled }}
+{{- fail "A2A requires a Praxis ingress NetworkPolicy allowance" }}
+{{- end }}
+{{- if not .Values.praxisIngress.namespace }}
+{{- fail "praxisIngress.namespace must identify the namespace of the Praxis pods" }}
+{{- end }}
+{{- if empty .Values.praxisIngress.podSelector }}
+{{- fail "praxisIngress.podSelector must select only the intended Praxis pods" }}
+{{- end }}
+{{- if or (ne .Values.olsConfig.a2a.inboundAudience "lightspeed-a2a") (ne .Values.olsConfig.a2a.allowedCallerClientID "acme-agent") (ne .Values.olsConfig.a2a.exchangeClientID "lightspeed-mcp") }}
+{{- fail "olsConfig.a2a must use the fixed lightspeed-a2a/acme-agent/lightspeed-mcp identity contract" }}
+{{- end }}
+{{- end }}
+{{- if and .Values.keycloakCA.externalSecret.enabled .Values.olsConfig.mcpServerSecurity.enabled }}
+{{- if ne .Values.keycloakCA.externalSecret.targetSecretName .Values.olsConfig.mcpServerSecurity.caSecretName }}
+{{- fail "keycloakCA.externalSecret.targetSecretName must match mcpServerSecurity.caSecretName" }}
+{{- end }}
+{{- if ne .Values.keycloakCA.externalSecret.targetKey .Values.olsConfig.mcpServerSecurity.caSecretKey }}
+{{- fail "keycloakCA.externalSecret.targetKey must match mcpServerSecurity.caSecretKey" }}
+{{- end }}
+{{- end }}
+apiVersion: ols.openshift.io/v1alpha1
+kind: OLSConfig
+metadata:
+  name: cluster
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  llm:
+    providers:
+      - name: {{ .Values.olsConfig.providerName | quote }}
+        type: google_vertex
+        credentialsSecretRef:
+          name: {{ .Values.olsConfig.credentialsSecretName | quote }}
+        credentialKey: {{ .Values.olsConfig.credentialKey | quote }}
+        models:
+          - name: {{ .Values.olsConfig.model | quote }}
+        googleVertexConfig:
+          projectID: {{ .Values.olsConfig.projectID | quote }}
+          location: {{ .Values.olsConfig.location | quote }}
+  ols:
+    defaultProvider: {{ .Values.olsConfig.providerName | quote }}
+    defaultModel: {{ .Values.olsConfig.model | quote }}
+    introspectionEnabled: {{ .Values.olsConfig.introspectionEnabled }}
+    {{- if .Values.olsConfig.serviceImage }}
+    serviceImage: {{ .Values.olsConfig.serviceImage | quote }}
+    {{- end }}
+    {{- if .Values.olsConfig.mcpServerSecurity.enabled }}
+    mcpServerSecurity:
+      authorizationURL: {{ .Values.olsConfig.mcpServerSecurity.authorizationURL | quote }}
+      oauthAudience: {{ .Values.olsConfig.mcpServerSecurity.oauthAudience | quote }}
+      caSecretRef:
+        name: {{ .Values.olsConfig.mcpServerSecurity.caSecretName | quote }}
+        key: {{ .Values.olsConfig.mcpServerSecurity.caSecretKey | quote }}
+        optional: false
+      toolsets:
+        {{- toYaml .Values.olsConfig.mcpServerSecurity.toolsets | nindent 8 }}
+      allowPrometheusMetrics: {{ .Values.olsConfig.mcpServerSecurity.allowPrometheusMetrics }}
+    {{- end }}
+    {{- if .Values.olsConfig.a2a.enabled }}
+    a2a:
+      enabled: true
+      targetClusterID: {{ .Values.olsConfig.a2a.targetClusterID | quote }}
+      publicURL: {{ .Values.olsConfig.a2a.publicURL | quote }}
+      inboundAudience: {{ .Values.olsConfig.a2a.inboundAudience | quote }}
+      allowedCallerClientID: {{ .Values.olsConfig.a2a.allowedCallerClientID | quote }}
+      exchangeClientID: {{ .Values.olsConfig.a2a.exchangeClientID | quote }}
+    {{- end }}
+{{- end }}

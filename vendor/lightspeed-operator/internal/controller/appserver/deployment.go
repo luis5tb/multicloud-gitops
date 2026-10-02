@@ -1,0 +1,777 @@
+package appserver
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/openshift/lightspeed-operator/internal/controller/reconciler"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	olsv1alpha1 "github.com/openshift/lightspeed-operator/api/v1alpha1"
+	"github.com/openshift/lightspeed-operator/internal/controller/utils"
+)
+
+func getOLSServerResources(cr *olsv1alpha1.OLSConfig) *corev1.ResourceRequirements {
+	return utils.GetResourcesOrDefault(
+		cr.Spec.OLSConfig.DeploymentConfig.APIContainer.Resources,
+		&corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
+			Claims:   []corev1.ResourceClaim{},
+		},
+	)
+}
+
+func getOLSDataCollectorResources(cr *olsv1alpha1.OLSConfig) *corev1.ResourceRequirements {
+	return utils.GetResourcesOrDefault(
+		cr.Spec.OLSConfig.DeploymentConfig.DataCollectorContainer.Resources,
+		&corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("64Mi")},
+			Claims:   []corev1.ResourceClaim{},
+		},
+	)
+}
+
+func appServerEnv(r reconciler.Reconciler, cr *olsv1alpha1.OLSConfig) []corev1.EnvVar {
+	env := append(utils.GetProxyEnvVars(), corev1.EnvVar{
+		Name:  "OLS_CONFIG_FILE",
+		Value: path.Join(utils.OLSConfigMountRoot, utils.OLSConfigFilename),
+	}, corev1.EnvVar{
+		// OTLP/gRPC uses its own trust store; extra_ca (certifi) is not consulted.
+		Name: utils.OTELExporterOTLPCertificateEnvVar,
+		Value: path.Join(
+			utils.OLSAppCertsMountRoot,
+			utils.AppOtelCollectorCACertDir,
+			utils.AppOtelCollectorCACertFile,
+		),
+	}, corev1.EnvVar{
+		// Make Python ssl (and httpx) use the merged ols.pem bundle that
+		// includes extra_ca entries (service-ca CAs for RHOKP, MCP, OTEL, etc.)
+		Name:  "SSL_CERT_FILE",
+		Value: path.Join(utils.OLSAppCertsMountRoot, utils.CertBundleVolumeName, "ols.pem"),
+	})
+	if !cr.Spec.OLSConfig.ByokRAGOnly {
+		env = append(env, corev1.EnvVar{
+			Name:  utils.OCPClusterVersionEnvVar,
+			Value: r.GetOpenShiftMajor() + "." + r.GetOpenshiftMinor(),
+		})
+		if rosaEnv := r.GetRosaOKPProductEnv(); rosaEnv != nil {
+			env = append(env, *rosaEnv)
+		}
+	}
+	return env
+}
+
+func GenerateOLSDeployment(r reconciler.Reconciler, cr *olsv1alpha1.OLSConfig) (*appsv1.Deployment, error) {
+	ctx := context.Background()
+	const OLSConfigVolumeName = "cm-olsconfig"
+	const OLSUserDataVolumeName = "ols-user-data"
+
+	revisionHistoryLimit := int32(1)
+	volumeDefaultMode := utils.VolumeDefaultMode
+
+	if err := validateServiceImage(cr.Spec.OLSConfig.ServiceImage); err != nil {
+		return nil, err
+	}
+	a2aSettings, err := getA2AWorkloadSettings(cr)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateA2AKeycloakCA(r, ctx, a2aSettings); err != nil {
+		return nil, err
+	}
+
+	dataCollectorEnabled, err := dataCollectorEnabled(r, cr)
+	if err != nil {
+		return nil, err
+	}
+
+	// certificates mount paths
+	AdditionalCAMountPath := path.Join(utils.OLSAppCertsMountRoot, utils.AppAdditionalCACertDir)
+	UserCAMountPath := path.Join(utils.OLSAppCertsMountRoot, utils.UserCACertDir)
+
+	// Container ports
+	ports := []corev1.ContainerPort{
+		{
+			ContainerPort: utils.OLSAppServerContainerPort,
+			Name:          "https",
+			Protocol:      corev1.ProtocolTCP,
+		},
+	}
+
+	// Initialize volumes and volumeMounts slices
+	volumes := []corev1.Volume{}
+	volumeMounts := []corev1.VolumeMount{}
+
+	// Add external LLM provider secrets - create both volumes and volume mounts in single pass
+	// Note: Callback never returns an error, using ForEach for convenient iteration
+	_ = utils.ForEachExternalSecret(cr, func(name, source string) error {
+		if !strings.HasPrefix(source, "llm-provider-") {
+			// TLS and MCP header secrets are handled separately below
+			return nil
+		}
+
+		mountPath := path.Join(utils.APIKeyMountRoot, name)
+		volumes = append(volumes, corev1.Volume{
+			Name: "secret-" + name,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  name,
+					DefaultMode: &volumeDefaultMode,
+				},
+			},
+		})
+
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "secret-" + name,
+			MountPath: mountPath,
+			ReadOnly:  true,
+		})
+		return nil
+	})
+
+	// Postgres secret volume and mount (operator-owned, not external)
+	postgresCredentialsMountPath := path.Join(utils.CredentialsMountRoot, utils.PostgresSecretName)
+	volumes = append(volumes, corev1.Volume{
+		Name: "secret-" + utils.PostgresSecretName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  utils.PostgresSecretName,
+				DefaultMode: &volumeDefaultMode,
+			},
+		},
+	})
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		Name:      "secret-" + utils.PostgresSecretName,
+		MountPath: postgresCredentialsMountPath,
+		ReadOnly:  true,
+	})
+
+	// TLS certificate volume and mount
+	// If user provides custom TLS, mount it; otherwise use service-ca generated secret
+	if cr.Spec.OLSConfig.TLSConfig != nil && cr.Spec.OLSConfig.TLSConfig.KeyCertSecretRef.Name != "" {
+		// User provided custom TLS secret
+		tlsMountPath := path.Join(utils.OLSAppCertsMountRoot, "lightspeed-tls")
+		volumes = append(volumes, corev1.Volume{
+			Name: "secret-lightspeed-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  cr.Spec.OLSConfig.TLSConfig.KeyCertSecretRef.Name,
+					DefaultMode: &volumeDefaultMode,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "secret-lightspeed-tls",
+			MountPath: tlsMountPath,
+			ReadOnly:  true,
+		})
+	} else {
+		// Use service-ca generated secret
+		tlsMountPath := path.Join(utils.OLSAppCertsMountRoot, "lightspeed-tls")
+		volumes = append(volumes, corev1.Volume{
+			Name: "secret-lightspeed-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  utils.OLSCertsSecretName,
+					DefaultMode: &volumeDefaultMode,
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "secret-lightspeed-tls",
+			MountPath: tlsMountPath,
+			ReadOnly:  true,
+		})
+	}
+
+	// OLS config map volume and mount
+	olsConfigVolume := corev1.Volume{
+		Name: OLSConfigVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: utils.OLSConfigCmName,
+				},
+				DefaultMode: &volumeDefaultMode,
+			},
+		},
+	}
+	volumes = append(volumes, olsConfigVolume)
+	olsConfigVolumeMount := corev1.VolumeMount{
+		Name:      OLSConfigVolumeName,
+		MountPath: utils.OLSConfigMountRoot,
+		ReadOnly:  true,
+	}
+	volumeMounts = append(volumeMounts, olsConfigVolumeMount)
+
+	// Data collector volumes and mounts (if enabled)
+	if dataCollectorEnabled {
+		olsUserDataVolume := corev1.Volume{
+			Name: OLSUserDataVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		}
+		volumes = append(volumes, olsUserDataVolume)
+
+		olsUserDataVolumeMount := corev1.VolumeMount{
+			Name:      OLSUserDataVolumeName,
+			MountPath: utils.OLSUserDataMountPath,
+		}
+		volumeMounts = append(volumeMounts, olsUserDataVolumeMount)
+
+		// Add exporter config volume and mount
+		exporterConfigVolume := corev1.Volume{
+			Name: utils.ExporterConfigVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: utils.ExporterConfigCmName,
+					},
+					DefaultMode: &volumeDefaultMode,
+				},
+			},
+		}
+		volumes = append(volumes, exporterConfigVolume)
+
+		exporterConfigVolumeMount := corev1.VolumeMount{
+			Name:      utils.ExporterConfigVolumeName,
+			MountPath: utils.ExporterConfigMountPath,
+			ReadOnly:  true,
+		}
+		volumeMounts = append(volumeMounts, exporterConfigVolumeMount)
+	}
+
+	// Mount "kube-root-ca.crt" configmap
+	certVolume := corev1.Volume{
+		Name: utils.OpenShiftCAVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: "kube-root-ca.crt",
+				},
+				DefaultMode: &volumeDefaultMode,
+			},
+		},
+	}
+
+	// Create certificates volume
+	certBundleVolume := corev1.Volume{
+		Name: utils.CertBundleVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}
+	volumes = append(volumes, certVolume, certBundleVolume)
+
+	// Volumemount OpenShift certificates configmap
+	openShiftCAVolumeMount := corev1.VolumeMount{
+		Name:      utils.OpenShiftCAVolumeName,
+		MountPath: AdditionalCAMountPath,
+		ReadOnly:  true,
+	}
+
+	certBundleVolumeMount := corev1.VolumeMount{
+		Name:      utils.CertBundleVolumeName,
+		MountPath: path.Join(utils.OLSAppCertsMountRoot, utils.CertBundleVolumeName),
+	}
+	volumeMounts = append(volumeMounts, openShiftCAVolumeMount, certBundleVolumeMount)
+
+	// User provided CA certificates - create both volumes and volume mounts in single pass
+	// Note: Callback never returns an error, using ForEach for convenient iteration
+	_ = utils.ForEachExternalConfigMap(cr, func(name, source string) error {
+		var volumeName, mountPath string
+		var items []corev1.KeyToPath
+		switch source {
+		case "additional-ca":
+			volumeName = utils.AdditionalCAVolumeName
+			mountPath = UserCAMountPath
+		case "proxy-ca":
+			volumeName = utils.ProxyCACertVolumeName
+			mountPath = path.Join(utils.OLSAppCertsMountRoot, utils.ProxyCACertVolumeName)
+			certKey := utils.GetProxyCACertKey(cr.Spec.OLSConfig.ProxyConfig.ProxyCACertificateRef)
+			items = []corev1.KeyToPath{
+				{Key: certKey, Path: certKey},
+			}
+		default:
+			return nil
+		}
+
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: name},
+					DefaultMode:          &volumeDefaultMode,
+					Items:                items,
+				},
+			},
+		})
+
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+			ReadOnly:  true,
+		})
+		return nil
+	})
+
+	// RAG volume
+	if len(cr.Spec.OLSConfig.RAG) > 0 {
+		ragVolume := generateRAGVolume()
+		volumes = append(volumes, ragVolume)
+	}
+
+	// Postgres CA volume
+	volumes = append(volumes, utils.GetPostgresCAConfigVolume())
+
+	volumes = append(volumes, corev1.Volume{
+		Name: utils.AppOtelCollectorCACertVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  utils.AgenticOtelCASecretName,
+				DefaultMode: &volumeDefaultMode,
+				Items: []corev1.KeyToPath{
+					{
+						Key:  utils.AgenticOtelCASecretDataKey,
+						Path: utils.AppOtelCollectorCACertFile,
+					},
+				},
+			},
+		},
+	})
+
+	if utils.BoolDeref(cr.Spec.OLSConfig.IntrospectionEnabled, true) {
+		volumes = append(volumes, corev1.Volume{
+			Name: utils.AppOpenShiftMCPServerCACertVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  utils.AgenticMCPCASecretName,
+					DefaultMode: &volumeDefaultMode,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  utils.AgenticMCPCASecretDataKey,
+							Path: utils.AppOpenShiftMCPServerCACertFile,
+						},
+					},
+				},
+			},
+		})
+	}
+
+	if !cr.Spec.OLSConfig.ByokRAGOnly {
+		volumes = append(volumes, corev1.Volume{
+			Name: utils.AppRHOKPCACertVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  utils.AgenticRHOKPCASecretName,
+					DefaultMode: &volumeDefaultMode,
+					Items: []corev1.KeyToPath{
+						{
+							Key:  utils.AgenticRHOKPCASecretDataKey,
+							Path: utils.AppRHOKPCACertFile,
+						},
+					},
+				},
+			},
+		})
+	}
+	if a2aSettings != nil {
+		a2aVolumes, a2aMounts := a2aSettings.volumesAndMounts()
+		volumes = append(volumes, a2aVolumes...)
+		volumeMounts = append(volumeMounts, a2aMounts...)
+	}
+
+	volumes = append(volumes,
+		corev1.Volume{
+			Name: utils.TmpVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+	)
+
+	if len(cr.Spec.OLSConfig.RAG) > 0 {
+		ragVolumeMounts := generateRAGVolumeMount()
+		volumeMounts = append(volumeMounts, ragVolumeMounts)
+	}
+
+	volumeMounts = append(volumeMounts,
+		utils.GetPostgresCAVolumeMount(path.Join(utils.OLSAppCertsMountRoot, "postgres-ca")),
+		corev1.VolumeMount{
+			Name:      utils.AppOtelCollectorCACertVolumeName,
+			MountPath: path.Join(utils.OLSAppCertsMountRoot, utils.AppOtelCollectorCACertDir),
+			ReadOnly:  true,
+		},
+	)
+	if utils.BoolDeref(cr.Spec.OLSConfig.IntrospectionEnabled, true) {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      utils.AppOpenShiftMCPServerCACertVolumeName,
+			MountPath: path.Join(utils.OLSAppCertsMountRoot, utils.AppOpenShiftMCPServerCACertDir),
+			ReadOnly:  true,
+		})
+	}
+	if !cr.Spec.OLSConfig.ByokRAGOnly {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      utils.AppRHOKPCACertVolumeName,
+			MountPath: path.Join(utils.OLSAppCertsMountRoot, utils.AppRHOKPCACertDir),
+			ReadOnly:  true,
+		})
+	}
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		Name:      utils.TmpVolumeName,
+		MountPath: utils.TmpVolumeMountPath,
+	})
+
+	// mount the volumes and add Volume mounts for the MCP server headers
+	// Note: Callback never returns an error, using ForEach for convenient iteration
+	_ = utils.ForEachExternalSecret(cr, func(name, source string) error {
+		if strings.HasPrefix(source, "mcp-") && source != "mcp-oidc-ca" {
+			volumes = append(volumes, corev1.Volume{
+				Name: "header-" + name,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName:  name,
+						DefaultMode: &volumeDefaultMode,
+					},
+				},
+			})
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      "header-" + name,
+				MountPath: path.Join(utils.MCPHeadersMountRoot, name),
+				ReadOnly:  true,
+			})
+		}
+		return nil
+	})
+
+	initContainers := []corev1.Container{}
+	initContainers = append(initContainers, utils.GeneratePostgresWaitInitContainer(r.GetPostgresImage()))
+	if len(cr.Spec.OLSConfig.RAG) > 0 {
+		ragInitContainers := GenerateRAGInitContainers(cr)
+		initContainers = append(initContainers, ragInitContainers...)
+	}
+
+	ols_server_resources := getOLSServerResources(cr)
+	data_collector_resources := getOLSDataCollectorResources(cr)
+	appServerImage := r.GetAppServerImage()
+	if cr.Spec.OLSConfig.ServiceImage != "" {
+		appServerImage = cr.Spec.OLSConfig.ServiceImage
+	}
+	appServerEnvironment := appServerEnv(r, cr)
+	if a2aSettings != nil {
+		appServerEnvironment = append(appServerEnvironment, a2aSettings.envVars()...)
+	}
+
+	// Get ResourceVersions for tracking - these resources should already exist
+	// If they don't exist (NotFound), we'll get empty strings which is fine for initial creation
+	// However, we should not ignore other errors (like API failures)
+	configMapResourceVersion, err := utils.GetConfigMapResourceVersion(r, ctx, utils.OLSConfigCmName)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get ConfigMap resource version: %w", err)
+	}
+
+	proxyCACMResourceVersion, err := utils.GetProxyCACertHash(r, ctx, cr)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get Proxy CA certificate hash: %w", err)
+	}
+
+	annotations := map[string]string{
+		utils.OLSConfigMapResourceVersionAnnotation: configMapResourceVersion,
+		utils.RAGSpecHashAnnotation:                 ragSpecHash(cr),
+		utils.ProxyCACertHashAnnotation:             proxyCACMResourceVersion,
+	}
+
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        utils.OLSAppServerDeploymentName,
+			Namespace:   r.GetNamespace(),
+			Labels:      utils.GenerateAppServerSelectorLabels(),
+			Annotations: annotations,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: utils.GenerateAppServerSelectorLabels(),
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: utils.GenerateAppServerSelectorLabels(),
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            "lightspeed-service-api",
+							Image:           appServerImage,
+							ImagePullPolicy: corev1.PullAlways,
+							Ports:           ports,
+							SecurityContext: utils.RestrictedContainerSecurityContext(),
+							VolumeMounts:    volumeMounts,
+							Env:             appServerEnvironment,
+							Resources:       *ols_server_resources,
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path:   "/readiness",
+										Port:   intstr.FromString("https"),
+										Scheme: corev1.URISchemeHTTPS,
+									},
+								},
+								InitialDelaySeconds: 30,
+								PeriodSeconds:       30,
+								TimeoutSeconds:      30,
+								FailureThreshold:    15,
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path:   "/liveness",
+										Port:   intstr.FromString("https"),
+										Scheme: corev1.URISchemeHTTPS,
+									},
+								},
+								InitialDelaySeconds: 30,
+								PeriodSeconds:       30,
+								TimeoutSeconds:      30,
+								FailureThreshold:    3,
+							},
+						},
+					},
+					InitContainers:     initContainers,
+					Volumes:            volumes,
+					ServiceAccountName: utils.OLSAppServerServiceAccountName,
+				},
+			},
+			RevisionHistoryLimit: &revisionHistoryLimit,
+		},
+	}
+
+	// Apply pod-level scheduling constraints (replicas configurable for appserver)
+	utils.ApplyPodDeploymentConfig(&deployment, cr.Spec.OLSConfig.DeploymentConfig.APIContainer, true)
+
+	if len(cr.Spec.OLSConfig.RAG) > 0 {
+		if cr.Spec.OLSConfig.ImagePullSecrets != nil {
+			deployment.Spec.Template.Spec.ImagePullSecrets = cr.Spec.OLSConfig.ImagePullSecrets
+		}
+		triggers, err := generateImageStreamTriggers(cr)
+		if err != nil {
+			return nil, err
+		}
+		deployment.Annotations[utils.OLSAppServerImageStreamTriggerAnnotation] = triggers
+	}
+
+	if err := controllerutil.SetControllerReference(cr, &deployment, r.GetScheme()); err != nil {
+		return nil, err
+	}
+
+	// Add the data collector container (if enabled).
+	// RHOKP now runs as a standalone Deployment, not a sidecar.
+
+	if dataCollectorEnabled {
+		// Add data exporter container
+		logLevel := cr.Spec.OLSDataCollectorConfig.LogLevel
+		if logLevel == "" {
+			logLevel = olsv1alpha1.LogLevelInfo
+		}
+		exporterContainer := corev1.Container{
+			Name:            "lightspeed-to-dataverse-exporter",
+			Image:           r.GetDataverseExporterImage(),
+			ImagePullPolicy: corev1.PullAlways,
+			SecurityContext: utils.RestrictedContainerSecurityContext(),
+			VolumeMounts:    dataCollectorVolumeMounts(volumeMounts),
+			// running in openshift mode ensures that cluster_id is set
+			// as identity_id
+			Args: []string{
+				"--mode",
+				"openshift",
+				"--config",
+				path.Join(utils.ExporterConfigMountPath, utils.ExporterConfigFilename),
+				"--log-level",
+				string(logLevel),
+				"--data-dir",
+				utils.OLSUserDataMountPath,
+			},
+			Resources: *data_collector_resources,
+		}
+		deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, exporterContainer)
+	}
+
+	return &deployment, nil
+}
+
+// updateOLSDeployment updates the deployment based on CustomResource configuration.
+func updateOLSDeployment(r reconciler.Reconciler, ctx context.Context, cr *olsv1alpha1.OLSConfig, existingDeployment, desiredDeployment *appsv1.Deployment) error {
+	// Step 1: Check if deployment spec has changed
+	utils.SetDefaults_Deployment(desiredDeployment)
+	changed := !utils.DeploymentSpecEqual(&existingDeployment.Spec, &desiredDeployment.Spec, false)
+
+	// Step 2: Check if OLS ConfigMap ResourceVersion has changed
+	currentConfigMapVersion, err := utils.GetConfigMapResourceVersion(r, ctx, utils.OLSConfigCmName)
+	if err != nil {
+		r.GetLogger().Info("failed to get ConfigMap ResourceVersion", "error", err)
+		changed = true
+	} else {
+		storedConfigMapVersion := existingDeployment.Annotations[utils.OLSConfigMapResourceVersionAnnotation]
+		if storedConfigMapVersion != currentConfigMapVersion {
+			changed = true
+		}
+	}
+
+	// Step 3: Check if Proxy CA certificate content has changed
+	currentProxyCACMHash, err := utils.GetProxyCACertHash(r, ctx, cr)
+	if err != nil && !apierrors.IsNotFound(err) {
+		r.GetLogger().Info("failed to get Proxy CA certificate hash", "error", err)
+		changed = true
+	} else {
+		storedProxyCACMHash := existingDeployment.Annotations[utils.ProxyCACertHashAnnotation]
+		if storedProxyCACMHash != currentProxyCACMHash {
+			r.GetLogger().Info("Proxy CA certificate content changed, updating deployment")
+			changed = true
+		}
+	}
+
+	// Step 4: Check if RAG spec has changed
+	currentRAGHash := ragSpecHash(cr)
+	if existingDeployment.Annotations[utils.RAGSpecHashAnnotation] != currentRAGHash {
+		r.GetLogger().Info("RAG spec changed, updating deployment")
+		changed = true
+	}
+
+	// If nothing changed, skip update
+	if !changed {
+		return nil
+	}
+
+	// Apply changes - always update spec and annotations since something changed
+	existingDeployment.Spec = desiredDeployment.Spec
+
+	// Initialize annotations if nil
+	if existingDeployment.Annotations == nil {
+		existingDeployment.Annotations = make(map[string]string)
+	}
+
+	existingDeployment.Annotations[utils.OLSConfigMapResourceVersionAnnotation] = desiredDeployment.Annotations[utils.OLSConfigMapResourceVersionAnnotation]
+	existingDeployment.Annotations[utils.RAGSpecHashAnnotation] = currentRAGHash
+	existingDeployment.Annotations[utils.ProxyCACertHashAnnotation] = currentProxyCACMHash
+
+	r.GetLogger().Info("updating OLS deployment", "name", existingDeployment.Name)
+
+	if err := RestartAppServer(r, ctx, existingDeployment); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func dataCollectorEnabled(r reconciler.Reconciler, cr *olsv1alpha1.OLSConfig) (bool, error) {
+	// Data collector is enabled when:
+	// 1. User data collection is enabled in OLS configuration (feedback OR transcripts)
+	// 2. AND telemetry is enabled (pull secret contains cloud.openshift.com auth)
+
+	// Check if data collection is enabled in CR
+	configEnabled := !cr.Spec.OLSConfig.UserDataCollection.FeedbackDisabled || !cr.Spec.OLSConfig.UserDataCollection.TranscriptsDisabled
+	if !configEnabled {
+		return false, nil
+	}
+
+	// Check if telemetry is enabled
+	// Telemetry enablement is determined by the presence of the telemetry pull secret
+	// the presence of the field '.auths."cloud.openshift.com"' indicates that telemetry is enabled
+	// use this command to check in an Openshift cluster:
+	// oc get secret/pull-secret -n openshift-config --template='{{index .data ".dockerconfigjson" | base64decode}}' | jq '.auths."cloud.openshift.com"'
+	pullSecret := &corev1.Secret{}
+	err := r.Get(context.Background(), client.ObjectKey{Namespace: utils.TelemetryPullSecretNamespace, Name: utils.TelemetryPullSecretName}, pullSecret)
+
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	dockerconfigjson, ok := pullSecret.Data[".dockerconfigjson"]
+	if !ok {
+		return false, fmt.Errorf("pull secret does not contain .dockerconfigjson")
+	}
+
+	dockerconfigjsonDecoded := map[string]interface{}{}
+	err = json.Unmarshal(dockerconfigjson, &dockerconfigjsonDecoded)
+	if err != nil {
+		return false, err
+	}
+
+	_, telemetryEnabled := dockerconfigjsonDecoded["auths"].(map[string]interface{})["cloud.openshift.com"]
+	return telemetryEnabled, nil
+}
+
+// RestartAppServer refreshes client CA Secrets, touches the agentic handoff ConfigMap
+// (RV bump so agentic-operator reloads certs), then rolls the app-server Deployment.
+// Fail-closed: if RefreshClientCASecrets fails (e.g. openshift-service-ca.crt missing
+// or empty), touch and force-reload are skipped so pods are not rolled with stale CA
+// material. A later reconcile or watcher event retries once the source CA is ready.
+//
+// After refresh+touch, the Deployment is always re-fetched so the Update uses a current
+// resourceVersion. An optional in-memory deployment may still be passed (e.g. from
+// updateOLSDeployment) to supply Spec / annotation mutations to apply on that fresh object.
+func RestartAppServer(r reconciler.Reconciler, ctx context.Context, deployment ...*appsv1.Deployment) error {
+	cr := &olsv1alpha1.OLSConfig{}
+	if err := r.Get(ctx, client.ObjectKey{Name: utils.OLSConfigName}, cr); err != nil {
+		return fmt.Errorf("%s: %w", utils.ErrGetOLSConfigForAppServerClientCARefresh, err)
+	}
+	if err := RefreshClientCASecrets(r, ctx, cr); err != nil {
+		return err
+	}
+
+	dep := &appsv1.Deployment{}
+	if err := r.Get(ctx, client.ObjectKey{Name: utils.OLSAppServerDeploymentName, Namespace: r.GetNamespace()}, dep); err != nil {
+		r.GetLogger().Info("failed to get deployment", "deploymentName", utils.OLSAppServerDeploymentName, "error", err)
+		return err
+	}
+
+	// Apply Spec / object annotations from the caller’s desired mutation, if any.
+	// Replace annotations (do not merge) so deletions from the caller take effect.
+	if len(deployment) > 0 && deployment[0] != nil {
+		dep.Spec = deployment[0].Spec
+		if deployment[0].Annotations == nil {
+			dep.Annotations = nil
+		} else {
+			dep.Annotations = make(map[string]string, len(deployment[0].Annotations))
+			for k, v := range deployment[0].Annotations {
+				dep.Annotations[k] = v
+			}
+		}
+	}
+
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations[utils.ForceReloadAnnotationKey] = time.Now().Format(time.RFC3339Nano)
+
+	r.GetLogger().Info("triggering app server rolling restart", "deployment", dep.Name)
+	if err := r.Update(ctx, dep); err != nil {
+		r.GetLogger().Info("failed to update deployment", "deploymentName", dep.Name, "error", err)
+		return err
+	}
+
+	return nil
+}
+
+func ragSpecHash(cr *olsv1alpha1.OLSConfig) string {
+	if len(cr.Spec.OLSConfig.RAG) == 0 {
+		return ""
+	}
+	data, _ := json.Marshal(cr.Spec.OLSConfig.RAG)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}

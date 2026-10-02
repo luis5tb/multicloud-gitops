@@ -1,0 +1,11 @@
+approvers:
+  - bparees
+  - xrajesh
+  - joshuawilson 
+  - raptorsun
+  - blublinsky
+  - onmete
+  - vimalk78
+# Note: prow reviewer assignment isn't particularly helpful and anyone
+# in the openshift org can review(lgtm) a PR, so leaving this empty.
+reviewers:

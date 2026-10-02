@@ -1,0 +1,8 @@
+apiVersion: v2
+name: openshift-lightspeed-config
+description: OLSConfig and external credential wiring for the OpenShift Lightspeed Operator
+keywords:
+  - pattern
+  - openshift-lightspeed
+type: application
+version: 0.0.1

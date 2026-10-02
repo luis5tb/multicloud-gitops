@@ -1,0 +1,40 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: update-bundle-related-images-run-1
+  namespace: crt-nshift-lightspeed-tenant
+  description: |
+    This pipeline run simulates a pipeline run triggered by Konflux.
+    These 3 parameters are passed by Konflux: snapshot, release and releasePlan. 
+    Other parameters are set by the release plan.
+spec:
+  serviceAccountName: konflux-bot-0
+  pipelineRef:
+    params:
+      - name: url
+        value: https://github.com:openshift/lightspeed-operator.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: .tekton/release/bundle-update/pipeline.yaml
+    resolver: git
+  params:
+    - name: release
+      value: crt-nshift-lightspeed-tenant/stable-ols-1.0.1-auto-3
+    - name: releasePlan
+      value: crt-nshift-lightspeed-tenant/ols-stable-automation-releaseplan
+    - name: snapshot
+      value: crt-nshift-lightspeed-tenant/ols-9697k
+    - name: taskGitUrl
+      value: https://github.com/openshift/lightspeed-operator.git
+    - name: taskGitRevision
+      value: main
+  workspaces:
+    - name: release-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi

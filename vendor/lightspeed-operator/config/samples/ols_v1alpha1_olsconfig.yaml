@@ -1,0 +1,63 @@
+apiVersion: ols.openshift.io/v1alpha1
+kind: OLSConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: olsconfig
+    app.kubernetes.io/instance: olsconfig-sample
+    app.kubernetes.io/part-of: lightspeed-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: lightspeed-operator
+  name: cluster
+spec:
+  ols:
+    defaultModel: gpt-3.5-turbo-1106
+    defaultProvider: OpenAI
+    introspectionEnabled: true
+    # Required for the operator-managed MCP server. Create this Secret in the
+    # openshift-lightspeed namespace with a PEM CA bundle at key ca.crt.
+    mcpServerSecurity:
+      authorizationURL: https://keycloak.example.com/realms/openshift
+      oauthAudience: openshift-mcp
+      caSecretRef:
+        name: keycloak-issuer-ca
+        key: ca.crt
+  llm:
+    providers:
+      - credentialsSecretRef:
+          name: credentials
+        models:
+          - name: gpt-3.5-turbo-1106
+        name: OpenAI
+  # Optional: Enable MCP (Model Context Protocol) servers
+  # featureGates:
+  #   - MCPServer
+  # mcpServers:
+  #   # Example 1: MCP server with secret-based authentication
+  #   - name: external-mcp
+  #     url: https://mcp.example.com
+  #     timeout: 30
+  #     headers:
+  #       - name: Authorization
+  #         valueFrom:
+  #           type: secret
+  #           secretRef:
+  #             name: mcp-auth-secret  # Secret must exist in operator's namespace
+  #       - name: X-API-Key
+  #         valueFrom:
+  #           type: secret
+  #           secretRef:
+  #             name: mcp-api-key-secret
+  #   # Example 2: MCP server using Kubernetes service account token
+  #   - name: internal-mcp
+  #     url: http://mcp-service.default.svc.cluster.local:8080
+  #     headers:
+  #       - name: Authorization
+  #         valueFrom:
+  #           type: kubernetes
+  #   # Example 3: MCP server using client token passthrough
+  #   - name: proxy-mcp
+  #     url: https://mcp-proxy.example.com
+  #     headers:
+  #       - name: Authorization
+  #         valueFrom:
+  #           type: client

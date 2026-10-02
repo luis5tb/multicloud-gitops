@@ -1,0 +1,516 @@
+package utils
+
+import (
+	"context"
+	"sync"
+	"sync/atomic"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
+	olsv1alpha1 "github.com/openshift/lightspeed-operator/api/v1alpha1"
+	"github.com/openshift/lightspeed-operator/internal/controller/reconciler"
+)
+
+// Definitions to manage status conditions
+const (
+	TypeApiReady                  = "ApiReady"
+	TypeCacheReady                = "CacheReady"
+	TypeConsolePluginReady        = "ConsolePluginReady"
+	TypeAgenticConsolePluginReady = "AgenticConsolePluginReady"
+	TypeAlertsAdapterReady        = "AlertsAdapterReady"
+	TypeOtelCollectorReady        = "OtelCollectorReady"
+	TypeMCPServerReady            = "MCPServerReady"
+	TypeRHOKPReady                = "RHOKPReady"
+	TypeCRReconciled              = "Reconciled"
+)
+
+type OLSConfigReconcilerOptions struct {
+	OpenShiftMajor                 string
+	OpenshiftMinor                 string
+	LightspeedServiceImage         string
+	LightspeedServicePostgresImage string
+	ConsoleUIImage                 string
+	AgenticConsoleUIImage          string
+	AlertsAdapterImage             string
+	AgenticSandboxImage            string
+	OtelCollectorImage             string
+	DataverseExporterImage         string
+	OpenShiftMCPServerImage        string
+	RHOOKPImage                    string
+	RosaOKPProductEnv              *corev1.EnvVar
+	Namespace                      string
+	PrometheusAvailable            bool
+}
+
+// SystemSecret represents a secret managed by Kubernetes or other applications
+// that the operator needs to watch for changes
+type SystemSecret struct {
+	Name                string
+	Namespace           string
+	Description         string
+	AffectedDeployments []string
+}
+
+// SystemConfigMap represents a configmap managed by Kubernetes or other applications
+// that the operator needs to watch for changes
+type SystemConfigMap struct {
+	Name                string
+	Namespace           string
+	Description         string
+	AffectedDeployments []string
+}
+
+// SecretWatcherConfig contains configuration for watching secrets
+type SecretWatcherConfig struct {
+	SystemResources []SystemSecret
+}
+
+// ConfigMapWatcherConfig contains configuration for watching configmaps
+type ConfigMapWatcherConfig struct {
+	SystemResources []SystemConfigMap
+}
+
+// WatcherConfig contains all watcher configuration.
+// This struct is written by the reconciler and read concurrently by informer
+// event handlers (predicate filters such as SecretWatcherFilter).  The mu
+// RWMutex protects the annotated mappings; callers must use the provided
+// accessor methods for thread-safe access.  The reconciler builds replacement
+// maps locally and publishes each complete map under the write lock via
+// PublishAnnotatedSecrets / PublishAnnotatedConfigMaps.
+type WatcherConfig struct {
+	Secrets    SecretWatcherConfig
+	ConfigMaps ConfigMapWatcherConfig
+	// OpenShiftMCPServerTLSWatchEnabled gates informer handling of openshift-mcp-server-tls.
+	// The Secret stays in Secrets.SystemResources (static); reconcile toggles this flag from
+	// introspectionEnabled so enable/disable does not rewrite SystemResources under the informer.
+	OpenShiftMCPServerTLSWatchEnabled atomic.Bool
+	// RHOKPTLSWatchEnabled gates informer handling of lightspeed-rhokp-tls.
+	// Same pattern: static entry, toggled from !byokRAGOnly.
+	RHOKPTLSWatchEnabled atomic.Bool
+
+	mu                        sync.RWMutex
+	annotatedSecretMapping    map[string][]string
+	annotatedConfigMapMapping map[string][]string
+}
+
+// PublishAnnotatedSecrets atomically replaces the annotated secret mapping.
+// The reconciler should build the complete map locally, then publish it here.
+func (c *WatcherConfig) PublishAnnotatedSecrets(m map[string][]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.annotatedSecretMapping = m
+}
+
+// PublishAnnotatedConfigMaps atomically replaces the annotated configmap mapping.
+// The reconciler should build the complete map locally, then publish it here.
+func (c *WatcherConfig) PublishAnnotatedConfigMaps(m map[string][]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.annotatedConfigMapMapping = m
+}
+
+// GetAnnotatedSecretDeployments returns the deployments affected by a secret, if mapped.
+func (c *WatcherConfig) GetAnnotatedSecretDeployments(name string) ([]string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	d, ok := c.annotatedSecretMapping[name]
+	return d, ok
+}
+
+// GetAnnotatedConfigMapDeployments returns the deployments affected by a configmap, if mapped.
+func (c *WatcherConfig) GetAnnotatedConfigMapDeployments(name string) ([]string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	d, ok := c.annotatedConfigMapMapping[name]
+	return d, ok
+}
+
+// IsSystemSecretWatchEnabled reports whether a SystemResources entry should be active.
+// OpenShift MCP TLS is listed statically but only watched while introspection is enabled.
+func (c *WatcherConfig) IsSystemSecretWatchEnabled(secret SystemSecret) bool {
+	if c == nil {
+		return false
+	}
+	if secret.Name == OpenShiftMCPServerCertsSecretName {
+		return c.OpenShiftMCPServerTLSWatchEnabled.Load()
+	}
+	if secret.Name == RHOKPCertsSecretName {
+		return c.RHOKPTLSWatchEnabled.Load()
+	}
+	return true
+}
+
+/*** controller internal ***/
+type ReconcileFunc func(reconciler.Reconciler, context.Context, *olsv1alpha1.OLSConfig) error
+type ReconcileTask struct {
+	Name string
+	Task ReconcileFunc
+}
+
+type DeleteFunc func(reconciler.Reconciler, context.Context) error
+type DeleteTask struct {
+	Name string
+	Task DeleteFunc
+}
+
+/*** application server configuration file ***/
+// root of the app server configuration file
+type AppSrvConfigFile struct {
+	LLMProviders            []ProviderConfig        `json:"llm_providers"`
+	OLSConfig               OLSConfig               `json:"ols_config,omitempty"`
+	UserDataCollectorConfig UserDataCollectorConfig `json:"user_data_collector_config,omitempty"`
+	MCPServers              []MCPServerConfig       `json:"mcp_servers,omitempty"`
+}
+
+type ProviderConfig struct {
+	// Provider name
+	Name string `json:"name"`
+	// Provider API URL
+	URL string `json:"url,omitempty"`
+	// Path to the file containing API provider credentials in the app server container.
+	// default to "bam_api_key.txt"
+	CredentialsPath string `json:"credentials_path,omitempty" default:"bam_api_key.txt"`
+	// List of models from the provider
+	Models []ModelConfig `json:"models,omitempty"`
+	// Provider type
+	Type string `json:"type,omitempty"`
+	// Watsonx Project ID
+	WatsonProjectID string `json:"project_id,omitempty"`
+	// API Version for Azure OpenAI provider
+	APIVersion string `json:"api_version,omitempty"`
+	// Azure OpenAI Config
+	AzureOpenAIConfig *AzureOpenAIConfig `json:"azure_openai_config,omitempty"`
+	// Fake Provider Config for testing
+	FakeProviderConfig *FakeProviderConfig `json:"fake_provider_config,omitempty"`
+	// Google Vertex Config
+	GoogleVertexConfig *GoogleVertexConfig `json:"google_vertex_config,omitempty"`
+	// Google Vertex Anthropic Config
+	GoogleVertexAnthropicConfig *GoogleVertexAnthropicConfig `json:"google_vertex_anthropic_config,omitempty"`
+}
+
+type FakeProviderConfig struct {
+	// URL of the fake provider server to send requests
+	URL string `json:"url,omitempty" default:"http://example.com"`
+	// Whether the fake provider should stream responses in chunks
+	Stream bool `json:"stream" default:"false"`
+	// Flag to enable mcp tool call in fake provider
+	MCPToolCall bool `json:"mcp_tool_call" default:"false"`
+	// The full response to return when Stream is false, or the base response to chunk when Stream is true
+	Response string `json:"response,omitempty"`
+	// The number of chunks to split the response into when Stream is true
+	Chunks int `json:"chunks,omitempty" default:"30"`
+	// The amount of time in seconds to sleep between sending each chunk when Stream is true
+	Sleep float64 `json:"sleep,omitempty" default:"0.1"`
+}
+
+type AzureOpenAIConfig struct {
+	// Azure OpenAI API URL
+	URL string `json:"url,omitempty"`
+	// Path where Azure OpenAI accesstoken or credentials are stored
+	CredentialsPath string `json:"credentials_path"`
+	// Azure deployment name
+	AzureDeploymentName string `json:"deployment_name,omitempty"`
+}
+
+type GoogleVertexConfig struct {
+	// Google Cloud project ID
+	Project string `json:"project,omitempty"`
+	// Server region location
+	Location string `json:"location,omitempty"`
+}
+
+type GoogleVertexAnthropicConfig = GoogleVertexConfig
+
+// ModelParameters defines the parameters for a model.
+type ModelParameters struct {
+	// Maximum number of tokens for the input text. Default: 1024
+	MaxTokensForResponse int `json:"max_tokens_for_response,omitempty"`
+	// Ratio of context window size allocated for tool token budget
+	ToolBudgetRatio float64 `json:"tool_budget_ratio"`
+	// Sampling temperature, omitted when unset so the service does not set one.
+	Temperature *float64 `json:"temperature,omitempty"`
+	// Reasoning configuration for the model (provider-agnostic freeform config)
+	ReasoningConfig map[string]runtime.RawExtension `json:"reasoning_config,omitempty"`
+}
+
+// ModelSpec defines the desired state of in-memory cache.
+type ModelConfig struct {
+	// Model name
+	Name string `json:"name"`
+	// Model API URL
+	URL string `json:"url,omitempty"`
+	// Model context window size
+	ContextWindowSize uint `json:"context_window_size,omitempty"`
+	// Model parameters
+	Parameters ModelParameters `json:"parameters,omitempty"`
+}
+
+type OLSConfig struct {
+	// Default model for usage
+	DefaultModel string `json:"default_model,omitempty"`
+	// Default provider for usage
+	DefaultProvider string `json:"default_provider,omitempty"`
+	// Maximum number of iterations for agent execution
+	MaxIterations int `json:"max_iterations,omitempty"`
+	// Logging config
+	Logging LoggingConfig `json:"logging_config,omitempty"`
+	// Conversation cache
+	ConversationCache ConversationCacheConfig `json:"conversation_cache,omitempty"`
+	// TLS configuration
+	TLSConfig TLSConfig `json:"tls_config,omitempty"`
+	// TLS security profile for service endpoint
+	TLSSecurityProfile *TLSSecurityProfileConfig `json:"tlsSecurityProfile,omitempty"`
+	// Query filters
+	QueryFilters []QueryFilters `json:"query_filters,omitempty"`
+	// Reference content for BYOK RAG vector indexes; omitted when spec.ols.rag is empty.
+	ReferenceContent *ReferenceContent `json:"reference_content,omitempty"`
+	// User data collection configuration
+	UserDataCollection UserDataCollectionConfig `json:"user_data_collection,omitempty"`
+	// List of Paths to files containing additional CA certificates in the app server container.
+	ExtraCAs []string `json:"extra_ca,omitempty"`
+	// Path to the directory containing the certificates bundle in the app server container.
+	CertificateDirectory string `json:"certificate_directory,omitempty"`
+	// Proxy settings
+	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
+	// LLM Token Quota Configuration
+	QuotaHandlersConfig *QuotaHandlersConfig `json:"quota_handlers,omitempty"`
+	// User specified system prompt
+	SystemPromptPath string `json:"system_prompt_path,omitempty"`
+	// Tool filtering configuration for hybrid RAG retrieval
+	ToolFiltering *ToolFilteringConfig `json:"tool_filtering,omitempty"`
+	// Tool execution approval configuration
+	ToolsApproval *ToolsApprovalConfig `json:"tools_approval,omitempty"`
+	// Audit logging and tracing configuration
+	Audit *AuditYAMLConfig `json:"audit,omitempty"`
+	// Solr hybrid RAG (portal-rag /hybrid-search); mirrors lightspeed-service solr_hybrid
+	SolrHybrid *SolrHybridSettings `json:"solr_hybrid,omitempty"`
+	// Enable in-process credential hot-reload for LLM provider secrets
+	CredentialHotReload bool `json:"credential_hot_reload,omitempty"`
+}
+
+type AuditYAMLConfig struct {
+	Logging string          `json:"logging"`
+	OTEL    *OTELYAMLConfig `json:"otel,omitempty"`
+}
+
+type OTELYAMLConfig struct {
+	Endpoint string `json:"endpoint,omitempty"`
+	TLSMode  string `json:"tls_mode,omitempty"`
+}
+
+// SolrHybridSettings configures Solr hybrid RAG retrieval for the OLS application config file.
+type SolrHybridSettings struct {
+	SolrHTTPBase             string  `json:"solr_http_base,omitempty"`
+	MaxResults               int     `json:"max_results,omitempty"`
+	ChunkFilterQuery         string  `json:"chunk_filter_query,omitempty"`
+	HybridVectorBoost        float64 `json:"hybrid_vector_boost,omitempty"`
+	HybridPoolDocs           int     `json:"hybrid_pool_docs,omitempty"`
+	HybridScoreThreshold     float64 `json:"hybrid_score_threshold,omitempty"`
+	HybridSolrTimeoutSeconds float64 `json:"hybrid_solr_timeout_s,omitempty"`
+}
+
+type TLSSecurityProfileConfig struct {
+	// Profile type expected by the service (OldType, IntermediateType, ModernType, Custom)
+	ProfileType string `json:"type,omitempty"`
+	// Minimum TLS protocol version (VersionTLS12, VersionTLS13, ...)
+	MinTLSVersion string `json:"minTLSVersion,omitempty"`
+	// Allowed ciphers in OpenSSL format
+	Ciphers []string `json:"ciphers,omitempty"`
+}
+
+// ToolFilteringConfig defines configuration for tool filtering using hybrid RAG retrieval
+// The embedding model is not exposed as it's handled by the container image
+type ToolFilteringConfig struct {
+	// Weight for dense vs sparse retrieval (1.0 = full dense, 0.0 = full sparse)
+	Alpha float64 `json:"alpha,omitempty"`
+	// Number of tools to retrieve
+	TopK int `json:"top_k,omitempty"`
+	// Minimum similarity threshold for filtering results
+	Threshold float64 `json:"threshold,omitempty"`
+}
+
+// ToolsApprovalConfig defines configuration for tool execution approval
+// Controls whether tool calls require user approval before execution
+type ToolsApprovalConfig struct {
+	// Approval strategy for tool execution
+	ApprovalType string `json:"approval_type,omitempty"`
+	// Timeout in seconds for waiting for user approval
+	ApprovalTimeout int `json:"approval_timeout,omitempty"`
+}
+
+// QuotaHandlersConfig defines the token quota configuration
+type QuotaHandlersConfig struct {
+	// Postgres connection details
+	Storage PostgresCacheConfig `json:"storage,omitempty"`
+	// Quota scheduler settings
+	Scheduler SchedulerConfig `json:"scheduler,omitempty"`
+	// Token quota limiters
+	LimitersConfig []LimiterConfig `json:"limiters,omitempty"`
+	// Enable token history
+	EnableTokenHistory bool `json:"enable_token_history,omitempty"`
+}
+
+// LimiterConfig defines settings for a token quota limiter
+type LimiterConfig struct {
+	// Name of the limiter
+	Name string `json:"name"`
+	// Type of the limiter
+	Type string `json:"type"`
+	// Initial value of the token quota
+	InitialQuota int `json:"initial_quota"`
+	// Token quota increase step
+	QuotaIncrease int `json:"quota_increase"`
+	// Period of time the token quota is for
+	Period string `json:"period"`
+}
+
+// Scheduler configuration
+type SchedulerConfig struct {
+	// How often token quota is checked, sec
+	Period int `json:"period,omitempty"`
+}
+
+type LoggingConfig struct {
+	// Application log level
+	AppLogLevel string `json:"app_log_level" default:"info"`
+	// Library log level
+	LibLogLevel string `json:"lib_log_level" default:"warning"`
+	// Uvicorn log level
+	UvicornLogLevel string `json:"uvicorn_log_level" default:"info"`
+}
+
+type ConversationCacheConfig struct {
+	// Type of cache to use. Default: "postgres"
+	Type string `json:"type" default:"postgres"`
+	// Postgres cache configuration
+	Postgres PostgresCacheConfig `json:"postgres,omitempty"`
+}
+
+type MemoryCacheConfig struct {
+	// Maximum number of cache entries. Default: "1000"
+	MaxEntries int `json:"max_entries,omitempty" default:"1000"`
+}
+
+type PostgresCacheConfig struct {
+	// Postgres host
+	Host string `json:"host,omitempty" default:"lightspeed-postgres-server.openshift-lightspeed.svc"`
+	// Postgres port
+	Port int `json:"port,omitempty" default:"5432"`
+	// Postgres user
+	User string `json:"user,omitempty" default:"postgres"`
+	// Postgres dbname
+	DbName string `json:"dbname,omitempty" default:"postgres"`
+	// Path to the file containing postgres credentials in the app server container
+	PasswordPath string `json:"password_path,omitempty"`
+	// SSLMode is the preferred ssl mode to connect with postgres
+	SSLMode string `json:"ssl_mode,omitempty" default:"require"`
+	// Postgres CA certificate path
+	CACertPath string `json:"ca_cert_path,omitempty"`
+}
+
+type TLSConfig struct {
+	TLSCertificatePath string `json:"tls_certificate_path,omitempty"`
+	TLSKeyPath         string `json:"tls_key_path,omitempty"`
+}
+
+type QueryFilters struct {
+	// Filter name.
+	Name string `json:"name,omitempty"`
+	// Filter pattern.
+	Pattern string `json:"pattern,omitempty"`
+	// Replacement for the matched pattern.
+	ReplaceWith string `json:"replace_with,omitempty"`
+}
+
+type ReferenceIndex struct {
+	// Path to the file containing the product docs index in the app server container.
+	ProductDocsIndexPath string `json:"product_docs_index_path,omitempty"`
+	// Name of the index to load.
+	ProductDocsIndexId string `json:"product_docs_index_id,omitempty"`
+	// Where the database was copied from, i.e. BYOK image name.
+	ProductDocsOrigin string `json:"product_docs_origin,omitempty"`
+}
+
+type ReferenceContent struct {
+	// Path to the file containing the product docs embeddings model in the app server container.
+	EmbeddingsModelPath string `json:"embeddings_model_path,omitempty"`
+	// List of reference indexes.
+	Indexes []ReferenceIndex `json:"indexes,omitempty"`
+}
+
+type UserDataCollectionConfig struct {
+	FeedbackDisabled    bool   `json:"feedback_disabled" default:"false"`
+	FeedbackStorage     string `json:"feedback_storage,omitempty"`
+	TranscriptsDisabled bool   `json:"transcripts_disabled" default:"false"`
+	TranscriptsStorage  string `json:"transcripts_storage,omitempty"`
+}
+
+type UserDataCollectorConfig struct {
+	// Path to dir where ols user data (feedback and transcripts) are stored
+	DataStorage string `json:"data_storage,omitempty"`
+	// Collector logging level
+	LogLevel string `json:"log_level,omitempty"`
+}
+
+type MCPTransport string
+
+const (
+	SSE            MCPTransport = "sse"
+	Stdio          MCPTransport = "stdio"
+	StreamableHTTP MCPTransport = "streamable_http"
+)
+
+type MCPServerConfig struct {
+	// MCP server name
+	Name string `json:"name"`
+	// MCP server URL
+	URL string `json:"url"`
+	// Headers (map of header name to file path or placeholder)
+	Headers map[string]string `json:"headers,omitempty"`
+	// Timeout in seconds
+	Timeout int `json:"timeout,omitempty"`
+}
+
+type StdioTransportConfig struct {
+	// Command to run
+	Command string `json:"command,omitempty"`
+	// Command-line parameters for the command
+	Args []string `json:"args,omitempty"`
+	// Environment variables for the command
+	Env map[string]string `json:"env,omitempty"`
+	// The working directory for the command
+	Cwd string `json:"cwd,omitempty"`
+	// Encoding for the text exchanged with the command
+	Encoding string `json:"encoding,omitempty"`
+}
+
+type StreamableHTTPTransportConfig struct {
+	// URL of the MCP server
+	URL string `json:"url,omitempty"`
+	// Overall timeout for the MCP server
+	Timeout int `json:"timeout,omitempty"`
+	// SSE read timeout for the MCP server
+	SSEReadTimeout int `json:"sse_read_timeout,omitempty"`
+	// Headers to send to the MCP server
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+type ProxyConfig struct {
+	// Proxy URL
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// ProxyCACertPath is the path to the CA certificate for the proxy server
+	ProxyCACertPath string `json:"proxy_ca_cert_path,omitempty"`
+}
+
+type OperatorReconcileFuncs struct {
+	Name string
+	Fn   func(context.Context) error
+}
+
+type ReconcileSteps struct {
+	Name          string
+	Fn            func(context.Context, *olsv1alpha1.OLSConfig) error
+	ConditionType string
+	Deployment    string
+}

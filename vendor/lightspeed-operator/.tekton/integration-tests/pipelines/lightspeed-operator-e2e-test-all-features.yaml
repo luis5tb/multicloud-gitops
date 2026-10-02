@@ -1,0 +1,317 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  annotations:
+    pipelinesascode.tekton.dev/task: "[ols-installer, ols-e2e-task]"
+  name: ols-integration-tests-pipeline
+spec:
+  description: |
+    This pipeline automates the process of running end-to-end tests for OpenShift Lightspeed
+    using a ROSA (Red Hat OpenShift Service on AWS) cluster. The pipeline provisions
+    the ROSA cluster, installs the OpenShift Lightspeed operator using the installer, runs the tests, collects artifacts,
+    and finally deprovisions the ROSA cluster.
+  params:
+    - name: SNAPSHOT
+      description: 'The JSON string representing the snapshot of the application under test.'
+      default: '{"components": [{"name":"test-app", "containerImage": "quay.io/example/repo:latest"}]}'
+      type: string
+    - name: test-name
+      description: 'The name of the test corresponding to a defined Konflux integration test.'
+      default: 'ols-e2e-test-all-features'
+    - name: namespace
+      description: 'Namespace to run tests in'
+      default: 'openshift-lightspeed'
+    - name: openshift-version-prefix
+      description: 'OpenShift minor version to provision (for example, 4.22).'
+      default: '4.22'
+      type: string
+  tasks:
+    - name: provision-ephemeral-cluster
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/openshift/konflux-tasks
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/provision-ephemeral-cluster/0.1/provision-ephemeral-cluster.yaml
+      params:
+        - name: ownerName
+          value: $(context.pipelineRun.name)
+        - name: ownerUid
+          value: $(context.pipelineRun.uid)
+        - name: workflow
+          value: hypershift-hostedcluster-workflow
+        - name: clusterProfile
+          value: aws-konflux-prod
+        - name: env
+          value: '{"COMPUTE_NODE_TYPE": "m5.2xlarge", "HYPERSHIFT_NODE_COUNT": "3", "HOSTED_MANAGEMENT_CLUSTER": "hosted-mgmt2"}'
+        - name: releases
+          value: '{"latest":{"release":{"channel":"stable","version":"$(params.openshift-version-prefix)","architecture":"multi"}}}'
+    - name: ols-install
+      description: Task to install bundle onto ephemeral namespace
+      runAfter:
+        - provision-ephemeral-cluster
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+        - name: namespace
+          value: "$(params.namespace)"
+        - name: clusterCredentialsSecretRef
+          value: $(tasks.provision-ephemeral-cluster.results.secretRef)
+      taskSpec:
+        results:
+          - name: bundle-image
+            value: "$(steps.get-bundle-image.results.bundle-image)"
+          - name: commit
+            value: "$(steps.get-bundle-image.results.commit)"
+        params:
+          - name: SNAPSHOT
+          - name: namespace
+            type: string
+          - name: clusterCredentialsSecretRef
+            type: string
+        volumes:
+          - name: cluster-credentials
+            secret:
+              secretName: $(params.clusterCredentialsSecretRef)
+        steps:
+          - name: install-operator
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+              - name: KONFLUX_COMPONENT_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['appstudio.openshift.io/component']
+              - name: KUBECONFIG
+                value: "/credentials/kubeconfig"
+            volumeMounts:
+              - name: cluster-credentials
+                mountPath: /credentials
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22
+            script: |
+              echo "---------------------------------------------"
+              cat $KUBECONFIG
+              echo "---------------------------------------------"
+              dnf -y install jq python3-pip
+              export OPERATOR_SDK_VERSION=1.36.1
+              export ARCH=$(case $(uname -m) in x86_64) echo -n amd64 ;; aarch64) echo -n arm64 ;; *) echo -n $(uname -m) ;; esac)
+              export OPERATOR_SDK_DL_URL=https://github.com/operator-framework/operator-sdk/releases/download/v${OPERATOR_SDK_VERSION}
+              curl -Lo /usr/local/bin/operator-sdk ${OPERATOR_SDK_DL_URL}/operator-sdk_linux_${ARCH}
+              chmod +x /usr/local/bin/operator-sdk
+              operator-sdk version
+              echo "---------------------------------------------"
+              oc create namespace $(params.namespace)
+              oc label namespaces $(params.namespace) openshift.io/cluster-monitoring=true --overwrite=true
+              echo "---------------------------------------------"
+              echo ${KONFLUX_COMPONENT_NAME}
+              export BUNDLE_IMAGE="$(jq -r --arg component_name "$KONFLUX_COMPONENT_NAME" '.components[] | select(.name == $component_name) | .containerImage' <<< "$SNAPSHOT")"
+              echo "${BUNDLE_IMAGE}"
+              echo "---------------------------------------------"
+              operator-sdk run bundle --timeout=30m --namespace "$(params.namespace)" "$BUNDLE_IMAGE" --verbose
+              echo "---------------------------------------------"
+              oc get deployment lightspeed-operator-controller-manager -n "$(params.namespace)"
+          - name: get-bundle-image
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+            results:
+              - name: bundle-image
+                type: string
+                description: "service image from snapshot"
+              - name: commit
+                type: string
+                description: "commit sha to be used to store artifacts"
+            script: |
+              dnf -y install jq
+              echo -n "$(jq -r --arg component_name "ols-bundle" '.components[] | select(.name == $component_name) | .containerImage' <<< "$SNAPSHOT")" > $(step.results.bundle-image.path)
+              echo -n "$(jq -r --arg component_name "ols-bundle" '.components[] | select(.name == $component_name) | .source.git.revision' <<< "$SNAPSHOT")" > $(step.results.commit.path)
+    - name: ols-operator-tests
+      description: Task to run tests from operator repository
+      params:
+        - name: commit
+          value: $(tasks.ols-install.results.commit)
+        - name: clusterCredentialsSecretRef
+          value: $(tasks.provision-ephemeral-cluster.results.secretRef)
+      runAfter:
+        - ols-install
+      taskSpec:
+        params:
+          - name: commit
+          - name: clusterCredentialsSecretRef
+            type: string
+        volumes:
+          - name: azure-openai-token
+            secret:
+              secretName: azureopenai-apitoken
+          - name: azureopenai-entra-id
+            secret:
+              secretName: azureopenai-entra-id
+          - name: bam-token
+            secret:
+              secretName: bam-apitoken
+          - name: openai-token
+            secret:
+              secretName: openai
+          - name: watsonx-token
+            secret:
+              secretName: watsonx-apitoken
+          - name: cluster-credentials
+            secret:
+              secretName: $(params.clusterCredentialsSecretRef)
+          - name: ols-konflux-artifacts-bot-creds
+            secret:
+              secretName: ols-konflux-artifacts-bot
+        steps:
+          - name: run-e2e-tests
+            resources:
+              requests:
+                memory: "8Gi"
+              limits:
+                memory: "8Gi"
+            onError: continue
+            volumeMounts:
+              - name: azure-openai-token
+                mountPath: /var/run/azure_openai
+              - name: azureopenai-entra-id
+                mountPath: /var/run/azureopenai-entra-id
+              - name: bam-token
+                mountPath: /var/run/bam
+              - name: openai-token
+                mountPath: /var/run/openai
+              - name: watsonx-token
+                mountPath: /var/run/watsonx
+              - name: cluster-credentials
+                mountPath: /credentials
+            env:
+              - name: KUBECONFIG
+                value: "/credentials/kubeconfig"
+              - name: BAM_PROVIDER_KEY_PATH
+                value: "/var/run/bam/token"
+              - name: AZUREOPENAI_PROVIDER_KEY_PATH
+                value: "/var/run/azure_openai/token"
+              - name: OPENAI_PROVIDER_KEY_PATH
+                value: "/var/run/openai/token"
+              - name: WATSONX_PROVIDER_KEY_PATH
+                value: "/var/run/watsonx/token"
+              - name: COMMIT_SHA
+                value: "$(params.commit)"
+              - name: ARTIFACT_DIR
+                value: "/workspace"
+            image: registry.redhat.io/openshift4/ose-cli-rhel9:v4.22
+            script: |
+              echo "---------------------------------------------"
+              cat $KUBECONFIG
+              echo "---------------------------------------------"
+              dnf -y install git make golang jq gpgme-devel
+              git init lightspeed-operator
+              cd lightspeed-operator
+              git remote add origin https://github.com/openshift/lightspeed-operator.git
+              git fetch --depth=1 --filter=blob:none origin ${COMMIT_SHA}
+              TEST_SOURCE_COMMIT=$(
+              git show ${COMMIT_SHA}:related_images.json |
+                jq -r '.[] | select(.name=="lightspeed-operator") | .revision'
+              )
+              git fetch --depth=1 --filter=blob:none origin ${TEST_SOURCE_COMMIT}
+              git checkout ${TEST_SOURCE_COMMIT}
+              echo "---------------------------------------------"
+              echo "---------------------------------------------"
+              echo "---------------------------------------------"
+              export LLM_TOKEN=$(cat ${OPENAI_PROVIDER_KEY_PATH})
+              export LLM_PROVIDER="openai"
+              export LLM_MODEL="gpt-4o-mini"
+              echo "starting tests for $LLM_PROVIDER $LLM_MODEL"
+              make test-e2e-all-features
+          - name: gather-cluster-resources
+            onError: continue
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/tekton-integration-catalog
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/gather-cluster-resources/0.1/gather-cluster-resources.yaml
+            params:
+              - name: credentials
+                value: "cluster-credentials"
+              - name: kubeconfig
+                value: "kubeconfig"
+              - name: artifact-dir
+                value: "/workspace/konflux-artifacts"
+          # validate that the cluster resources are available in another tekton step
+          - name: list-artifacts
+            onError: continue
+            image: quay.io/konflux-qe-incubator/konflux-qe-tools:latest
+            workingDir: "/workspace"
+            script: |
+              #!/bin/bash
+              ls -la /workspace
+          - name: push-artifacts
+            onError: continue
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/secure-push-oci/0.1/secure-push-oci.yaml
+            params:
+              - name: workdir-path
+                value: /workspace
+              - name: oci-ref
+                value: "quay.io/openshift-lightspeed/ols-operator-artifacts:$(params.commit)"
+              - name: credentials-volume-name
+                value: ols-konflux-artifacts-bot-creds
+          - name: fail-if-any-step-failed
+            ref:
+              resolver: git
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/tekton-integration-catalog.git
+                - name: revision
+                  value: main
+                - name: pathInRepo
+                  value: stepactions/fail-if-any-step-failed/0.1/fail-if-any-step-failed.yaml
+  finally:
+    - name: deprovision-ephemeral-cluster
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/openshift/konflux-tasks
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/deprovision-ephemeral-cluster/0.1/deprovision-ephemeral-cluster.yaml
+      params:
+        - name: testPlatformClusterClaimName
+          value: $(tasks.provision-ephemeral-cluster.results.testPlatformClusterClaimName)
+        - name: testPlatformClusterClaimNamespace
+          value: $(tasks.provision-ephemeral-cluster.results.testPlatformClusterClaimNamespace)
+    - name: export-logs-for-retention
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/tekton-integration-catalog.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/export-logs/0.1/export-logs-to-quay.yaml
+      params:
+        - name: pipeline-run-name
+          value: $(context.pipelineRun.name)
+        - name: namespace
+          value: $(context.pipelineRun.namespace)
+        - name: quay-repo
+          value: "quay.io/openshift-lightspeed/ols-operator-artifacts"
+        - name: artifact-credentials-secret
+          value: ols-konflux-artifacts-bot

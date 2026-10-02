@@ -1,0 +1,278 @@
+# OLM Bundle Management Guide
+
+This guide covers bundle management for the OpenShift Lightspeed Operator.
+
+> **📖 For OLM Fundamentals:** See [Operator SDK Bundle Documentation](https://sdk.operatorframework.io/docs/olm-integration/tutorial-bundle/)  
+> **📖 For CSV Field Reference:** See [ClusterServiceVersion Spec](https://olm.operatorframework.io/docs/concepts/crds/clusterserviceversion/)
+
+---
+
+## Overview
+
+An OLM bundle packages an operator for distribution and installation. It contains:
+- **Manifests**: ClusterServiceVersion (CSV), CRD, RBAC
+- **Metadata**: OLM annotations (channels, versions, compatibility)
+- **Dockerfile**: Bundle image build instructions
+
+---
+
+## Bundle Structure
+
+```
+bundle/
+├── manifests/
+│   ├── lightspeed-operator.clusterserviceversion.yaml  # Main metadata and install strategy
+│   ├── ols.openshift.io_olsconfigs.yaml                # CRD definition
+│   └── *_rbac.authorization.k8s.io_*.yaml              # RBAC resources
+├── metadata/
+│   └── annotations.yaml                                # Bundle metadata (channels, OCP versions)
+└── tests/scorecard/
+    └── config.yaml                                     # Scorecard configuration
+
+bundle.Dockerfile                                        # Bundle image build
+```
+
+### Important: Install Mode vs CRD Scope
+
+**Our Configuration:**
+- **CSV install mode**: `OwnNamespace` (operator deployed in `openshift-lightspeed`)
+- **CRD scope**: `Cluster` (OLSConfig is cluster-scoped, no namespace required)
+
+**Why this matters:**
+
+The `OLSConfig` CRD is intentionally **cluster-scoped** despite `OwnNamespace` install mode:
+
+1. **Singleton Pattern**: One OLSConfig instance per cluster (name must be `cluster`)
+2. **Semantic Correctness**: Cluster-wide service = cluster-scoped resource
+3. **Cross-Namespace Watching**: Can watch Secrets/ConfigMaps in any namespace
+4. **User Convenience**: `oc get olsconfig cluster` (no namespace flag needed)
+
+**Key Distinction:**
+- **CSV install mode**: Where operator deployment lives (`openshift-lightspeed`)
+- **CRD scope**: How users access the custom resource (cluster-wide)
+
+All operand resources (deployments, services) are still created in `openshift-lightspeed` namespace.
+
+---
+
+## Bundle Generation Workflow
+
+### When to Regenerate Bundle
+
+**Required:**
+- RBAC changes (`//+kubebuilder:rbac` markers or `config/rbac/`)
+- CRD changes (`api/v1alpha1/olsconfig_types.go`)
+- Image changes (operator or operand images)
+- CSV metadata changes (description, keywords, maintainers)
+- Any other change in .config directory
+
+**Not Required:**
+- Reconciliation logic changes
+- Tests, docs, internal utilities
+
+### Commands
+
+**Generate bundle:**
+```bash
+make bundle BUNDLE_TAG=0.1.0
+
+# With custom images
+make bundle BUNDLE_TAG=0.1.0 RELATED_IMAGES_FILE=related_images.json
+```
+
+**What happens:**
+1. Generates manifests via `operator-sdk` and `kustomize`
+2. Updates image references from `related_images.json`
+3. Adds OpenShift compatibility annotations
+4. Generates bundle Dockerfile
+5. Validates bundle
+
+**Validate:**
+```bash
+operator-sdk bundle validate ./bundle
+
+# For OpenShift
+operator-sdk bundle validate ./bundle --select-optional name=operatorhub
+```
+
+**Build and push:**
+```bash
+make bundle-build BUNDLE_IMG=quay.io/myorg/lightspeed-operator-bundle:v0.1.0
+make bundle-push BUNDLE_IMG=quay.io/myorg/lightspeed-operator-bundle:v0.1.0
+```
+
+### Implementation Files
+
+- Makefile: [`Makefile`](../Makefile) (lines 329-346)
+- Script: [`hack/update_bundle.sh`](../hack/update_bundle.sh)
+- Images: [`related_images.json`](../related_images.json)
+- Dockerfile: [`bundle.Dockerfile`](../bundle.Dockerfile)
+
+---
+
+## Related Images Management
+
+**Purpose:** `related_images.json` is the **single source of truth** for operand images and operator deployment wiring. Each operand entry may include `operator_arg` (passed as `--<operator_arg>=<image>` to the operator) or `operator_target: image` for the operator container itself. `hack/generate_deployment_patch.sh` (via `make manifests`) generates `config/default/deployment-patch.yaml`; `hack/update_bundle.sh` and `make deploy` substitute image digests from the same file.
+
+**Format:** Each entry has at least `name` and `image`. Optional fields depend on how the image is sourced (see **Entry types** below).
+
+**Entry types:**
+
+Entries fall into two categories. Do not add inline comments to `related_images.json` (JSON does not support them); use this section as the reference.
+
+| Type | When to use | Required fields | Optional Konflux fields |
+|------|-------------|-----------------|-------------------------|
+| **Konflux-managed** | Image built in the OLS Konflux tenant | `name`, `image`, `revision` | `snapshot_component`, `konflux_prefix`, `stable_prefix`; add `snapshot_source: "bundle"` only for `lightspeed-operator-bundle` |
+| **External / manual** | Third-party or Red Hat product images not in the OLS snapshot | `name`, `image`, `revision: ""` | None — pin `image` yourself; snapshot refresh leaves these unchanged |
+
+**Konflux-managed example** (refreshed by `hack/snapshot_to_image_list.sh`; metadata stripped from CSV by `hack/update_bundle.sh`):
+
+```json
+{
+  "name": "lightspeed-service-api",
+  "image": "quay.io/.../lightspeed-service@sha256:...",
+  "revision": "e5e1454f3fa8b19293200868684abcaf18f38097",
+  "operator_arg": "service-image",
+  "snapshot_component": "lightspeed-service",
+  "konflux_prefix": "quay.io/redhat-user-workloads/crt-nshift-lightspeed-tenant/ols/lightspeed-service",
+  "stable_prefix": "registry.redhat.io/openshift-lightspeed/lightspeed-service-api-rhel9"
+}
+```
+
+**External / manual example** (e.g. PostgreSQL, dataverse exporter, RHOKP):
+
+```json
+{
+  "name": "rhokp",
+  "image": "registry.redhat.io/offline-knowledge-portal/rhokp-rhel9@sha256:f46082f2dc2972582f3b85ed2a563b554d0aba3255ba2f00835e65f4929ae9a9",
+  "revision": "",
+  "operator_arg": "rhokp-image"
+}
+```
+
+Field reference for Konflux-managed entries:
+
+- `snapshot_component` — component name in the Konflux snapshot (`spec.components[].name`)
+- `konflux_prefix` — Quay image prefix in CI/Konflux workloads
+- `stable_prefix` — product registry prefix when refreshing with `-r stable`
+- `snapshot_source` — omit (defaults to OLS snapshot); set to `"bundle"` only for `lightspeed-operator-bundle`
+
+**Workflow:**
+```
+related_images.json → make manifests (deployment-patch.yaml) → hack/update_bundle.sh v1|v2 → variant CSV relatedImages + deployment args → Controller → Operand deployments
+```
+
+**Best practice:**
+- Development: Use tags (`:latest`, `:v1.0.0`)
+- Production: Use digests (`@sha256:abc123...`) for reproducibility
+
+---
+
+## Version Management
+
+**Bump version:**
+```bash
+# 1. Update version
+vim Makefile  # Update BUNDLE_TAG
+
+# 2. Generate bundle
+make bundle BUNDLE_TAG=0.2.0
+
+# 3. Review and commit
+git diff bundle/
+git add bundle/ bundle.Dockerfile
+git commit -m "chore: bump bundle version to v0.2.0"
+```
+
+**Semantic Versioning:**
+- **Major (x.0.0)**: Breaking changes
+- **Minor (0.x.0)**: New features, backward-compatible
+- **Patch (0.0.x)**: Bug fixes
+
+**Ensure version consistency across:**
+1. `Makefile` (`BUNDLE_TAG`)
+2. CSV metadata name (`lightspeed-operator.v0.2.0`)
+3. CSV spec `version` field
+4. Bundle Dockerfile labels
+
+---
+
+## Common Tasks
+
+### Update Operator Image
+
+```bash
+# Get image references from Konflux snapshot (pass -b for bundle snapshot when updating ols-bundle)
+./hack/snapshot_to_image_list.sh -s <ols-snapshot-ref> -b <ols-bundle-snapshot-ref> -o related_images.json
+
+# Update bundle (uses version from related_images.json or current CSV)
+make bundle
+
+# Verify operator image was updated
+grep "lightspeed-operator" bundle/manifests/*.clusterserviceversion.yaml
+```
+
+### Add RBAC Permission
+
+```bash
+vim config/rbac/role.yaml  # Update RBAC
+make manifests && make bundle BUNDLE_VARIANT=v1 BUNDLE_TAG=1.0.0
+yq '.spec.install.spec.clusterPermissions[0].rules' \
+  bundle/manifests/lightspeed-operator.clusterserviceversion.yaml  # Verify
+```
+
+### Change OpenShift Version Support
+
+```bash
+vim bundle/metadata/annotations.yaml  # Change: com.redhat.openshift.versions
+operator-sdk bundle validate ./bundle
+```
+
+---
+
+## Troubleshooting
+
+### Bundle Validation Fails
+
+```bash
+operator-sdk bundle validate ./bundle -o text  # Verbose output
+```
+
+**Common fixes:**
+- Check CSV YAML syntax (indentation)
+- Ensure required fields present (`minKubeVersion`, `displayName`, `version`)
+- Verify image references are valid
+- Check RBAC rules format
+
+### Images Not Updated in CSV
+
+```bash
+YQ=$(which yq) JQ=$(which jq) ./hack/update_bundle.sh v1 -v 1.0.0 -i related_images.json
+```
+
+**Common fixes:**
+- Verify `related_images.json` format
+- Ensure `yq` and `jq` are installed
+- Check image names match expected patterns
+
+### OLM Can't Install Bundle
+
+```bash
+# Check subscription and install plan
+oc get subscription lightspeed-operator -n openshift-lightspeed -o yaml
+oc get installplan -n openshift-lightspeed
+```
+
+**Common fixes:**
+- Verify RBAC permissions complete
+- Ensure CRD is valid
+- Review deployment spec in CSV
+
+---
+
+## Additional Resources
+
+- [OLM Catalog Management](./olm-catalog-management.md) - Next: organize bundles into catalogs
+- [OLM Integration & Lifecycle](./olm-integration-lifecycle.md) - Deploy bundles via OLM
+- [Operator SDK Bundle Docs](https://sdk.operatorframework.io/docs/olm-integration/tutorial-bundle/)
+- [CSV Field Reference](https://olm.operatorframework.io/docs/concepts/crds/clusterserviceversion/)

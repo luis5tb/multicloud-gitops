@@ -1,0 +1,11 @@
+apiVersion: v2
+name: openshift-lightspeed-operator
+description: >-
+  Gated OLM installation scaffold for a separately built and published downstream
+  OpenShift Lightspeed Operator catalog. It does not provide an operator image or catalog.
+type: application
+version: 0.1.0
+keywords:
+  - pattern
+  - openshift
+  - openshift-lightspeed

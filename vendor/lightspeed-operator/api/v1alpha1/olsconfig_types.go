@@ -1,0 +1,1013 @@
+/*
+Copyright 2024.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package v1alpha1
+
+import (
+	configv1 "github.com/openshift/api/config/v1"
+	corev1 "k8s.io/api/core/v1"
+	resource "k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+)
+
+// AuditConfig configures audit log and trace export via the OTEL Collector.
+type AuditConfig struct {
+	// logging enables audit log storage in PostgreSQL via the Collector.
+	// Default: true when absent.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Audit Logging",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:booleanSwitch"}
+	Logging *bool `json:"logging,omitempty"`
+
+	// tracingEndpoint is the trace export backend (e.g. "jaeger:4317").
+	// The Collector forwards traces here when set. TLS is always used.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Tracing Endpoint"
+	TracingEndpoint string `json:"tracingEndpoint,omitempty"`
+}
+
+// SandboxMode selects how the agentic operator provisions agent sandbox pods.
+// +kubebuilder:validation:Enum=bare-pod;sandbox-claim
+type SandboxMode string
+
+const (
+	// SandboxModeBarePod runs agent sandboxes as bare Pods (no Agent Sandbox API CRDs required).
+	SandboxModeBarePod SandboxMode = "bare-pod"
+	// SandboxModeSandboxClaim provisions sandboxes via the Agent Sandbox API.
+	SandboxModeSandboxClaim SandboxMode = "sandbox-claim"
+)
+
+// AgenticOLSSpec configures classic→agentic operator handoff for sandbox provisioning.
+type AgenticOLSSpec struct {
+	// sandboxMode selects bare Pods vs Agent Sandbox API claims.
+	// Default: bare-pod when absent. When agenticOLS is omitted entirely, the operator
+	// treats sandbox mode as bare-pod.
+	// +optional
+	// +kubebuilder:default=bare-pod
+	// +kubebuilder:validation:Enum=bare-pod;sandbox-claim
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Sandbox Mode"
+	SandboxMode SandboxMode `json:"sandboxMode,omitempty"`
+	// AgenticSandboxConfig overrides for the composed sandbox PodSpec (resources, tolerations, nodeSelector).
+	// Replicas are ignored and always treated as 1; sandbox pod count is managed by the agentic operator.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Agentic Sandbox Config"
+	AgenticSandboxConfig Config `json:"agenticSandboxConfig,omitempty"`
+	// TerminalTTL is the optional retention ceiling for terminal AgenticRuns, in whole days.
+	// The agentic operator supplies the fallback when this field is absent.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Terminal TTL (days)"
+	TerminalTTL *int32 `json:"terminalTTL,omitempty"`
+}
+
+// OLSConfigSpec defines the desired state of OLSConfig
+type OLSConfigSpec struct {
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="LLM Settings"
+	LLMConfig LLMSpec `json:"llm"`
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="OLS Settings"
+	OLSConfig OLSSpec `json:"ols"`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="OLS Data Collector Settings"
+	OLSDataCollectorConfig OLSDataCollectorSpec `json:"olsDataCollector,omitempty"`
+	// MCP Server settings
+	// +kubebuilder:validation:MaxItems=20
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="MCP Server Settings"
+	MCPServers []MCPServerConfig `json:"mcpServers,omitempty"`
+	// Feature Gates holds list of features to be enabled explicitly, otherwise they are disabled by default.
+	// possible values: MCPServer, ToolFiltering
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Feature Gates"
+	FeatureGates []FeatureGate `json:"featureGates,omitempty"`
+	// Audit log and trace export configuration for the OTEL Collector.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Audit Settings"
+	Audit AuditConfig `json:"audit"`
+	// Agentic OLS settings for inter-operator sandbox handoff to the agentic operator.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Agentic OLS Settings"
+	AgenticOLS *AgenticOLSSpec `json:"agenticOLS,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=MCPServer;ToolFiltering
+type FeatureGate string
+
+// OLSConfigStatus defines the observed state of OLS deployment.
+type OLSConfigStatus struct {
+	// Conditions represent the state of individual components
+	// Always populated after first reconciliation
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	Conditions []metav1.Condition `json:"conditions"`
+
+	// OverallStatus provides a high-level summary of the entire system's health.
+	// Aggregates all component conditions into a single status value.
+	// - Ready: All components are healthy
+	// - NotReady: At least one component is not ready (check conditions for details)
+	// Always set after first reconciliation
+	// +optional
+	// +kubebuilder:validation:Enum=Ready;NotReady
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	OverallStatus OverallStatus `json:"overallStatus,omitempty"`
+
+	// DiagnosticInfo provides detailed troubleshooting information when deployments fail.
+	// Each entry contains pod-level error details for a specific component.
+	// This array is automatically populated when deployments fail and cleared when they recover.
+	// Only present during deployment failures.
+	// +optional
+	// +operator-sdk:csv:customresourcedefinitions:type=status
+	DiagnosticInfo []PodDiagnostic `json:"diagnosticInfo,omitempty"`
+}
+
+// PodDiagnostic describes a pod-level issue
+type PodDiagnostic struct {
+	// FailedComponent identifies which component this diagnostic relates to,
+	// using the same type as the Conditions field (e.g., "ApiReady", "CacheReady", "AlertsAdapterReady")
+	// This allows easy correlation between condition status and diagnostic details.
+	FailedComponent string `json:"failedComponent"`
+
+	// PodName is the name of the pod with issues
+	PodName string `json:"podName"`
+
+	// ContainerName is the container within the pod that failed
+	// Empty if the issue is at the pod level (e.g., scheduling)
+	// +optional
+	ContainerName string `json:"containerName,omitempty"`
+
+	// Reason is the failure reason
+	// Examples: ImagePullBackOff, CrashLoopBackOff, Unschedulable, OOMKilled
+	Reason string `json:"reason"`
+
+	// Message provides detailed error information from Kubernetes
+	Message string `json:"message"`
+
+	// ExitCode for terminated containers (only set for container failures)
+	// +optional
+	ExitCode *int32 `json:"exitCode,omitempty"`
+
+	// Type indicates the diagnostic type
+	// +kubebuilder:validation:Enum=ContainerWaiting;ContainerTerminated;PodScheduling;PodCondition
+	Type DiagnosticType `json:"type"`
+
+	// LastUpdated is the timestamp when this diagnostic was collected
+	LastUpdated metav1.Time `json:"lastUpdated"`
+}
+
+// DiagnosticType categorizes the type of diagnostic
+// +kubebuilder:validation:Enum=ContainerWaiting;ContainerTerminated;PodScheduling;PodCondition
+type DiagnosticType string
+
+const (
+	DiagnosticTypeContainerWaiting    DiagnosticType = "ContainerWaiting"
+	DiagnosticTypeContainerTerminated DiagnosticType = "ContainerTerminated"
+	DiagnosticTypePodScheduling       DiagnosticType = "PodScheduling"
+	DiagnosticTypePodCondition        DiagnosticType = "PodCondition"
+)
+
+// DeploymentStatus represents the status of a deployment check
+type DeploymentStatus string
+
+const (
+	DeploymentStatusReady       DeploymentStatus = "Ready"
+	DeploymentStatusProgressing DeploymentStatus = "Progressing"
+	DeploymentStatusFailed      DeploymentStatus = "Failed"
+)
+
+// OverallStatus represents the aggregate status of the entire system
+type OverallStatus string
+
+const (
+	OverallStatusReady    OverallStatus = "Ready"
+	OverallStatusNotReady OverallStatus = "NotReady"
+)
+
+// LogLevel defines the logging level for components
+// +kubebuilder:validation:Enum=DEBUG;INFO;WARNING;ERROR;CRITICAL
+type LogLevel string
+
+const (
+	// LogLevelDebug enables debug-level logging (most verbose)
+	LogLevelDebug LogLevel = "DEBUG"
+
+	// LogLevelInfo enables info-level logging (default)
+	LogLevelInfo LogLevel = "INFO"
+
+	// LogLevelWarning enables warning-level logging
+	LogLevelWarning LogLevel = "WARNING"
+
+	// LogLevelError enables error-level logging
+	LogLevelError LogLevel = "ERROR"
+
+	// LogLevelCritical enables critical-level logging (least verbose)
+	LogLevelCritical LogLevel = "CRITICAL"
+)
+
+// LLMSpec defines the desired state of the large language model (LLM).
+type LLMSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxItems=10
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Providers"
+	Providers []ProviderSpec `json:"providers"`
+}
+
+// OLSSpec defines the desired state of OLS deployment.
+//
+// OKP (Offline Knowledge Portal) / Solr hybrid RAG is operator-managed, not configured on this CR:
+//   - Enabled by default. The operator deploys the RHOKP sidecar and writes ols_config.solr_hybrid
+//     into olsconfig.yaml (Solr URL, hybrid tuning, and related keys use operator defaults).
+//   - The app-server pod receives OCP_CLUSTER_VERSION for Solr chunk_filter_query resolution.
+//   - OCP documentation is retrieved via the search_openshift_documentation tool (Solr hybrid), not
+//     direct prompt RAG. BYOK content remains on spec.rag (FAISS indexes).
+//   - Set byokRAGOnly to disable OKP: no RHOKP sidecar, no solr_hybrid section, and no built-in
+//     OCP documentation retrieval—only BYOK FAISS indexes from spec.rag are used.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.mcpServerSecurity) || (has(self.introspectionEnabled) && self.introspectionEnabled == false)",message="ols.mcpServerSecurity is required when introspection is enabled (or its default is in effect)"
+// +kubebuilder:validation:XValidation:rule="!has(self.a2a) || !self.a2a.enabled || (has(self.mcpServerSecurity) && (!has(self.introspectionEnabled) || self.introspectionEnabled == true))",message="ols.a2a requires introspection to be enabled and mcpServerSecurity to be configured"
+type OLSSpec struct {
+	// Conversation cache settings
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=2,displayName="Conversation Cache"
+	ConversationCache ConversationCacheSpec `json:"conversationCache,omitempty"`
+	// OLS deployment settings
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=1,displayName="Deployment"
+	DeploymentConfig DeploymentConfig `json:"deployment,omitempty"`
+	// Log level. Valid options are DEBUG, INFO, WARNING, ERROR and CRITICAL. Default: "INFO".
+	// +kubebuilder:default=INFO
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Log level"
+	LogLevel LogLevel `json:"logLevel,omitempty"`
+	// Default model for usage
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Default Model",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	DefaultModel string `json:"defaultModel"`
+	// Default provider for usage
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Default Provider",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:text"}
+	DefaultProvider string `json:"defaultProvider"`
+	// Query filters
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Query Filters"
+	QueryFilters []QueryFiltersSpec `json:"queryFilters,omitempty"`
+	// User data collection switches
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="User Data Collection"
+	UserDataCollection UserDataCollectionSpec `json:"userDataCollection,omitempty"`
+	// TLS configuration of the Lightspeed backend's HTTPS endpoint
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="TLS Configuration"
+	TLSConfig *TLSConfig `json:"tlsConfig,omitempty"`
+	// Additional CA certificates for TLS communication between OLS service and LLM Provider
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Additional CA Configmap",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	AdditionalCAConfigMapRef *corev1.LocalObjectReference `json:"additionalCAConfigMapRef,omitempty"`
+	// TLS Security Profile used by API endpoints
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="TLS Security Profile",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	TLSSecurityProfile *configv1.TLSSecurityProfile `json:"tlsSecurityProfile,omitempty"`
+	// Enable introspection features (e.g. built-in OpenShift MCP server).
+	// Default: true when absent. Explicit false disables introspection.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Introspection Enabled",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:booleanSwitch"}
+	IntrospectionEnabled *bool `json:"introspectionEnabled,omitempty"`
+	// auditEventsEnabled controls structured compliance audit JSON events on stdout.
+	// Default: true when absent. Does not affect collector storage (see spec.audit).
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Audit Events Enabled",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:booleanSwitch"}
+	AuditEventsEnabled *bool `json:"auditEventsEnabled,omitempty"`
+	// MCP Kubernetes server configuration
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="MCP Kube Server Configuration",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	// +kubebuilder:validation:Optional
+	MCPKubeServerConfig *MCPKubeServerConfiguration `json:"mcpKubeServerConfig,omitempty"`
+	// Security configuration for the operator-managed OpenShift MCP server.
+	// Required whenever introspection is enabled. The operator always requires a
+	// bearer token, validates it against this OIDC issuer, and passes it through to
+	// the Kubernetes API without performing a second token exchange.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="OpenShift MCP Security"
+	MCPServerSecurity *MCPServerSecurityConfig `json:"mcpServerSecurity,omitempty"`
+	// A2A workload integration settings. Disabled unless explicitly enabled.
+	// Enabling A2A requires the built-in OpenShift MCP operand and its local OIDC security settings.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="A2A Workload Integration"
+	A2A *A2AConfig `json:"a2a,omitempty"`
+	// Immutable custom image for the Lightspeed app-server. When omitted, the operator's
+	// --service-image startup argument remains the source of the image.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9][a-zA-Z0-9._:/+-]*@sha256:[a-f0-9]{64}$`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Lightspeed Service Image (Digest)"
+	ServiceImage string `json:"serviceImage,omitempty"`
+	// Proxy settings for connecting to external servers, such as LLM providers.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Proxy Settings",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	// +kubebuilder:validation:Optional
+	ProxyConfig *ProxyConfig `json:"proxyConfig,omitempty"`
+	// BYOK RAG databases (bring-your-own container images with FAISS vector indexes).
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="BYOK RAG Databases",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	RAG []RAGSpec `json:"rag,omitempty"`
+	// LLM Token Quota Configuration
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="LLM Token Quota Configuration"
+	QuotaHandlersConfig *QuotaHandlersConfig `json:"quotaHandlersConfig,omitempty"`
+	// Persistent Storage Configuration
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Persistent Storage Configuration",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	Storage *Storage `json:"storage,omitempty"`
+	// Only use BYOK RAG sources. Disables OKP (RHOKP sidecar, solr_hybrid config, and built-in OCP documentation retrieval).
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Only use BYOK RAG sources",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:booleanSwitch"}
+	ByokRAGOnly bool `json:"byokRAGOnly,omitempty"`
+	// Custom system prompt for LLM queries. If not specified, uses the default OpenShift Lightspeed prompt.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Query System Prompt",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	QuerySystemPrompt string `json:"querySystemPrompt,omitempty"`
+	// Maximum number of iterations for agent execution. Default: 5
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Max Iterations",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:number"}
+	MaxIterations int `json:"maxIterations,omitempty"`
+	// Pull secrets for BYOK RAG images from image registries requiring authentication
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Image Pull Secrets"
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+	// Tool filtering configuration for hybrid RAG retrieval. If not specified, all tools are used.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Tool Filtering Configuration",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	ToolFilteringConfig *ToolFilteringConfig `json:"toolFilteringConfig,omitempty"`
+	// Tool execution approval configuration. Controls whether tool calls require user approval before execution.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Tools Approval Configuration",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	ToolsApprovalConfig *ToolsApprovalConfig `json:"toolsApprovalConfig,omitempty"`
+	// Enable in-process credential hot-reload for LLM provider secrets.
+	// When true, the operator will not restart the app-server when LLM credential
+	// secret data is rotated — the service re-reads credentials from disk on each request.
+	// IMPORTANT: Requires lightspeed-service with get_credentials() hot-reload support
+	// (service PR #2955 / RFE-9380). If enabled with an older service image, rotated
+	// credentials (including revoked keys) will remain stale until the pod is manually restarted.
+	// +kubebuilder:default=false
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Credential Hot Reload",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:booleanSwitch"}
+	CredentialHotReload *bool `json:"credentialHotReload,omitempty"`
+}
+
+// Persistent Storage Configuration
+type Storage struct {
+	// Size of the requested volume
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Size of the Requested Volume"
+	// +kubebuilder:validation:Optional
+	Size resource.Quantity `json:"size,omitempty"`
+	// Storage class of the requested volume
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Storage Class of the Requested Volume"
+	Class string `json:"class,omitempty"`
+}
+
+// MCPKubeServerConfiguration defines the configuration for the MCP Kubernetes server
+// This server is started by OLS to provide MCP capabilities for Kubernetes resources
+type MCPKubeServerConfiguration struct {
+	// Timeout for the MCP Kube server in seconds, default is 60
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=5
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Timeout (seconds)"
+	Timeout int `json:"timeout,omitempty"`
+}
+
+// MCPToolset is an allow-listed MCP toolset supported by the operator-managed
+// OpenShift MCP server.
+// +kubebuilder:validation:Enum=core;config;helm;observability/metrics;kubevirt
+type MCPToolset string
+
+// MCPServerSecurityConfig configures local OAuth verification and the bounded
+// tool/network surface of the operator-managed OpenShift MCP server.
+type MCPServerSecurityConfig struct {
+	// AuthorizationURL is the HTTPS OIDC issuer URL used by the MCP server to
+	// validate bearer signatures and claims. Query strings and fragments are not
+	// supported.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https://[^@?#]+$`
+	// +required
+	AuthorizationURL string `json:"authorizationURL"`
+	// OAuthAudience is the required audience in bearer tokens. Defaults to openshift-mcp.
+	// +kubebuilder:default=openshift-mcp
+	// +kubebuilder:validation:Enum=openshift-mcp
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	OAuthAudience string `json:"oauthAudience,omitempty"`
+	// CASecretRef identifies the key in a Secret in the OLS namespace containing
+	// the OIDC issuer CA bundle. This is separate from service-ca used for OLS-to-MCP TLS.
+	// +kubebuilder:validation:Required
+	// +required
+	CASecretRef *MCPCASecretKeySelector `json:"caSecretRef"`
+	// Toolsets restricts the MCP tool families registered by the server. When omitted,
+	// only core is enabled. The operator always emits read_only=true and denies Secret
+	// and RBAC resources regardless of the selected toolsets.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=5
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Allowed MCP Toolsets"
+	Toolsets []MCPToolset `json:"toolsets,omitempty"`
+	// AllowPrometheusMetrics enables HTTPS scraping only from the cluster Prometheus
+	// pods in openshift-monitoring. Defaults to true to preserve the operator's metrics.
+	// +kubebuilder:default=true
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Allow Prometheus MCP Metrics Scrape"
+	AllowPrometheusMetrics *bool `json:"allowPrometheusMetrics,omitempty"`
+}
+
+// MCPCASecretKeySelector selects a required PEM CA bundle key from a Secret.
+// +kubebuilder:validation:XValidation:rule="self.key != '.' && self.key != '..' && !self.key.startsWith('..')",message="key must not be '.' or start with '..'"
+type MCPCASecretKeySelector struct {
+	// Name is a required DNS subdomain Secret name in the OLS namespace.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^([a-z0-9]([-a-z0-9]*[a-z0-9])?)(\.([a-z0-9]([-a-z0-9]*[a-z0-9])?))*$`
+	// +required
+	Name string `json:"name"`
+	// Key must be a non-empty valid Secret/ConfigMap data key.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z0-9]+$`
+	// +required
+	Key string `json:"key"`
+	// Optional is fixed false: an absent Secret or key must fail closed.
+	// +kubebuilder:default=false
+	// +kubebuilder:validation:Enum=false
+	Optional *bool `json:"optional,omitempty"`
+}
+
+// A2AConfig configures the request-scoped A2A identity boundary for the app-server.
+// Issuer, MCP audience, and Keycloak CA are inherited from MCPServerSecurityConfig.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.targetClusterID) && size(self.targetClusterID) > 0 && has(self.publicURL) && size(self.publicURL) > 0 && self.inboundAudience == 'lightspeed-a2a' && self.allowedCallerClientID == 'acme-agent' && self.exchangeClientID == 'lightspeed-mcp')",message="enabled A2A requires targetClusterID, publicURL, and the fixed A2A audience/client IDs"
+type A2AConfig struct {
+	// Enabled activates the A2A identity environment and SPIFFE Workload API mount.
+	// +kubebuilder:default=false
+	// +kubebuilder:validation:Optional
+	Enabled bool `json:"enabled,omitempty"`
+	// TargetClusterID is the stable DNS-safe registry ID for this OLS instance.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetClusterID string `json:"targetClusterID,omitempty"`
+	// PublicURL is the HTTPS origin exposed by Praxis (no path, query, fragment, or userinfo).
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https://[^/@?#]+$`
+	PublicURL string `json:"publicURL,omitempty"`
+	// InboundAudience is fixed for the Lightspeed A2A endpoint.
+	// +kubebuilder:default=lightspeed-a2a
+	// +kubebuilder:validation:Enum=lightspeed-a2a
+	InboundAudience string `json:"inboundAudience,omitempty"`
+	// AllowedCallerClientID is the only accepted Keycloak caller client.
+	// +kubebuilder:default=acme-agent
+	// +kubebuilder:validation:Enum=acme-agent
+	AllowedCallerClientID string `json:"allowedCallerClientID,omitempty"`
+	// ExchangeClientID is the SPIFFE-bound Keycloak token exchange client.
+	// +kubebuilder:default=lightspeed-mcp
+	// +kubebuilder:validation:Enum=lightspeed-mcp
+	ExchangeClientID string `json:"exchangeClientID,omitempty"`
+}
+
+// RAGSpec defines a BYOK RAG database (container image and index path).
+type RAGSpec struct {
+	// The path to the BYOK RAG database inside of the container image
+	// +kubebuilder:default="/rag/vector_db"
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Index Path in the Image"
+	IndexPath string `json:"indexPath,omitempty"`
+	// The Index ID of the BYOK RAG database. Only needed if there are multiple indices in the database.
+	// +kubebuilder:default=""
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Index ID"
+	IndexID string `json:"indexID,omitempty"`
+	// The URL of the container image to use as a BYOK RAG source
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Image"
+	Image string `json:"image"`
+}
+
+// QuotaHandlersConfig defines the token quota configuration
+type QuotaHandlersConfig struct {
+	// Token quota limiters
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Token Quota Limiters",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	LimitersConfig []LimiterConfig `json:"limitersConfig,omitempty"`
+	// Enable token history
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Enable Token History",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:booleanSwitch"}
+	EnableTokenHistory bool `json:"enableTokenHistory,omitempty"`
+}
+
+// LimiterConfig defines settings for a token quota limiter
+type LimiterConfig struct {
+	// Name of the limiter
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Limiter Name"
+	Name string `json:"name"`
+	// Type of the limiter
+	// +kubebuilder:validation:Enum=cluster_limiter;user_limiter
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Limiter Type. Accepted Values: cluster_limiter, user_limiter."
+	Type string `json:"type"`
+	// Initial value of the token quota
+	// +kubebuilder:validation:Minimum=0
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Initial Token Quota"
+	InitialQuota int `json:"initialQuota"`
+	// Token quota increase step
+	// +kubebuilder:validation:Minimum=0
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Token Quota Increase Step"
+	QuotaIncrease int `json:"quotaIncrease"`
+	// Period of time the token quota is for
+	// Examples: "1 hour", "30 minutes", "2 days", "1 h", "30 min", "2 d"
+	// Accepts singular (e.g., "1 second") or plural (e.g., "2 seconds") forms
+	// Supported units: second(s), minute(s), hour(s), day(s), month(s), year(s) or s, min, h, d, m, y
+	// +kubebuilder:validation:Pattern=`^(1\s+(second|minute|hour|day|month|year|s|min|h|d|m|y)|([2-9][0-9]*|[1-9][0-9]{2,})\s+(seconds|minutes|hours|days|months|years|s|min|h|d|m|y))$`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Period of Time the Token Quota Is For"
+	Period string `json:"period"`
+}
+
+// DeploymentConfig defines the schema for overriding deployment of OLS instance.
+type DeploymentConfig struct {
+	// API container settings.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="API Deployment"
+	APIContainer Config `json:"api,omitempty"`
+	// Data Collector container settings.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Data Collector Container"
+	DataCollectorContainer ContainerConfig `json:"dataCollector,omitempty"`
+	// MCP server deployment settings.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="MCP Server Deployment"
+	MCPServerContainer Config `json:"mcpServer,omitempty"`
+	// RHOKP standalone deployment settings (Solr / OKP).
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="RHOKP Container"
+	RHOKPContainer Config `json:"rhokp,omitempty"`
+	// Console container settings.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Console Deployment"
+	ConsoleContainer Config `json:"console,omitempty"`
+	// Agentic console plugin container settings.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Agentic Console Deployment"
+	AgenticConsoleContainer Config `json:"agenticConsole,omitempty"`
+	// Database container settings.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Database Deployment"
+	DatabaseContainer Config `json:"database,omitempty"`
+	// Alerts adapter deployment and runtime config reference.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Alerts Adapter"
+	AlertsAdapter AlertsAdapterSpec `json:"alertsAdapter,omitempty"`
+	// OTEL Collector deployment settings.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="OTEL Collector Deployment"
+	OtelCollector Config `json:"otelCollector,omitempty"`
+}
+
+// AlertsAdapterSpec defines deployment settings and a reference to user-managed adapter runtime config.
+type AlertsAdapterSpec struct {
+	Config `json:",inline"`
+	// ConfigMapRef enables the alerts adapter when set and references a user-managed ConfigMap
+	// in the operator namespace. When unset, reconciliation is skipped and managed operand
+	// resources are removed. The operator does not create or validate ConfigMap data. When the
+	// referenced ConfigMap exists, it is mounted read-only at /etc/alerts-adapter; when absent,
+	// no config volume is mounted. The adapter reads config.yaml from that path and uses
+	// built-in defaults when the file is missing or invalid.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Alerts Adapter ConfigMap Reference"
+	ConfigMapRef *corev1.LocalObjectReference `json:"configMapRef,omitempty"`
+}
+
+// Config defines pod configuration using standard Kubernetes types
+type Config struct {
+	// Defines the number of desired pods. Default: "1"
+	// Note: Replicas are configurable for APIContainer and MCP server (mcpServer).
+	// For PostgreSQL, Console, Agentic Console, Alerts Adapter, OTEL Collector, and
+	// Agentic Sandbox (spec.agenticOLS.agenticSandboxConfig), the number of replicas is always set to 1.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Number of replicas",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:podCount"}
+	Replicas *int32 `json:"replicas,omitempty"`
+	// Resource requirements (CPU, memory)
+	// Uses standard corev1.ResourceRequirements
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Tolerations for pod scheduling
+	// Uses standard corev1.Toleration
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Node selector constraints
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+}
+
+// ContainerConfig defines container configuration using standard Kubernetes types
+type ContainerConfig struct {
+	// Resource requirements (CPU, memory)
+	// Uses standard corev1.ResourceRequirements
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// +kubebuilder:validation:Enum=postgres
+type CacheType string
+
+const (
+	Postgres CacheType = "postgres"
+)
+
+// ConversationCacheSpec defines the desired state of OLS conversation cache.
+type ConversationCacheSpec struct {
+	// Conversation cache type. Default: "postgres"
+	// +kubebuilder:default=postgres
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Cache Type"
+	Type CacheType `json:"type,omitempty"`
+	// +optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="PostgreSQL Settings"
+	Postgres PostgresSpec `json:"postgres,omitempty"`
+}
+
+// PostgresSpec defines the desired state of Postgres.
+type PostgresSpec struct {
+	// Postgres sharedbuffers
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:default="256MB"
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Shared Buffer Size"
+	SharedBuffers string `json:"sharedBuffers,omitempty"`
+	// Postgres maxconnections. Default: "2000"
+	// +kubebuilder:default=2000
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=262143
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Maximum Connections"
+	MaxConnections int `json:"maxConnections,omitempty"`
+}
+
+// QueryFiltersSpec defines filters to manipulate questions/queries.
+type QueryFiltersSpec struct {
+	// Filter name.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Filter Name"
+	Name string `json:"name,omitempty"`
+	// Filter pattern.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="The pattern to replace"
+	Pattern string `json:"pattern,omitempty"`
+	// Replacement for the matched pattern.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Replace With"
+	ReplaceWith string `json:"replaceWith,omitempty"`
+}
+
+// VertexConfig defines the configuration for the Google Vertex provider.
+type VertexConfig struct {
+	// Google Cloud project ID
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Google Cloud Project ID"
+	ProjectID string `json:"projectID,omitempty"`
+	// Server region location
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Server Region Location"
+	Location string `json:"location,omitempty"`
+}
+
+// ModelParametersSpec
+type ModelParametersSpec struct {
+	// Max tokens for response. The default is 2048 tokens.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Max Tokens For Response"
+	MaxTokensForResponse int `json:"maxTokensForResponse,omitempty"`
+	// Ratio of context window size allocated for tool token budget. Must be between 0.1 and 0.5. The default is 0.5.
+	// +kubebuilder:default=0.5
+	// +kubebuilder:validation:Minimum=0.1
+	// +kubebuilder:validation:Maximum=0.5
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Tool Budget Ratio"
+	ToolBudgetRatio float64 `json:"toolBudgetRatio,omitempty"`
+	// Optional sampling temperature. When unset, the service does not specify a temperature.
+	// Explicit zero is passed through. Must be non-negative and finite.
+	// +kubebuilder:validation:Minimum=0
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Temperature"
+	Temperature *float64 `json:"temperature,omitempty"`
+	// Reasoning configuration for the model (provider-agnostic freeform config).
+	// The service and provider API validate the contents.
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Reasoning Config"
+	ReasoningConfig map[string]runtime.RawExtension `json:"reasoningConfig,omitempty"`
+}
+
+// ModelSpec defines the LLM model to use and its parameters.
+type ModelSpec struct {
+	// Model name
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Name"
+	Name string `json:"name"`
+	// Model API URL
+	// +kubebuilder:validation:Pattern=`^https?://.*$`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="URL"
+	URL string `json:"url,omitempty"`
+	// Defines the model's context window size, in tokens. The default is 128k tokens.
+	// +kubebuilder:validation:Minimum=1024
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Context Window Size"
+	ContextWindowSize uint `json:"contextWindowSize,omitempty"`
+	// Model API parameters
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Parameters"
+	Parameters ModelParametersSpec `json:"parameters,omitempty"`
+}
+
+// ProviderSpec defines the desired state of LLM provider.
+// +kubebuilder:validation:XValidation:message="'deploymentName' must be specified for 'azure_openai' provider",rule="self.type != \"azure_openai\" || self.deploymentName != \"\""
+// +kubebuilder:validation:XValidation:message="'projectID' must be specified for 'watsonx' provider",rule="self.type != \"watsonx\" || self.projectID != \"\""
+// +kubebuilder:validation:XValidation:message="credentialKey must not be empty or whitespace",rule="!has(self.credentialKey) || !self.credentialKey.matches('^[ \\t\\n\\r\\v\\f]*$')"
+// +kubebuilder:validation:XValidation:message="googleVertexConfig is required for google_vertex provider",rule="self.type != \"google_vertex\" || has(self.googleVertexConfig)"
+// +kubebuilder:validation:XValidation:message="googleVertexAnthropicConfig is required for google_vertex_anthropic provider",rule="self.type != \"google_vertex_anthropic\" || has(self.googleVertexAnthropicConfig)"
+// +kubebuilder:validation:XValidation:message="googleVertexConfig may only be set when type is google_vertex",rule="self.type == \"google_vertex\" || !has(self.googleVertexConfig)"
+// +kubebuilder:validation:XValidation:message="googleVertexAnthropicConfig may only be set when type is google_vertex_anthropic",rule="self.type == \"google_vertex_anthropic\" || !has(self.googleVertexAnthropicConfig)"
+type ProviderSpec struct {
+	// Provider name
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=1,displayName="Name"
+	Name string `json:"name"`
+	// Provider API URL
+	// +kubebuilder:validation:Pattern=`^https?://.*$`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=2,displayName="URL"
+	URL string `json:"url,omitempty"`
+	// The name of the secret object that stores API provider credentials
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=3,displayName="Credential Secret"
+	CredentialsSecretRef corev1.LocalObjectReference `json:"credentialsSecretRef"`
+	// List of models from the provider
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxItems=50
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Models"
+	Models []ModelSpec `json:"models"`
+	// Provider type
+	// +kubebuilder:validation:Required
+	// +required
+	// +kubebuilder:validation:Enum=azure_openai;bam;openai;watsonx;rhoai_vllm;rhelai_vllm;fake_provider;google_vertex;google_vertex_anthropic;bedrock
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Provider Type"
+	Type string `json:"type"`
+	// Deployment name for Azure OpenAI provider
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Azure Deployment Name"
+	AzureDeploymentName string `json:"deploymentName,omitempty"`
+	// API Version for Azure OpenAI provider
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Azure OpenAI API Version"
+	APIVersion string `json:"apiVersion,omitempty"`
+	// Watsonx Project ID
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Watsonx Project ID"
+	WatsonProjectID string `json:"projectID,omitempty"`
+	// Google Vertex Config
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Google Vertex Config"
+	GoogleVertexConfig *VertexConfig `json:"googleVertexConfig,omitempty"`
+	// Google Vertex Anthropic Config
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Google Vertex Anthropic Config"
+	GoogleVertexAnthropicConfig *VertexConfig `json:"googleVertexAnthropicConfig,omitempty"`
+	// Fake Provider MCP Tool Call
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Fake Provider MCP Tool Call"
+	FakeProviderMCPToolCall bool `json:"fakeProviderMCPToolCall,omitempty"`
+	// TLS Security Profile used by connection to provider
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="TLS Security Profile",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
+	TLSSecurityProfile *configv1.TLSSecurityProfile `json:"tlsSecurityProfile,omitempty"`
+	// Secret key name for provider credentials (defaults to "apitoken" if not set).
+	// Specifies which key inside credentialsSecretRef to read the credential value from.
+	// The credential value is exposed to the app server container as env var {PROVIDER_NAME}_API_KEY
+	// (derived from the provider name, not this field). This field only controls which secret data key is read.
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Credential Key Name"
+	CredentialKey string `json:"credentialKey,omitempty"`
+}
+
+// UserDataCollectionSpec defines how we collect user data.
+type UserDataCollectionSpec struct {
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Do Not Collect User Feedback"
+	FeedbackDisabled bool `json:"feedbackDisabled,omitempty"`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Do Not Collect Transcripts"
+	TranscriptsDisabled bool `json:"transcriptsDisabled,omitempty"`
+}
+
+// OLSDataCollectorSpec defines allowed OLS data collector configuration.
+type OLSDataCollectorSpec struct {
+	// Log level. Valid options are DEBUG, INFO, WARNING, ERROR and CRITICAL. Default: "INFO".
+	// +kubebuilder:default=INFO
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Log level"
+	LogLevel LogLevel `json:"logLevel,omitempty"`
+}
+
+type TLSConfig struct {
+	// KeyCertSecretRef references a Secret containing TLS certificate and key.
+	// The Secret must contain the following keys:
+	//   - tls.crt: Server certificate (PEM format) - REQUIRED
+	//   - tls.key: Private key (PEM format) - REQUIRED
+	//   - ca.crt: CA certificate for console proxy trust (PEM format) - OPTIONAL
+	//
+	// If ca.crt is not provided, the OpenShift Console proxy will use the default system trust store.
+	//
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="TLS Certificate Secret Reference"
+	// +optional
+	KeyCertSecretRef corev1.LocalObjectReference `json:"keyCertSecretRef,omitempty"`
+}
+
+// ProxyConfig defines the proxy settings for connecting to external servers, such as LLM providers.
+type ProxyConfig struct {
+	// Proxy URL, e.g. https://proxy.example.com:8080
+	// If not specified, the cluster wide proxy will be used, through env var "https_proxy".
+	// +kubebuilder:validation:Pattern=`^https?://.*$`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Proxy URL"
+	ProxyURL string `json:"proxyURL,omitempty"`
+	// The configmap and key holding proxy CA certificate.
+	// The key is optional and defaults to "proxy-ca.crt" for backward compatibility.
+	// If you use a different key name in your ConfigMap, specify it in the Key field of ProxyCACertConfigMapRef.
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Proxy CA Certificate"
+	ProxyCACertificateRef *ProxyCACertConfigMapRef `json:"proxyCACertificate,omitempty"`
+}
+
+// ProxyCACertConfigMapRef references a ConfigMap containing the proxy CA certificate.
+// Provides backward compatibility by making the key field optional with a default value.
+// +structType=atomic
+type ProxyCACertConfigMapRef struct {
+	// The ConfigMap to select from
+	corev1.LocalObjectReference `json:",inline"`
+	// Key in the ConfigMap that contains the proxy CA certificate.
+	// Defaults to "proxy-ca.crt" if not specified.
+	// +kubebuilder:default="proxy-ca.crt"
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// ToolFilteringConfig defines configuration for tool filtering using hybrid RAG retrieval.
+// If this config is present, tool filtering is enabled. If absent, all tools are used.
+// The embedding model is not exposed as it's handled by the container image.
+// +kubebuilder:validation:XValidation:rule="self.alpha >= 0.0 && self.alpha <= 1.0",message="alpha must be between 0.0 and 1.0"
+// +kubebuilder:validation:XValidation:rule="self.threshold >= 0.0 && self.threshold <= 1.0",message="threshold must be between 0.0 and 1.0"
+type ToolFilteringConfig struct {
+	// Weight for dense vs sparse retrieval (1.0 = full dense, 0.0 = full sparse)
+	// +kubebuilder:default=0.8
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Alpha Weight"
+	Alpha float64 `json:"alpha,omitempty"`
+
+	// Number of tools to retrieve
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=50
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Top K"
+	TopK int `json:"topK,omitempty"`
+
+	// Minimum similarity threshold for filtering results
+	// +kubebuilder:default=0.01
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Similarity Threshold"
+	Threshold float64 `json:"threshold,omitempty"`
+}
+
+// ApprovalType defines the approval strategy for tool execution
+// +kubebuilder:validation:Enum=never;always;tool_annotations
+type ApprovalType string
+
+const (
+	// ApprovalTypeNever - all tools execute without approval
+	ApprovalTypeNever ApprovalType = "never"
+	// ApprovalTypeAlways - all tool calls require approval
+	ApprovalTypeAlways ApprovalType = "always"
+	// ApprovalTypeToolAnnotations - approval based on per-tool annotations
+	ApprovalTypeToolAnnotations ApprovalType = "tool_annotations"
+)
+
+// ToolsApprovalConfig defines configuration for tool execution approval.
+// Controls whether tool calls require user approval before execution.
+type ToolsApprovalConfig struct {
+	// Approval strategy for tool execution.
+	// 'never' - tools execute without approval
+	// 'always' - all tool calls require approval
+	// 'tool_annotations' - approval based on per-tool annotations
+	// +kubebuilder:default=tool_annotations
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Approval Type"
+	ApprovalType ApprovalType `json:"approvalType,omitempty"`
+
+	// Timeout in seconds for waiting for user approval
+	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=1
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Approval Timeout (seconds)"
+	ApprovalTimeout int `json:"approvalTimeout,omitempty"`
+}
+
+// MCPHeaderSourceType defines the type of header value source
+// +enum
+type MCPHeaderSourceType string
+
+const (
+	// MCPHeaderSourceTypeSecret uses a value from a Kubernetes secret
+	MCPHeaderSourceTypeSecret MCPHeaderSourceType = "secret"
+	// MCPHeaderSourceTypeKubernetes uses the Kubernetes service account token
+	MCPHeaderSourceTypeKubernetes MCPHeaderSourceType = "kubernetes"
+	// MCPHeaderSourceTypeClient uses the client token from the incoming request
+	MCPHeaderSourceTypeClient MCPHeaderSourceType = "client"
+)
+
+// MCPHeaderValueSource defines where the header value comes from.
+// Uses a discriminated union pattern following KEP-1027.
+// The Type field determines which of the other fields should be set.
+// Secrets must exist in the operator's namespace.
+//
+// Examples:
+//
+//	# Use a secret:
+//	valueFrom:
+//	  type: secret
+//	  secretRef:
+//	    name: my-mcp-secret
+//
+//	# Use Kubernetes service account token:
+//	valueFrom:
+//	  type: kubernetes
+//
+//	# Pass through client token:
+//	valueFrom:
+//	  type: client
+//
+// +kubebuilder:validation:XValidation:rule="self.type == 'secret' ? has(self.secretRef) && size(self.secretRef.name) > 0 : true",message="secretRef with non-empty name is required when type is 'secret'"
+// +kubebuilder:validation:XValidation:rule="self.type != 'secret' ? !has(self.secretRef) : true",message="secretRef must not be set when type is 'kubernetes' or 'client'"
+type MCPHeaderValueSource struct {
+	// Type specifies the source type for the header value
+	// +unionDiscriminator
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=secret;kubernetes;client
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Source Type"
+	Type MCPHeaderSourceType `json:"type"`
+
+	// Reference to a secret containing the header value.
+	// Required when Type is "secret".
+	// The secret must exist in the operator's namespace.
+	// +unionMember
+	// +optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Secret Reference"
+	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
+}
+
+// MCPHeader defines a header to send to the MCP server
+type MCPHeader struct {
+	// Name of the header (e.g., "Authorization", "X-API-Key")
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9-]+$`
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Header Name"
+	Name string `json:"name"`
+
+	// Source of the header value
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Value Source"
+	ValueFrom MCPHeaderValueSource `json:"valueFrom"`
+}
+
+// MCPServerConfig defines the streamlined configuration for an MCP server
+// This configuration only supports HTTP/HTTPS transport
+type MCPServerConfig struct {
+	// Name of the MCP server
+	// +kubebuilder:validation:Required
+	// +required
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Name"
+	Name string `json:"name"`
+
+	// URL of the MCP server (HTTP/HTTPS)
+	// +kubebuilder:validation:Required
+	// +required
+	// +kubebuilder:validation:Pattern=`^https?://.*$`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="URL"
+	URL string `json:"url"`
+
+	// Timeout for the MCP server in seconds, default is 5
+	// +kubebuilder:default=5
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Timeout (seconds)"
+	Timeout int `json:"timeout,omitempty"`
+
+	// Headers to send to the MCP server
+	// Each header can reference a secret or use a special source (kubernetes token, client token)
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Headers"
+	Headers []MCPHeader `json:"headers,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == 'cluster'",message=".metadata.name must be 'cluster'"
+// Red Hat OpenShift Lightspeed instance. OLSConfig is the Schema for the olsconfigs API
+type OLSConfig struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	// +kubebuilder:validation:Required
+	// +required
+	Spec   OLSConfigSpec   `json:"spec"`
+	Status OLSConfigStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster
+// OLSConfigList contains a list of OLSConfig
+type OLSConfigList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []OLSConfig `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(&OLSConfig{}, &OLSConfigList{})
+}

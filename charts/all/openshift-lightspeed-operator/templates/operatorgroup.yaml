@@ -1,0 +1,16 @@
+{{- include "openshift-lightspeed-operator.validate" . -}}
+{{- if and .Values.subscription.enabled .Values.operatorGroup.create }}
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: {{ .Values.operatorGroup.name | quote }}
+  namespace: {{ .Values.installNamespace.name | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  labels:
+    app.kubernetes.io/name: openshift-lightspeed-operator
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+spec:
+  targetNamespaces:
+    - {{ .Values.installNamespace.name | quote }}
+{{- end }}

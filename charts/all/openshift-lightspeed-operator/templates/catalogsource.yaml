@@ -1,0 +1,20 @@
+{{- include "openshift-lightspeed-operator.validate" . -}}
+{{- if .Values.catalogSource.enabled }}
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: {{ .Values.catalogSource.name | quote }}
+  namespace: {{ .Values.catalogSource.namespace | quote }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  labels:
+    app.kubernetes.io/name: openshift-lightspeed-operator
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+spec:
+  sourceType: grpc
+  image: {{ .Values.catalogSource.image | quote }}
+  displayName: {{ .Values.catalogSource.displayName | quote }}
+  {{- with .Values.catalogSource.publisher }}
+  publisher: {{ . | quote }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,42 @@
+{{- if .Values.olsConfig.enabled }}
+{{- $serviceAccount := printf "%s-crd-waiter" .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- $readerRole := printf "%s-olsconfig-crd-reader" .Release.Name | trunc 63 | trimSuffix "-" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccount | quote }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-3"
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $readerRole | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    resourceNames: [olsconfigs.ols.openshift.io]
+    verbs: [get, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $readerRole | quote }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount | quote }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $readerRole | quote }}
+{{- end }}

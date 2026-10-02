@@ -1,0 +1,319 @@
+package ocpmcp
+
+import (
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	olsv1alpha1 "github.com/openshift/lightspeed-operator/api/v1alpha1"
+	"github.com/openshift/lightspeed-operator/internal/controller/utils"
+	monv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+func expectOwnedByOLSConfig(obj metav1.Object) {
+	olsConfig := &olsv1alpha1.OLSConfig{}
+	Expect(k8sClient.Get(ctx, crNamespacedName, olsConfig)).To(Succeed())
+
+	var ownerRef *metav1.OwnerReference
+	for i := range obj.GetOwnerReferences() {
+		ref := &obj.GetOwnerReferences()[i]
+		if ref.APIVersion == utils.OLSConfigAPIVersion &&
+			ref.Kind == utils.OLSConfigKind &&
+			ref.Name == olsConfig.Name {
+			ownerRef = ref
+			break
+		}
+	}
+	Expect(ownerRef).NotTo(BeNil(), "expected %T %s to be owned by OLSConfig", obj, obj.GetName())
+	Expect(ownerRef.Name).To(Equal(olsConfig.Name))
+}
+
+var _ = Describe("OpenShift MCP Server reconciler", Ordered, func() {
+	var testCR *olsv1alpha1.OLSConfig
+
+	BeforeAll(func() {
+		testCR = cr.DeepCopy()
+		testCR.Spec.OLSConfig.IntrospectionEnabled = utils.BoolPtr(true)
+	})
+
+	Context("Phase 1 resources", func() {
+		BeforeAll(func() {
+			err := ReconcileResources(testReconcilerInstance, ctx, testCR)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should create the MCP ConfigMap", func() {
+			cm := &corev1.ConfigMap{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerConfigCmName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, cm)
+			Expect(err).NotTo(HaveOccurred())
+			expectOwnedByOLSConfig(cm)
+			toml := cm.Data[utils.OpenShiftMCPServerConfigFilename]
+			Expect(toml).To(ContainSubstring(`require_oauth = true`))
+			Expect(toml).To(ContainSubstring(`cluster_auth_mode = "passthrough"`))
+			Expect(toml).To(ContainSubstring(`kind = "Secret"`))
+		})
+
+		It("should create the MCP ServiceAccount", func() {
+			sa := &corev1.ServiceAccount{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerServiceAccountName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, sa)
+			Expect(err).NotTo(HaveOccurred())
+			expectOwnedByOLSConfig(sa)
+		})
+
+		It("should create the MCP NetworkPolicy", func() {
+			np := &networkingv1.NetworkPolicy{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerNetworkPolicyName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, np)
+			Expect(err).NotTo(HaveOccurred())
+			expectOwnedByOLSConfig(np)
+			Expect(np.Spec.Ingress).To(HaveLen(2))
+			Expect(np.Spec.Ingress[0].From).To(ConsistOf(networkingv1.NetworkPolicyPeer{
+				PodSelector: &metav1.LabelSelector{MatchLabels: utils.GenerateAppServerSelectorLabels()},
+			}))
+		})
+
+		It("should skip ConfigMap update when data is unchanged", func() {
+			cm := &corev1.ConfigMap{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerConfigCmName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, cm)
+			Expect(err).NotTo(HaveOccurred())
+			oldRV := cm.ResourceVersion
+
+			err = ReconcileResources(testReconcilerInstance, ctx, testCR)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerConfigCmName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, cm)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cm.ResourceVersion).To(Equal(oldRV))
+		})
+
+		It("should delete the legacy MCP CA ConfigMap on upgrade", func() {
+			legacy := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      utils.LegacyOpenShiftMCPServerCAConfigMapName,
+					Namespace: utils.OLSNamespaceDefault,
+				},
+				Data: map[string]string{"service-ca.crt": "stale"},
+			}
+			Expect(k8sClient.Create(ctx, legacy)).To(Succeed())
+
+			Expect(ReconcileResources(testReconcilerInstance, ctx, testCR)).To(Succeed())
+
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.LegacyOpenShiftMCPServerCAConfigMapName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, &corev1.ConfigMap{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Context("Phase 2 deployment", func() {
+		BeforeAll(func() {
+			ensureMCPTLSSecret()
+			ensureMCPAuthCASecret()
+			err := ReconcileDeployment(testReconcilerInstance, ctx, testCR)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should create the MCP Service", func() {
+			svc := &corev1.Service{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerServiceName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, svc)
+			Expect(err).NotTo(HaveOccurred())
+			expectOwnedByOLSConfig(svc)
+			Expect(svc.Annotations[utils.ServingCertSecretAnnotationKey]).To(Equal(utils.OpenShiftMCPServerCertsSecretName))
+		})
+
+		It("should create the MCP Deployment", func() {
+			dep := &appsv1.Deployment{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, dep)
+			Expect(err).NotTo(HaveOccurred())
+			expectOwnedByOLSConfig(dep)
+			Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal(utils.OpenShiftMCPServerImageDefault))
+			Expect(dep.Annotations).To(HaveKey(utils.OpenShiftMCPServerConfigMapResourceVersionAnnotation))
+			Expect(dep.Annotations).To(HaveKey(utils.OpenShiftMCPServerTLSSecretResourceVersionAnnotation))
+			Expect(dep.Annotations).To(HaveKey(utils.OpenShiftMCPServerOIDCCASecretResourceVersionAnnotation))
+		})
+
+		It("should create the MCP ServiceMonitor", func() {
+			sm := &monv1.ServiceMonitor{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerServiceMonitorName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, sm)
+			Expect(err).NotTo(HaveOccurred())
+			expectOwnedByOLSConfig(sm)
+			Expect(sm.Spec.Endpoints).To(HaveLen(1))
+			Expect(sm.Spec.Endpoints[0].Port).To(Equal("https"))
+			Expect(sm.Spec.Endpoints[0].Path).To(Equal(utils.OpenShiftMCPServerMetricsPath))
+		})
+
+		It("should skip Deployment update when spec and versions are unchanged", func() {
+			dep := &appsv1.Deployment{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, dep)
+			Expect(err).NotTo(HaveOccurred())
+			oldRV := dep.ResourceVersion
+			oldForceReload := dep.Spec.Template.Annotations[utils.ForceReloadAnnotationKey]
+
+			err = ReconcileDeployment(testReconcilerInstance, ctx, testCR)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, dep)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dep.ResourceVersion).To(Equal(oldRV))
+			Expect(dep.Spec.Template.Annotations[utils.ForceReloadAnnotationKey]).To(Equal(oldForceReload))
+		})
+
+		It("should trigger a rolling restart via Restart", func() {
+			dep := &appsv1.Deployment{}
+			err := k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, dep)
+			Expect(err).NotTo(HaveOccurred())
+
+			err = Restart(testReconcilerInstance, ctx, dep)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &appsv1.Deployment{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, updated)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updated.Spec.Template.Annotations).To(HaveKey(utils.ForceReloadAnnotationKey))
+		})
+
+		It("should keep the OIDC CA resource version stable across watcher restart and reconcile", func() {
+			caSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      "test-mcp-oidc-ca",
+				Namespace: utils.OLSNamespaceDefault,
+			}, caSecret)).To(Succeed())
+			caSecret.Data["ca.crt"] = append(caSecret.Data["ca.crt"], '\n')
+			Expect(k8sClient.Update(ctx, caSecret)).To(Succeed())
+
+			Expect(Restart(testReconcilerInstance, ctx)).To(Succeed())
+			updated := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, updated)).To(Succeed())
+			Expect(updated.Annotations[utils.OpenShiftMCPServerOIDCCASecretResourceVersionAnnotation]).To(Equal(caSecret.ResourceVersion))
+			oldResourceVersion := updated.ResourceVersion
+			oldForceReload := updated.Spec.Template.Annotations[utils.ForceReloadAnnotationKey]
+
+			desired, err := GenerateDeployment(testReconcilerInstance, ctx, testCR)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(UpdateDeployment(testReconcilerInstance, ctx, updated, desired)).To(Succeed())
+
+			stable := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, stable)).To(Succeed())
+			Expect(stable.ResourceVersion).To(Equal(oldResourceVersion), "reconcile should not create a second rollout after Restart synchronized the CA version")
+			Expect(stable.Spec.Template.Annotations[utils.ForceReloadAnnotationKey]).To(Equal(oldForceReload))
+		})
+
+		It("should skip Restart when the Deployment is missing", func() {
+			Expect(k8sClient.Delete(ctx, &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      utils.OpenShiftMCPServerDeploymentName,
+					Namespace: utils.OLSNamespaceDefault,
+				},
+			})).To(Succeed())
+
+			err := Restart(testReconcilerInstance, ctx)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should remove all MCP resources via Remove", func() {
+			// Prior tests may have deleted the Deployment; recreate so cleanup is exercised.
+			ensureMCPTLSSecret()
+			ensureMCPAuthCASecret()
+			Expect(ReconcileDeployment(testReconcilerInstance, ctx, testCR)).To(Succeed())
+
+			err := Remove(testReconcilerInstance, ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			dep := &appsv1.Deployment{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerDeploymentName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, dep)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "deployment should be deleted")
+
+			svc := &corev1.Service{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerServiceName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, svc)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "service should be deleted")
+
+			for _, name := range []string{
+				utils.OpenShiftMCPServerConfigCmName,
+			} {
+				cm := &corev1.ConfigMap{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: utils.OLSNamespaceDefault}, cm)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "configmap %s should be deleted", name)
+			}
+
+			sa := &corev1.ServiceAccount{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerServiceAccountName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, sa)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "service account should be deleted")
+
+			np := &networkingv1.NetworkPolicy{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerNetworkPolicyName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, np)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "network policy should be deleted")
+
+			tlsSecret := &corev1.Secret{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerCertsSecretName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, tlsSecret)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "TLS secret should be deleted")
+
+			sm := &monv1.ServiceMonitor{}
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      utils.OpenShiftMCPServerServiceMonitorName,
+				Namespace: utils.OLSNamespaceDefault,
+			}, sm)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "ServiceMonitor should be deleted")
+		})
+	})
+})

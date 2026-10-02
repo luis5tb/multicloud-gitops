@@ -1,0 +1,1290 @@
+// Package utils provides shared utility functions, types, and constants used across
+// the OpenShift Lightspeed operator components.
+//
+// This package contains:
+//   - Constants for resource names, labels, and annotations
+//   - Error constants for consistent error handling
+//   - Helper functions for Kubernetes resource operations
+//   - Status condition utilities
+//   - TLS certificate validation
+//   - OpenShift version detection
+//   - Configuration data structures for OLS components
+//
+// The utilities in this package are designed to be reusable across all operator
+// components (`appserver`, `postgres`, `console`) and promote consistency in resource
+// naming, labeling, and error handling throughout the codebase.
+package utils
+
+import (
+	"context"
+	"crypto/sha1" //nolint:gosec
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+
+	"github.com/go-logr/logr"
+	configv1 "github.com/openshift/api/config/v1"
+	imagev1 "github.com/openshift/api/image/v1"
+	operatorv1 "github.com/openshift/api/operator/v1"
+	monv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	olsv1alpha1 "github.com/openshift/lightspeed-operator/api/v1alpha1"
+	"github.com/openshift/lightspeed-operator/internal/controller/reconciler"
+)
+
+// GetResourcesOrDefault returns custom resources from CR if specified, otherwise returns defaults.
+// This is a common pattern used across all component resource getters to avoid repetitive
+// null-checking logic. It provides a consistent way to handle user-configurable container resources
+// with sensible defaults.
+//
+// Example usage:
+//
+//	return GetResourcesOrDefault(
+//	    cr.Spec.OLSConfig.DeploymentConfig.APIContainer.Resources,
+//	    &corev1.ResourceRequirements{
+//	        Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+//	        Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+//	    },
+//	)
+func GetResourcesOrDefault(customResources *corev1.ResourceRequirements, defaultResources *corev1.ResourceRequirements) *corev1.ResourceRequirements {
+	if customResources != nil {
+		return customResources
+	}
+	return defaultResources
+}
+
+// RestrictedContainerSecurityContext returns a SecurityContext that conforms to
+// the Pod Security "restricted" profile. Use this for all operator-managed containers.
+func RestrictedContainerSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &[]bool{false}[0],
+		ReadOnlyRootFilesystem:   &[]bool{true}[0],
+		RunAsNonRoot:             &[]bool{true}[0],
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+}
+
+// RHOOKPContainerSecurityContext is restricted PSS except readOnlyRootFilesystem: the RHOKP image
+// writes Solr pid files, logs, and httpd config patches at startup.
+func RHOOKPContainerSecurityContext() *corev1.SecurityContext {
+	sc := RestrictedContainerSecurityContext()
+	sc.ReadOnlyRootFilesystem = &[]bool{false}[0]
+	return sc
+}
+
+// ApplyPodDeploymentConfig applies PodDeploymentConfig settings to a Deployment.
+// This centralizes the logic for applying pod-level configurations (NodeSelector, Tolerations, etc.)
+// to avoid code duplication across different deployment generators.
+//
+// Parameters:
+//   - deployment: The deployment to modify
+//   - config: The PodDeploymentConfig containing the desired settings
+//   - applyReplicas: Whether to apply the Replicas field (true for appserver and MCP server)
+//
+// Usage:
+//
+//	// For console/postgres (replicas always 1):
+//	utils.ApplyPodDeploymentConfig(deployment, cr.Spec.OLSConfig.DeploymentConfig.ConsoleContainer, false)
+//
+//	// For appserver or MCP server (replicas configurable):
+//	utils.ApplyPodDeploymentConfig(deployment, cr.Spec.OLSConfig.DeploymentConfig.APIContainer, true)
+func ApplyPodDeploymentConfig(deployment *appsv1.Deployment, config olsv1alpha1.Config, applyReplicas bool) {
+	// Apply replicas if allowed (appserver and MCP server)
+	if applyReplicas && config.Replicas != nil {
+		deployment.Spec.Replicas = config.Replicas
+	} else {
+		deployment.Spec.Replicas = &[]int32{1}[0]
+	}
+
+	// Apply pod-level scheduling constraints
+	if config.NodeSelector != nil {
+		deployment.Spec.Template.Spec.NodeSelector = config.NodeSelector
+	}
+	if config.Tolerations != nil {
+		deployment.Spec.Template.Spec.Tolerations = config.Tolerations
+	}
+}
+
+func GetSecretContent(rclient client.Client, ctx context.Context, secretName string, namespace string, secretFields []string, foundSecret *corev1.Secret) (map[string]string, error) {
+	err := rclient.Get(ctx, client.ObjectKey{Name: secretName, Namespace: namespace}, foundSecret)
+	if err != nil {
+		return nil, fmt.Errorf("secret not found: %s. error: %w", secretName, err)
+	}
+	secretValues := make(map[string]string)
+	for _, field := range secretFields {
+		value, ok := foundSecret.Data[field]
+		if !ok {
+			return nil, fmt.Errorf("secret field %s not present in the secret", field)
+		}
+		secretValues[field] = string(value)
+	}
+
+	return secretValues, nil
+}
+
+// podVolumEqual compares two slices of corev1.Volume and returns true if they are equal.
+// covers 3 volume types: Secret, ConfigMap, EmptyDir
+func PodVolumeEqual(a, b []corev1.Volume) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aVolumeMap := make(map[string]corev1.Volume)
+	for _, v := range a {
+		aVolumeMap[v.Name] = v
+	}
+	bVolumeMap := make(map[string]corev1.Volume)
+	for _, v := range b {
+		bVolumeMap[v.Name] = v
+	}
+	for name, aVolume := range aVolumeMap {
+		if bVolume, exist := bVolumeMap[name]; exist {
+			if aVolume.Secret != nil && bVolume.Secret != nil {
+				if aVolume.Secret.SecretName != bVolume.Secret.SecretName {
+					return false
+				}
+				continue
+			}
+			if aVolume.ConfigMap != nil && bVolume.ConfigMap != nil {
+				if aVolume.ConfigMap.Name != bVolume.ConfigMap.Name {
+					return false
+				}
+				continue
+			}
+			if aVolume.EmptyDir != nil && bVolume.EmptyDir != nil {
+				if aVolume.EmptyDir.Medium != bVolume.EmptyDir.Medium {
+					return false
+				}
+				continue
+			}
+			if aVolume.PersistentVolumeClaim != nil && bVolume.PersistentVolumeClaim != nil {
+				if aVolume.PersistentVolumeClaim.ClaimName != bVolume.PersistentVolumeClaim.ClaimName {
+					return false
+				}
+				continue
+			}
+
+			return false
+		}
+		return false
+	}
+
+	return true
+}
+
+// deploymentSpecEqual compares two appsv1.DeploymentSpec and returns true if they are equal.
+// ConfigMapEqual compares two ConfigMaps for equality, checking Data and BinaryData
+func ConfigMapEqual(a, b *corev1.ConfigMap) bool {
+	return apiequality.Semantic.DeepEqual(a.Data, b.Data) &&
+		apiequality.Semantic.DeepEqual(a.BinaryData, b.BinaryData)
+}
+
+func DeploymentSpecEqual(a, b *appsv1.DeploymentSpec, compareInitContainers bool) bool {
+	if !apiequality.Semantic.DeepEqual(a.Template.Spec.NodeSelector, b.Template.Spec.NodeSelector) || // check node selector
+		!apiequality.Semantic.DeepEqual(a.Template.Spec.Tolerations, b.Template.Spec.Tolerations) || // check toleration
+		!apiequality.Semantic.DeepEqual(a.Template.Spec.Affinity, b.Template.Spec.Affinity) || // check affinity
+		!apiequality.Semantic.DeepEqual(a.Template.Spec.TopologySpreadConstraints, b.Template.Spec.TopologySpreadConstraints) || // check topology spread constraints
+		!apiequality.Semantic.DeepEqual(a.Strategy, b.Strategy) || // check strategy
+		!PodVolumeEqual(a.Template.Spec.Volumes, b.Template.Spec.Volumes) || // check volumes
+		*a.Replicas != *b.Replicas || // check replicas
+		a.Template.Spec.ServiceAccountName != b.Template.Spec.ServiceAccountName || // check service account name
+		!apiequality.Semantic.DeepEqual(a.Template.Spec.TerminationGracePeriodSeconds, b.Template.Spec.TerminationGracePeriodSeconds) { // check termination grace period
+		return false
+	}
+
+	// check containers
+	if !ContainersEqual(a.Template.Spec.Containers, b.Template.Spec.Containers) {
+		return false
+	}
+
+	// check init containers
+	if compareInitContainers && !ContainersEqual(a.Template.Spec.InitContainers, b.Template.Spec.InitContainers) {
+		return false
+	}
+
+	return true
+}
+
+// containerEqual compares two container arrays and returns true if they are equal.
+func ContainersEqual(a, b []corev1.Container) bool {
+	// check containers
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !ContainerSpecEqual(&a[i], &b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// ContainerSpecEqual compares two corev1.Container and returns true if they are equal.
+// checks performed on limited fields
+func ContainerSpecEqual(a, b *corev1.Container) bool {
+	return (a.Name == b.Name && // check name
+		a.Image == b.Image && // check image
+		apiequality.Semantic.DeepEqual(a.Ports, b.Ports) && // check ports
+		EnvEqual(a.Env, b.Env) && // check env (order-insensitive)
+		apiequality.Semantic.DeepEqual(a.Command, b.Command) && // check command (entrypoint + flags)
+		apiequality.Semantic.DeepEqual(a.Args, b.Args) && // check arguments
+		VolumeMountsEqual(a.VolumeMounts, b.VolumeMounts) && // check volume mounts (order-insensitive)
+		apiequality.Semantic.DeepEqual(a.Resources, b.Resources) && // check resources
+		apiequality.Semantic.DeepEqual(a.SecurityContext, b.SecurityContext) && // check security context
+		a.ImagePullPolicy == b.ImagePullPolicy && // check image pull policy
+		ProbeEqual(a.LivenessProbe, b.LivenessProbe) && // check liveness probe
+		ProbeEqual(a.ReadinessProbe, b.ReadinessProbe) && // check readiness probe
+		ProbeEqual(a.StartupProbe, b.StartupProbe) && // check startup probe
+		apiequality.Semantic.DeepEqual(a.Lifecycle, b.Lifecycle)) // check lifecycle hooks
+}
+
+// EnvEqual compares two EnvVar slices ignoring order
+func EnvEqual(a, b []corev1.EnvVar) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aEnvMap := make(map[string]corev1.EnvVar)
+	for _, env := range a {
+		aEnvMap[env.Name] = env
+	}
+	bEnvMap := make(map[string]corev1.EnvVar)
+	for _, env := range b {
+		bEnvMap[env.Name] = env
+	}
+	for name, aEnv := range aEnvMap {
+		bEnv, exist := bEnvMap[name]
+		if !exist {
+			return false
+		}
+		if !apiequality.Semantic.DeepEqual(aEnv, bEnv) {
+			return false
+		}
+	}
+	return true
+}
+
+// VolumeMountsEqual compares two VolumeMount slices ignoring order
+func VolumeMountsEqual(a, b []corev1.VolumeMount) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	aVolumeMountMap := make(map[string]corev1.VolumeMount)
+	for _, vm := range a {
+		aVolumeMountMap[vm.Name] = vm
+	}
+	bVolumeMountMap := make(map[string]corev1.VolumeMount)
+	for _, vm := range b {
+		bVolumeMountMap[vm.Name] = vm
+	}
+	for name, aVolumeMount := range aVolumeMountMap {
+		bVolumeMount, exist := bVolumeMountMap[name]
+		if !exist {
+			return false
+		}
+		if !apiequality.Semantic.DeepEqual(aVolumeMount, bVolumeMount) {
+			return false
+		}
+	}
+	return true
+}
+
+func ProbeEqual(a, b *corev1.Probe) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if !apiequality.Semantic.DeepEqual(a.ProbeHandler, b.ProbeHandler) {
+		return false
+	}
+
+	arrA := []int32{a.InitialDelaySeconds, a.TimeoutSeconds, a.PeriodSeconds, a.SuccessThreshold, a.FailureThreshold}
+	arrB := []int32{b.InitialDelaySeconds, b.TimeoutSeconds, b.PeriodSeconds, b.SuccessThreshold, b.FailureThreshold}
+	for i := range arrA {
+		// unset values are considered equal
+		if arrA[i] == 0 || arrB[i] == 0 {
+			continue
+		}
+		if arrA[i] != arrB[i] {
+			return false
+		}
+	}
+
+	return apiequality.Semantic.DeepEqual(a.TerminationGracePeriodSeconds, b.TerminationGracePeriodSeconds)
+}
+
+// serviceEqual compares two v1.Service and returns true if they are equal.
+func ServiceEqual(a *corev1.Service, b *corev1.Service) bool {
+	if !apiequality.Semantic.DeepEqual(a.Labels, b.Labels) ||
+		!apiequality.Semantic.DeepEqual(a.Spec.Selector, b.Spec.Selector) ||
+		len(a.Spec.Ports) != len(b.Spec.Ports) {
+		return false
+	}
+
+	for i, aPort := range a.Spec.Ports {
+		bPort := b.Spec.Ports[i]
+		if !apiequality.Semantic.DeepEqual(aPort, bPort) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// serviceMonitorEqual compares two monv1.ServiceMonitor and returns true if they are equal.
+func ServiceMonitorEqual(a *monv1.ServiceMonitor, b *monv1.ServiceMonitor) bool {
+	return apiequality.Semantic.DeepEqual(a.Labels, b.Labels) &&
+		apiequality.Semantic.DeepEqual(a.Spec, b.Spec)
+}
+
+// prometheusRuleEqual compares two monv1.PrometheusRule and returns true if they are equal.
+func PrometheusRuleEqual(a *monv1.PrometheusRule, b *monv1.PrometheusRule) bool {
+	return apiequality.Semantic.DeepEqual(a.Labels, b.Labels) &&
+		apiequality.Semantic.DeepEqual(a.Spec, b.Spec)
+}
+
+// networkPolicyEqual compares two networkingv1.NetworkPolicy and returns true if they are equal.
+func NetworkPolicyEqual(a *networkingv1.NetworkPolicy, b *networkingv1.NetworkPolicy) bool {
+	return apiequality.Semantic.DeepEqual(a.Labels, b.Labels) &&
+		apiequality.Semantic.DeepEqual(a.Spec, b.Spec)
+}
+
+// ImageStreamEqual compares the fields that the controller owns on two imagev1.ImageStreams.
+// Used to decide if an existing ImageStream needs an Update. All managed fields must be
+// listed here so reconciliation does not miss changes.
+func ImageStreamEqual(a *imagev1.ImageStream, b *imagev1.ImageStream) bool {
+	return apiequality.Semantic.DeepEqual(a.Spec, b.Spec) &&
+		apiequality.Semantic.DeepEqual(a.Labels, b.Labels) &&
+		apiequality.Semantic.DeepEqual(a.OwnerReferences, b.OwnerReferences)
+}
+
+// This is copied from https://github.com/kubernetes/kubernetes/blob/v1.29.2/pkg/apis/apps/v1/defaults.go#L38
+// to avoid importing the whole k8s.io/kubernetes package.
+// SetDefaults_Deployment sets additional defaults compared to its counterpart
+// in extensions. These addons are:
+// - MaxUnavailable during rolling update set to 25% (1 in extensions)
+// - MaxSurge value during rolling update set to 25% (1 in extensions)
+// - RevisionHistoryLimit set to 10 (not set in extensions)
+// - ProgressDeadlineSeconds set to 600s (not set in extensions)
+func SetDefaults_Deployment(obj *appsv1.Deployment) {
+	// Set DeploymentSpec.Replicas to 1 if it is not set.
+	if obj.Spec.Replicas == nil {
+		obj.Spec.Replicas = new(int32)
+		*obj.Spec.Replicas = 1
+	}
+	// Set default TerminationGracePeriodSeconds to match the Kubernetes API server default (30s).
+	// Without this, the desired spec has nil while the existing spec (from the API server) has &30,
+	// causing spurious updates on every reconcile.
+	if obj.Spec.Template.Spec.TerminationGracePeriodSeconds == nil {
+		defaultTerminationGracePeriod := int64(corev1.DefaultTerminationGracePeriodSeconds)
+		obj.Spec.Template.Spec.TerminationGracePeriodSeconds = &defaultTerminationGracePeriod
+	}
+	strategy := &obj.Spec.Strategy
+	// Set default DeploymentStrategyType as RollingUpdate.
+	if strategy.Type == "" {
+		strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
+	}
+	if strategy.Type == appsv1.RollingUpdateDeploymentStrategyType {
+		if strategy.RollingUpdate == nil {
+			rollingUpdate := appsv1.RollingUpdateDeployment{}
+			strategy.RollingUpdate = &rollingUpdate
+		}
+		if strategy.RollingUpdate.MaxUnavailable == nil {
+			// Set default MaxUnavailable as 25% by default.
+			maxUnavailable := intstr.FromString("25%")
+			strategy.RollingUpdate.MaxUnavailable = &maxUnavailable
+		}
+		if strategy.RollingUpdate.MaxSurge == nil {
+			// Set default MaxSurge as 25% by default.
+			maxSurge := intstr.FromString("25%")
+			strategy.RollingUpdate.MaxSurge = &maxSurge
+		}
+	}
+	if obj.Spec.RevisionHistoryLimit == nil {
+		obj.Spec.RevisionHistoryLimit = new(int32)
+		*obj.Spec.RevisionHistoryLimit = 10
+	}
+	if obj.Spec.ProgressDeadlineSeconds == nil {
+		obj.Spec.ProgressDeadlineSeconds = new(int32)
+		*obj.Spec.ProgressDeadlineSeconds = 600
+	}
+}
+
+func GetProxyEnvVars() []corev1.EnvVar {
+	envVars := []corev1.EnvVar{}
+	for _, envvar := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
+		if value := os.Getenv(envvar); value != "" {
+			envVars = append(envVars, corev1.EnvVar{
+				Name:  strings.ToLower(envvar),
+				Value: value,
+			})
+		}
+	}
+	return envVars
+}
+
+// validate the x509 certificate syntax
+func ValidateCertificateFormat(cert []byte) error {
+	if len(cert) == 0 {
+		return fmt.Errorf("certificate is empty")
+	}
+	block, _ := pem.Decode(cert)
+	if block == nil {
+		return fmt.Errorf("failed to decode PEM certificate")
+	}
+	if block.Type != "CERTIFICATE" {
+		return fmt.Errorf("block type is not certificate but %s", block.Type)
+	}
+	// check the CA is correctly formatted
+	_, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse certificate: %v", err)
+	}
+
+	return nil
+}
+
+// ValidatePEMCABundle verifies that a required Secret key contains one or more
+// parseable PEM certificates. It is shared by the MCP and app-server OIDC mounts.
+func ValidatePEMCABundle(secret *corev1.Secret, key string) error {
+	if secret == nil {
+		return fmt.Errorf("OIDC CA Secret is nil")
+	}
+	bundle, ok := secret.Data[key]
+	if !ok || len(bundle) == 0 {
+		return fmt.Errorf("OIDC CA Secret %q is missing non-empty key %q", secret.Name, key)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(bundle) {
+		return fmt.Errorf("OIDC CA Secret %q key %q does not contain a PEM certificate bundle", secret.Name, key)
+	}
+	return nil
+}
+
+// Get Openshift version
+func GetOpenshiftVersion(k8sClient client.Client, ctx context.Context) (string, string, error) {
+	key := client.ObjectKey{Name: "version"}
+	clusterVersion := &configv1.ClusterVersion{}
+	if err := k8sClient.Get(ctx, key, clusterVersion); err != nil {
+		return "", "", err
+	}
+	openshift_versions := strings.Split(clusterVersion.Status.Desired.Version, ".")
+	if len(openshift_versions) < 2 {
+		return "", "", fmt.Errorf("failed to parse cluster version: %s", clusterVersion.Status.Desired.Version)
+	}
+	return openshift_versions[0], openshift_versions[1], nil
+}
+
+const rosaClusterResourceName = "cluster"
+
+// RosaOKPProductEnv returns the OLS_ROSA_PRODUCT env var for ROSA clusters, or nil when
+// the cluster is not ROSA. On ROSA, External topology maps to HCP; all other topologies
+// map to Classic (OLS-1894).
+func RosaOKPProductEnv(k8sClient client.Client, ctx context.Context, log logr.Logger) (*corev1.EnvVar, error) {
+	console := &operatorv1.Console{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: rosaClusterResourceName}, console); err != nil {
+		return nil, fmt.Errorf("failed to get console cluster: %w", err)
+	}
+	if console.Spec.Customization.Brand != operatorv1.BrandROSA {
+		return nil, nil
+	}
+
+	infrastructure := &configv1.Infrastructure{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: rosaClusterResourceName}, infrastructure); err != nil {
+		return nil, fmt.Errorf("failed to get infrastructure cluster: %w", err)
+	}
+
+	topology := infrastructure.Status.ControlPlaneTopology
+	product := RosaOKPProductClassic
+	if topology == configv1.ExternalTopologyMode {
+		product = RosaOKPProductHCP
+	} else {
+		log.Info("ROSA detected, using Classic OKP product", "controlPlaneTopology", topology)
+	}
+	return &corev1.EnvVar{
+		Name:  OLSRosaProductEnvVar,
+		Value: product,
+	}, nil
+}
+
+// GeneratePostgresSelectorLabels returns selector labels for Postgres components
+func GeneratePostgresSelectorLabels() map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/component":  "postgres-server",
+		"app.kubernetes.io/managed-by": "lightspeed-operator",
+		"app.kubernetes.io/name":       "lightspeed-service-postgres",
+		"app.kubernetes.io/part-of":    "openshift-lightspeed",
+	}
+}
+
+// GenerateAlertsAdapterSelectorLabels returns selector labels for the alerts adapter.
+func GenerateAlertsAdapterSelectorLabels() map[string]string {
+	return map[string]string{
+		"app":                          AlertsAdapterDeploymentName,
+		"app.kubernetes.io/component":  AlertsAdapterComponentLabel,
+		"app.kubernetes.io/managed-by": "lightspeed-operator",
+		"app.kubernetes.io/name":       AlertsAdapterDeploymentName,
+		"app.kubernetes.io/part-of":    "openshift-lightspeed",
+	}
+}
+
+// GenerateOtelCollectorSelectorLabels returns selector labels for the OTEL Collector.
+func GenerateOtelCollectorSelectorLabels() map[string]string {
+	return map[string]string{
+		"app":                          OtelCollectorDeploymentName,
+		"app.kubernetes.io/component":  OtelCollectorComponentLabel,
+		"app.kubernetes.io/managed-by": "lightspeed-operator",
+		"app.kubernetes.io/name":       OtelCollectorDeploymentName,
+		"app.kubernetes.io/part-of":    "openshift-lightspeed",
+	}
+}
+
+// GenerateAgenticIntegrationSelectorLabels returns labels for classic→agentic handoff artifacts.
+func GenerateAgenticIntegrationSelectorLabels() map[string]string {
+	return map[string]string{
+		"app":                          AgenticConfigurationConfigMapName,
+		"app.kubernetes.io/component":  AgenticIntegrationComponentLabel,
+		"app.kubernetes.io/managed-by": "lightspeed-operator",
+		"app.kubernetes.io/name":       AgenticConfigurationConfigMapName,
+		"app.kubernetes.io/part-of":    "openshift-lightspeed",
+	}
+}
+
+// GetPostgresCAConfigVolume returns the CA certificate volume for postgres TLS verification.
+func GetPostgresCAConfigVolume() corev1.Volume {
+	volumeDefaultMode := VolumeDefaultMode
+	return corev1.Volume{
+		Name: PostgresCAVolume,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: OLSCAConfigMap,
+				},
+				DefaultMode: &volumeDefaultMode,
+			},
+		},
+	}
+}
+
+// GetPostgresCAVolumeMount returns the CA certificate volume mount for postgres.
+func GetPostgresCAVolumeMount(mountPath string) corev1.VolumeMount {
+	return corev1.VolumeMount{
+		Name:      PostgresCAVolume,
+		MountPath: mountPath,
+		ReadOnly:  true,
+	}
+}
+
+// GetCAFromSecret retrieves CA certificate content from a Secret.
+// It looks for the "ca.crt" key in the Secret's Data field.
+// Returns empty string if the key doesn't exist (not an error - CA is optional).
+func GetCAFromSecret(rclient client.Client, ctx context.Context, namespace, secretName string) (string, error) {
+	secret := &corev1.Secret{}
+	err := rclient.Get(ctx, client.ObjectKey{
+		Name:      secretName,
+		Namespace: namespace,
+	}, secret)
+	if err != nil {
+		return "", fmt.Errorf("secret not found: %s. error: %w", secretName, err)
+	}
+
+	caCert, ok := secret.Data["ca.crt"]
+	if !ok {
+		// CA cert is optional - if not provided, console will use default trust
+		return "", nil
+	}
+
+	return string(caCert), nil
+}
+
+// ValidateLLMCredentials validates that all LLM provider credentials are present and usable.
+// For each provider it requires credentialsSecretRef, loads the secret, then checks Data keys:
+// Azure OpenAI accepts the default credential key or client_id/tenant_id/client_secret;
+// Google Vertex (and Anthropic) use credentialKey when set, otherwise the default key;
+// Bedrock accepts either the default credential key (Bearer token) or AWS IAM keys;
+// all other supported types require the default credential key
+func ValidateLLMCredentials(r reconciler.Reconciler, ctx context.Context, cr *olsv1alpha1.OLSConfig) error {
+	for _, provider := range cr.Spec.LLMConfig.Providers {
+		if provider.CredentialsSecretRef.Name == "" {
+			return fmt.Errorf("provider %s missing credentials secret", provider.Name)
+		}
+
+		secret := &corev1.Secret{}
+		err := r.Get(ctx, client.ObjectKey{Name: provider.CredentialsSecretRef.Name, Namespace: r.GetNamespace()}, secret)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("LLM provider %s credential secret %s not found", provider.Name, provider.CredentialsSecretRef.Name)
+			}
+			return fmt.Errorf("failed to get LLM provider %s credential secret %s: %w", provider.Name, provider.CredentialsSecretRef.Name, err)
+		}
+
+		// Validate credential keys based on provider configuration
+		if provider.Type == AzureOpenAIType {
+			// Azure OpenAI provider: secret must contain default credential key or 3 keys named "client_id", "tenant_id", "client_secret"
+			if _, ok := secret.Data[DefaultCredentialKey]; ok {
+				continue
+			}
+			for _, key := range []string{"client_id", "tenant_id", "client_secret"} {
+				if _, ok := secret.Data[key]; !ok {
+					return fmt.Errorf("LLM provider %s credential secret %s missing key '%s'", provider.Name, provider.CredentialsSecretRef.Name, key)
+				}
+			}
+		} else if provider.Type == GoogleVertexType || provider.Type == GoogleVertexAnthropicType {
+			credentialKey := provider.CredentialKey
+			if credentialKey == "" {
+				credentialKey = DefaultCredentialKey
+			}
+			if strings.TrimSpace(credentialKey) == "" {
+				return fmt.Errorf("LLM provider %s: credentialKey must not be empty or whitespace", provider.Name)
+			}
+			if _, ok := secret.Data[credentialKey]; !ok {
+				return fmt.Errorf("LLM provider %s credential secret %s missing key '%s'", provider.Name, provider.CredentialsSecretRef.Name, credentialKey)
+			}
+		} else if provider.Type == BedrockType {
+			accessKey := strings.TrimSpace(string(secret.Data[BedrockAccessKeyIDKey]))
+			secretKey := strings.TrimSpace(string(secret.Data[BedrockSecretAccessKeyKey]))
+			hasAccessKey := accessKey != ""
+			hasSecretKey := secretKey != ""
+			if hasAccessKey != hasSecretKey {
+				return fmt.Errorf(
+					"LLM provider %s credential secret %s: IAM auth requires both '%s' and '%s'",
+					provider.Name,
+					provider.CredentialsSecretRef.Name,
+					BedrockAccessKeyIDKey,
+					BedrockSecretAccessKeyKey,
+				)
+			}
+			if hasAccessKey && hasSecretKey {
+				continue
+			}
+			if strings.TrimSpace(string(secret.Data[DefaultCredentialKey])) != "" {
+				continue
+			}
+			return fmt.Errorf(
+				"LLM provider %s credential secret %s must contain either '%s' (Bearer token) or '%s' and '%s' (IAM credentials)",
+				provider.Name,
+				provider.CredentialsSecretRef.Name,
+				DefaultCredentialKey,
+				BedrockAccessKeyIDKey,
+				BedrockSecretAccessKeyKey,
+			)
+		} else {
+			// Standard providers: must contain the default credential key
+			if _, ok := secret.Data[DefaultCredentialKey]; !ok {
+				return fmt.Errorf("LLM provider %s credential secret %s missing key '%s'", provider.Name, provider.CredentialsSecretRef.Name, DefaultCredentialKey)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateTLSSecret validates that the custom TLS secret exists and contains required keys.
+// It checks that the secret contains 'tls.crt' and 'tls.key'. The 'ca.crt' key is optional.
+// This function should only be called when TLSConfig.KeyCertSecretRef is configured.
+func ValidateTLSSecret(r reconciler.Reconciler, ctx context.Context, cr *olsv1alpha1.OLSConfig) error {
+	secretName := cr.Spec.OLSConfig.TLSConfig.KeyCertSecretRef.Name
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: r.GetNamespace()}, secret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("TLS secret %s not found", secretName)
+		}
+		return fmt.Errorf("failed to get TLS secret %s: %w", secretName, err)
+	}
+
+	// Validate required keys
+	requiredKeys := []string{"tls.crt", "tls.key"}
+	for _, key := range requiredKeys {
+		if _, ok := secret.Data[key]; !ok {
+			return fmt.Errorf("TLS secret %s missing required key '%s'", secretName, key)
+		}
+	}
+
+	// Note: 'ca.crt' is optional and not validated here
+	return nil
+}
+
+// GenerateAppServerSelectorLabels returns selector labels for Application Server components
+func GenerateAppServerSelectorLabels() map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/component":  "application-server",
+		"app.kubernetes.io/managed-by": "lightspeed-operator",
+		"app.kubernetes.io/name":       "lightspeed-service-api",
+		"app.kubernetes.io/part-of":    "openshift-lightspeed",
+	}
+}
+
+// AnnotateSecretWatcher adds the watcher annotation to a secret
+func AnnotateSecretWatcher(secret *corev1.Secret) {
+	annotations := secret.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[WatcherAnnotationKey] = OLSConfigName
+	secret.SetAnnotations(annotations)
+}
+
+// AnnotateConfigMapWatcher adds the watcher annotation to a configmap
+func AnnotateConfigMapWatcher(cm *corev1.ConfigMap) {
+	annotations := cm.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[WatcherAnnotationKey] = OLSConfigName
+	cm.SetAnnotations(annotations)
+}
+
+// IsPrometheusOperatorAvailable checks if Prometheus Operator CRDs are available on the cluster.
+// It attempts to list ServiceMonitor and PrometheusRule resources to determine availability.
+// Returns true if both CRDs are present, false otherwise.
+func IsPrometheusOperatorAvailable(ctx context.Context, c client.Client) bool {
+	// Check ServiceMonitor CRD
+	serviceMonitorList := &monv1.ServiceMonitorList{}
+	if err := c.List(ctx, serviceMonitorList, &client.ListOptions{Limit: 1}); err != nil {
+		return false
+	}
+
+	// Check PrometheusRule CRD
+	prometheusRuleList := &monv1.PrometheusRuleList{}
+	if err := c.List(ctx, prometheusRuleList, &client.ListOptions{Limit: 1}); err != nil {
+		return false
+	}
+
+	return true
+}
+
+// GetConfigMapResourceVersion returns the ResourceVersion of a ConfigMap.
+func GetConfigMapResourceVersion(r reconciler.Reconciler, ctx context.Context, configMapName string) (string, error) {
+	configMap := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: configMapName, Namespace: r.GetNamespace()}, configMap)
+	if err != nil {
+		return "", err
+	}
+	return configMap.ResourceVersion, nil
+}
+
+// GetProxyCACertHash returns a SHA256 hash of the proxy CA certificate content
+// if proxy CA is configured. This ensures deployments only restart when the certificate
+// content actually changes, not just when the ConfigMap ResourceVersion changes
+// (which can happen frequently for service-ca managed ConfigMaps).
+// Returns empty string and nil error if proxy is not configured.
+func GetProxyCACertHash(r reconciler.Reconciler, ctx context.Context, cr *olsv1alpha1.OLSConfig) (string, error) {
+	if cr.Spec.OLSConfig.ProxyConfig == nil {
+		return "", nil
+	}
+	cmName := GetProxyCACertConfigMapName(cr.Spec.OLSConfig.ProxyConfig.ProxyCACertificateRef)
+	if cmName == "" {
+		return "", nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: cmName, Namespace: r.GetNamespace()}, cm)
+	if err != nil {
+		return "", err
+	}
+
+	certKey := GetProxyCACertKey(cr.Spec.OLSConfig.ProxyConfig.ProxyCACertificateRef)
+	certData, ok := cm.Data[certKey]
+	if !ok {
+		return "", fmt.Errorf("proxy CA certificate key %s not found in ConfigMap %s", certKey, cmName)
+	}
+
+	hash := sha256.Sum256([]byte(certData))
+	return hex.EncodeToString(hash[:]), nil
+}
+
+// The callback function receives:
+//   - name: the secret name
+//   - source: a descriptive identifier of where the secret is used (e.g., "llm-provider-openai", "tls", "mcp-myserver", "mcp-oidc-ca")
+//
+// If fn returns an error, iteration stops immediately and that error is returned.
+// Returns nil if all iterations complete successfully.
+//
+// Example usage:
+//
+//	err := ForEachExternalSecret(cr, func(name, source string) error {
+//	    return validateSecret(name)
+//	})
+func ForEachExternalSecret(cr *olsv1alpha1.OLSConfig, fn func(name string, source string) error) error {
+	// 1. LLM provider credentials
+	for _, provider := range cr.Spec.LLMConfig.Providers {
+		secretName := provider.CredentialsSecretRef.Name
+		if secretName == "" {
+			continue
+		}
+		if err := fn(secretName, "llm-provider-"+provider.Name); err != nil {
+			return err
+		}
+	}
+
+	// 2. TLS certificate secret
+	if cr.Spec.OLSConfig.TLSConfig != nil &&
+		cr.Spec.OLSConfig.TLSConfig.KeyCertSecretRef.Name != "" {
+		secretName := cr.Spec.OLSConfig.TLSConfig.KeyCertSecretRef.Name
+		if err := fn(secretName, "tls"); err != nil {
+			return err
+		}
+	}
+
+	// 3. MCP server header secrets (only for type "secret")
+	for _, mcpServer := range cr.Spec.MCPServers {
+		for _, header := range mcpServer.Headers {
+			// Only process secret references
+			if header.ValueFrom.Type != olsv1alpha1.MCPHeaderSourceTypeSecret {
+				continue
+			}
+			if header.ValueFrom.SecretRef == nil || header.ValueFrom.SecretRef.Name == "" {
+				continue
+			}
+			if err := fn(header.ValueFrom.SecretRef.Name, "mcp-"+mcpServer.Name); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 4. OIDC issuer CA for the operator-managed OpenShift MCP server.
+	if BoolDeref(cr.Spec.OLSConfig.IntrospectionEnabled, true) &&
+		cr.Spec.OLSConfig.MCPServerSecurity != nil &&
+		cr.Spec.OLSConfig.MCPServerSecurity.CASecretRef != nil &&
+		cr.Spec.OLSConfig.MCPServerSecurity.CASecretRef.Name != "" {
+		if err := fn(cr.Spec.OLSConfig.MCPServerSecurity.CASecretRef.Name, "mcp-oidc-ca"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// AlertsAdapterConfigMapRef returns the referenced ConfigMap name when the alerts adapter
+// is enabled (configMapRef set with a non-empty name). The bool is false when disabled.
+func AlertsAdapterConfigMapRef(cr *olsv1alpha1.OLSConfig) (name string, ok bool) {
+	ref := cr.Spec.OLSConfig.DeploymentConfig.AlertsAdapter.ConfigMapRef
+	if ref == nil || ref.Name == "" {
+		return "", false
+	}
+	return ref.Name, true
+}
+
+// ForEachExternalConfigMap calls fn for each external configmap referenced in the OLSConfig CR.
+// The callback function receives:
+//   - name: the configmap name
+//   - source: a descriptive identifier of where the configmap is used (e.g., "additional-ca", "proxy-ca")
+//
+// If fn returns an error, iteration stops immediately and that error is returned.
+// Returns nil if all iterations complete successfully.
+//
+// Example usage:
+//
+//	err := ForEachExternalConfigMap(cr, func(name, source string) error {
+//	    return validateConfigMap(name)
+//	})
+func ForEachExternalConfigMap(cr *olsv1alpha1.OLSConfig, fn func(name string, source string) error) error {
+	// 1. Additional CA certificates
+	if cr.Spec.OLSConfig.AdditionalCAConfigMapRef != nil &&
+		cr.Spec.OLSConfig.AdditionalCAConfigMapRef.Name != "" {
+		cmName := cr.Spec.OLSConfig.AdditionalCAConfigMapRef.Name
+		if err := fn(cmName, "additional-ca"); err != nil {
+			return err
+		}
+	}
+
+	// 2. Proxy CA certificate
+	if cr.Spec.OLSConfig.ProxyConfig != nil {
+		cmName := GetProxyCACertConfigMapName(cr.Spec.OLSConfig.ProxyConfig.ProxyCACertificateRef)
+		if cmName != "" {
+			if err := fn(cmName, "proxy-ca"); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 3. Alerts adapter runtime config (opt-in via configMapRef)
+	if name, ok := AlertsAdapterConfigMapRef(cr); ok {
+		if err := fn(name, "alerts-adapter"); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// ImageStream name length limits (RFC 1123 DNS subdomain label).
+const (
+	// ImageStreamSlugMaxLength is the max length of the slug part in ImageStreamNameFor (max DNS label 63 − 1 − 6-char suffix).
+	imageStreamSlugMaxLength = 55
+	// imageStreamSHA1SuffixLength is the length of the SHA1 suffix in ImageStreamNameFor.
+	imageStreamSHA1SuffixLength = 6
+)
+
+// imageStreamNameRegex is used only by ImageStreamNameFor.
+var imageStreamNameRegex = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// ImageStreamNameFor converts a container image reference (e.g. "quay.io/org/my-image:v1.0")
+// into a Kubernetes-compatible name suitable for an ImageStream.
+// Kubernetes names that are used as DNS subdomain labels must follow RFC 1123: a single label
+// can be at most 63 characters (DNS label max). The final name is slug + "-" + suffix, so:
+//
+//	ImageStreamSlugMaxLength (55) + 1 (hyphen) + 6 (suffix) ≤ 63.
+//
+// It lowercases the string,
+// replaces "/", ":", and "@" with underscores, replaces any character that is not [a-z0-9-]
+// with a hyphen, trims and truncates to ImageStreamSlugMaxLength characters, then appends a 6-char SHA1 suffix
+// of the original image so that different images still produce unique names while fitting
+// within typical length limits (e.g. DNS subdomain labels).
+func ImageStreamNameFor(image string) string {
+	base := strings.ToLower(strings.ReplaceAll(image, "/", "_"))
+	base = strings.ReplaceAll(base, ":", "_")
+	base = strings.ReplaceAll(base, "@", "_")
+
+	slug := imageStreamNameRegex.ReplaceAllString(base, "-")
+	slug = strings.Trim(slug, "-")
+
+	if len(slug) > imageStreamSlugMaxLength {
+		slug = slug[:imageStreamSlugMaxLength]
+	}
+	slug = strings.Trim(slug, "-")
+	sum := sha1.Sum([]byte(image)) //nolint:gosec
+	sfx := hex.EncodeToString(sum[:])[:imageStreamSHA1SuffixLength]
+	return fmt.Sprintf("%s-%s", slug, sfx)
+}
+
+// GenerateConsolePluginNginxConfigMap generates a ConfigMap containing nginx.conf for a console plugin.
+func GenerateConsolePluginNginxConfigMap(
+	r reconciler.Reconciler,
+	cr *olsv1alpha1.OLSConfig,
+	name string,
+	labels map[string]string,
+	nginxConfig string,
+) (*corev1.ConfigMap, error) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: r.GetNamespace(),
+			Labels:    labels,
+		},
+		Data: map[string]string{
+			"nginx.conf": nginxConfig,
+		},
+	}
+	if err := controllerutil.SetControllerReference(cr, cm, r.GetScheme()); err != nil {
+		return nil, err
+	}
+	return cm, nil
+}
+
+// GenerateConsolePluginNetworkPolicy generates a network policy allowing ingress from OpenShift Console pods.
+func GenerateConsolePluginNetworkPolicy(
+	r reconciler.Reconciler,
+	cr *olsv1alpha1.OLSConfig,
+	name string,
+	labels map[string]string,
+	port int32,
+) (*networkingv1.NetworkPolicy, error) {
+	protocolTCP := corev1.ProtocolTCP
+	servicePort := intstr.FromInt32(port)
+	np := networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: r.GetNamespace(),
+			Labels:    labels,
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			Ingress: []networkingv1.NetworkPolicyIngressRule{
+				{
+					From: []networkingv1.NetworkPolicyPeer{
+						{
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"kubernetes.io/metadata.name": "openshift-console",
+								},
+							},
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"app": "console",
+								},
+							},
+						},
+					},
+					Ports: []networkingv1.NetworkPolicyPort{
+						{
+							Protocol: &protocolTCP,
+							Port:     &servicePort,
+						},
+					},
+				},
+			},
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			PolicyTypes: []networkingv1.PolicyType{
+				networkingv1.PolicyTypeIngress,
+			},
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(cr, &np, r.GetScheme()); err != nil {
+		return nil, err
+	}
+	return &np, nil
+}
+
+// DefaultConsolePluginResourceRequirements returns default resource requirements for console plugin containers.
+func DefaultConsolePluginResourceRequirements() *corev1.ResourceRequirements {
+	return &corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("10m"),
+			corev1.ResourceMemory: resource.MustParse("50Mi"),
+		},
+		Claims: []corev1.ResourceClaim{},
+	}
+}
+
+// ConsolePluginDeploymentOptions configures nginx-based console plugin Deployments.
+type ConsolePluginDeploymentOptions struct {
+	Name                string
+	Labels              map[string]string
+	SelectorLabels      map[string]string
+	ServiceAccountName  string
+	ContainerName       string
+	Image               string
+	Port                int32
+	PortName            string
+	CertVolumeName      string
+	CertSecretName      string
+	NginxVolumeName     string
+	NginxConfigMapName  string
+	NginxTempVolumeName string
+	Resources           *corev1.ResourceRequirements
+	Env                 []corev1.EnvVar
+	DeploymentConfig    olsv1alpha1.Config
+}
+
+// GenerateConsolePluginDeployment generates a Deployment for an nginx-served console plugin.
+func GenerateConsolePluginDeployment(
+	r reconciler.Reconciler,
+	cr *olsv1alpha1.OLSConfig,
+	opts ConsolePluginDeploymentOptions,
+) (*appsv1.Deployment, error) {
+	runAsNonRoot := true
+	volumeDefaultMode := VolumeDefaultMode
+	replicas := int32(1)
+
+	containerPort := corev1.ContainerPort{
+		ContainerPort: opts.Port,
+		Protocol:      corev1.ProtocolTCP,
+	}
+	if opts.PortName != "" {
+		containerPort.Name = opts.PortName
+	}
+
+	resources := opts.Resources
+	if resources == nil {
+		resources = DefaultConsolePluginResourceRequirements()
+	}
+
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      opts.Name,
+			Namespace: r.GetNamespace(),
+			Labels:    opts.Labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: opts.SelectorLabels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: opts.Labels,
+				},
+				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: BoolPtr(false),
+					Containers: []corev1.Container{
+						{
+							Name:            opts.ContainerName,
+							Image:           opts.Image,
+							Ports:           []corev1.ContainerPort{containerPort},
+							SecurityContext: RestrictedContainerSecurityContext(),
+							ImagePullPolicy: corev1.PullAlways,
+							Env:             opts.Env,
+							Resources:       *resources,
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      opts.CertVolumeName,
+									MountPath: "/var/cert",
+									ReadOnly:  true,
+								},
+								{
+									Name:      opts.NginxVolumeName,
+									MountPath: "/etc/nginx/nginx.conf",
+									SubPath:   "nginx.conf",
+									ReadOnly:  true,
+								},
+								{
+									Name:      opts.NginxTempVolumeName,
+									MountPath: "/tmp/nginx",
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: opts.CertVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName:  opts.CertSecretName,
+									DefaultMode: &volumeDefaultMode,
+								},
+							},
+						},
+						{
+							Name: opts.NginxVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: opts.NginxConfigMapName,
+									},
+									DefaultMode: &volumeDefaultMode,
+								},
+							},
+						},
+						{
+							Name: opts.NginxTempVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &runAsNonRoot,
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
+					ServiceAccountName: opts.ServiceAccountName,
+				},
+			},
+		},
+	}
+
+	ApplyPodDeploymentConfig(deployment, opts.DeploymentConfig, false)
+
+	if err := controllerutil.SetControllerReference(cr, deployment, r.GetScheme()); err != nil {
+		return nil, err
+	}
+
+	return deployment, nil
+}
+
+// GenerateServiceAccount generates a service account with the given name in the operator namespace
+func GenerateServiceAccount(r reconciler.Reconciler, cr *olsv1alpha1.OLSConfig, name string) (*corev1.ServiceAccount, error) {
+	sa := corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: r.GetNamespace(),
+		},
+	}
+
+	if err := controllerutil.SetControllerReference(cr, &sa, r.GetScheme()); err != nil {
+		return nil, err
+	}
+	return &sa, nil
+}
+
+// GetProxyCACertKey returns the ConfigMap key for the proxy CA certificate.
+// If not specified, defaults to ProxyCACertFileName for backward compatibility.
+func GetProxyCACertKey(proxyCACertRef *olsv1alpha1.ProxyCACertConfigMapRef) string {
+	if proxyCACertRef == nil {
+		return ProxyCACertFileName
+	}
+	if proxyCACertRef.Key != "" {
+		return proxyCACertRef.Key
+	}
+	return ProxyCACertFileName // Default for backward compatibility
+}
+
+// GetProxyCACertConfigMapName returns the ConfigMap name for the proxy CA certificate.
+// Returns empty string if the reference is nil.
+func GetProxyCACertConfigMapName(proxyCACertRef *olsv1alpha1.ProxyCACertConfigMapRef) string {
+	if proxyCACertRef == nil || proxyCACertRef.Name == "" {
+		return ""
+	}
+	return proxyCACertRef.Name
+}
+
+// ReconcileOLSAdditionalCAConfigMap validates that the externally referenced Additional CA ConfigMap exists.
+// Annotation handling is managed by the main controller.
+func ReconcileOLSAdditionalCAConfigMap(r reconciler.Reconciler, ctx context.Context, cr *olsv1alpha1.OLSConfig) error {
+	if cr.Spec.OLSConfig.AdditionalCAConfigMapRef == nil {
+		// no additional CA certs, skip
+		r.GetLogger().Info("Additional CA not configured, reconciliation skipped")
+		return nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: cr.Spec.OLSConfig.AdditionalCAConfigMapRef.Name, Namespace: r.GetNamespace()}, cm)
+	if err != nil {
+		return fmt.Errorf("%s: %w", ErrGetAdditionalCACM, err)
+	}
+
+	r.GetLogger().Info("additional CA configmap reconciled", "configmap", cm.Name)
+	return nil
+}
+
+// ReconcileProxyCAConfigMap validates that the externally referenced Proxy CA ConfigMap exists.
+// Annotation handling is managed by the main controller.
+func ReconcileProxyCAConfigMap(r reconciler.Reconciler, ctx context.Context, cr *olsv1alpha1.OLSConfig) error {
+	if cr.Spec.OLSConfig.ProxyConfig == nil {
+		// no proxy CA certs, skip
+		r.GetLogger().Info("Proxy CA not configured, reconciliation skipped")
+		return nil
+	}
+
+	cmName := GetProxyCACertConfigMapName(cr.Spec.OLSConfig.ProxyConfig.ProxyCACertificateRef)
+	if cmName == "" {
+		// no proxy CA certs, skip
+		r.GetLogger().Info("Proxy CA not configured, reconciliation skipped")
+		return nil
+	}
+
+	cm := &corev1.ConfigMap{}
+	err := r.Get(ctx, client.ObjectKey{Name: cmName, Namespace: r.GetNamespace()}, cm)
+	if err != nil {
+		return fmt.Errorf("%s: %w", ErrGetProxyCACM, err)
+	}
+
+	r.GetLogger().Info("proxy CA configmap reconciled", "configmap", cm.Name)
+	return nil
+}
+
+// BoolDeref returns *p when non-nil; otherwise def.
+func BoolDeref(p *bool, def bool) bool {
+	if p != nil {
+		return *p
+	}
+	return def
+}
+
+// BoolPtr returns a pointer to b (for optional API fields).
+func BoolPtr(b bool) *bool {
+	return &b
+}

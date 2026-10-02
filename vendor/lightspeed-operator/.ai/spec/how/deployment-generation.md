@@ -1,0 +1,147 @@
+# Deployment Generation
+
+## Module Map
+
+| File | Key Functions | Responsibility |
+|---|---|---|
+| `internal/controller/appserver/deployment.go` | `GenerateOLSDeployment()`, `updateOLSDeployment()`, `RestartAppServer()`, `dataCollectorEnabled()` | AppServer deployment spec, change detection, restart |
+| `internal/controller/postgres/deployment.go` | `GeneratePostgresDeployment()`, `UpdatePostgresDeployment()` | PostgreSQL deployment spec |
+| `internal/controller/console/deployment.go` | `GenerateConsoleUIDeployment()` | Console UI deployment spec |
+| `internal/controller/agenticconsole/deployment.go` | `GenerateAgenticConsoleUIDeployment()` | Agentic console plugin deployment spec |
+| `internal/controller/otelcollector/deployment.go` | `GenerateOtelCollectorDeployment()`, `UpdateOtelCollectorDeployment()` | OTEL Collector deployment spec; [PLANNED: OLS-3569] conditional Agentic exporter sidecar and spool mounts |
+| `internal/controller/ocpmcp/deployment.go` | `GenerateDeployment()`, `UpdateDeployment()` | Standalone OpenShift MCP deployment spec |
+| `internal/controller/rhokp/deployment.go` | `GenerateDeployment()`, `UpdateDeployment()` | Standalone RHOKP deployment spec |
+| `internal/controller/alertsadapter/deployment.go` | `GenerateDeployment()` | Alerts adapter deployment spec |
+
+## Data Flow
+
+### AppServer Deployment Construction
+```
+GenerateOLSDeployment(r, cr)
+  1. Check dataCollectorEnabled (requires both user config AND telemetry pull secret)
+  2. Build LLM provider credential volumes + mounts (via ForEachExternalSecret, source "llm-provider-*")
+  3. Build postgres secret volume + mount
+  4. Build TLS volume + mount (user-provided KeyCertSecretRef OR service-ca generated OLSCertsSecretName)
+  5. Build OLS config configmap volume + mount
+  6. Conditionally add data collector volumes (user-data emptyDir, exporter config CM)
+  7. Add kube-root-ca.crt configmap volume + cert-bundle emptyDir volume
+  8. Add user-provided CA volumes (additional-ca CM, proxy-ca CM via ForEachExternalConfigMap)
+  9. Add RAG emptyDir volume (if spec.ols.rag configured)
+  10. Add postgres-ca configmap volume + tmp emptyDir volume
+   11. Add MCP header secret volumes (via ForEachExternalSecret, source "mcp-*", excluding the MCP OIDC CA reference)
+   11a. When `spec.ols.a2a.enabled`, validate the shared MCP OIDC CA Secret, mount its selected key read-only at `/etc/certs/a2a-keycloak-ca/ca-bundle.crt`, and mount a read-only `csi.spiffe.io` volume at `/spiffe-workload-api`.
+  12. Build init containers:
+      a. PostgreSQL wait init container (polls pg service)
+      b. RAG init containers (one per RAG entry, copies data to shared emptyDir)
+      c. [PLANNED: OLS-3799] RHOKP wait init container (when `!byokRAGOnly`) — not yet implemented; today only the PostgreSQL wait + RAG init containers are generated.
+  13. Get ConfigMap ResourceVersions for tracking annotations
+  14. Get proxy CA cert hash for tracking annotation
+  15. Assemble Deployment:
+       - Container: "lightspeed-service-api", image: `spec.ols.serviceImage` when provided (must be pinned by `@sha256:`), otherwise `r.GetAppServerImage()` from the operator `--service-image` argument; port 8443
+       - Env: OLS_CONFIG_FILE path + proxy vars (HTTP_PROXY, HTTPS_PROXY, NO_PROXY)
+       - Env: when A2A is enabled, the fixed `OLS_A2A_*` identity contract plus `SPIFFE_ENDPOINT_SOCKET=unix:///spiffe-workload-api/spire-agent.sock`; the SPIFFE JWT-SVID audience equals the issuer URL from `mcpServerSecurity`
+      - Env: OCP_CLUSTER_VERSION (`<major>.<minor>`) when `!byokRAGOnly` (same cluster-version source as console UI)
+      - Env: OLS_ROSA_PRODUCT when `!byokRAGOnly` and startup detection finds ROSA brand. `External` topology → `red_hat_openshift_service_on_aws` (HCP); any other topology on ROSA → `red_hat_openshift_service_on_aws_classic_architecture` (Classic). Omitted on non-ROSA or detection failure.
+      - Probes: HTTPS GET on /readiness (initial: 30s, period: 30s, timeout: 30s, failure: 15) and /liveness (initial: 30s, period: 30s, timeout: 30s, failure: 3 — OLS-3221)
+      - Default resources: 500m CPU request, 1Gi memory request (no limits)
+  16. Apply pod-level config (replicas, nodeSelector, tolerations)
+  17. Set ImageStream triggers annotation (if RAG configured)
+  18. Set owner reference to OLSConfig CR
+  19. Conditionally add data collector sidecar container ("lightspeed-to-dataverse-exporter")
+  20. When `!byokRAGOnly`, mount the RHOKP client CA Secret `lightspeed-agentic-rhokp-ca` at `/etc/certs/rhokp-ca/` (added to `extra_ca`). RHOKP itself runs as a standalone Deployment (`internal/controller/rhokp/`, HTTPS `:8443`), not an app-server sidecar — see `rhokp.md`.
+   21. When introspection is enabled, mount MCP client CA Secret `lightspeed-agentic-mcp-ca` (no MCP sidecar; standalone operand).
+   22. When A2A is enabled, use the `mcpServerSecurity.caSecretRef` Secret directly for the app-server Keycloak CA mount; it is separate from the service-ca MCP client CA. Secret updates are mapped to restart both MCP and app-server deployments.
+   23. The SPIFFE socket and Keycloak CA mounts are excluded from the optional data-collector sidecar, even though other legacy mounts are shared with that container.
+```
+
+### OTEL Collector Deployment — Agentic Collection
+
+[PLANNED: OLS-3569] Collector runtime configuration and `GenerateOtelCollectorDeployment()` use the same Agentic collection gate:
+
+1. [PLANNED: OLS-3569] Generate these resources only where the parent-defined Agentic v2 bundle is available. Within that scope, evaluate `!spec.ols.userDataCollection.transcriptsDisabled` AND usable `cloud.openshift.com` auth in `openshift-config/pull-secret`; do not use the Classic feedback-OR-transcripts expression.
+2. [PLANNED: OLS-3569] When enabled, append one shared `emptyDir` with `sizeLimit` set from an explicit Agentic spool deployment configuration value, mount it in the Collector at `/var/lib/lightspeed-data-collection`, and mount it in a separate `lightspeed-to-dataverse-exporter` sidecar at `/app-root/ols-user-data`. No authoritative numeric sizing convention is defined here. At capacity, follow Rules 33-34 in the parent `../../../../.ai/spec/what/agentic-data-collection.md`; do not add local eviction, overwrite, back-pressure, loss, or aggregation policy.
+3. [PLANNED: OLS-3569] Build the sidecar with `GetDataverseExporterImage()`, the existing telemetry credentials, `lightspeed-exporter-config`, `spec.olsDataCollector.logLevel`, and `spec.ols.deployment.dataCollector.resources`. As a sidecar, it inherits Collector pod scheduling from `spec.ols.deployment.otelCollector`.
+4. [PLANNED: OLS-3569] When enabled, include the trace-only Agentic product-collection pipeline in the Collector runtime ConfigMap. Preserve the existing OTLP receiver, logs/templog, admin, metrics, and optional trace-forwarding configuration.
+5. [PLANNED: OLS-3569] When disabled, omit the Agentic pipeline, sidecar, `emptyDir`, and both mounts. A gate transition changes the desired pod template and follows the normal Collector rollout path.
+6. [PLANNED: OLS-3569] Do not change the app-server exporter or add collection state to `lightspeed-agentic-configuration`. See `what/agentic-data-collection.md` for the operator contract and its parent-spec references.
+
+### Change Detection Pattern
+All deployments use the same pattern in their update functions:
+1. Compare desired vs existing deployment spec using `DeploymentSpecEqual()` (from `utils/`)
+2. Compare ConfigMap ResourceVersions via deployment annotations (one per tracked CM)
+3. Compare content hashes (proxy CA cert hash; OpenShift MCP CA hash when introspection is enabled) via annotations; A2A Keycloak CA Secret changes are handled by the annotated-Secret watcher.
+4. If any differ: update spec + annotations, call RestartX() function
+   - RestartX() sets `ols.openshift.io/force-reload` annotation to `time.Now().Format(time.RFC3339Nano)`
+   - This triggers a rolling restart by changing the pod template
+
+**AppServer tracks:** OLS config CM version, MCP server config CM version, proxy CA cert hash, MCP client CA Secret content hash (when introspection is enabled). The A2A Keycloak CA Secret is watched and triggers app-server restart when A2A is enabled.
+
+## Key Abstractions
+
+### Resource Requirement Defaults
+Each component defines default CPU/memory requests in local `get*Resources()` functions. Per [OpenShift conventions](https://github.com/openshift/enhancements/blob/master/CONVENTIONS.md#resources-and-limits), operator defaults set requests only and do not set limits. User-provided values from the CR override defaults via `utils.GetResourcesOrDefault()` which returns user values if non-nil, otherwise defaults. Users may still set limits via the CRD if needed for their environment.
+
+Default resources by container:
+| Container | CPU Request | Memory Request | Ephemeral Storage Request |
+|---|---|---|---|
+| AppServer `lightspeed-service-api` | 500m | 1Gi | — |
+| Data collector | 50m | 64Mi | — |
+| Collector-side Agentic data exporter | [PLANNED: OLS-3569] 50m | [PLANNED: OLS-3569] 64Mi | — |
+| MCP server (standalone) | 50m | 64Mi | — |
+| RHOKP `rhokp` (standalone) | 2000m | 2Gi | — (75Gi EmptyDir `sizeLimit`, not an ephemeral-storage request) |
+
+### Volume/Mount Construction
+Volumes and mounts are built as slices and conditionally appended using inline append patterns.
+
+### Init Container Generation
+- **PostgreSQL wait:** `utils.GeneratePostgresWaitInitContainer()` generates a container that polls the PostgreSQL service until it responds.
+- **RHOKP wait (when `!byokRAGOnly`):** [PLANNED: OLS-3799] — not yet implemented. When added, `utils.GenerateRHOKPWaitInitContainer()` would poll the RHOKP Solr ping endpoint until it responds (~360s budget), following the PostgreSQL wait pattern. No such function exists today.
+- **RAG (AppServer only):** `GenerateRAGInitContainers()` creates one init container per RAG entry, each copying data from the RAG image to the shared emptyDir volume at `/app-root/rag/rag-<index>`.
+
+### ImageStream Triggers (AppServer only)
+RAG images use OpenShift ImageStreams for automatic updates. The deployment is annotated with `image.openshift.io/triggers` JSON that maps ImageStreamTag changes to init container image fields. This allows RAG content updates without operator intervention.
+
+### Data Collector Enablement
+The existing Classic app-server collector gate is computed from two inputs:
+1. User data collection config: `!FeedbackDisabled || !TranscriptsDisabled`
+2. Telemetry pull secret: `openshift-config/pull-secret` has `.auths."cloud.openshift.com"` entry in `.dockerconfigjson`
+
+Both must be true. The service ID is `"ols"` unless the CR has `openstack.org/lightspeed-owner-id` label, in which case it's `"rhos-lightspeed"`.
+
+[PLANNED: OLS-3569] The Collector-side Agentic resources use the independent gate defined in `what/agentic-data-collection.md`; the Classic gate and handoff ConfigMap remain unchanged.
+
+### Pod Scheduling Configuration
+`utils.ApplyPodDeploymentConfig()` applies scheduling from `cr.Spec.OLSConfig.DeploymentConfig.APIContainer`:
+- Replicas (configurable for API container; forced to 1 for postgres and console)
+- NodeSelector
+- Tolerations
+
+Affinity and topology spread constraints are not exposed on `Config` (CRD size); use cluster-level defaults or patch deployments out of band if needed.
+
+## Integration Points
+
+| Consumer | Provider | Data |
+|---|---|---|
+| Deployment spec | `utils/constants.go` | Resource names, ports, mount paths |
+| Container resources | CR `spec.ols.deployment.api.resources` | User-overridable CPU/memory |
+| RHOKP resources | CR `spec.ols.deployment.rhokp.resources` | User-overridable CPU/memory/ephemeral storage |
+| Pod scheduling | CR `spec.ols.deployment.api` | Tolerations, nodeSelector |
+| Volume secrets | Kubernetes Secrets | LLM credentials, TLS certs, PostgreSQL password, MCP header values |
+| A2A workload identity | CR `spec.ols.a2a` + `spec.ols.mcpServerSecurity` | SPIFFE CSI socket, exact caller/client/audience env contract, shared Keycloak CA Secret |
+| Volume configmaps | Generated ConfigMaps | OLS config, nginx config, MCP server config; [PLANNED: OLS-3569] existing exporter config also mounted by the Collector-side Agentic exporter |
+| Proxy env vars | `utils.GetProxyEnvVars()` | HTTP_PROXY, HTTPS_PROXY, NO_PROXY from cluster |
+| RAG images | CR `spec.ols.rag[].image` | Container images for init containers |
+| RHOKP image | `--rhokp-image` flag | Standalone RHOKP Deployment container image; default from `related_images.json` (`rhokp`) |
+
+## Agentic Controller Deployment (OLM-managed)
+
+Unlike the AppServer, PostgreSQL, and Console UI deployments (which are reconciled by the lightspeed-operator controller at runtime), the agentic controller deployment is statically defined in the CSV and managed by OLM. The lightspeed-operator controller has no code to generate, update, or restart the agentic controller deployment. The agentic controller's operand images (agentic console plugin, etc.) are configured via startup flags on its deployment in the CSV, not via the lightspeed-operator's flags.
+
+## Implementation Notes
+
+- `RevisionHistoryLimit` is set to 1 for all deployments to minimize stored ReplicaSets.
+- All sidecar containers use `utils.RestrictedContainerSecurityContext()` which sets: `RunAsNonRoot: true`, `ReadOnlyRootFilesystem: true`, `AllowPrivilegeEscalation: false`, Drop ALL capabilities, RuntimeDefault seccomp profile.
+- The force-reload annotation (`ols.openshift.io/force-reload`) is set to `time.Now().Format(time.RFC3339Nano)` to guarantee uniqueness and trigger pod replacement.
+- The OpenShift MCP server always uses `PullIfNotPresent`.
+- The `VolumeDefaultMode` is `int32(420)` (0644 octal), defined in `utils/constants.go`.
+- AppServer deployment name is `utils.OLSAppServerDeploymentName` (`"lightspeed-app-server"`).

@@ -1,0 +1,193 @@
+# OpenShift Lightspeed Operator - AI Assistant Guide
+
+## Specs
+
+All specifications live in `.ai/spec/`. Start with `.ai/spec/README.md` for project overview, reading order, and structure guide.
+
+## Project Overview
+Kubernetes operator managing OpenShift Lightspeed (AI-powered Virtual Assistant). Go + controller-runtime/kubebuilder + Ginkgo v2/Gomega testing.
+
+## Version Management
+
+### Version Update Process
+When updating the operator version for a release, you **MUST** update version numbers in **TWO** files:
+
+1. **`bundle.Dockerfile`** - Bundle container labels (lines 63 and 66)
+   ```dockerfile
+   LABEL release=X.Y.Z
+   LABEL version=X.Y.Z
+   ```
+
+2. **`bundle/manifests/lightspeed-operator.clusterserviceversion.yaml`** - CSV metadata (lines 58 and 715)
+   ```yaml
+   name: lightspeed-operator.vX.Y.Z
+   # ... line 715:
+   version: X.Y.Z
+   ```
+
+**Important Notes:**
+- Both files MUST have matching versions
+- The CSV `name` field includes a `v` prefix (e.g., `lightspeed-operator.v1.0.8`)
+- The CSV `version` field does NOT have a prefix (e.g., `1.0.8`)
+- After version changes, regenerate the selected bundle using `make bundle BUNDLE_VARIANT=v1 BUNDLE_TAG=1.x.y` or `hack/update_bundle.sh v1 -v 1.x.y` (use `v2`/`2.x.y` for the agentic bundle)
+
+## Architecture Quick Reference
+
+### Core Components
+- **API**: `api/v1alpha1/` - CRD definitions (`OLSConfig`)
+- **Controllers**: `internal/controller/` - Reconciliation logic
+- **Entry Point**: `cmd/main.go` - Operator entry with watcher configuration
+- **Key CRD**: `OLSConfig` - cluster-scoped, single instance per cluster
+
+### Reconciliation Flow
+```
+OLSConfigReconciler.Reconcile() →
+├── [Operator-level resources: ServiceMonitor, NetworkPolicy]
+├── [Finalizer logic: handle CR deletion if DeletionTimestamp set]
+├── annotateExternalResources() (validate LLM/TLS credentials)
+├── Phase 1 — reconcileIndependentResources() (continue-on-error)
+│   ├── postgres.ReconcilePostgresResources()
+│   ├── console.ReconcileConsoleUIResources()
+│   ├── agenticconsole.ReconcileAgenticConsoleUIResources()
+│   ├── alertsadapter.ReconcileAlertsAdapterResources()
+│   │   (opt-in via configMapRef; RemoveAlertsAdapter() when unset; no ConfigMap validation—
+│   │    mount at /etc/alerts-adapter when CM exists, adapter reads config.yaml)
+│   ├── otelcollector.ReconcileOtelCollectorResources()
+│   ├── ocpmcp.ReconcileResources()
+│   │   (when introspectionEnabled; else ocpmcp.Remove())
+│   ├── rhokp.ReconcileResources()
+│   │   (when !byokRAGOnly; else rhokp.Remove())
+│   └── appserver.ReconcileAppServerResources()
+└── Phase 2 — reconcileDeploymentsAndStatus()
+    ├── console.ReconcileConsoleUIDeploymentAndPlugin()  → ConsolePluginReady
+    ├── agenticconsole.ReconcileAgenticConsoleUIDeploymentAndPlugin() → AgenticConsolePluginReady
+    ├── postgres.ReconcilePostgresDeployment()           → CacheReady
+    ├── otelcollector.ReconcileOtelCollectorDeployment() → OtelCollectorReady
+    ├── ocpmcp.ReconcileDeployment()                     → MCPServerReady
+    │   (when introspectionEnabled; else MCPServerReady=True, Reason=NotConfigured)
+    ├── rhokp.ReconcileDeployment()                      → RHOKPReady
+    │   (when !byokRAGOnly; else RHOKPReady=False, Reason=Disabled)
+    ├── appserver.ReconcileAppServerDeployment()         → ApiReady
+    ├── alertsadapter.ReconcileAlertsAdapterDeployment() → AlertsAdapterReady
+    │   (only when configMapRef set; else AlertsAdapterReady=True, Reason=NotConfigured)
+    └── agenticintegration.ReconcileAgenticIntegrationResources()
+        (last: handoff ConfigMap only; client CA Secrets owned by appserver)
+```
+
+## Code Conventions
+
+### Naming Patterns
+- **Constants**: `const OLSConfigCmName = "olsconfig"`
+- **Error Constants**: `const ErrCreateAPIConfigmap = "failed to create API configmap"`
+- **Functions**: `reconcile<ComponentName>()`, `generate<ResourceType>()`
+- **File Names**: `reconciler.go`, `assets.go`, `suite_test.go`
+
+### Error Handling
+Wrap with `fmt.Errorf("%s: %w", ErrConstant, err)`
+
+## Testing - CRITICAL
+
+NEVER use `go test` directly - ALWAYS use `make test`
+
+The Makefile handles essential setup (envtest, CRDs, build flags) that `go test` doesn't.
+
+```bash
+make test       # Unit tests
+make test-e2e   # E2E tests (requires cluster)
+```
+
+## Key File Locations
+
+### CLI Plugin
+- `cmd/oc-ols/main.go` - CLI binary entry point (IOStreams, root command)
+- `cli/` - CLI command implementations (root, version, kubeconfig integration, endpoint resolution)
+- `cli/config/` - Per-context configuration storage (endpoint persistence, set-endpoint subcommand)
+
+### Controllers
+- `internal/controller/olsconfig_controller.go` - Main reconciler with finalizer logic
+- `internal/controller/appserver/` - App server (also owns client CA Secrets `lightspeed-agentic-otel-ca` / `lightspeed-agentic-mcp-ca` / `lightspeed-agentic-rhokp-ca`; `RestartAppServer` calls `RefreshClientCASecrets` and touches the handoff ConfigMap)
+- `internal/controller/postgres/` - PostgreSQL
+- `internal/controller/otelcollector/` - OTEL Collector (always deployed; Postgres audit log storage, optional trace forwarding, HTTPS metrics `:8888` + ServiceMonitor)
+- `internal/controller/agenticintegration/` - Classic→agentic handoff ConfigMap (`lightspeed-agentic-configuration`) only; end of Phase 2
+- `internal/controller/ocpmcp/` - Standalone OpenShift MCP server (gated by `introspectionEnabled`; HTTPS via service-ca)
+- `internal/controller/rhokp/` - Standalone RHOKP (Red Hat Offline Knowledge Portal) for Solr RAG (gated by `!byokRAGOnly`; HTTPS via service-ca)
+- `internal/controller/console/` - Chat console plugin (Lightspeed assistant UI)
+- `internal/controller/agenticconsole/` - Agentic console plugin (AI Hub / proposals UI)
+- `internal/controller/alertsadapter/` - Agentic alerts adapter (opt-in via `configMapRef`; mounts user CM at `/etc/alerts-adapter` when present; adapter validates config)
+- `internal/controller/watchers/` - External resource watching
+- `internal/controller/utils/` - Shared utilities, constants
+  - `constants.go` - Includes `OLSConfigFinalizer` constant
+  - `console_plugin_reconciler.go` - Shared ConsolePlugin reconcile helpers (used by `console/` and `agenticconsole/`)
+
+### Tests
+- `*_test.go` - Unit tests (co-located)
+- `test/e2e/` - E2E tests (shared helpers in `assets.go`, `utils.go`, `client.go`, and related files)
+- `internal/controller/utils/test_fixtures.go` - Shared controller **unit-test** fixtures (default `OLSConfig` CR, random secret/configmap/TLS helpers, telemetry pull-secret create/delete, shared `With*` provider mutators). Add here when the same shape is reused across tests or packages.
+- For **one-off** CR or spec fragments used only in one file, **inline** next to the test (or use a file-local unexported helper in that `*_test.go`) instead of `test_fixtures.go`, so refactors do not leave unused exported helpers.
+- `internal/controller/utils/testing.go` - `TestReconciler`, `NewTestReconciler`, and `StatusHasCondition` for envtest-based suites
+- `internal/controller/suite_test.go` - Test suite setup, shared helpers
+  - `cleanupOLSConfig()` - Reusable CR cleanup helper (removes finalizers, waits for deletion)
+
+## State Management
+
+**Owned Resources**: Tracked automatically by controller-runtime via ResourceVersion
+
+**External Resources**: Three-layer watcher system (predicate filtering, data comparison, restart logic). See `internal/controller/watchers/` and `cmd/main.go`.
+
+## Common Development Tasks
+
+### Adding New Reconciliation Step
+- **App Server**: Add to `ReconcileTask` slice in `internal/controller/appserver/reconciler.go`
+- **Console plugin operand**: Add package under `internal/controller/<component>/`, reuse `utils/console_plugin_reconciler.go` where possible, wire Phase 1/2 in `olsconfig_controller.go`
+- **Top-Level operand**: Create package under `internal/controller/<component>/`, add to `olsconfig_controller.go` Phase 1 (`reconcileIndependentResources`) and Phase 2 (`reconcileDeploymentsAndStatus`)
+- Add error constants to `internal/controller/utils/errors.go`
+- Write unit tests in co-located `*_test.go` files
+
+### Local Development (`make run`)
+- Sets `LOCAL_DEV_MODE=true`, which skips operator ServiceMonitor reconciliation and app-server metrics reader secret reconciliation (no local metrics scraping loop).
+- Image overrides: `--console-image`, `--agentic-console-image`, `--alerts-adapter-image`, `--agentic-sandbox-image`, and other flags in `cmd/main.go`.
+
+## AI Assistant Skills
+
+Available skills:
+
+- **`/update-bundle dev`** - PR/CI: Konflux CI images (`-r ci`), regen bundle at current version
+- **`/update-bundle release X.Y.Z`** or **`/version-update X.Y.Z`** - Ship to `main`: see `version-update` skill for full release steps (stable images, version bump, bundle regen)
+
+Code review:
+
+- **`/go-code-review`** - Review Go code for error handling, concurrency, resource leaks, naming conventions
+- **`/go-testing-code-review`** - Review test code for table-driven tests, cleanup patterns, error messages
+- **`/review-pr`** - Structured PR review process with issue verification
+
+Invoke by typing `/skill-name` in chat.
+
+## Git and PR Workflow
+
+### Commit Messages
+- Start with the Jira ticket reference: `OLS-XXXX description`
+- Keep the first line under 72 characters
+- Use imperative mood
+
+### Pull Requests
+This repo uses a **fork-based workflow**:
+
+1. **Push to your fork**, not to `origin` (openshift/lightspeed-operator)
+2. **Create the PR** against `origin/main` using your fork's branch:
+   ```bash
+   git push <your-fork-remote> <branch>
+   gh pr create --repo openshift/lightspeed-operator --head <your-github-user>:<branch> --base main
+   ```
+3. **PR title** must start with the Jira reference: `OLS-XXXX description`
+4. **Squash commits** before pushing -- one logical commit per PR unless the PR explicitly tracks multiple independent changes
+
+### Branch Completion
+When finishing a development branch:
+1. Remove any process artifacts (design docs, plans in `docs/superpowers/`)
+2. Squash commits with the Jira-prefixed message
+3. Push to the contributor's fork remote (not `origin`)
+4. Create the PR against `origin/main` using `--head <user>:<branch>`
+
+## Maintaining This Document
+
+Always suggest AGENTS.md edits when architectural, structural, or conventional changes are made to the codebase.

@@ -1,0 +1,500 @@
+/*
+Copyright 2024.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package main is the entry point for the OpenShift Lightspeed Operator.
+//
+// This package initializes and starts the Kubernetes controller manager that
+// manages the lifecycle of the OpenShift Lightspeed application.
+//
+// The main function performs the following initialization:
+//   - Parses command-line flags for configuration (image URLs, namespaces, intervals)
+//   - Sets up the Kubernetes scheme with required API types (Console, Monitoring, etc.)
+//   - Configures the controller manager with metrics, health probes, and leader election
+//   - Detects OpenShift version for component configuration
+//   - Configures TLS security for metrics server (if enabled)
+//   - Initializes and starts the OLSConfigReconciler
+//
+// Command-line Flags:
+//   - metrics-bind-address: Address for metrics endpoint (default: :8080)
+//   - health-probe-bind-address: Address for health probe endpoint (default: :8081)
+//   - leader-elect: Enable leader election for HA deployments
+//   - secure-metrics-server: Enable mTLS for metrics server
+//   - service-image: Override default lightspeed-service image
+//   - console-image: Override default console plugin image
+//   - agentic-console-image: Override default agentic console plugin image
+//   - alerts-adapter-image: Override default agentic alerts adapter image
+//   - agentic-sandbox-image: Override default agentic sandbox container image
+//   - otel-collector-image: Override default OTEL Collector image
+//   - postgres-image: Override default PostgreSQL image
+//   - openshift-mcp-server-image: Override default MCP server image
+//   - namespace: Operator namespace (defaults to WATCH_NAMESPACE env var or "openshift-lightspeed")
+//
+// Environment Variables:
+//   - WATCH_NAMESPACE: Namespace to watch for OLSConfig resources
+//
+// The operator runs as a singleton in the cluster (with optional leader election)
+// and continuously reconciles the OLSConfig custom resource to maintain the
+// desired state of all OpenShift Lightspeed components.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"flag"
+	"fmt"
+	"os"
+	"slices"
+
+	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+	// to ensure that exec-entrypoint and run can make use of them.
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+
+	consolev1 "github.com/openshift/api/console/v1"
+	imagev1 "github.com/openshift/api/image/v1"
+	openshiftv1 "github.com/openshift/api/operator/v1"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	configv1 "github.com/openshift/api/config/v1"
+	monv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
+	olsv1alpha1 "github.com/openshift/lightspeed-operator/api/v1alpha1"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/openshift/lightspeed-operator/internal/controller"
+	"github.com/openshift/lightspeed-operator/internal/controller/utils"
+	utiltls "github.com/openshift/lightspeed-operator/internal/tls"
+	//+kubebuilder:scaffold:imports
+)
+
+var (
+	scheme   = runtime.NewScheme()
+	setupLog = ctrl.Log.WithName("setup")
+	// The default images of operands
+	defaultImages = map[string]string{
+		"lightspeed-service":         utils.OLSAppServerImageDefault,
+		"postgres-image":             utils.PostgresServerImageDefault,
+		"console-plugin":             utils.ConsoleUIImageDefault,
+		"agentic-console-plugin":     utils.AgenticConsoleUIImageDefault,
+		"alerts-adapter":             utils.AlertsAdapterImageDefault,
+		"agentic-sandbox":            utils.AgenticSandboxImageDefault,
+		"otel-collector":             utils.OtelCollectorImageDefault,
+		"openshift-mcp-server-image": utils.OpenShiftMCPServerImageDefault,
+		"dataverse-exporter-image":   utils.DataverseExporterImageDefault,
+		"rhokp-image":                utils.RHOOKPImageDefault,
+	}
+)
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(consolev1.AddToScheme(scheme))
+	utilruntime.Must(imagev1.AddToScheme(scheme))
+	utilruntime.Must(openshiftv1.AddToScheme(scheme))
+	utilruntime.Must(monv1.AddToScheme(scheme))
+	utilruntime.Must(configv1.AddToScheme(scheme))
+
+	utilruntime.Must(olsv1alpha1.AddToScheme(scheme))
+	//+kubebuilder:scaffold:scheme
+}
+
+// overrideImages overrides the default images with the images provided by the user.
+// If an image is not provided, the default is used.
+func overrideImages(serviceImage string, consoleImage string, agenticConsoleImage string, alertsAdapterImage string, agenticSandboxImage string, otelCollectorImage string, postgresImage string, openshiftMCPServerImage string, dataverseExporterImage string, rhokpImage string) map[string]string {
+	res := defaultImages
+	if serviceImage != "" {
+		res["lightspeed-service"] = serviceImage
+	}
+	if consoleImage != "" {
+		res["console-plugin"] = consoleImage
+	}
+	if agenticConsoleImage != "" {
+		res["agentic-console-plugin"] = agenticConsoleImage
+	}
+	if alertsAdapterImage != "" {
+		res["alerts-adapter"] = alertsAdapterImage
+	}
+	if agenticSandboxImage != "" {
+		res["agentic-sandbox"] = agenticSandboxImage
+	}
+	if otelCollectorImage != "" {
+		res["otel-collector"] = otelCollectorImage
+	}
+	if postgresImage != "" {
+		res["postgres-image"] = postgresImage
+	}
+	if openshiftMCPServerImage != "" {
+		res["openshift-mcp-server-image"] = openshiftMCPServerImage
+	}
+	if dataverseExporterImage != "" {
+		res["dataverse-exporter-image"] = dataverseExporterImage
+	}
+	if rhokpImage != "" {
+		res["rhokp-image"] = rhokpImage
+	}
+	return res
+}
+
+// listImages returns a sorted list of all configured images in "key=value" format.
+func listImages() []string {
+	i := 0
+	imgs := make([]string, len(defaultImages))
+	for k, v := range defaultImages {
+		imgs[i] = fmt.Sprintf("%v=%v", k, v)
+		i++
+	}
+	slices.Sort(imgs)
+	return imgs
+}
+
+func main() {
+	var metricsAddr string
+	var enableLeaderElection bool
+	var probeAddr string
+	var secureMetricsServer bool
+	var certDir string
+	var certName string
+	var keyName string
+	var caCertPath string
+	var metricsClientCA string
+	var serviceImage string
+	var consoleImage string
+	var agenticConsoleImage string
+	var alertsAdapterImage string
+	var agenticSandboxImage string
+	var otelCollectorImage string
+	var namespace string
+	var postgresImage string
+	var openshiftMCPServerImage string
+	var dataverseExporterImage string
+	var rhokpImage string
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+		"Enable leader election for controller manager. "+
+			"Enabling this will ensure there is only one active controller manager.")
+	flag.BoolVar(&secureMetricsServer, "secure-metrics-server", false, "Enable secure serving of the metrics server using mTLS.")
+	flag.StringVar(&certDir, "cert-dir", utils.OperatorCertDirDefault, "The directory where the TLS certificates are stored.")
+	flag.StringVar(&certName, "cert-name", utils.OperatorCertNameDefault, "The name of the TLS certificate file.")
+	flag.StringVar(&keyName, "key-name", utils.OperatorKeyNameDefault, "The name of the TLS key file.")
+	flag.StringVar(&caCertPath, "ca-cert", utils.OperatorCACertPathDefault, "The path to the CA certificate file.")
+	flag.StringVar(&serviceImage, "service-image", utils.OLSAppServerImageDefault, "The image of the lightspeed-service container.")
+	flag.StringVar(&consoleImage, "console-image", utils.ConsoleUIImageDefault, "The image of the console-plugin container.")
+	flag.StringVar(&agenticConsoleImage, "agentic-console-image", utils.AgenticConsoleUIImageDefault, "The image of the agentic console-plugin container.")
+	flag.StringVar(&alertsAdapterImage, "alerts-adapter-image", utils.AlertsAdapterImageDefault, "The image of the agentic alerts adapter container.")
+	flag.StringVar(&agenticSandboxImage, "agentic-sandbox-image", utils.AgenticSandboxImageDefault, "The image of the agentic sandbox container.")
+	flag.StringVar(&otelCollectorImage, "otel-collector-image", utils.OtelCollectorImageDefault, "The image of the OTEL Collector container.")
+	flag.StringVar(&namespace, "namespace", "", "The namespace where the operator is deployed.")
+	flag.StringVar(&postgresImage, "postgres-image", utils.PostgresServerImageDefault, "The image of the PostgreSQL server.")
+	flag.StringVar(&openshiftMCPServerImage, "openshift-mcp-server-image", utils.OpenShiftMCPServerImageDefault, "The image of the OpenShift MCP server container.")
+	flag.StringVar(&dataverseExporterImage, "dataverse-exporter-image", utils.DataverseExporterImageDefault, "The image of the dataverse exporter container.")
+	flag.StringVar(&rhokpImage, "rhokp-image", utils.RHOOKPImageDefault, "The RH Offline Knowledge Portal (Solr) sidecar image for Solr hybrid RAG.")
+	opts := zap.Options{
+		Development: true,
+	}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if namespace == "" {
+		namespace = getWatchNamespace()
+	}
+
+	imagesMap := overrideImages(serviceImage, consoleImage, agenticConsoleImage, alertsAdapterImage, agenticSandboxImage, otelCollectorImage, postgresImage, openshiftMCPServerImage, dataverseExporterImage, rhokpImage)
+	setupLog.Info("Images setting loaded", "images", listImages())
+
+	setupLog.Info("Starting the operator", "metricsAddr", metricsAddr, "probeAddr", probeAddr, "certDir", certDir, "certName", certName, "keyName", keyName, "namespace", namespace)
+	// Get K8 client and context
+	cfg, err := config.GetConfig()
+	if err != nil {
+		setupLog.Error(err, "unable to get Kubernetes config")
+		os.Exit(1)
+	}
+	k8sClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		setupLog.Error(err, "unable to create Kubernetes client")
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+
+	var tlsSecurityProfileSpec configv1.TLSProfileSpec
+	if secureMetricsServer {
+		apiAuthConfigmap := &corev1.ConfigMap{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: utils.ClientCACmName, Namespace: utils.ClientCACmNamespace}, apiAuthConfigmap)
+		if err != nil {
+			setupLog.Error(err, fmt.Sprintf("failed to get %s/%s configmap.", utils.ClientCACmNamespace, utils.ClientCACmName))
+			os.Exit(1)
+		}
+		var exists bool
+		metricsClientCA, exists = apiAuthConfigmap.Data[utils.ClientCACertKey]
+		if !exists {
+			keyErr := fmt.Errorf("the key %s is not found in %s/%s configmap", utils.ClientCACertKey, utils.ClientCACmNamespace, utils.ClientCACmName)
+			setupLog.Error(keyErr, "failed to get client CA certificate from configmap")
+			os.Exit(1)
+		}
+
+		olsconfig := &olsv1alpha1.OLSConfig{}
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: utils.OLSConfigName}, olsconfig)
+		if err != nil && client.IgnoreNotFound(err) != nil {
+			setupLog.Error(err, fmt.Sprintf("failed to get %s OLSConfig.", utils.OLSConfigName))
+			os.Exit(1)
+		}
+		if olsconfig.Spec.OLSConfig.TLSSecurityProfile != nil {
+			tlsSecurityProfileSpec = utiltls.GetTLSProfileSpec(olsconfig.Spec.OLSConfig.TLSSecurityProfile)
+		} else {
+			setupLog.Info("TLS profile is not defined in OLSConfig, fetch from API server")
+			profileAPIServer, err := utiltls.FetchAPIServerTlsProfile(k8sClient)
+			if err != nil {
+				setupLog.Error(err, "unable to get TLS profile from API server")
+				os.Exit(1)
+			}
+			tlsSecurityProfileSpec = utiltls.GetTLSProfileSpec(profileAPIServer)
+		}
+
+	}
+
+	metricsTLSSetup := func(tlsConf *tls.Config) {
+		if !secureMetricsServer {
+			return
+		}
+		tlsConf.ClientCAs = x509.NewCertPool()
+		tlsConf.ClientCAs.AppendCertsFromPEM([]byte(metricsClientCA))
+		tlsConf.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConf.MinVersion = utiltls.VersionCode(configv1.TLSProtocolVersion(utiltls.MinTLSVersion(tlsSecurityProfileSpec)))
+		ciphers, unsupportedCiphers := utiltls.CipherCodes(utiltls.TLSCiphers(tlsSecurityProfileSpec))
+		tlsConf.CipherSuites = ciphers
+		if len(unsupportedCiphers) > 0 {
+			setupLog.Info("TLS setup for metrics server contains unsupported ciphers", "unsupportedCiphers", unsupportedCiphers)
+		}
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			SecureServing: secureMetricsServer,
+			BindAddress:   metricsAddr,
+			CertDir:       certDir,
+			CertName:      certName,
+			KeyName:       keyName,
+			TLSOpts:       []func(*tls.Config){metricsTLSSetup},
+		},
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         enableLeaderElection,
+		LeaderElectionID:       "0ca034e3.openshift.io",
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				namespace: {},
+			},
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {
+					Namespaces: map[string]cache.Config{
+						namespace: {},
+						// The ClusterRole only permits reading the telemetry pull-secret by name
+						// (resourceNames=pull-secret). Kubernetes requires list/watch requests on a
+						// resourceNames-restricted rule to carry a matching metadata.name field selector,
+						// otherwise the informer's bare LIST is denied with 403 and the manager fails to start.
+						utils.TelemetryPullSecretNamespace: {
+							FieldSelector: fields.SelectorFromSet(fields.Set{"metadata.name": utils.TelemetryPullSecretName}),
+						},
+					},
+				},
+				&rbacv1.RoleBinding{}: {
+					Namespaces: map[string]cache.Config{
+						namespace:                          {},
+						utils.OpenShiftMonitoringNamespace: {},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	// Get Openshift version
+	major, minor, err := utils.GetOpenshiftVersion(k8sClient, ctx)
+	if err != nil {
+		setupLog.Error(err, "failed to get Openshift version.")
+		os.Exit(1)
+	}
+
+	rosaOKPProductEnv, err := utils.RosaOKPProductEnv(k8sClient, ctx, setupLog)
+	if err != nil {
+		setupLog.Error(err, "failed to detect ROSA OKP product; app-server will use OCP-only OKP retrieval")
+	} else if rosaOKPProductEnv != nil && rosaOKPProductEnv.Value == utils.RosaOKPProductHCP {
+		setupLog.Info("ROSA OKP product configured for app-server", "product", rosaOKPProductEnv.Value)
+	}
+
+	// Check if Prometheus Operator CRDs are available
+	prometheusAvailable := utils.IsPrometheusOperatorAvailable(ctx, k8sClient)
+	prometheusStatus := "NOT AVAILABLE"
+	if prometheusAvailable {
+		prometheusStatus = "AVAILABLE"
+	}
+	setupLog.Info("========================================")
+	setupLog.Info(">>> PROMETHEUS OPERATOR STATUS <<<", "status", prometheusStatus)
+	setupLog.Info("========================================")
+	if prometheusAvailable {
+		setupLog.Info("ServiceMonitor and PrometheusRule resources will be created")
+	} else {
+		setupLog.Info("ServiceMonitor and PrometheusRule resources will be skipped")
+	}
+
+	// In our implementation we use 2 different approaches for updating deployments in
+	// cases when objects that deployments depend on change. For resources owned by the operator
+	// we check whether they change during deployment reconciliation, for external resources we
+	// use watchers, configured below
+	// Configure watcher for external resources. We use here declarative configuration,
+	// so that the code do not need to be changed if anything modified.
+	watcherConfig := &utils.WatcherConfig{
+		// list here "special" external secrets that we need to watch in addition to
+		// external secrets specified in CR. To watch for additional secrets, add them here
+		Secrets: utils.SecretWatcherConfig{
+			SystemResources: []utils.SystemSecret{
+				{
+					Name:                utils.TelemetryPullSecretName,
+					Namespace:           utils.TelemetryPullSecretNamespace,
+					Description:         "OpenShift telemetry pull secret",
+					AffectedDeployments: []string{utils.OLSAppServerDeploymentName},
+				},
+				{
+					Name:                utils.ConsoleUIServiceCertSecretName,
+					Namespace:           namespace,
+					Description:         "Console UI TLS certificate",
+					AffectedDeployments: []string{utils.ConsoleUIDeploymentName},
+				},
+				{
+					Name:                utils.AgenticConsoleUIServiceCertSecretName,
+					Namespace:           namespace,
+					Description:         "Agentic Console UI TLS certificate",
+					AffectedDeployments: []string{utils.AgenticConsoleUIDeploymentName},
+				},
+				{
+					Name:                utils.PostgresCertsSecretName,
+					Namespace:           namespace,
+					Description:         "PostgreSQL TLS certificate (created by Service CA Operator)",
+					AffectedDeployments: []string{utils.PostgresDeploymentName, utils.OLSAppServerDeploymentName},
+				},
+				{
+					Name:                utils.OtelCollectorCertsSecretName,
+					Namespace:           namespace,
+					Description:         "OTEL Collector TLS certificate (created by Service CA Operator)",
+					AffectedDeployments: []string{utils.OtelCollectorDeploymentName, utils.OLSAppServerDeploymentName, utils.AgenticConfigurationConfigMapName},
+				},
+				{
+					// Gated at runtime by WatcherConfig.OpenShiftMCPServerTLSWatchEnabled
+					// (introspectionEnabled). Keep the entry static to avoid SystemResources races.
+					Name:                utils.OpenShiftMCPServerCertsSecretName,
+					Namespace:           namespace,
+					Description:         "OpenShift MCP server serving certificate (created by Service CA Operator)",
+					AffectedDeployments: []string{utils.OpenShiftMCPServerDeploymentName, utils.OLSAppServerDeploymentName, utils.AgenticConfigurationConfigMapName},
+				},
+				{
+					// Gated at runtime by WatcherConfig.RHOKPTLSWatchEnabled
+					// (!byokRAGOnly). Keep the entry static to avoid SystemResources races.
+					Name:                utils.RHOKPCertsSecretName,
+					Namespace:           namespace,
+					Description:         "RHOKP serving certificate (created by Service CA Operator)",
+					AffectedDeployments: []string{utils.RHOKPDeploymentName, utils.OLSAppServerDeploymentName, utils.AgenticConfigurationConfigMapName},
+				},
+			},
+		},
+		// list here "special" external config maps that we need to watch in addition to
+		// external config maps specified in CR. To watch for additional config maps, add them here
+		ConfigMaps: utils.ConfigMapWatcherConfig{
+			SystemResources: []utils.SystemConfigMap{
+				{
+					Name:                utils.DefaultOpenShiftCerts,
+					Namespace:           namespace,
+					Description:         "OpenShift default CA bundle",
+					AffectedDeployments: []string{utils.OLSAppServerDeploymentName},
+				},
+				{
+					Name:                utils.OLSCAConfigMap,
+					Namespace:           namespace,
+					Description:         "OpenShift Service CA certificate bundle",
+					AffectedDeployments: []string{utils.OLSAppServerDeploymentName, utils.PostgresDeploymentName},
+				},
+			},
+		},
+	}
+
+	if err = (&controller.OLSConfigReconciler{
+		Client: mgr.GetClient(),
+		Logger: ctrl.Log.WithName("controller").WithName("OLSConfig"),
+		Options: utils.OLSConfigReconcilerOptions{
+			OpenShiftMajor:                 major,
+			OpenshiftMinor:                 minor,
+			ConsoleUIImage:                 imagesMap["console-plugin"],
+			AgenticConsoleUIImage:          imagesMap["agentic-console-plugin"],
+			AlertsAdapterImage:             imagesMap["alerts-adapter"],
+			AgenticSandboxImage:            imagesMap["agentic-sandbox"],
+			OtelCollectorImage:             imagesMap["otel-collector"],
+			LightspeedServiceImage:         imagesMap["lightspeed-service"],
+			LightspeedServicePostgresImage: imagesMap["postgres-image"],
+			OpenShiftMCPServerImage:        imagesMap["openshift-mcp-server-image"],
+			DataverseExporterImage:         imagesMap["dataverse-exporter-image"],
+			RHOOKPImage:                    imagesMap["rhokp-image"],
+			RosaOKPProductEnv:              rosaOKPProductEnv,
+			Namespace:                      namespace,
+			PrometheusAvailable:            prometheusAvailable,
+		},
+		WatcherConfig: watcherConfig,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "OLSConfig")
+		os.Exit(1)
+	}
+	//+kubebuilder:scaffold:builder
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	setupLog.Info("starting manager")
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		setupLog.Error(err, "problem running manager")
+		os.Exit(1)
+	}
+}
+
+// GetWatchNamespace returns the namespace to watch or uses the default namespace.
+func getWatchNamespace() string {
+	ns, found := os.LookupEnv("WATCH_NAMESPACE")
+	if !found {
+		return utils.OLSNamespaceDefault
+	}
+	return ns
+}

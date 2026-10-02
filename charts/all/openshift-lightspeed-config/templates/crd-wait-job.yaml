@@ -1,0 +1,55 @@
+{{- if .Values.olsConfig.enabled }}
+{{- if not (regexMatch "^[^@]+@sha256:[a-f0-9]{64}$" .Values.crdWait.cliImage) }}
+{{- fail "crdWait.cliImage must be a deployment-supplied immutable OpenShift CLI image digest when olsConfig.enabled=true" }}
+{{- end }}
+{{- if or (lt (int .Values.crdWait.timeoutSeconds) 60) (gt (int .Values.crdWait.timeoutSeconds) 3600) }}
+{{- fail "crdWait.timeoutSeconds must be between 60 and 3600" }}
+{{- end }}
+{{- $serviceAccount := printf "%s-crd-waiter" .Release.Name | trunc 63 | trimSuffix "-" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-wait-for-olsconfig-crd" .Release.Name | trunc 63 | trimSuffix "-" | quote }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-2"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (int .Values.crdWait.timeoutSeconds) 60 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openshift-lightspeed-config-crd-waiter
+    spec:
+      serviceAccountName: {{ $serviceAccount | quote }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wait-for-crd
+          image: {{ .Values.crdWait.cliImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: [oc]
+          args:
+            - wait
+            - --for=condition=Established
+            - --timeout={{ int .Values.crdWait.timeoutSeconds }}s
+            - crd/olsconfigs.ols.openshift.io
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+{{- end }}

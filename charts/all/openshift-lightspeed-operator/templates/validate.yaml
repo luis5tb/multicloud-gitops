@@ -1,0 +1,1 @@
+{{- include "openshift-lightspeed-operator.validate" . -}}

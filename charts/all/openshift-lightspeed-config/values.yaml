@@ -1,0 +1,82 @@
+global:
+  clusterVersion: ""
+  localClusterName: ""
+
+clusterGroup:
+  name: ""
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+
+vertexCredentials:
+  externalSecret:
+    enabled: false
+    name: llm-creds-vertex
+    refreshInterval: 2m0s
+    vaultKey: secret/data/global/llm-creds-vertex
+    vaultProperty: credentials
+    targetKey: apitoken
+
+keycloakCA:
+  # When managed by ESO, the Vault property should contain the Keycloak
+  # issuer's verified PEM CA bundle. The same Secret is mounted read-only into
+  # MCP (for local OIDC verification) and the app-server (for A2A JWKS/token TLS).
+  externalSecret:
+    enabled: false
+    name: keycloak-issuer-ca
+    refreshInterval: 2m0s
+    vaultKey: secret/data/global/keycloak-issuer-ca
+    vaultProperty: ca-bundle
+    targetSecretName: keycloak-issuer-ca
+    targetKey: ca-bundle.crt
+
+olsConfig:
+  # The chart is inert until the downstream operator CRD, catalog, images, and
+  # deployment-specific values are verified.
+  enabled: false
+  providerName: vertex-google
+  model: gemini-3.8-flash
+  projectID: redhat-marketplace-dev
+  location: global
+  credentialsSecretName: llm-creds-vertex
+  credentialKey: apitoken
+  introspectionEnabled: false
+  mcpServerSecurity:
+    enabled: false
+    authorizationURL: ""
+    oauthAudience: openshift-mcp
+    caSecretName: keycloak-issuer-ca
+    caSecretKey: ca-bundle.crt
+    toolsets:
+      - core
+    # Keep the extra Prometheus ingress peer disabled unless the approved
+    # MCP toolset includes metrics and the data exposure has been reviewed.
+    allowPrometheusMetrics: false
+  a2a:
+    enabled: false
+    targetClusterID: ""
+    publicURL: ""
+    inboundAudience: lightspeed-a2a
+    allowedCallerClientID: acme-agent
+    exchangeClientID: lightspeed-mcp
+  # The operator requires a digest-pinned downstream Lightspeed service image
+  # when A2A is enabled. Never place a tag-only or floating image here.
+  serviceImage: ""
+
+# Argo Sync hook that waits for the downstream OLSConfig CRD before any
+# ExternalSecret/OLSConfig resource is applied. A deployment-controlled
+# immutable OpenShift CLI image is required when olsConfig.enabled=true.
+crdWait:
+  timeoutSeconds: 1800
+  cliImage: ""
+
+# Add an ingress allowance for the Praxis pods in their own namespace. The
+# operator's existing app-server policy continues to serve its console/ingress
+# use cases; do not create a direct OLS Route for A2A access.
+praxisIngress:
+  enabled: false
+  namespace: ""
+  podSelector:
+    app.kubernetes.io/name: praxis-proxy
+    app.kubernetes.io/instance: praxis-proxy

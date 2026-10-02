@@ -1,0 +1,78 @@
+kind: Kustomization
+# this generates Konflux release objects for OpenShift Lightspeed
+# run `make konflux-release` to generate the Konflux resources in release-konflux/
+# Release notes should be updated in the release objects, refer to https://konflux.pages.redhat.com/docs/users/releasing/releasing-with-an-advisory.html
+
+
+# channel
+namePrefix: stable-
+# version
+nameSuffix: -1.0.7-4
+
+resources:
+  - base/components.yaml
+  - base/bundle.yaml
+  - base/fbc-prod-v4-16.yaml
+  - base/fbc-prod-v4-17.yaml
+  - base/fbc-prod-v4-18.yaml
+  - base/fbc-prod-v4-19.yaml
+  - base/fbc-prod-v4-20.yaml
+  - base/fbc-staging.yaml
+
+patches:
+  - target:
+      kind: Release
+      name: ols
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-6w2x2
+  - target:
+      kind: Release
+      name: ols-bundle
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-bundle-dk56w
+  - target:
+      kind: Release
+      name: fbc-prod-416
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-fbc-v4-16-94pbb
+  - target:
+      kind: Release
+      name: fbc-prod-417
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-fbc-v4-17-9659q
+  - target:
+      kind: Release
+      name: fbc-prod-418
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-fbc-v4-18-2nz5g
+  - target:
+      kind: Release
+      name: fbc-prod-419
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-fbc-v4-19-fl87m
+  - target:
+      kind: Release
+      name: fbc-prod-420
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-fbc-v4-20-jj52g
+  - target:
+      kind: Release
+      name: fbc-staging
+    patch: |-
+      - op: replace
+        path: /spec/snapshot
+        value: ols-fbc-v4-19-vpv6g
