@@ -11,8 +11,8 @@
 # contracts").
 global:
   olsClusters:
-    api-bm-cluster-e2e-bos-redhat-com-6443:
-      apiURL: https://api.bm-cluster.e2e.bos.redhat.com:6443
+    api-ocp.pgt8r.sandbox288.opentlc.com-6443:
+      apiURL: https://api.ocp.pgt8r.sandbox288.opentlc.com:6443
       upstreamHost: lightspeed-app-server.openshift-lightspeed.svc.cluster.local
       upstreamPort: 8443
       upstreamSNI: lightspeed-app-server.openshift-lightspeed.svc
@@ -164,12 +164,12 @@ clusterGroup:
         - name: openshiftOIDC.enabled
           value: "false"
         - name: openshiftOIDC.issuerURL
-          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+          value: https://keycloak.apps.ocp.pgt8r.sandbox288.opentlc.com/realms/rca
         # The web console's public route (`oc whoami --show-console`), used
         # as the redirect URI Keycloak accepts for the console's OIDC
         # client. Required once openshiftOIDC.enabled is "true".
         - name: openshiftOIDC.consoleRoute
-          value: https://console-openshift-console.apps.bm-cluster.e2e.bos.redhat.com
+          value: https://console-openshift-console.apps.ocp.pgt8r.sandbox288.opentlc.com
         # Cluster-admin ServiceAccount + non-expiring token Secret in
         # openshift-config, independent of openshiftOIDC.enabled. Safe to
         # enable any time; run `make admin-break-glass-kubeconfig` after
@@ -212,7 +212,7 @@ clusterGroup:
         # static secret. See:
         # https://www.keycloak.org/2026/01/federated-client-authentication
         - name: keycloak.spiffeIdentityProvider.trustDomain
-          value: apps.bm-cluster.e2e.bos.redhat.com
+          value: apps.ocp.pgt8r.sandbox288.opentlc.com
         - name: keycloak.spiffeIdentityProvider.bundleEndpoint
           value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
         # Namespace/ServiceAccount pair ZTWIM/SPIRE issues ACME's JWT-SVID
@@ -256,12 +256,12 @@ clusterGroup:
         - name: route.enabled
           value: "true"
         - name: route.host
-          value: openshift-lightspeed.apps.bm-cluster.e2e.bos.redhat.com
+          value: openshift-lightspeed.apps.ocp.pgt8r.sandbox288.opentlc.com
         # OLS may take a while to complete a tool-using, multi-turn analysis.
         - name: route.timeout
           value: 22m
         - name: identity.keycloak.issuerUrl
-          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+          value: https://keycloak.apps.ocp.pgt8r.sandbox288.opentlc.com/realms/rca
         # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide
         # private IdP egress switch. Its only configured callout is this
         # static Keycloak JWKS URL; do not add user-controlled URLs here.
@@ -296,7 +296,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/acme-agent
         - name: image.tag
-          value: da3c4e81
+          value: 3b27fd56
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
@@ -315,7 +315,7 @@ clusterGroup:
         # one-item a2a.remoteAgents list; there is no separate single-agent
         # shorthand.
         - name: a2a.remoteAgents[0].endpoint
-          value: https://openshift-lightspeed.apps.bm-cluster.e2e.bos.redhat.com
+          value: https://openshift-lightspeed.apps.ocp.pgt8r.sandbox288.opentlc.com
         - name: a2a.remoteAgents[0].name
           value: openshift_lightspeed
         - name: a2a.remoteAgents[0].description
@@ -333,9 +333,9 @@ clusterGroup:
         - name: auth.mode
           value: keycloak
         - name: auth.keycloak.issuerUrl
-          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+          value: https://keycloak.apps.ocp.pgt8r.sandbox288.opentlc.com/realms/rca
         - name: auth.keycloak.tokenUrl
-          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca/protocol/openid-connect/token
+          value: https://keycloak.apps.ocp.pgt8r.sandbox288.opentlc.com/realms/rca/protocol/openid-connect/token
         - name: auth.keycloak.clientId
           value: acme-agent
         - name: identity.spiffe.enabled
@@ -345,7 +345,7 @@ clusterGroup:
         # Must match the cluster's trust domain (see the
         # zero-trust-workload-identity-manager application's comment above).
         - name: identity.clusterSpiffeID.trustDomain
-          value: apps.bm-cluster.e2e.bos.redhat.com
+          value: apps.ocp.pgt8r.sandbox288.opentlc.com
         - name: route.enabled
           value: "true"
         # Allow the browser's A2A request to survive the long-running analysis.
@@ -394,22 +394,22 @@ clusterGroup:
         # happened -- empty means this patch only sets the A2A_* env vars
         # below, not the image.
         - name: appServerPatch.image.repository
-          value: ""
+          value: quay.io/ltomasbo/openshift-lightspeed
         - name: appServerPatch.image.tag
-          value: ""
+          value: 3b27fd56
         # Same Keycloak issuer as openshiftOIDC.issuerURL/
         # identity.keycloak.issuerUrl above -- replace together with every
-        # other bm-cluster.e2e.bos.redhat.com reference in this file.
+        # other ocp.pgt8r.sandbox288.opentlc.com reference in this file.
         - name: appServerPatch.a2a.keycloakIssuerURL
-          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+          value: https://keycloak.apps.ocp.pgt8r.sandbox288.opentlc.com/realms/rca
         # Same routing id as this file's global.olsClusters map key --
         # must stay in sync with it.
         - name: appServerPatch.a2a.clusterId
-          value: api-bm-cluster-e2e-bos-redhat-com-6443
+          value: api-ocp.pgt8r.sandbox288.opentlc.com-6443
         # Same public A2A endpoint as praxis-proxy's route.host / acme-agent's
         # a2a.remoteAgents[0].endpoint above.
         - name: appServerPatch.a2a.rpcUrl
-          value: https://openshift-lightspeed.apps.bm-cluster.e2e.bos.redhat.com
+          value: https://openshift-lightspeed.apps.ocp.pgt8r.sandbox288.opentlc.com
     mao-mongo:
       name: mao-mongo
       namespace: mao
