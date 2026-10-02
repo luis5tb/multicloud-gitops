@@ -1,3 +1,7 @@
+{{- $mismatches := list -}}
+{{- range .Values.policy.allowedCallers -}}
+{{- $mismatches = append $mismatches (printf "claim.azp != '%s'" .) -}}
+{{- end }}
 plugins:
   - name: jwt-client
     kind: identity/jwt
@@ -7,8 +11,14 @@ plugins:
       - perform_http
     on_error: fail
     config:
-      role: client
+      # Client credentials are projected into the user/subject claim bag by
+      # this resolver role; role: client only populates client.* and does not
+      # make the JWT's azp claim available to these APL predicates.
+      role: user
       header: Authorization
+      claims:
+        include:
+          - azp
       trusted_issuers:
         - issuer: "{{ trimSuffix "/" .Values.identity.keycloak.issuerUrl }}"
           audiences:
@@ -39,18 +49,8 @@ routes:
       pre_invocation:
         - "allow"
 
-  # Catch-all: all other HTTP requests require a valid Keycloak client token
-  # and an explicit allow-list match. The earlier exact routes take priority.
-  #
-  # The identity/jwt plugin's claim_mapper (both "keycloak" and "standard"
-  # presets) always normalizes the client claim -- azp, client_id, or the
-  # pre-2023 Keycloak "clientId" -- into a single mapped field named
-  # "client_id". "azp" is only ever an input candidate, never the exposed
-  # field name, so `claim.azp` is always undefined here; compare against
-  # `claim.client_id` instead. Also note pre_invocation entries are bare
-  # boolean expressions (see the "allow" entries above) -- wrapping one in
-  # `require(...)` is accepted by the config schema but never evaluates
-  # true, so it fails closed regardless of the claim compared.
+  # Catch-all: all other HTTP requests require a valid Keycloak token and an
+  # explicit allow-list match. The earlier exact routes take priority.
   - http:
       path_prefix: /
     authentication:
@@ -58,6 +58,4 @@ routes:
         - jwt-client
     authorization:
       pre_invocation:
-{{ range .Values.policy.allowedCallers }}
-        - {{ printf "claim.client_id == '%s'" . | quote }}
-{{ end }}
+        - {{ printf "%s: deny('client is not allow-listed', 'caller_not_allowed')" (join " && " $mismatches) | quote }}

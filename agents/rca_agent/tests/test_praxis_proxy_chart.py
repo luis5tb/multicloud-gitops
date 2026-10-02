@@ -40,7 +40,7 @@ def test_praxis_chart_renders_fail_closed_keycloak_authorization_policy():
 
     identity_plugin = policy["plugins"][0]
     assert identity_plugin["kind"] == "identity/jwt"
-    assert identity_plugin["config"]["role"] == "client"
+    assert identity_plugin["config"]["role"] == "user"
     assert identity_plugin["config"]["header"] == "Authorization"
     assert identity_plugin["config"]["claims"]["include"] == ["azp"]
     assert identity_plugin["config"]["trusted_issuers"][0]["issuer"] == (
@@ -62,7 +62,30 @@ def test_praxis_chart_renders_fail_closed_keycloak_authorization_policy():
     assert catch_all["http"] == {"path_prefix": "/"}
     assert catch_all["authentication"]["steps"] == ["jwt-client"]
     assert catch_all["authorization"]["pre_invocation"] == [
-        "require(claim.azp == 'acme-agent')",
+        (
+            "claim.azp != 'acme-agent': "
+            "deny('client is not allow-listed', 'caller_not_allowed')"
+        ),
+    ]
+
+
+def test_praxis_allow_list_denies_only_callers_outside_the_configured_set():
+    resources = _render(
+        "charts/all/praxis-proxy",
+        "--set",
+        "identity.keycloak.issuerUrl=https://keycloak.example.com/realms/rca",
+        "--set-json",
+        'policy.allowedCallers=["acme-agent","trusted-client"]',
+    )
+    config = _one(resources, "ConfigMap", "praxis-proxy")["data"]
+    policy = yaml.safe_load(config["policy.yaml"])
+
+    assert policy["plugins"][0]["config"]["claims"]["include"] == ["azp"]
+    assert policy["routes"][2]["authorization"]["pre_invocation"] == [
+        (
+            "claim.azp != 'acme-agent' && claim.azp != 'trusted-client': "
+            "deny('client is not allow-listed', 'caller_not_allowed')"
+        ),
     ]
 
 

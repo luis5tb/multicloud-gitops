@@ -19,16 +19,15 @@ the internal Service.
 `files/policy.yaml` is rendered into the chart ConfigMap and loaded by the
 Praxis `policy` filter at process startup. The `identity/jwt` plugin validates
 `Authorization` against the configured Keycloak issuer, JWKS endpoint, and
-`rca-agent` audience. Its `claim_mapper` (`keycloak`/`standard` presets)
-normalizes the token's client identity -- `azp`, `client_id`, or the
-pre-2023 Keycloak `clientId` -- into a single mapped field always named
-`client_id`; `azp` itself is never the exposed field, so APL matches
-`claim.client_id` (not `claim.azp`, and not `sub`). `policy.allowedCallers`
-defaults to the explicit allow-list `[acme-agent]`; an absent identity, a
-different client, or a policy/JWKS failure does not reach RCA. Also note
-`pre_invocation` entries must be bare boolean expressions (see the two
-unauthenticated routes' `"allow"` entries) -- wrapping a comparison in
-`require(...)` is accepted by the config schema but never evaluates true.
+`rca-agent` audience. It uses `role: user` so the verified token's explicitly
+included `azp` claim is available to APL as `claim.azp`; `role: client` places
+identity in `client.*` and does not bridge that claim into the predicates used
+here. The catch-all has an explicit `deny(...)` effect when `azp` does not
+match the configured allow-list. `policy.allowedCallers` defaults to
+`[acme-agent]`; an absent or different caller, an invalid token, or a
+policy/JWKS failure does not reach RCA. A bare boolean comparison in
+`pre_invocation` is not an authorization action and does not deny a request,
+so the explicit `deny(...)` is essential.
 
 Two unauthenticated HTTP paths are intentionally forwarded:
 
