@@ -1,0 +1,61 @@
+{{- if .Values.mcpAccess.enabled }}
+{{- if not .Values.keycloak.lightspeedMcp.enabled }}
+{{- fail "keycloak.lightspeedMcp.enabled must be true when mcpAccess.enabled is true" }}
+{{- end }}
+{{- if not .Values.openshiftOIDC.enabled }}
+{{- fail "openshiftOIDC.enabled must be true when mcpAccess.enabled so the API server can map the Keycloak token groups" }}
+{{- end }}
+{{- if empty .Values.mcpAccess.groupName }}
+{{- fail "mcpAccess.groupName must identify the OpenShift-mapped Keycloak group" }}
+{{- end }}
+{{- if empty .Values.openshiftOIDC.groupsPrefix }}
+{{- fail "openshiftOIDC.groupsPrefix must stay non-empty to prevent reserved-group collisions" }}
+{{- end }}
+{{- $expectedGroup := printf "%s%s" .Values.openshiftOIDC.groupsPrefix .Values.keycloak.acmeGroupName }}
+{{- if ne .Values.mcpAccess.groupName $expectedGroup }}
+{{- fail (printf "mcpAccess.groupName must match ACME's mapped Keycloak group %q" $expectedGroup) }}
+{{- end }}
+{{- if empty .Values.mcpAccess.namespaces }}
+{{- fail "mcpAccess.namespaces must define explicit namespace-scoped Role rules when enabled" }}
+{{- end }}
+{{- range $namespace, $rules := .Values.mcpAccess.namespaces }}
+{{- if empty $rules }}
+{{- fail (printf "mcpAccess.namespaces.%s must define at least one explicit rule" $namespace) }}
+{{- end }}
+{{- $baseName := printf "%s-%s" $.Values.mcpAccess.roleName $namespace }}
+{{- $resourceName := $baseName }}
+{{- if gt (len $baseName) 63 }}
+{{- $resourceName = printf "%s-%s" ($baseName | trunc 54 | trimSuffix "-") ($namespace | sha256sum | trunc 8) }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $resourceName }}
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "keycloak-oidc.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $.Values.rbac.syncWave | quote }}
+rules:
+  {{- toYaml $rules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $resourceName }}
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "keycloak-oidc.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $.Values.rbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $.Values.mcpAccess.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $resourceName }}
+{{- end }}
+{{- end }}

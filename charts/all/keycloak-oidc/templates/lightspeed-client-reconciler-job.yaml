@@ -1,0 +1,116 @@
+{{- if .Values.keycloak.lightspeedMcp.enabled }}
+{{- if not .Values.openshiftOIDC.issuerURL }}
+{{- fail "openshiftOIDC.issuerURL is required to reconcile the Lightspeed Keycloak client" }}
+{{- end }}
+{{- if not (hasPrefix "https://" .Values.openshiftOIDC.issuerURL) }}
+{{- fail "openshiftOIDC.issuerURL must use HTTPS because the reconciler sends Keycloak administrator credentials to it" }}
+{{- end }}
+{{- if not (hasSuffix (printf "/realms/%s" .Values.keycloak.realm) .Values.openshiftOIDC.issuerURL) }}
+{{- fail "openshiftOIDC.issuerURL must identify keycloak.realm for the Lightspeed client reconciler" }}
+{{- end }}
+{{- if or (not .Values.keycloak.spiffeIdentityProvider.enabled) (not .Values.keycloak.spiffeIdentityProvider.trustDomain) (not .Values.keycloak.spiffeIdentityProvider.bundleEndpoint) }}
+{{- fail "a configured SPIFFE identity provider is required to reconcile the Lightspeed federated client" }}
+{{- end }}
+{{- if or (not .Values.keycloak.lightspeedMcp.workload.namespace) (not .Values.keycloak.lightspeedMcp.workload.serviceAccount) }}
+{{- fail "keycloak.lightspeedMcp.workload namespace and ServiceAccount must match the deployed OLS workload" }}
+{{- end }}
+# KeycloakRealmImport does not continuously reconcile an already imported
+# realm. This PostSync job idempotently applies only the Lightspeed/ACME
+# client, audience, groups-mapper and ACME service-account group changes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.keycloak.realm }}-lightspeed-client-reconciler
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "15"
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded,BeforeHookCreation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "keycloak-oidc.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reconcile
+          image: {{ .Values.realmSecretsReconciler.image | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          command: ["python3", "/scripts/reconcile.py"]
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: KEYCLOAK_BASE_URL
+              value: {{ trimSuffix (printf "/realms/%s" .Values.keycloak.realm) .Values.openshiftOIDC.issuerURL | quote }}
+            - name: KEYCLOAK_REALM
+              value: {{ .Values.keycloak.realm | quote }}
+            - name: KEYCLOAK_SKIP_TLS_VERIFY
+              value: {{ .Values.realmSecretsReconciler.skipTlsVerify | quote }}
+            - name: KEYCLOAK_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloak.adminUser.secretName }}
+                  key: {{ .Values.keycloak.adminUser.usernameKey }}
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.keycloak.adminUser.secretName }}
+                  key: {{ .Values.keycloak.adminUser.passwordKey }}
+            - name: ACME_CLIENT_ID
+              value: {{ .Values.keycloak.acmeClientId | quote }}
+            - name: LIGHTSPEED_CLIENT_ID
+              value: {{ .Values.keycloak.lightspeedMcp.clientId | quote }}
+            - name: LIGHTSPEED_CLIENT_NAME
+              value: {{ .Values.keycloak.lightspeedMcp.clientName | quote }}
+            - name: LIGHTSPEED_INBOUND_AUDIENCE
+              value: {{ .Values.keycloak.lightspeedMcp.inboundAudience | quote }}
+            - name: MCP_AUDIENCE_CLIENT_ID
+              value: {{ .Values.keycloak.mcpAudienceClientId | quote }}
+            - name: SPIFFE_ALIAS
+              value: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
+            - name: LIGHTSPEED_SPIFFE_SUBJECT
+              value: {{ printf "spiffe://%s/ns/%s/sa/%s" .Values.keycloak.spiffeIdentityProvider.trustDomain .Values.keycloak.lightspeedMcp.workload.namespace .Values.keycloak.lightspeedMcp.workload.serviceAccount | quote }}
+            - name: ACME_GROUP_NAME
+              value: {{ .Values.keycloak.acmeGroupName | quote }}
+            {{- if .Values.realmSecretsReconciler.caBundleConfigMapName }}
+            - name: KEYCLOAK_CA_BUNDLE
+              value: /etc/keycloak-ca/ca-bundle.crt
+            {{- end }}
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            {{- if .Values.realmSecretsReconciler.caBundleConfigMapName }}
+            - name: keycloak-ca
+              mountPath: /etc/keycloak-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: script
+          configMap:
+            name: {{ include "keycloak-oidc.fullname" . }}-lightspeed-client-reconciler
+            defaultMode: 0444
+        {{- if .Values.realmSecretsReconciler.caBundleConfigMapName }}
+        - name: keycloak-ca
+          configMap:
+            name: {{ .Values.realmSecretsReconciler.caBundleConfigMapName }}
+            items:
+              - key: ca-bundle.crt
+                path: ca-bundle.crt
+        {{- end }}
+{{- end }}

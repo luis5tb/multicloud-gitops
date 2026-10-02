@@ -1,0 +1,14 @@
+{{- if .Values.keycloak.lightspeedMcp.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keycloak-oidc.fullname" . }}-lightspeed-client-reconciler
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "14"
+data:
+  reconcile.py: |
+{{ .Files.Get "files/reconcile-lightspeed-clients.py" | indent 4 }}
+{{- end }}

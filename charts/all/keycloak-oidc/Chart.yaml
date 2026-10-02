@@ -1,0 +1,6 @@
+apiVersion: v2
+name: keycloak-oidc
+description: Keycloak realm claims, optional OpenShift Native OIDC, and scoped agent RBAC
+type: application
+version: 0.1.0
+appVersion: "1.0"

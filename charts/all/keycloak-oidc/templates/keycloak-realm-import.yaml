@@ -1,0 +1,275 @@
+{{- if .Values.realmImport.enabled }}
+{{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+{{- if or (not .Values.keycloak.spiffeIdentityProvider.trustDomain) (not .Values.keycloak.spiffeIdentityProvider.bundleEndpoint) }}
+{{- fail "keycloak.spiffeIdentityProvider.trustDomain and .bundleEndpoint must be set when keycloak.spiffeIdentityProvider.enabled is true" }}
+{{- end }}
+{{- end }}
+{{- if .Values.keycloak.lightspeedMcp.enabled }}
+{{- if not .Values.keycloak.spiffeIdentityProvider.enabled }}
+{{- fail "keycloak.spiffeIdentityProvider.enabled must be true for the lightspeed-mcp federated client" }}
+{{- end }}
+{{- if or (not .Values.keycloak.lightspeedMcp.workload.namespace) (not .Values.keycloak.lightspeedMcp.workload.serviceAccount) }}
+{{- fail "keycloak.lightspeedMcp.workload.namespace and serviceAccount must match the deployed Lightspeed app-server workload" }}
+{{- end }}
+{{- if or (not .Values.keycloak.lightspeedMcp.clientId) (not .Values.keycloak.lightspeedMcp.inboundAudience) }}
+{{- fail "keycloak.lightspeedMcp.clientId and inboundAudience must be non-empty when enabled" }}
+{{- end }}
+{{- if eq .Values.keycloak.lightspeedMcp.clientId .Values.keycloak.mcpAudienceClientId }}
+{{- fail "keycloak.lightspeedMcp.clientId must be distinct from the openshift-mcp audience client" }}
+{{- end }}
+{{- end }}
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: {{ .Values.keycloak.realm }}
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.realmImport.syncWave | quote }}
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  keycloakCRName: {{ .Values.keycloak.name }}
+  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled }}
+  placeholders:
+    {{- if .Values.keycloak.consoleClientSecretVaultKey }}
+    # Resolves $(CONSOLE_CLIENT_SECRET) below into openshift-console's client
+    # secret, sourced from the same Secret/Vault value
+    # openshiftOIDC.consoleClientSecretName reads (see console-client-secret.yaml)
+    # -- see that file's comment for why this needs its own copy of the
+    # Secret in this namespace rather than reading the openshift-config one
+    # directly.
+    CONSOLE_CLIENT_SECRET:
+      secret:
+        name: {{ .Values.openshiftOIDC.consoleClientSecretName }}
+        key: clientSecret
+    {{- end }}
+    {{- if .Values.keycloak.consoleAdminUser.enabled }}
+    # Resolves $(CONSOLE_ADMIN_PASSWORD) below into consoleAdminUser's
+    # initial password (see console-admin-user-secret.yaml).
+    CONSOLE_ADMIN_PASSWORD:
+      secret:
+        name: {{ .Values.keycloak.consoleAdminUser.passwordSecretName }}
+        key: password
+    {{- end }}
+  {{- end }}
+  realm:
+    realm: {{ .Values.keycloak.realm | quote }}
+    enabled: true
+    displayName: {{ .Values.keycloak.displayName | quote }}
+    groups:
+      - name: {{ .Values.keycloak.groupName | quote }}
+      {{- if .Values.keycloak.adminGroupName }}
+      - name: {{ .Values.keycloak.adminGroupName | quote }}
+      {{- end }}
+      - name: {{ .Values.keycloak.acmeGroupName | quote }}
+    clients:
+      # This client is only for human `oc login`/console access via OpenShift
+      # Native OIDC; workload A2A authentication uses separate confidential
+      # clients below.
+      - clientId: {{ .Values.keycloak.clientId | quote }}
+        name: {{ .Values.keycloak.clientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: true
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        # Needed for `oc login` when openshiftOIDC.enabled registers this
+        # client as the "cli" OIDC platform client (public, no secret).
+        # OpenShift's built-in external-OIDC CLI flow listens on localhost:8080.
+        redirectUris:
+          - "http://localhost:8080"
+          - "http://localhost:8080/callback"
+        protocolMappers:
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
+          - name: openshift-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: openshift
+              access.token.claim: "true"
+      {{- if .Values.keycloak.lightspeedMcp.enabled }}
+      # Confidential client used by the locally maintained Lightspeed A2A
+      # handler to exchange ACME's validated caller token for an
+      # openshift-mcp-audience token. The SPIFFE subject must match the real
+      # operator-managed Lightspeed application ServiceAccount.
+      - clientId: {{ .Values.keycloak.lightspeedMcp.clientId | quote }}
+        name: {{ .Values.keycloak.lightspeedMcp.clientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        clientAuthenticatorType: federated-jwt
+        attributes:
+          jwt.credential.issuer: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
+          jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" .Values.keycloak.spiffeIdentityProvider.trustDomain .Values.keycloak.lightspeedMcp.workload.namespace .Values.keycloak.lightspeedMcp.workload.serviceAccount | quote }}
+          standard.token.exchange.enabled: "true"
+        protocolMappers:
+          - name: openshift-mcp-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: {{ .Values.keycloak.mcpAudienceClientId | quote }}
+              access.token.claim: "true"
+          # Verify this mapper on a live RFC 8693 token: Keycloak's group
+          # mapper behavior during exchange depends on which client scope is
+          # applied by the installed Keycloak version.
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
+      {{- end }}
+      # Audience client required by Keycloak's RFC 8693 exchange. The
+      # operator-managed MCP server forwards the exchanged token to the API
+      # server, so this audience must also be trusted in OpenShift OIDC.
+      - clientId: {{ .Values.keycloak.mcpAudienceClientId | quote }}
+        name: {{ .Values.keycloak.mcpAudienceClientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+      # Confidential client used by acme-agent's client-credentials call.
+      #
+      # ACME authenticates with its own SPIRE JWT-SVID. Its Token A receives
+      # the Lightspeed-specific inbound audience plus the real Lightspeed
+      # exchange-client audience; both are emitted only when the Lightspeed
+      # client is enabled.
+      - clientId: {{ .Values.keycloak.acmeClientId | quote }}
+        name: {{ .Values.keycloak.acmeClientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+        clientAuthenticatorType: federated-jwt
+        attributes:
+          jwt.credential.issuer: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
+          jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" .Values.keycloak.spiffeIdentityProvider.trustDomain .Values.keycloak.acmeWorkload.namespace .Values.keycloak.acmeWorkload.serviceAccount | quote }}
+        {{- end }}
+        protocolMappers:
+          {{- if .Values.keycloak.lightspeedMcp.enabled }}
+          - name: {{ printf "%s-audience" .Values.keycloak.lightspeedMcp.inboundAudience }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ .Values.keycloak.lightspeedMcp.inboundAudience | quote }}
+              access.token.claim: "true"
+          - name: {{ printf "%s-audience" .Values.keycloak.lightspeedMcp.clientId }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.client.audience: {{ .Values.keycloak.lightspeedMcp.clientId | quote }}
+              access.token.claim: "true"
+          {{- end }}
+          # Without this, ACME's caller token has no groups claim for either
+          # OpenShift RBAC or the downstream exchanging client's token.
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
+      # Confidential client registered as the web console's OIDC platform
+      # client when openshiftOIDC.enabled is true.
+      #
+      # If keycloak.consoleClientSecretVaultKey is set, its secret comes from
+      # the placeholder above (Vault-backed, no manual step). Otherwise
+      # Keycloak generates this client's secret at import time -- MANUAL
+      # STEP: copy it into a Secret in the openshift-config namespace (see
+      # the README) before setting openshiftOIDC.enabled=true, or the
+      # console will fail to log in with "no OIDC client found" / invalid_client.
+      - clientId: {{ .Values.keycloak.consoleClientId | quote }}
+        name: {{ .Values.keycloak.consoleClientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: true
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        {{- if .Values.keycloak.consoleClientSecretVaultKey }}
+        secret: $(CONSOLE_CLIENT_SECRET)
+        {{- end }}
+        {{- if .Values.openshiftOIDC.consoleRoute }}
+        redirectUris:
+          - "{{ .Values.openshiftOIDC.consoleRoute }}/auth/callback"
+        {{- end }}
+        # Without this, tokens issued to this client carry no groups claim,
+        # so claimMappings.groups on Authentication/cluster has nothing to
+        # map -- console users authenticate fine but land in no groups at
+        # all, silently losing any RBAC granted via keycloak.adminGroupName.
+        protocolMappers:
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
+    # Puts acme-agent's own service-account user into its dedicated group
+    # so its tokens actually carry the groups claim the mapper above adds.
+    # serviceAccountsEnabled: true auto-creates this user
+    # (service-account-<clientId>); this only sets its group membership, it
+    # does not create the user itself.
+    users:
+      - username: {{ printf "service-account-%s" .Values.keycloak.acmeClientId | quote }}
+        serviceAccountClientId: {{ .Values.keycloak.acmeClientId | quote }}
+        enabled: true
+        groups:
+          - {{ printf "/%s" .Values.keycloak.acmeGroupName | quote }}
+      {{- if .Values.keycloak.consoleAdminUser.enabled }}
+      # Human user in adminGroupName (-> cluster-admin, see that value's
+      # comment), so the console has at least one working login once
+      # openshiftOIDC.enabled is true, with no manual Admin Console step.
+      # temporary: true forces a password change on first login -- the
+      # generated Vault value is a bootstrap credential, not meant to be
+      # kept long-term.
+      - username: {{ .Values.keycloak.consoleAdminUser.username | quote }}
+        enabled: true
+        credentials:
+          - type: password
+            value: $(CONSOLE_ADMIN_PASSWORD)
+            temporary: true
+        groups:
+          - {{ printf "/%s" .Values.keycloak.adminGroupName | quote }}
+      {{- end }}
+    {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+    # Backs the confidential workload clients' federated-jwt authentication
+    # above. Config key names are this Keycloak build's actual internal
+    # field names (verified against the running server), not the field
+    # labels shown in the Admin Console -- "issuer" holds the SPIFFE trust
+    # domain, not an OIDC issuer URL, because Keycloak's SpiffeIdentityProviderConfig
+    # reuses the generic IdentityProviderModel.ISSUER config key for it.
+    identityProviders:
+      - alias: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
+        providerId: spiffe
+        enabled: true
+        config:
+          issuer: {{ printf "spiffe://%s" .Values.keycloak.spiffeIdentityProvider.trustDomain | quote }}
+          bundleEndpoint: {{ .Values.keycloak.spiffeIdentityProvider.bundleEndpoint | quote }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,41 @@
+{{- if .Values.rbac.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.agenticRun.roleName }}
+  namespace: {{ .Values.agenticRun.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.rbac.syncWave | quote }}
+rules:
+  # This Role supports the separate human AgenticRun UI/CLI workflow. It does
+  # not grant permissions to the Lightspeed MCP path. "patch" is required for
+  # server-side apply; do not add list/watch or unrelated resources without a
+  # separately reviewed use case.
+  - apiGroups: ["agentic.openshift.io"]
+    resources: ["agenticruns"]
+    verbs: ["create", "patch", "get"]
+  - apiGroups: ["agentic.openshift.io"]
+    resources: ["analysisresults"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.agenticRun.roleName }}
+  namespace: {{ .Values.agenticRun.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.rbac.syncWave | quote }}
+subjects:
+  {{- range .Values.agenticRun.groupNames }}
+  - kind: Group
+    name: {{ . | quote }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.agenticRun.roleName }}
+{{- end }}
