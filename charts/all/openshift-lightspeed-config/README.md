@@ -104,6 +104,45 @@ surface (not yet confirmed to exist) or a reviewed operator fork/patch,
 which is explicitly called out in the plan as a separate, blocking piece of
 work -- it is out of scope for this chart alone to deliver.
 
+## Temporary A2A bridge
+
+The OLSConfig CRD has no field for a custom app-server image -- the operator
+picks that via its own `--service-image` startup flag, not `OLSConfig` (see
+the top-level `README.md` Phase 0) -- and no field for the `A2A_*`
+environment variables `vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py`
+requires to serve A2A requests at all (`A2A_KEYCLOAK_ISSUER_URL`,
+`A2A_CLUSTER_ID`, `A2A_RPC_URL` are required; it raises
+`A2AConfigurationError` and never starts the A2A endpoint without them).
+Both are properties of the operator-managed app-server Deployment, which
+this chart does not own and which the operator continuously reconciles.
+
+`appServerPatch` (disabled by default) works around this by patching that
+Deployment directly, after the fact:
+
+- `templates/appserver-patch-rbac.yaml` -- a ServiceAccount/Role/RoleBinding
+  scoped to `patch` on exactly the named Deployment
+  (`appServerPatch.deploymentName`, an unconfirmed-guess name like
+  `appServer.podSelectorLabels` above -- verify against `oc get deployment -n
+  <namespace>`).
+- `templates/appserver-patch-job.yaml` -- an ArgoCD `Sync` hook Job that
+  polls for the Deployment to exist (the operator may not have reconciled
+  `OLSConfig` into it yet on a fresh install) and applies a strategic merge
+  patch setting the container's `image` (if `appServerPatch.image.repository`/
+  `tag` are set) and merging the `A2A_*` env vars built from
+  `appServerPatch.a2a`/`extraEnv` -- by name, so any other env var or
+  container the operator set is left alone.
+- `templates/appserver-patch-cronjob.yaml` -- re-applies the same patch on a
+  schedule (`appServerPatch.schedule`), because the operator's own reconcile
+  loop can silently revert it on a later pass.
+
+**This is explicitly temporary.** Delete `appServerPatch` from `values.yaml`,
+`templates/appserver-patch-*.yaml`, and `files/patch_appserver.py` entirely
+once the OpenShift Lightspeed Operator/OLSConfig CRD natively supports a
+custom service image and A2A configuration (i.e. once the A2A changes in
+`vendor/lightspeed-service` are upstreamed and the operator exposes them as
+real CRD fields) -- at that point this whole mechanism becomes dead weight
+fighting a problem the operator itself already solves.
+
 ## Known gaps / deliberately out of scope
 
 - `values-secret.yaml.template`'s `llm-creds-vertex` entry is commented out

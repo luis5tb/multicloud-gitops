@@ -48,12 +48,18 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     podman push quay.io/${QUAY_ORG}/openshift-lightspeed:${OLS_TAG}
     ```
 
-    How this custom OLS image actually gets used by the OpenShift Lightspeed
-    Operator (its `--service-image` startup flag, not an `OLSConfig` field)
-    is an open question this pattern hasn't confirmed against the live
-    catalog yet -- see
-    `charts/all/openshift-lightspeed-config/README.md` and
-    `LIGHTSPEED_DESIGN.md`'s Phase 0 spikes before relying on it.
+    The OpenShift Lightspeed Operator picks the app-server image via its own
+    `--service-image` startup flag, not an `OLSConfig` field, and has no CRD
+    field for the `A2A_*` environment variables the vendored service needs
+    either. `charts/all/openshift-lightspeed-config`'s `appServerPatch`
+    (disabled by default) is a **temporary** bridge for both: it patches the
+    operator-managed app-server Deployment directly, after the fact, with
+    this image and the required `A2A_*` settings (`keycloakIssuerURL`,
+    `clusterId`, `rpcUrl`, plus the optional audience/azp overrides) --
+    see that chart's README.md ("Temporary A2A bridge") for how to set it
+    and why it has to re-assert itself periodically instead of being a
+    one-shot patch. Delete it once the operator/OLSConfig CRD natively
+    supports a custom service image and A2A configuration.
 
 2. Replace the `acme-agent` application's `image.repository`/`image.tag`
    overrides in `variants/standalone/values-standalone.yaml` with the image
@@ -70,7 +76,7 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
    `LIGHTSPEED_DESIGN.md` section 7 before bumping `image.tag`
    yourself. `openshift-lightspeed-config`'s own `OLSConfig` doesn't carry an
    image reference at all; see step 1 above for how the custom OLS image is
-   (and currently isn't yet) wired in.
+   actually wired in (`appServerPatch`, a temporary post-reconcile patch).
 
 3. Confirm the branch you're deploying from is what's pushed and what the
    new cluster's ArgoCD Application will track:
@@ -218,20 +224,34 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     ```
 
 At this point `openshift-lightspeed-config`, `praxis-proxy`, and `acme-agent`
-should be fully functional: acme-agent's Keycloak token (plus the
-`X-OLS-Cluster` header naming the target cluster) reaches the public Praxis
-Route, Praxis validates the token and its `azp` allow-list, selects the OLS
-backend the header names, and forwards the request unchanged -- OpenShift
-Lightspeed's A2A endpoint independently re-validates it and does the RFC 8693
-token exchange for OpenShift MCP, and OLS's own Service is unreachable except
-from Praxis. See [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) for
-the full request flow.
+are functional up to, but not including, the final OpenShift MCP tool call:
+acme-agent's Keycloak token (plus the `X-OLS-Cluster` header naming the
+target cluster) reaches the public Praxis Route, Praxis validates the token
+and its `azp` allow-list, selects the OLS backend the header names, and
+forwards the request unchanged -- OpenShift Lightspeed's A2A endpoint
+independently re-validates it and does the RFC 8693 token exchange for
+OpenShift MCP, and OLS's own Service is unreachable except from Praxis. The
+exchanged token ("Token B") itself mints successfully, but the API server
+does not yet trust it as an identity: it will reject the MCP tool call with
+401 until Phase 3 below is done, since `claimMappings.groups` (what maps
+Token B's `groups` claim to the OpenShift group `lightspeed-mcp-rbac.yaml`
+binds RBAC to) and the `openshift-mcp` audience trust only exist once
+`Authentication/cluster` is actually switched to `type: OIDC`. See
+[`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) for the full request
+flow.
 
-### Phase 3 — Optional: enable OpenShift Native OIDC
+### Phase 3 — Enable OpenShift Native OIDC (required for the MCP tool call)
 
-Skip entirely unless you specifically want direct Keycloak login for the
-console and `oc`. Nothing above depends on it, and getting it wrong locks
-out console and CLI login cluster-wide. Full detail is in
+This is **not optional** if you want acme-agent's investigation to actually
+reach the cluster: the exchanged MCP-scoped token is only honored by the API
+server once `Authentication/cluster` switches to `type: OIDC`, which is
+exactly what `openshiftOIDC.enabled=true` does. It is only "skippable" in the
+narrow sense that you can stop at Phase 2 to verify Praxis enforcement and
+the token exchange in isolation, with the final MCP call expected to 401.
+
+Flipping `type: OIDC` also replaces the internal OAuth server for console/`oc
+login` cluster-wide, in one step, for everyone -- getting it wrong locks out
+console and CLI login cluster-wide. Full detail is in
 [`charts/all/keycloak-oidc/README.md`](charts/all/keycloak-oidc/README.md);
 short version:
 

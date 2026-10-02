@@ -76,3 +76,100 @@ volumes:
       name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync-script
       defaultMode: 0444
 {{- end }}
+
+{{/*
+TEMPORARY A2A bridge -- see values.yaml's appServerPatch comment and
+README.md's "Temporary A2A bridge" section. Builds the CONTAINER_ENV_JSON
+payload merged into the operator-managed app-server Deployment's named
+container; only includes the optional fields when actually set, so leaving
+them blank doesn't override anything the operator (or a future native
+OLSConfig field) already set.
+*/}}
+{{- define "openshift-lightspeed-config.appServerPatchEnvJSON" -}}
+{{- $a2a := .Values.appServerPatch.a2a -}}
+{{- $env := list -}}
+{{- if $a2a.keycloakIssuerURL -}}
+{{- $env = append $env (dict "name" "A2A_KEYCLOAK_ISSUER_URL" "value" $a2a.keycloakIssuerURL) -}}
+{{- end -}}
+{{- if $a2a.clusterId -}}
+{{- $env = append $env (dict "name" "A2A_CLUSTER_ID" "value" $a2a.clusterId) -}}
+{{- end -}}
+{{- if $a2a.rpcUrl -}}
+{{- $env = append $env (dict "name" "A2A_RPC_URL" "value" $a2a.rpcUrl) -}}
+{{- end -}}
+{{- if $a2a.keycloakCaBundle -}}
+{{- $env = append $env (dict "name" "A2A_KEYCLOAK_CA_BUNDLE" "value" $a2a.keycloakCaBundle) -}}
+{{- end -}}
+{{- $env = append $env (dict "name" "A2A_INBOUND_AUDIENCE" "value" $a2a.inboundAudience) -}}
+{{- $env = append $env (dict "name" "A2A_INBOUND_AZP" "value" $a2a.inboundAzp) -}}
+{{- $env = append $env (dict "name" "A2A_EXCHANGE_AUDIENCE" "value" $a2a.exchangeAudience) -}}
+{{- $env = append $env (dict "name" "A2A_EXCHANGE_CLIENT_ASSERTION_TYPE" "value" $a2a.exchangeClientAssertionType) -}}
+{{- if $a2a.spiffeJwtAudience -}}
+{{- $env = append $env (dict "name" "A2A_SPIFFE_JWT_AUDIENCE" "value" $a2a.spiffeJwtAudience) -}}
+{{- end -}}
+{{- if $a2a.spiffeEndpointSocket -}}
+{{- $env = append $env (dict "name" "A2A_SPIFFE_ENDPOINT_SOCKET" "value" $a2a.spiffeEndpointSocket) -}}
+{{- end -}}
+{{- range .Values.appServerPatch.extraEnv -}}
+{{- $env = append $env (dict "name" .name "value" .value) -}}
+{{- end -}}
+{{- $env | toJson -}}
+{{- end -}}
+
+{{- define "openshift-lightspeed-config.appServerPatchImage" -}}
+{{- if and .Values.appServerPatch.image.repository .Values.appServerPatch.image.tag -}}
+{{- printf "%s:%s" .Values.appServerPatch.image.repository .Values.appServerPatch.image.tag -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "openshift-lightspeed-config.appServerPatchPodSpec" -}}
+serviceAccountName: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+securityContext:
+{{ toYaml .Values.securityContext | nindent 2 }}
+{{- with .Values.image.pullSecrets }}
+imagePullSecrets:
+{{ toYaml . | nindent 2 }}
+{{- end }}
+restartPolicy: Never
+containers:
+  - name: patch-appserver
+    image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+    imagePullPolicy: {{ .Values.image.pullPolicy }}
+    command:
+      - python3
+      - -B
+      - /opt/app-root/src/patch_appserver.py
+    env:
+      - name: TARGET_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: DEPLOYMENT_NAME
+        value: {{ .Values.appServerPatch.deploymentName | quote }}
+      - name: CONTAINER_NAME
+        value: {{ .Values.appServerPatch.containerName | quote }}
+      - name: CONTAINER_IMAGE
+        value: {{ include "openshift-lightspeed-config.appServerPatchImage" . | quote }}
+      - name: CONTAINER_ENV_JSON
+        value: {{ include "openshift-lightspeed-config.appServerPatchEnvJSON" . | quote }}
+      - name: POLL_INTERVAL_SECONDS
+        value: {{ .Values.appServerPatch.poll.intervalSeconds | quote }}
+      - name: POLL_DEADLINE_SECONDS
+        value: {{ .Values.appServerPatch.poll.deadlineSeconds | quote }}
+      - name: PYTHONDONTWRITEBYTECODE
+        value: "1"
+    securityContext:
+{{ toYaml .Values.containerSecurityContext | nindent 6 }}
+    resources:
+{{ toYaml .Values.appServerPatch.resources | nindent 6 }}
+    volumeMounts:
+      - name: patch-script
+        mountPath: /opt/app-root/src/patch_appserver.py
+        subPath: patch_appserver.py
+        readOnly: true
+volumes:
+  - name: patch-script
+    configMap:
+      name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch-script
+      defaultMode: 0444
+{{- end }}

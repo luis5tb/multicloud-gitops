@@ -143,6 +143,73 @@ appServer:
     app.kubernetes.io/name: lightspeed-service-api
     app.kubernetes.io/part-of: openshift-lightspeed
 
+# TEMPORARY A2A bridge -- see README.md's "Temporary A2A bridge" section.
+# OLSConfig has no field for a custom app-server image (the operator picks
+# that via its own --service-image startup flag, not OLSConfig -- see the
+# top-level README.md Phase 0) and no field for the A2A_* environment
+# variables vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py requires
+# to serve A2A requests at all. Disabled by default: this patches the
+# operator-managed app-server Deployment directly, after the fact, via a
+# bootstrap Job plus a re-asserting CronJob (the operator's own reconcile
+# loop can silently overwrite this patch on a later pass). DELETE this
+# entire block, templates/appserver-patch-*.yaml, and
+# files/patch_appserver.py once the Operator/OLSConfig CRD natively supports
+# a custom service image and A2A configuration.
+appServerPatch:
+  enabled: false
+  # UNCONFIRMED GUESS, same caveat as appServer.podSelectorLabels above --
+  # verify both against `oc get deployment -n <namespace>` and `oc get
+  # deployment <name> -o jsonpath='{.spec.template.spec.containers[*].name}'`
+  # on the installed operator before relying on this.
+  deploymentName: lightspeed-app-server
+  containerName: lightspeed-service-api
+  # The custom, A2A-enabled OLS image built from
+  # vendor/lightspeed-service/Containerfile (see the top-level README.md
+  # Phase 0). Left empty, this patch only touches env vars, not the image.
+  image:
+    repository: ""
+    tag: ""
+  a2a:
+    # Required -- vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py's
+    # A2ASettings.from_env() raises A2AConfigurationError without these
+    # three, so the A2A endpoint will not start at all if they're unset.
+    keycloakIssuerURL: ""
+    clusterId: ""
+    rpcUrl: ""
+    # Optional path to a mounted CA bundle file trusted for TLS to
+    # keycloakIssuerURL. Setting this only sets the env var; it does not
+    # mount a volume into the operator-managed pod, so only set it if the
+    # pod's default trust store already has that file at this path.
+    keycloakCaBundle: ""
+    # These three default to a2a_auth.py's own frozen module constants;
+    # override only if your Keycloak realm's client IDs/audiences actually
+    # differ from this pattern's defaults (charts/all/keycloak-oidc's
+    # lightspeedA2aAudience, acmeClientId, and mcpAudienceClientId
+    # respectively).
+    inboundAudience: lightspeed-a2a
+    inboundAzp: acme-agent
+    exchangeAudience: openshift-mcp
+    exchangeClientAssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
+    # Defaults to keycloakIssuerURL inside a2a_auth.py itself when empty;
+    # only set this if the SPIFFE JWT-SVID assertion audience must differ.
+    spiffeJwtAudience: ""
+    spiffeEndpointSocket: ""
+  # Escape hatch for any other A2A_* env var this chart doesn't template
+  # explicitly above -- each entry is a plain {name, value} pair merged into
+  # the container's env by name.
+  extraEnv: []
+  schedule: "*/5 * * * *"
+  poll:
+    intervalSeconds: 10
+    deadlineSeconds: 150
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
 # Restricts ingress to the operator-managed app-server pods (selected via
 # appServer.podSelectorLabels above) to same-namespace traffic and the
 # Praxis gateway. Any NetworkPolicy the operator itself creates for these pods is

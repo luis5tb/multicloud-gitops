@@ -1,0 +1,28 @@
+{{- if .Values.appServerPatch.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
+spec:
+  schedule: {{ .Values.appServerPatch.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: openshift-lightspeed-config-appserver-patch
+            app.kubernetes.io/instance: {{ .Release.Name }}
+        spec:
+{{ include "openshift-lightspeed-config.appServerPatchPodSpec" . | nindent 10 }}
+{{- end }}
