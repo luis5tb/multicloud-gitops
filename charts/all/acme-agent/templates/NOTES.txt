@@ -1,0 +1,17 @@
+{{- if .Values.enabled }}
+ACME A2A agent deployed.
+
+Downstream A2A agents:
+{{- range .Values.a2a.remoteAgents }}
+  - {{ .name }}: {{ .endpoint }}
+{{- end }}
+
+{{- if .Values.route.enabled }}
+UI and A2A endpoint:
+  oc get route {{ include "acme-agent.fullname" . }}
+{{- else }}
+Port-forward the UI and A2A endpoint:
+  oc port-forward svc/{{ include "acme-agent.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+  Open http://localhost:{{ .Values.service.port }}/ui
+{{- end }}
+{{- end }}

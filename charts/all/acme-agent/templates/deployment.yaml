@@ -1,0 +1,250 @@
+{{- if .Values.enabled }}
+{{- if and .Values.ztoIdentity.enabled .Values.identity.spiffe.enabled }}
+{{- fail "configure only one of ztoIdentity.enabled or identity.spiffe.enabled" }}
+{{- end }}
+{{- if not .Values.litellm.enabled }}
+{{- fail "litellm.enabled must remain true: the local coordinator's model is configured through LiteLLM" }}
+{{- end }}
+{{- if and .Values.litellm.existingSecret.name .Values.litellm.vaultKey }}
+{{- fail "configure either litellm.existingSecret.name or litellm.vaultKey, not both" }}
+{{- end }}
+{{- if and (not .Values.litellm.existingSecret.name) (not .Values.litellm.vaultKey) }}
+{{- fail "configure litellm.existingSecret.name or litellm.vaultKey" }}
+{{- end }}
+{{- if and (eq .Values.auth.mode "keycloak") .Values.identity.spiffe.enabled (not .Values.auth.keycloak.issuerUrl) }}
+{{- fail "auth.keycloak.issuerUrl must be set when auth.mode is keycloak and identity.spiffe.enabled is true: it is the audience Keycloak's federated-jwt client validator expects on the SPIFFE JWT-SVID client_assertion" }}
+{{- end }}
+{{- if and .Values.auth.caBundle .Values.auth.caBundleConfigMap.name }}
+{{- fail "configure only one of auth.caBundle or auth.caBundleConfigMap" }}
+{{- end }}
+{{- if and .Values.auth.caBundleSync.enabled (not .Values.auth.caBundleConfigMap.name) }}
+{{- fail "auth.caBundleConfigMap.name is required when auth.caBundleSync.enabled is true" }}
+{{- end }}
+{{- $clusterSelectionEnabled := eq (lower (toString .Values.clusterSelection.enabled)) "true" }}
+{{- $acmeClusterRegistry := dict }}
+{{- if $clusterSelectionEnabled }}
+{{- $olsClusters := .Values.global.olsClusters | default dict }}
+{{- if not $olsClusters }}
+{{- fail "clusterSelection.enabled requires at least one global.olsClusters entry" }}
+{{- end }}
+{{- range $clusterID, $cluster := $olsClusters }}
+{{- if not (kindIs "map" $cluster) }}
+{{- fail (printf "global.olsClusters.%s must be an object" $clusterID) }}
+{{- end }}
+{{- if not (hasKey $cluster "apiURL") }}
+{{- fail (printf "global.olsClusters.%s.apiURL is required when cluster selection is enabled" $clusterID) }}
+{{- end }}
+{{- $apiURL := index $cluster "apiURL" }}
+{{- if not (kindIs "string" $apiURL) }}
+{{- fail (printf "global.olsClusters.%s.apiURL must be a string" $clusterID) }}
+{{- end }}
+{{- $_ := set $acmeClusterRegistry $clusterID $apiURL }}
+{{- end }}
+{{- end }}
+{{- if not .Values.a2a.remoteAgents }}
+{{- fail "a2a.remoteAgents must have at least one entry (name, description, endpoint) -- there is no default downstream agent" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "acme-agent.fullname" . }}
+  labels:
+    {{- include "acme-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "acme-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "acme-agent.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.podAnnotations .Values.auth.caBundleSync.enabled }}
+      annotations:
+        {{- if .Values.auth.caBundleSync.enabled }}
+        ca-bundle-sync-sha256: ""
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "acme-agent.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: acme-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: ADK_MODEL
+              value: {{ .Values.litellm.model | quote }}
+            - name: LITELLM_API_BASE
+              value: {{ .Values.litellm.apiBase | quote }}
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.litellm.credentialsSecretName .Values.litellm.existingSecret.name }}
+                  key: {{ if .Values.litellm.existingSecret.name }}{{ .Values.litellm.existingSecret.key }}{{ else }}LITELLM_API_KEY{{ end }}
+            - name: REMOTE_A2A_AGENTS_JSON
+              value: {{ .Values.a2a.remoteAgents | toJson | quote }}
+            - name: ACME_CLUSTER_SELECTION_ENABLED
+              value: {{ $clusterSelectionEnabled | quote }}
+            {{- if $clusterSelectionEnabled }}
+            - name: OLS_CLUSTER_REGISTRY_JSON
+              value: {{ $acmeClusterRegistry | toJson | quote }}
+            {{- end }}
+            - name: A2A_USE_LEGACY
+              value: {{ .Values.a2a.useLegacy | quote }}
+            - name: A2A_REQUEST_TIMEOUT
+              value: {{ .Values.a2a.requestTimeout | quote }}
+            - name: A2A_PUBLIC_HOST
+              value: {{ .Values.a2a.publicHost | quote }}
+            - name: A2A_PUBLIC_PORT
+              value: {{ .Values.a2a.publicPort | quote }}
+            - name: A2A_PUBLIC_PROTOCOL
+              value: {{ .Values.a2a.publicProtocol | quote }}
+            - name: A2A_AUTH_MODE
+              value: {{ .Values.auth.mode | quote }}
+            - name: A2A_TLS_VERIFY
+              value: {{ .Values.auth.tlsVerify | quote }}
+            - name: A2A_CA_BUNDLE
+              value: {{ if .Values.auth.caBundle }}{{ .Values.auth.caBundle | quote }}{{ else if .Values.auth.caBundleConfigMap.name }}{{ printf "/etc/acme-agent/ca-bundle/%s" .Values.auth.caBundleConfigMap.key | quote }}{{ else }}""{{ end }}
+            - name: ZTO_FORWARD_IDENTITY
+              value: {{ .Values.auth.forwardZtoIdentity | quote }}
+            - name: ZTO_IDENTITY_HEADER
+              value: {{ .Values.auth.ztoIdentityHeader | quote }}
+            - name: ZTO_IDENTITY_TOKEN_FILE
+              value: {{ printf "%s/identity-token" .Values.ztoIdentity.mountPath | quote }}
+            {{- if .Values.identity.spiffe.enabled }}
+            - name: SPIFFE_ENABLED
+              value: "true"
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: {{ .Values.identity.spiffe.workloadApiSocket | quote }}
+            # This JWT-SVID is used only as the client_assertion authenticating
+            # to Keycloak (auth.py's _keycloak_token), so its audience must be
+            # the Keycloak realm issuer -- that's what Keycloak's federated-jwt
+            # client validator checks it against by default, not an arbitrary
+            # workload name.
+            - name: SPIFFE_JWT_AUDIENCE
+              value: {{ .Values.auth.keycloak.issuerUrl | quote }}
+            - name: SPIFFE_TIMEOUT_SECONDS
+              value: {{ .Values.identity.spiffe.timeoutSeconds | quote }}
+            {{- end }}
+            - name: KEYCLOAK_TOKEN_URL
+              value: {{ .Values.auth.keycloak.tokenUrl | quote }}
+            - name: KEYCLOAK_CLIENT_ID
+              value: {{ .Values.auth.keycloak.clientId | quote }}
+            - name: KEYCLOAK_CLIENT_AUTH_METHOD
+              value: {{ .Values.auth.keycloak.clientAuthMethod | quote }}
+            - name: KEYCLOAK_CLIENT_ASSERTION_TYPE
+              value: {{ .Values.auth.keycloak.clientAssertionType | quote }}
+            - name: KEYCLOAK_SCOPE
+              value: {{ .Values.auth.keycloak.scope | quote }}
+            - name: KEYCLOAK_TOKEN_REFRESH_SKEW
+              value: {{ .Values.auth.keycloak.tokenRefreshSkew | quote }}
+            {{- if .Values.auth.staticTokenSecret.name }}
+            - name: A2A_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.staticTokenSecret.name }}
+                  key: {{ .Values.auth.staticTokenSecret.key }}
+            {{- end }}
+            {{- if .Values.auth.keycloak.clientSecretSecret.name }}
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.keycloak.clientSecretSecret.name }}
+                  key: {{ .Values.auth.keycloak.clientSecretSecret.key }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.ztoIdentity.enabled }}
+            - name: zto-identity
+              mountPath: {{ .Values.ztoIdentity.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.identity.spiffe.enabled }}
+            - name: spiffe-workload-api
+              mountPath: {{ .Values.identity.spiffe.workloadApiMountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.auth.caBundleConfigMap.name }}
+            - name: ca-bundle
+              mountPath: /etc/acme-agent/ca-bundle
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.ztoIdentity.enabled }}
+        - name: zto-identity
+          {{- if .Values.ztoIdentity.projectedServiceAccountToken.enabled }}
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: identity-token
+                  {{- if .Values.ztoIdentity.projectedServiceAccountToken.audience }}
+                  audience: {{ .Values.ztoIdentity.projectedServiceAccountToken.audience | quote }}
+                  {{- end }}
+                  expirationSeconds: {{ .Values.ztoIdentity.projectedServiceAccountToken.expirationSeconds }}
+          {{- else }}
+          secret:
+            secretName: {{ required "ztoIdentity.secretName is required when the ZTO identity Secret is enabled" .Values.ztoIdentity.secretName }}
+            items:
+              - key: {{ .Values.ztoIdentity.secretKey }}
+                path: identity-token
+        {{- end }}
+      {{- end }}
+        {{- if .Values.identity.spiffe.enabled }}
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        {{- end }}
+        {{- if .Values.auth.caBundleConfigMap.name }}
+        - name: ca-bundle
+          configMap:
+            name: {{ .Values.auth.caBundleConfigMap.name }}
+            items:
+              - key: {{ .Values.auth.caBundleConfigMap.key }}
+                path: {{ .Values.auth.caBundleConfigMap.key }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

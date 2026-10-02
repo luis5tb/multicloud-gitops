@@ -1,0 +1,209 @@
+fullnameOverride: acme-agent
+
+# Inert until an immutable ACME image, verified Praxis endpoint, Keycloak
+# workload identity, and target-cluster registry are configured.
+enabled: false
+
+image:
+  repository: quay.io/your-org/acme-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+replicaCount: 1
+
+# Standalone chart stub for the Pattern-wide registry. The Pattern supplies
+# global.olsClusters entries with apiURL/upstreamHost/upstreamPort/upstreamSNI;
+# ACME uses only each entry's map key and apiURL field.
+global:
+  olsClusters: {}
+
+clusterSelection:
+  # Keep target selection disabled until the approved registry and
+  # Praxis/OLS path are ready for greenfield activation.
+  enabled: false
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+a2a:
+  # Each item becomes a RemoteA2aAgent sub-agent of the local ACME ADK router.
+  # In deployment, point it at the static Praxis HTTPS endpoint, never at an
+  # OpenShift API URL. A single downstream agent is still a one-item list.
+  remoteAgents: []
+  # Request ADK's newer A2A executor from downstream agents by default.
+  # Set true only for a downstream peer that requires the legacy path.
+  useLegacy: false
+  requestTimeout: 60
+  publicHost: acme-agent
+  publicPort: 8080
+  publicProtocol: http
+
+litellm:
+  # The local ADK coordinator (the router that picks a downstream sub-agent)
+  # always calls LiteLLM -- never Google's
+  # Gemini API directly, so no GOOGLE_API_KEY/Vertex credentials are needed
+  # here. The proxy can route to Gemini, Anthropic, OpenAI, or another
+  # approved provider without changing this pod.
+  enabled: true
+  model: openai/gpt-6-luna
+  apiBase: http://litellm.litellm.svc.cluster.local:4000
+  credentialsSecretName: acme-agent-litellm
+  vaultKey: secret/data/global/acme-agent-litellm
+  vaultProperty: api-key
+  existingSecret:
+    name: ""
+    key: LITELLM_API_KEY
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+auth:
+  # none, static, or keycloak
+  mode: none
+  tlsVerify: true
+  # Optional path to a CA bundle supplied by another volume. Alternatively,
+  # set caBundleConfigMap to have this chart mount a ConfigMap and populate
+  # A2A_CA_BUNDLE with its path.
+  caBundle: ""
+  caBundleConfigMap:
+    name: ""
+    key: ca-bundle.crt
+  # Copies the managed OpenShift ingress CA into this release's namespace.
+  # The bootstrap Job runs before the agent Deployment; the CronJob refreshes
+  # the bundle and rolls the Deployment when its contents change.
+  caBundleSync:
+    enabled: false
+    sourceNamespace: openshift-config-managed
+    sourceConfigMap: default-ingress-cert
+    sourceKey: ca-bundle.crt
+    schedule: "*/5 * * * *"
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+  forwardZtoIdentity: false
+  ztoIdentityHeader: X-ZTO-Identity
+  staticTokenSecret:
+    name: ""
+    key: token
+  keycloak:
+    # The realm issuer, e.g. https://keycloak.example/realms/rca -- distinct
+    # from tokenUrl below. Also used as the audience of the SPIFFE JWT-SVID
+    # sent as client_assertion (identity.spiffe.*): Keycloak's federated-jwt
+    # client validator checks the assertion's aud against this by default.
+    issuerUrl: ""
+    tokenUrl: ""
+    clientId: ""
+    clientAuthMethod: client_assertion_post
+    clientAssertionType: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+    scope: ""
+    clientSecretSecret:
+      name: ""
+      key: client-secret
+    tokenRefreshSkew: 30
+
+# Escape hatch for additional container env vars not covered by another
+# value above.
+extraEnv: []
+
+ztoIdentity:
+  # Enable when ZTO injects an identity token through a Secret or projection.
+  # Ignored when identity.spiffe.enabled is true: the SPIFFE JWT-SVID fetched
+  # directly from ZTWIM/SPIRE takes precedence over a file-based token.
+  enabled: false
+  mountPath: /var/run/secrets/zto
+  secretName: ""
+  secretKey: identity-token
+  projectedServiceAccountToken:
+    enabled: false
+    audience: ""
+    expirationSeconds: 3600
+
+identity:
+  spiffe:
+    # When enabled, the agent fetches its own short-lived JWT-SVID directly
+    # from ZTWIM/SPIRE through the Workload API (csi.spiffe.io), the same
+    # mechanism for the ACME workload. This is the "ZTO" identity used
+    # as the jwt-spiffe client assertion when calling Keycloak, and takes
+    # precedence over ztoIdentity's file/Secret-based token.
+    enabled: false
+    # The SPIFFE CSI driver always names this file spire-agent.sock -- it is
+    # not configurable server-side, so this must match regardless of the
+    # mount path chosen below.
+    workloadApiSocket: unix:///spiffe-workload-api/spire-agent.sock
+    workloadApiMountPath: /spiffe-workload-api
+    timeoutSeconds: 5
+
+  # ZTWIM must have a matching ClusterSPIFFEID registration. This optional
+  # object is disabled by default because the cluster trust domain is an
+  # installation-specific value.
+  clusterSpiffeID:
+    enabled: false
+    name: acme-agent
+    trustDomain: ""
+
+route:
+  enabled: false
+  host: ""
+  # Optional OpenShift HAProxy route timeout for long-running A2A requests.
+  timeout: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
