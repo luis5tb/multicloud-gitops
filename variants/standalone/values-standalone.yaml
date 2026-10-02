@@ -162,7 +162,7 @@ clusterGroup:
         # ExternalOIDCControllerDegraded (this has happened -- recovery
         # command is in that README too).
         - name: openshiftOIDC.enabled
-          value: "true"
+          value: "false"
         - name: openshiftOIDC.issuerURL
           value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
         # The web console's public route (`oc whoami --show-console`), used
@@ -381,6 +381,35 @@ clusterGroup:
         # deploys an app-server identity to register.
         - name: identity.clusterSpiffeID.enabled
           value: "false"
+        # TEMPORARY A2A bridge (see charts/all/openshift-lightspeed-config/
+        # README.md's "Temporary A2A bridge" section) -- patches the
+        # operator-managed app-server Deployment with the custom OLS image
+        # and the A2A_* env vars vendor/lightspeed-service's A2A endpoint
+        # requires, since OLSConfig has no field for either. Delete this
+        # override block entirely once the Operator/OLSConfig CRD natively
+        # supports a custom service image and A2A configuration.
+        - name: appServerPatch.enabled
+          value: "true"
+        # Set these once Phase 0 step 1's podman build/push has actually
+        # happened -- empty means this patch only sets the A2A_* env vars
+        # below, not the image.
+        - name: appServerPatch.image.repository
+          value: ""
+        - name: appServerPatch.image.tag
+          value: ""
+        # Same Keycloak issuer as openshiftOIDC.issuerURL/
+        # identity.keycloak.issuerUrl above -- replace together with every
+        # other bm-cluster.e2e.bos.redhat.com reference in this file.
+        - name: appServerPatch.a2a.keycloakIssuerURL
+          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+        # Same routing id as this file's global.olsClusters map key --
+        # must stay in sync with it.
+        - name: appServerPatch.a2a.clusterId
+          value: api-bm-cluster-e2e-bos-redhat-com-6443
+        # Same public A2A endpoint as praxis-proxy's route.host / acme-agent's
+        # a2a.remoteAgents[0].endpoint above.
+        - name: appServerPatch.a2a.rpcUrl
+          value: https://openshift-lightspeed.apps.bm-cluster.e2e.bos.redhat.com
     mao-mongo:
       name: mao-mongo
       namespace: mao

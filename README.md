@@ -170,6 +170,7 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     - `acme-agent` → `auth.keycloak.tokenUrl` = `<issuerURL>/protocol/openid-connect/token`
     - `acme-agent` → `identity.clusterSpiffeID.trustDomain` = the trust domain itself
     - `global.olsClusters` (top of `values-standalone.yaml`, shared by `acme-agent` and `praxis-proxy`) → replace the placeholder entry with the real `oc whoami --show-server` URL, its derived `X-OLS-Cluster` id (lowercase host+port, `.`/`:` → `-`; see `agents/acme_agent/src/acme_agent/cluster_registry.py`), and the real OLS app-server Service `upstreamHost`/`upstreamPort`/`upstreamSNI`
+    - `openshift-lightspeed-config` → `appServerPatch.a2a.keycloakIssuerURL` = same as `openshiftOIDC.issuerURL`, `appServerPatch.a2a.clusterId` = the same id you just set in `global.olsClusters`, `appServerPatch.a2a.rpcUrl` = same hostname as `praxis-proxy`'s `route.host` -- and `appServerPatch.image.repository`/`tag` once Phase 0 step 1's image is actually pushed
 
 7. Edit `variants/standalone/values-standalone.yaml`, replacing the
    placeholders above with the real values.
