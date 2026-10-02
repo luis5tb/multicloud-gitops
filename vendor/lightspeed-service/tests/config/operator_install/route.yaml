@@ -1,0 +1,19 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+ annotations:
+   haproxy.router.openshift.io/timeout: 300s
+ labels:
+   app: ols
+ name: ols
+spec:
+ port:
+   targetPort: https
+ tls:
+   insecureEdgeTerminationPolicy: Redirect
+   termination: reencrypt
+ to:
+   kind: Service
+   name: lightspeed-app-server
+   weight: 100
+ wildcardPolicy: None

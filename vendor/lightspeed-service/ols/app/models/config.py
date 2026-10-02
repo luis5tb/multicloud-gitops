@@ -1,0 +1,1568 @@
+"""Config classes for the configuration structure."""
+
+import logging
+import os
+import re
+from enum import StrEnum
+from typing import Any, Optional, Self
+
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    FilePath,
+    PositiveInt,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
+
+from ols import constants
+from ols.utils import checks, tls
+
+
+def validate_tool_round_cap_fraction_config(v: float) -> float:
+    """Validate ``tool_round_cap_fraction`` for ``OLSConfig``."""
+    if not (
+        constants.TOOL_ROUND_CAP_FRACTION_MIN
+        <= v
+        <= constants.TOOL_ROUND_CAP_FRACTION_MAX
+    ):
+        raise checks.InvalidConfigurationError(
+            f"tool_round_cap_fraction must be between "
+            f"{constants.TOOL_ROUND_CAP_FRACTION_MIN} and "
+            f"{constants.TOOL_ROUND_CAP_FRACTION_MAX}, got {v}"
+        )
+    return v
+
+
+class ModelParameters(BaseModel):
+    """Model parameters."""
+
+    max_tokens_for_response: PositiveInt = constants.DEFAULT_MAX_TOKENS_FOR_RESPONSE
+    tool_budget_ratio: float = constants.DEFAULT_TOOL_BUDGET_RATIO
+    reasoning_config: Optional[dict[str, Any]] = None
+    temperature: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_temperature_flag(cls, data: Any) -> Any:
+        """Reject the removed temperature capability flag."""
+        if isinstance(data, dict) and "temperature_supported" in data:
+            raise checks.InvalidConfigurationError(
+                "temperature_supported is no longer supported"
+            )
+        return data
+
+    @field_validator("tool_budget_ratio")
+    @classmethod
+    def validate_tool_budget_ratio(cls, v: float) -> float:
+        """Validate tool budget ratio is within bounds."""
+        if not (
+            constants.TOOL_BUDGET_RATIO_MIN <= v <= constants.TOOL_BUDGET_RATIO_MAX
+        ):
+            raise checks.InvalidConfigurationError(
+                f"tool_budget_ratio must be between "
+                f"{constants.TOOL_BUDGET_RATIO_MIN} and "
+                f"{constants.TOOL_BUDGET_RATIO_MAX}, got {v}"
+            )
+        return v
+
+
+class ModelConfig(BaseModel):
+    """Model configuration."""
+
+    name: str
+
+    # TODO: OLS-656 Switch OLS operator to use provider-specific configuration parameters
+    url: Optional[AnyHttpUrl] = None
+    credentials: Optional[str] = None
+
+    context_window_size: PositiveInt = constants.DEFAULT_CONTEXT_WINDOW_SIZE
+    parameters: ModelParameters = ModelParameters()
+    # Set and validated against context_window_size in Config._compute_tool_budgets
+    # (max_tokens_for_response + max_tokens_for_tools must fit in the window).
+    max_tokens_for_tools: int = 0
+
+    options: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_inputs(cls, data: Any) -> None:
+        """Validate model inputs."""
+        if data.get("name") is None:
+            raise checks.InvalidConfigurationError("model name is missing")
+
+        data["credentials"] = checks.read_secret(
+            data, constants.CREDENTIALS_PATH_SELECTOR, constants.API_TOKEN_FILENAME
+        )
+
+        # if the context window size is not set explicitly, use default value.
+        # Note that it is important to set a correct value; default may not be accurate.
+        data["context_window_size"] = data.get(
+            "context_window_size", constants.DEFAULT_CONTEXT_WINDOW_SIZE
+        )
+        return data
+
+    @field_validator("options")
+    @classmethod
+    def validate_options(cls, options: dict) -> dict[str, Any]:
+        """Validate model options which must be dict[str, Any]."""
+        if not isinstance(options, dict):
+            raise checks.InvalidConfigurationError("model options must be dictionary")
+        for key in options:
+            if not isinstance(key, str):
+                raise checks.InvalidConfigurationError(
+                    "key for model option must be string"
+                )
+        return options
+
+
+class TLSConfig(BaseModel):
+    """TLS configuration."""
+
+    tls_certificate_path: Optional[FilePath] = None
+    tls_key_path: Optional[FilePath] = None
+    tls_key_password: Optional[str] = None
+
+    def __init__(
+        self, data: Optional[dict] = None, ignore_missing_certs: bool = False
+    ) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        self._ignore_missing_certs = ignore_missing_certs
+        if data:
+            self.tls_certificate_path = data.get(
+                "tls_certificate_path", self.tls_certificate_path
+            )
+            self.tls_key_path = data.get("tls_key_path", self.tls_key_path)
+            self.tls_key_password = checks.get_attribute_from_file(
+                data, "tls_key_password_path"
+            )
+
+    def validate_yaml(self, disable_tls: bool = False) -> None:
+        """Validate TLS config."""
+        if not disable_tls and not self._ignore_missing_certs:
+            if not self.tls_certificate_path:
+                raise checks.InvalidConfigurationError(
+                    "Can not enable TLS without ols_config.tls_config.tls_certificate_path"
+                )
+
+            checks.file_check(self.tls_certificate_path, "OLS server certificate")
+            if not self.tls_key_path:
+                raise checks.InvalidConfigurationError(
+                    "Can not enable TLS without ols_config.tls_config.tls_key_path"
+                )
+            checks.file_check(self.tls_key_path, "OLS server certificate private key")
+
+
+class ProxyConfig(BaseModel):
+    """HTTPS Proxy configuration."""
+
+    proxy_url: Optional[str] = Field(
+        default_factory=lambda: os.getenv("https_proxy") or os.getenv("HTTPS_PROXY")
+    )
+    proxy_ca_cert_path: Optional[FilePath] = None
+    no_proxy_hosts: Optional[list[str]] = Field(
+        default_factory=lambda: [
+            host for host in os.getenv("no_proxy", "").split(",") if host
+        ]
+    )
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if not data:
+            return
+        if "proxy_url" in data:
+            # avoid overwriting the proxy_url set by environment variable
+            self.proxy_url = data.get("proxy_url")
+        self.proxy_ca_cert_path = data.get("proxy_ca_cert_path")
+        if "no_proxy_hosts" in data:
+            # avoid overwriting the no_proxy_hosts set by environment variable
+            self.no_proxy_hosts = data.get("no_proxy_hosts", self.no_proxy_hosts)
+
+    def validate_yaml(self) -> None:
+        """Validate proxy config."""
+        if self.proxy_url is None and self.proxy_ca_cert_path:
+            raise checks.InvalidConfigurationError("Proxy URL is missing")
+        if self.proxy_url and not checks.is_valid_http_url(self.proxy_url):
+            raise checks.InvalidConfigurationError(
+                "Proxy URL is invalid, only http:// and https:// URLs are supported"
+            )
+        if self.proxy_ca_cert_path is not None:
+            checks.file_check(self.proxy_ca_cert_path, "Proxy CA certificate")
+
+    def is_https(self) -> bool:
+        """Check if the proxy URL is HTTPS."""
+        if self.proxy_url is None:
+            return False
+        return self.proxy_url.lower().startswith("https://")
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_default_proxy_url(cls, values: Any) -> Any:
+        """Set proxy URL from environment variable if not provided."""
+        if "proxy_url" not in values or values["proxy_url"] is None:
+            env_proxy = os.getenv("https_proxy") or os.getenv("HTTPS_PROXY")
+            if env_proxy:
+                values["proxy_url"] = env_proxy
+        return values
+
+
+class AuthenticationConfig(BaseModel):
+    """Authentication configuration."""
+
+    module: Optional[str] = None
+    skip_tls_verification: bool = False
+    k8s_cluster_api: Optional[AnyHttpUrl] = None
+    k8s_ca_cert_path: Optional[FilePath] = None
+
+    def validate_yaml(self) -> None:
+        """Validate YAML containing authentication configuration section."""
+        if self.module is None:
+            raise checks.InvalidConfigurationError("Authentication module is not setup")
+        if self.module not in constants.SUPPORTED_AUTHENTICATION_MODULES:
+            raise checks.InvalidConfigurationError(
+                f"invalid authentication module: {self.module}, supported modules are"
+                f" {constants.SUPPORTED_AUTHENTICATION_MODULES}"
+            )
+
+
+class TLSSecurityProfile(BaseModel):
+    """TLS security profile structure."""
+
+    profile_type: Optional[str] = None
+    min_tls_version: Optional[str] = None
+    ciphers: Optional[list[str]] = None
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is not None:
+            self.profile_type = data.get("type")
+            self.min_tls_version = data.get("minTLSVersion")
+            self.ciphers = data.get("ciphers")
+
+    _REJECTED_TLS_PROFILES = frozenset({tls.TLSProfiles.OLD_TYPE})
+    _MIN_ALLOWED_TLS_VERSION = tls.TLSProtocolVersion.VERSION_TLS_12
+
+    def _validate_profile_type(self) -> None:
+        """Validate TLS profile type against known and allowed profiles."""
+        try:
+            profile = tls.TLSProfiles(self.profile_type)
+        except ValueError:
+            raise checks.InvalidConfigurationError(
+                f"Invalid TLS profile type '{self.profile_type}'"
+            )
+        if profile in self._REJECTED_TLS_PROFILES:
+            raise checks.InvalidConfigurationError(
+                f"TLS profile '{self.profile_type}' does not meet minimum "
+                f"security requirements (TLS 1.2+). "
+                f"Use 'IntermediateType' or 'ModernType' instead."
+            )
+
+    def _validate_min_tls_version(self) -> None:
+        """Validate minimum TLS version meets security floor."""
+        try:
+            version = tls.TLSProtocolVersion(self.min_tls_version)
+        except ValueError:
+            raise checks.InvalidConfigurationError(
+                f"Invalid minimal TLS version '{self.min_tls_version}'"
+            )
+        allowed = list(tls.TLSProtocolVersion)
+        if allowed.index(version) < allowed.index(self._MIN_ALLOWED_TLS_VERSION):
+            raise checks.InvalidConfigurationError(
+                f"Minimum TLS version '{self.min_tls_version}' is below the "
+                f"required minimum '{self._MIN_ALLOWED_TLS_VERSION.value}'. "
+                f"Use 'VersionTLS12' or higher."
+            )
+
+    def validate_yaml(self) -> None:
+        """Validate structure content."""
+        if self.profile_type is not None:
+            self._validate_profile_type()
+        if self.min_tls_version is not None:
+            self._validate_min_tls_version()
+        if self.ciphers is not None:
+            if self.profile_type is not None and self.profile_type != "Custom":
+                supported_ciphers = tls.TLS_CIPHERS[tls.TLSProfiles(self.profile_type)]
+                for cipher in self.ciphers:
+                    if cipher not in supported_ciphers:
+                        raise checks.InvalidConfigurationError(
+                            f"Unsupported cipher '{cipher}' found in configuration"
+                        )
+
+
+class ProviderSpecificConfig(BaseModel, extra="forbid"):
+    """Base class with common provider specific configurations."""
+
+    url: AnyHttpUrl  # required attribute
+    token: Optional[Any] = None
+    api_key: Optional[str] = None
+
+
+class OpenAIConfig(ProviderSpecificConfig, extra="forbid"):
+    """Configuration specific to OpenAI provider."""
+
+    credentials_path: str  # required attribute
+
+
+class RHOAIVLLMConfig(ProviderSpecificConfig, extra="forbid"):
+    """Configuration specific to RHOAI VLLM provider."""
+
+    credentials_path: str  # required attribute
+
+
+class RHELAIVLLMConfig(ProviderSpecificConfig, extra="forbid"):
+    """Configuration specific to RHEL VLLM provider."""
+
+    credentials_path: str  # required attribute
+
+
+class AzureOpenAIConfig(ProviderSpecificConfig, extra="forbid"):
+    """Configuration specific to Azure OpenAI provider."""
+
+    deployment_name: str  # required attribute
+    credentials_path: Optional[str] = None
+    tenant_id: Optional[str] = None
+    client_id: Optional[str] = None
+    client_secret_path: Optional[str] = None
+    client_secret: Optional[str] = None
+
+
+class WatsonxConfig(ProviderSpecificConfig, extra="forbid"):
+    """Configuration specific to Watsonx provider."""
+
+    credentials_path: str  # required attribute
+    project_id: Optional[str] = None
+
+
+class GoogleVertexAnthropicConfig(BaseModel, extra="forbid"):
+    """Configuration specific to Google Vertex AI Anthropic (Claude) provider."""
+
+    project: str  # required attribute
+    location: str  # required attribute
+
+
+class GoogleVertexConfig(BaseModel, extra="forbid"):
+    """Configuration specific to Google Vertex AI (ChatGoogleGenerativeAI) provider."""
+
+    project: str  # required attribute
+    location: str  # required attribute
+
+
+class FakeConfig(ProviderSpecificConfig, extra="forbid"):
+    """Configuration specific to fake provider."""
+
+    stream: Optional[bool]
+    mcp_tool_call: Optional[bool]
+    response: Optional[str]
+    chunks: Optional[int]
+    sleep: Optional[float]
+
+
+class ProviderConfig(BaseModel):
+    """LLM provider configuration."""
+
+    name: Optional[str] = None
+    type: Optional[str] = None
+    url: Optional[AnyHttpUrl] = None
+    credentials: Optional[str] = None
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key: Optional[str] = None
+    role_arn: Optional[str] = None
+    project_id: Optional[str] = None
+    models: dict[str, ModelConfig] = Field(default_factory=dict)
+    api_version: Optional[str] = None
+    deployment_name: Optional[str] = None
+    openai_config: Optional[OpenAIConfig] = None
+    azure_config: Optional[AzureOpenAIConfig] = None
+    watsonx_config: Optional[WatsonxConfig] = None
+    rhoai_vllm_config: Optional[RHOAIVLLMConfig] = None
+    rhelai_vllm_config: Optional[RHELAIVLLMConfig] = None
+    google_vertex_anthropic_config: Optional[GoogleVertexAnthropicConfig] = None
+    google_vertex_config: Optional[GoogleVertexConfig] = None
+    fake_provider_config: Optional[FakeConfig] = None
+    tls_security_profile: Optional[TLSSecurityProfile] = None
+
+    _credentials_path: Optional[str] = PrivateAttr(default=None)
+    _credential_hot_reload: bool = PrivateAttr(default=False)
+
+    def __init__(
+        self,
+        data: Optional[dict] = None,
+        ignore_llm_secrets: bool = False,
+        credential_hot_reload: bool = False,
+    ) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        self._credential_hot_reload = credential_hot_reload
+        if data is None:
+            return
+        self.name = data.get("name", None)
+
+        self.set_provider_type(data)
+        self.url = data.get("url", None)
+        self._credentials_path = data.get(constants.CREDENTIALS_PATH_SELECTOR)
+        try:
+            self.credentials = checks.read_secret(
+                data, constants.CREDENTIALS_PATH_SELECTOR, constants.API_TOKEN_FILENAME
+            )
+        except FileNotFoundError:
+            if ignore_llm_secrets or self.type == constants.PROVIDER_BEDROCK:
+                self.credentials = None
+            else:
+                raise
+
+        if self.type == constants.PROVIDER_BEDROCK:
+            self._read_bedrock_iam_credentials(data)
+
+        # OLS-622: Provider-specific configuration parameters in configuration file
+        self.project_id = data.get("project_id", None)
+        if self.type == constants.PROVIDER_WATSONX and self.project_id is None:
+            raise checks.InvalidConfigurationError(
+                f"project_id is required for Watsonx provider {self.name}"
+            )
+
+        self.set_provider_specific_configuration(data)
+
+        self.setup_models_config(data)
+
+        if self.type == constants.PROVIDER_AZURE_OPENAI:
+            self.api_version = data.get(
+                "api_version", constants.DEFAULT_AZURE_API_VERSION
+            )
+            # deployment_name only required when using Azure OpenAI
+            self.deployment_name = data.get("deployment_name", None)
+            # note: it can be overwritten in azure_config
+        self.tls_security_profile = TLSSecurityProfile(
+            data.get("tlsSecurityProfile", None)
+        )
+
+    def set_provider_type(self, data: dict) -> None:
+        """Set the provider type."""
+        # Default provider type to be the provider name, unless
+        # specified explicitly.
+        self.type = str(data.get("type", self.name)).lower()
+        if self.type not in constants.SUPPORTED_PROVIDER_TYPES:
+            raise checks.InvalidConfigurationError(
+                f"invalid provider type: {self.type}, supported types are"
+                f" {set(constants.SUPPORTED_PROVIDER_TYPES)}"
+            )
+
+    def setup_models_config(self, data: dict) -> None:
+        """Set up models configuration."""
+        if "models" not in data or len(data["models"]) == 0:
+            raise checks.InvalidConfigurationError(
+                f"no models configured for provider {data['name']}"
+            )
+        for m in data["models"]:
+            if "name" not in m:
+                raise checks.InvalidConfigurationError("model name is missing")
+            # add provider to model data - needed for some constants
+            # resolution based on the specific provider
+            m["provider"] = self.type
+            model = ModelConfig(**m)
+            self.models[m["name"]] = model
+
+    def set_provider_specific_configuration(  # noqa: C901  # pylint: disable=R0912
+        self, data: dict
+    ) -> None:
+        """Set the provider-specific configuration."""
+        # compute how many provider-specific configurations are
+        # found in config file
+        found = 0
+        for provider_name in constants.SUPPORTED_PROVIDER_TYPES:
+            cfg_name = provider_name.lower() + "_config"
+            if data.get(cfg_name) is not None:
+                found += 1
+
+        # just none or one provider-specific configuration
+        # should available
+        if found > 1:
+            raise checks.InvalidConfigurationError(
+                "multiple provider-specific configurations found, "
+                f"but just one is expected for provider {self.type}"
+            )
+
+        # If one provider-specific configuration is available
+        # it must match the selected provider type.
+        # It means, that if configuration for selected provider
+        # is not present the configuration must be wrong.
+        if found == 1:
+            match self.type:
+                case constants.PROVIDER_AZURE_OPENAI:
+                    azure_config = data.get("azure_openai_config")
+                    self.check_provider_config(azure_config)
+                    if azure_config is not None:
+                        azure_config["tenant_id"] = checks.read_secret(
+                            azure_config,
+                            constants.CREDENTIALS_PATH_SELECTOR,
+                            constants.AZURE_TENANT_ID_FILENAME,
+                            directory_name_expected=True,
+                            raise_on_error=False,
+                        )
+                        azure_config["client_id"] = checks.read_secret(
+                            azure_config,
+                            constants.CREDENTIALS_PATH_SELECTOR,
+                            constants.AZURE_CLIENT_ID_FILENAME,
+                            directory_name_expected=True,
+                            raise_on_error=False,
+                        )
+                        azure_config["client_secret"] = checks.read_secret(
+                            azure_config,
+                            constants.CREDENTIALS_PATH_SELECTOR,
+                            constants.AZURE_CLIENT_SECRET_FILENAME,
+                            directory_name_expected=True,
+                            raise_on_error=False,
+                        )
+                    self.read_api_key(azure_config)
+                    self.azure_config = AzureOpenAIConfig(**azure_config)
+                case constants.PROVIDER_OPENAI:
+                    openai_config = data.get("openai_config")
+                    self.check_provider_config(openai_config)
+                    self.read_api_key(openai_config)
+                    self.openai_config = OpenAIConfig(**openai_config)
+                case constants.PROVIDER_RHOAI_VLLM:
+                    rhoai_vllm_config = data.get("rhoai_vllm_config")
+                    self.check_provider_config(rhoai_vllm_config)
+                    self.read_api_key(rhoai_vllm_config)
+                    self.rhoai_vllm_config = RHOAIVLLMConfig(**rhoai_vllm_config)
+                case constants.PROVIDER_RHELAI_VLLM:
+                    rhelai_vllm_config = data.get("rhelai_vllm_config")
+                    self.check_provider_config(rhelai_vllm_config)
+                    self.read_api_key(rhelai_vllm_config)
+                    self.rhelai_vllm_config = RHELAIVLLMConfig(**rhelai_vllm_config)
+                case constants.PROVIDER_WATSONX:
+                    watsonx_config = data.get("watsonx_config")
+                    self.check_provider_config(watsonx_config)
+                    self.read_api_key(watsonx_config)
+                    self.watsonx_config = WatsonxConfig(**watsonx_config)
+                case constants.PROVIDER_GOOGLE_VERTEX_ANTHROPIC:
+                    google_vertex_anthropic_config = data.get(
+                        "google_vertex_anthropic_config"
+                    )
+                    self.check_provider_config(google_vertex_anthropic_config)
+                    self.google_vertex_anthropic_config = GoogleVertexAnthropicConfig(
+                        **google_vertex_anthropic_config
+                    )
+                case constants.PROVIDER_GOOGLE_VERTEX:
+                    google_vertex_config = data.get("google_vertex_config")
+                    self.check_provider_config(google_vertex_config)
+                    self.google_vertex_config = GoogleVertexConfig(
+                        **google_vertex_config
+                    )
+                case constants.PROVIDER_FAKE:
+                    fake_provider_config = data.get("fake_provider_config")
+                    self.fake_provider_config = FakeConfig(**fake_provider_config)
+                case _:
+                    raise checks.InvalidConfigurationError(
+                        f"Unsupported provider {self.type} configured"
+                    )
+
+    @staticmethod
+    def read_api_key(config: Optional[dict]) -> None:
+        """Read API key from file with secret."""
+        if config is None:
+            return
+        config["api_key"] = checks.read_secret(
+            config,
+            constants.CREDENTIALS_PATH_SELECTOR,
+            constants.API_TOKEN_FILENAME,
+            raise_on_error=False,
+        )
+
+    def _read_bedrock_iam_credentials(self, data: dict) -> None:
+        """Read AWS IAM credentials from credentials_path directory for Bedrock."""
+        self.aws_access_key_id = checks.read_secret(
+            data,
+            constants.CREDENTIALS_PATH_SELECTOR,
+            constants.BEDROCK_ACCESS_KEY_ID_FILENAME,
+            directory_name_expected=True,
+            raise_on_error=False,
+        )
+        self.aws_secret_access_key = checks.read_secret(
+            data,
+            constants.CREDENTIALS_PATH_SELECTOR,
+            constants.BEDROCK_SECRET_ACCESS_KEY_FILENAME,
+            directory_name_expected=True,
+            raise_on_error=False,
+        )
+        self.role_arn = checks.read_secret(
+            data,
+            constants.CREDENTIALS_PATH_SELECTOR,
+            constants.BEDROCK_ROLE_ARN_FILENAME,
+            directory_name_expected=True,
+            raise_on_error=False,
+        )
+
+    def check_provider_config(self, provider_config: Any) -> None:
+        """Check if configuration is presented for selected provider type."""
+        if provider_config is None:
+            raise checks.InvalidConfigurationError(
+                f"provider type {self.type} selected, "
+                "but configuration is set for different provider"
+            )
+
+    def validate_yaml(self) -> None:
+        """Validate provider config."""
+        if self.name is None:
+            raise checks.InvalidConfigurationError("provider name is missing")
+        if self.url is not None and not checks.is_valid_http_url(self.url):
+            raise checks.InvalidConfigurationError(
+                "provider URL is invalid, only http:// and https:// URLs are supported"
+            )
+
+    def get_credentials(self) -> Optional[str]:
+        """Return current credentials, re-reading from disk when hot-reload is enabled."""
+        if self._credential_hot_reload and self._credentials_path is not None:
+            fresh = checks.read_secret_from_path(
+                self._credentials_path, constants.API_TOKEN_FILENAME
+            )
+            if fresh is not None:
+                self.credentials = fresh
+                return fresh
+        return self.credentials
+
+    def get_aws_credentials(
+        self,
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Return AWS IAM credentials, re-reading from disk when hot-reload is enabled.
+
+        Hot-reload only applies when ``_credentials_path`` is a directory
+        (IAM credential layout).  When the path is a plain file it holds an
+        API key, not IAM credentials, and must not be re-read here.
+        """
+        if (
+            self._credential_hot_reload
+            and self._credentials_path is not None
+            and os.path.isdir(self._credentials_path)
+        ):
+            prev_access = self.aws_access_key_id
+            prev_secret = self.aws_secret_access_key
+            prev_role = self.role_arn
+
+            access_key = checks.read_secret_from_path(
+                self._credentials_path, constants.BEDROCK_ACCESS_KEY_ID_FILENAME
+            )
+            secret_key = checks.read_secret_from_path(
+                self._credentials_path, constants.BEDROCK_SECRET_ACCESS_KEY_FILENAME
+            )
+            if access_key is not None:
+                self.aws_access_key_id = access_key
+            if secret_key is not None:
+                self.aws_secret_access_key = secret_key
+
+            result_role = prev_role
+            role_arn_path = os.path.join(
+                self._credentials_path, constants.BEDROCK_ROLE_ARN_FILENAME
+            )
+            if os.path.isfile(role_arn_path):
+                role_arn = checks.read_secret_from_path(
+                    self._credentials_path, constants.BEDROCK_ROLE_ARN_FILENAME
+                )
+                if role_arn is not None:
+                    self.role_arn = role_arn
+                    result_role = role_arn
+
+            return (
+                access_key if access_key is not None else prev_access,
+                secret_key if secret_key is not None else prev_secret,
+                result_role,
+            )
+        return self.aws_access_key_id, self.aws_secret_access_key, self.role_arn
+
+
+class LLMProviders(BaseModel):
+    """LLM providers configuration."""
+
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+
+    def __init__(
+        self,
+        data: Optional[dict] = None,
+        ignore_llm_secrets: bool = False,
+        credential_hot_reload: bool = False,
+    ) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+        for p in data:
+            if "name" not in p:
+                raise checks.InvalidConfigurationError("provider name is missing")
+            provider = ProviderConfig(
+                p, ignore_llm_secrets, credential_hot_reload=credential_hot_reload
+            )
+            self.providers[p["name"]] = provider
+
+    def validate_yaml(self) -> None:
+        """Validate LLM config."""
+        for v in self.providers.values():
+            v.validate_yaml()
+
+
+class MCPServerConfig(BaseModel):
+    """MCP server configuration.
+
+    MCP (Model Context Protocol) servers provide tools and capabilities to the
+    AI agents. These are configured by this structure. Only MCP servers
+    defined in the olsconfig.yaml configuration are available to the agents.
+    """
+
+    name: str = Field(
+        title="MCP name",
+        description="MCP server name that must be unique",
+    )
+
+    url: str = Field(
+        title="MCP server URL",
+        description="URL of the MCP server",
+    )
+
+    timeout: Optional[int] = Field(
+        default=None,
+        title="Request timeout",
+        description=(
+            "Timeout in seconds for requests to the MCP server. "
+            "If not specified, the default timeout will be used."
+        ),
+    )
+
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        title="Authorization headers",
+        description=(
+            "Headers to send to the MCP server. "
+            "The map contains the header name and the path to a file containing "
+            "the header value (secret). "
+            "There are 2 special cases: "
+            f"1. Usage of the kubernetes token in the header. "
+            f"To specify this use a string '{constants.MCP_KUBERNETES_PLACEHOLDER}' "
+            f"instead of the file path. "
+            f"2. Usage of the client provided token in the header. "
+            f"To specify this use a string '{constants.MCP_CLIENT_PLACEHOLDER}' "
+            f"instead of the file path."
+        ),
+    )
+
+    _resolved_headers: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @property
+    def resolved_headers(self) -> dict[str, str]:
+        """Resolved headers (computed from headers)."""
+        return self._resolved_headers
+
+
+class ToolFilteringConfig(BaseModel):
+    """Configuration for tool filtering using hybrid RAG retrieval.
+
+    If this config is present, tool filtering is enabled. If absent, all tools are used.
+    """
+
+    alpha: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Weight for dense vs sparse retrieval (1.0 = full dense, 0.0 = full sparse)",
+    )
+
+    top_k: int = Field(
+        default=10, ge=1, le=50, description="Number of tools to retrieve"
+    )
+
+    threshold: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        description="Minimum similarity threshold for filtering results",
+    )
+
+
+class SkillsConfig(BaseModel):
+    """Configuration for skill selection using hybrid RAG retrieval.
+
+    If this config is present, skill selection is enabled. If absent, no skills are used.
+    """
+
+    skills_dir: str = Field(
+        default="skills",
+        description="Path to directory containing skill subdirectories",
+    )
+
+    alpha: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Weight for dense vs sparse retrieval (1.0 = full dense, 0.0 = full sparse)",
+    )
+
+    threshold: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Minimum similarity score to accept a skill match",
+    )
+
+
+class ApprovalType(StrEnum):
+    """Approval strategy for tool execution."""
+
+    NEVER = "never"
+    ALWAYS = "always"
+    TOOL_ANNOTATIONS = "tool_annotations"
+
+
+class ToolsApprovalConfig(BaseModel):
+    """Configuration for tool execution approval.
+
+    Controls whether tool calls require user approval before execution.
+    """
+
+    approval_type: ApprovalType = Field(
+        default=ApprovalType.NEVER,
+        description=(
+            "Approval strategy for tool execution. "
+            "'never' - execute tools without approval, "
+            "'always' - all tool calls require approval, "
+            "'tool_annotations' - approval based on per-tool annotations"
+        ),
+    )
+
+    approval_timeout: int = Field(
+        default=600,
+        ge=1,
+        description="Timeout in seconds for waiting for user approval",
+    )
+
+
+class MCPServers(BaseModel):
+    """MCP servers configuration."""
+
+    servers: list[MCPServerConfig] = []
+
+    @model_validator(mode="after")
+    def check_duplicite_servers(self) -> Self:
+        """Check if there are duplicate servers."""
+        server_names = set()
+        for server in self.servers:
+            if server.name in server_names:
+                raise ValueError(f"Duplicate server name: '{server.name}'")
+            server_names.add(server.name)
+        return self
+
+
+class PostgresConfig(BaseModel):
+    """Postgres configuration."""
+
+    host: str = constants.POSTGRES_CACHE_HOST
+    port: PositiveInt = constants.POSTGRES_CACHE_PORT
+    dbname: str = constants.POSTGRES_CACHE_DBNAME
+    user: str = constants.POSTGRES_CACHE_USER
+    password_path: Optional[FilePath] = None
+    password: Optional[str] = None
+    ssl_mode: str = constants.POSTGRES_CACHE_SSL_MODE
+    gss_encmode: str = constants.POSTGRES_CACHE_GSSENCMODE
+    ca_cert_path: Optional[FilePath] = None
+    max_entries: PositiveInt = constants.POSTGRES_CACHE_MAX_ENTRIES
+    connect_timeout: PositiveInt = constants.POSTGRES_CACHE_CONNECT_TIMEOUT
+    statement_timeout: PositiveInt = constants.POSTGRES_CACHE_STATEMENT_TIMEOUT
+    keepalives_idle: PositiveInt = constants.POSTGRES_CACHE_KEEPALIVES_IDLE
+    keepalives_interval: PositiveInt = constants.POSTGRES_CACHE_KEEPALIVES_INTERVAL
+    keepalives_count: PositiveInt = constants.POSTGRES_CACHE_KEEPALIVES_COUNT
+    tls_security_profile: Optional["TLSSecurityProfile"] = None
+
+    def __init__(self, **data: Any) -> None:
+        """Initialize configuration."""
+        super().__init__(**data)
+        # password should be read from file
+        if self.password_path is not None:
+            with open(self.password_path, "r", encoding="utf-8") as f:
+                self.password = f.read().rstrip()
+
+    @model_validator(mode="after")
+    def validate_yaml(self) -> Self:
+        """Validate Postgres cache config."""
+        if not 0 < self.port < 65536:
+            raise ValueError("The port needs to be between 0 and 65536")
+        return self
+
+
+class InMemoryCacheConfig(BaseModel):
+    """In-memory cache configuration."""
+
+    max_entries: Optional[int] = None
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+
+        try:
+            self.max_entries = int(
+                data.get("max_entries", constants.IN_MEMORY_CACHE_MAX_ENTRIES)
+            )
+            if self.max_entries < 0:
+                raise ValueError
+        except ValueError as e:
+            raise checks.InvalidConfigurationError(
+                "invalid max_entries for memory conversation cache,"
+                " max_entries needs to be a non-negative integer"
+            ) from e
+
+    def validate_yaml(self) -> None:
+        """Validate memory cache config."""
+
+
+class QueryFilter(BaseModel):
+    """QueryFilter configuration."""
+
+    name: Optional[str] = None
+    pattern: Optional[str] = None
+    replace_with: Optional[str] = None
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+        try:
+            self.name = data.get("name")
+            self.pattern = data.get("pattern")
+            self.replace_with = data.get("replace_with")
+            if self.name is None or self.pattern is None or self.replace_with is None:
+                raise ValueError
+        except ValueError as e:
+            raise checks.InvalidConfigurationError(
+                "name, pattern and replace_with need to be specified"
+            ) from e
+
+    def validate_yaml(self) -> None:
+        """Validate query filter config."""
+        if self.name is None:
+            raise checks.InvalidConfigurationError("name is missing")
+        if self.pattern is None:
+            raise checks.InvalidConfigurationError("pattern is missing")
+        try:
+            re.compile(self.pattern)
+        except re.error as e:
+            raise checks.InvalidConfigurationError("pattern is invalid") from e
+        if self.replace_with is None:
+            raise checks.InvalidConfigurationError("replace_with is missing")
+
+
+class ConversationCacheConfig(BaseModel):
+    """Conversation cache configuration."""
+
+    type: Optional[str] = None
+    memory: Optional[InMemoryCacheConfig] = None
+    postgres: Optional[PostgresConfig] = None
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+        self.type = data.get("type", None)
+        if self.type is not None:
+            match self.type:
+                case constants.CACHE_TYPE_MEMORY:
+                    if constants.CACHE_TYPE_MEMORY not in data:
+                        raise checks.InvalidConfigurationError(
+                            "memory conversation cache type is specified,"
+                            " but memory configuration is missing"
+                        )
+                    self.memory = InMemoryCacheConfig(
+                        data.get(constants.CACHE_TYPE_MEMORY)
+                    )
+                case constants.CACHE_TYPE_POSTGRES:
+                    if constants.CACHE_TYPE_POSTGRES not in data:
+                        raise checks.InvalidConfigurationError(
+                            "Postgres conversation cache type is specified,"
+                            " but Postgres configuration is missing"
+                        )
+                    self.postgres = PostgresConfig(
+                        **data.get(constants.CACHE_TYPE_POSTGRES)
+                    )
+                case _:
+                    raise checks.InvalidConfigurationError(
+                        f"unknown conversation cache type: {self.type}"
+                    )
+
+    def validate_yaml(self) -> None:
+        """Validate conversation cache config."""
+        if self.type is None:
+            raise checks.InvalidConfigurationError("missing conversation cache type")
+        # cache type is specified, we can decide which cache configuration to validate
+        match self.type:
+            case constants.CACHE_TYPE_MEMORY:
+                self.memory.validate_yaml()
+            case constants.CACHE_TYPE_POSTGRES:
+                pass  # it is validated by Pydantic already
+            case _:
+                raise checks.InvalidConfigurationError(
+                    f"unknown conversation cache type: {self.type}"
+                )
+
+
+class LoggingConfig(BaseModel):
+    """Logging configuration."""
+
+    app_log_level: int = logging.INFO
+    lib_log_level: int = logging.WARNING
+    uvicorn_log_level: int = logging.WARNING
+    suppress_metrics_in_log: bool = False
+    suppress_auth_checks_warning_in_log: bool = False
+
+    def __init__(self, **data: Any) -> None:
+        """Initialize configuration and perform basic validation."""
+        # convert input strings (level names, eg. debug/info,...) to
+        # logging level names (integer values) for defined model fields
+        for field in filter(lambda x: x.endswith("_log_level"), self.model_fields):
+            if field in data:
+                data[field] = checks.get_log_level(data[field])
+        super().__init__(**data)
+
+
+class ReferenceContentIndex(BaseModel):
+    """One on-disk FAISS / vector index for BYOK RAG stores.
+
+    Field names are historical: ``product_docs_*`` is used for any persisted
+    LlamaIndex vector store path. Managed OpenShift product docs are served
+    exclusively via ``ols_config.solr_hybrid`` (OKP); this class is only for
+    user-supplied BYOK indexes.
+    """
+
+    product_docs_index_path: Optional[FilePath] = None
+    product_docs_index_id: Optional[str] = None
+    product_docs_origin: Optional[str] = None
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+        self.product_docs_index_path = data.get("product_docs_index_path", None)
+        self.product_docs_index_id = data.get("product_docs_index_id", None)
+        self.product_docs_origin = data.get("product_docs_origin", None)
+
+    def validate_yaml(self) -> None:
+        """Validate reference content index config."""
+        if self.product_docs_index_path is not None:
+            checks.dir_check(
+                self.product_docs_index_path, "Reference content index path"
+            )
+        elif self.product_docs_index_id is not None:
+            raise checks.InvalidConfigurationError(
+                "product_docs_index_id is specified but product_docs_index_path is missing"
+            )
+
+
+class ReferenceContent(BaseModel):
+    """Local vector indexes (FAISS on disk) for BYOK.
+
+    Omit or leave ``indexes`` empty when no on-disk indexes are needed.
+    Product documentation is served by Solr (see ``solr_hybrid``).
+    """
+
+    indexes: Optional[list[ReferenceContentIndex]] = None
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+
+        if "indexes" in data:
+            self.indexes = [ReferenceContentIndex(i) for i in data["indexes"]]
+        else:
+            self.indexes = None
+
+    def validate_yaml(self) -> None:
+        """Validate reference content config."""
+        if self.indexes is not None:
+            for index in self.indexes:
+                index.validate_yaml()
+
+
+class SolrHybridSettings(BaseModel):
+    """Pydantic container for Solr hybrid RAG (portal-rag ``/hybrid-search``).
+
+    Holds the Solr HTTP base URL, ranked hit count, optional ``fq`` filter, hybrid
+    rerank pool and vector weight, optional post-score cutoff, and HTTP client timeout.
+
+    Presence of the ``solr_hybrid`` section in the config enables the feature;
+    omit the section entirely to disable it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    solr_http_base: str = Field(
+        default="http://localhost:8080",
+        description="Solr base URL without trailing /solr.",
+    )
+    max_results: int = Field(
+        default=constants.RAG_CONTENT_LIMIT,
+        ge=1,
+        le=50,
+        description=(
+            "Target number of passages to return after parent dedupe; matches the "
+            "default index retriever chunk cap (``ols.constants.RAG_CONTENT_LIMIT`` / "
+            "``similarity_top_k``). Also scales how many rows Solr fetches for the hybrid "
+            "request pool before reranking."
+        ),
+    )
+    hybrid_vector_boost: float = Field(
+        default=8.0,
+        ge=0.0,
+        description=(
+            "Solr rerank vector weight (``reRankWeight``): relative emphasis of dense "
+            "vector score versus lexical relevance in the hybrid reranker."
+        ),
+    )
+    hybrid_pool_docs: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description=(
+            "Candidate document pool size (``reRankDocs``) passed to Solr's "
+            "``{!rerank}`` query for hybrid reranking."
+        ),
+    )
+    hybrid_score_threshold: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Drop hits whose hybrid ``score`` is below this value after retrieval; "
+            "use ``0`` to keep all Solr-ranked docs."
+        ),
+    )
+    hybrid_solr_timeout_s: float = Field(
+        default=60.0,
+        ge=5.0,
+        description="Total HTTP timeout in seconds for each hybrid-search request.",
+    )
+    max_expansion_neighbors: int = Field(
+        default=2,
+        ge=0,
+        le=10,
+        description=(
+            "Maximum number of sibling chunks to include on each side of the "
+            "matched chunk during chunk expansion. ``0`` disables expansion."
+        ),
+    )
+
+    def validate_yaml(self) -> None:
+        """Validate Solr hybrid settings."""
+        if not checks.is_valid_http_url(self.solr_http_base):
+            raise checks.InvalidConfigurationError(
+                "solr_hybrid.solr_http_base must be a valid http or https URL with a "
+                f"host; got {self.solr_http_base!r}"
+            )
+
+
+class UserDataCollection(BaseModel):
+    """User data collection configuration."""
+
+    feedback_disabled: bool = True
+    feedback_storage: Optional[str] = None
+    transcripts_disabled: bool = True
+    transcripts_storage: Optional[str] = None
+
+    @model_validator(mode="after")
+    def check_storage_location_is_set_when_needed(self) -> Self:
+        """Check that storage_location is set when enabled."""
+        if not self.feedback_disabled and self.feedback_storage is None:
+            raise ValueError("feedback_storage is required when feedback is enabled")
+        if not self.transcripts_disabled and self.transcripts_storage is None:
+            raise ValueError(
+                "transcripts_storage is required when transcripts capturing is enabled"
+            )
+        return self
+
+    @property
+    def config_status_enabled(self) -> bool:
+        """Config status is enabled when feedback or transcripts collection is enabled."""
+        return not self.feedback_disabled or not self.transcripts_disabled
+
+    @property
+    def config_status_storage(self) -> Optional[str]:
+        """Infer config status storage from feedback or transcripts storage."""
+        if not self.config_status_enabled:
+            return None
+        base_storage = self.feedback_storage or self.transcripts_storage
+        if base_storage is None:
+            return None
+        return os.path.join(os.path.dirname(base_storage), "config_status")
+
+
+class AuditLoggingMode(StrEnum):
+    """Allowed values for audit logging mode."""
+
+    ENABLED = "Enabled"
+    DISABLED = "Disabled"
+
+
+class OtelConfig(BaseModel):
+    """OTEL exporter configuration."""
+
+    endpoint: Optional[str] = None
+
+
+class AuditConfig(BaseModel):
+    """Audit logging configuration."""
+
+    logging: AuditLoggingMode = AuditLoggingMode.ENABLED
+    otel: Optional[OtelConfig] = None
+
+    @property
+    def enabled(self) -> bool:
+        """Whether audit logging is enabled."""
+        return self.logging == AuditLoggingMode.ENABLED
+
+
+class SchedulerConfig(BaseModel):
+    """Scheduler configuration."""
+
+    period: int
+
+
+class LimiterConfig(BaseModel):
+    """Configuration for one quota limiter."""
+
+    type: Optional[str]
+    initial_quota: Optional[int]
+    quota_increase: Optional[int]
+    period: Optional[str]
+
+
+class LimitersConfig(BaseModel):
+    """Configuration for all quota limiters."""
+
+    limiters: dict[str, LimiterConfig] = {}
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+        # convert list of limiters into a dictionary
+        for limiter in data:
+            if "name" not in limiter:
+                raise checks.InvalidConfigurationError("limiter name is missing")
+            limiter_config = LimiterConfig(**limiter)
+            self.limiters[limiter["name"]] = limiter_config
+
+
+class QuotaHandlersConfig(BaseModel):
+    """Quota limiter configuration."""
+
+    storage: Optional[PostgresConfig] = None
+    scheduler: Optional[SchedulerConfig] = None
+    limiters: Optional[LimitersConfig] = None
+    enable_token_history: Optional[bool] = None
+
+    def __init__(self, data: Optional[dict] = None) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+        # check the content
+        if "storage" not in data:
+            raise checks.InvalidConfigurationError(
+                "Missing storage configuration for quota limiters"
+            )
+        if "scheduler" not in data:
+            raise checks.InvalidConfigurationError(
+                "Missing scheduler configuration for quota limiters"
+            )
+        # setup all subcategories
+        self.storage = PostgresConfig(**data.get("storage"))
+        self.scheduler = SchedulerConfig(**data.get("scheduler"))
+        self.limiters = LimitersConfig(data.get("limiters", None))
+        self.enable_token_history = data.get("enable_token_history", False)
+
+
+class OLSConfig(BaseModel):
+    """OLS configuration."""
+
+    conversation_cache: Optional[ConversationCacheConfig] = None
+    logging_config: Optional[LoggingConfig] = None
+    reference_content: Optional[ReferenceContent] = None
+    authentication_config: AuthenticationConfig = AuthenticationConfig()
+    tls_config: TLSConfig = TLSConfig()
+    system_prompt_path: Optional[str] = None
+    system_prompt: Optional[str] = None
+
+    default_provider: Optional[str] = None
+    default_model: Optional[str] = None
+    max_iterations: Optional[PositiveInt] = None
+    history_compression_enabled: bool = True
+    expire_llm_is_ready_persistent_state: Optional[int] = -1
+    max_workers: Optional[int] = None
+    query_filters: Optional[list[QueryFilter]] = None
+
+    user_data_collection: UserDataCollection = UserDataCollection()
+    tls_security_profile: Optional[TLSSecurityProfile] = None
+
+    quota_handlers: Optional[QuotaHandlersConfig] = None
+
+    proxy_config: Optional[ProxyConfig] = None
+
+    tool_filtering: Optional[ToolFilteringConfig] = None
+
+    tools_approval: Optional[ToolsApprovalConfig] = None
+
+    skills: Optional[SkillsConfig] = None
+
+    audit: AuditConfig = AuditConfig()
+
+    solr_hybrid: Optional[SolrHybridSettings] = None
+
+    tool_round_cap_fraction: float = constants.DEFAULT_TOOL_ROUND_CAP_FRACTION
+
+    offload_storage_path: str = constants.DEFAULT_OFFLOAD_STORAGE_PATH
+
+    credential_hot_reload: bool = False
+
+    def __init__(  # noqa: C901
+        self, data: Optional[dict] = None, ignore_missing_certs: bool = False
+    ) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+
+        self.conversation_cache = ConversationCacheConfig(
+            data.get("conversation_cache", None)
+        )
+        self.logging_config = LoggingConfig(**data.get("logging_config", {}))
+        if data.get("reference_content") is not None:
+            self.reference_content = ReferenceContent(data.get("reference_content"))
+        self.default_provider = data.get("default_provider", None)
+        self.default_model = data.get("default_model", None)
+        self.max_iterations = data.get("max_iterations")
+        self.history_compression_enabled = data.get("history_compression_enabled", True)
+        self.credential_hot_reload = data.get("credential_hot_reload", False)
+        self.max_workers = data.get("max_workers", 1)
+        self.expire_llm_is_ready_persistent_state = data.get(
+            "expire_llm_is_ready_persistent_state", -1
+        )
+        self.authentication_config = AuthenticationConfig(
+            **data.get("authentication_config", {})
+        )
+        # setup the authentication module, which is optional in configuration file
+        if self.authentication_config.module is None:
+            self.authentication_config.module = constants.DEFAULT_AUTHENTICATION_MODULE
+
+        self.tls_config = TLSConfig(data.get("tls_config", None), ignore_missing_certs)
+        if data.get("query_filters", None) is not None:
+            self.query_filters = []
+            for item in data.get("query_filters", None):
+                self.query_filters.append(QueryFilter(item))
+        self.user_data_collection = UserDataCollection(
+            **data.get("user_data_collection", {})
+        )
+        # read file containing system prompt
+        # if not specified, the prompt will remain None, which will be handled
+        # by system prompt infrastructure
+        self.system_prompt = checks.get_attribute_from_file(data, "system_prompt_path")
+
+        self.tls_security_profile = TLSSecurityProfile(
+            data.get("tlsSecurityProfile", None)
+        )
+        self.quota_handlers = QuotaHandlersConfig(data.get("quota_handlers", None))
+        self._propagate_tls_profile()
+        self.proxy_config = ProxyConfig(data.get("proxy_config"))
+        if data.get("tool_filtering", None) is not None:
+            self.tool_filtering = ToolFilteringConfig(**data.get("tool_filtering"))
+        if data.get("tools_approval", None) is not None:
+            self.tools_approval = ToolsApprovalConfig(**data.get("tools_approval"))
+        if data.get("skills", None) is not None:
+            self.skills = SkillsConfig(**data.get("skills"))
+        if data.get("solr_hybrid", None) is not None:
+            self.solr_hybrid = SolrHybridSettings(**data.get("solr_hybrid"))
+
+        self.audit = AuditConfig(**data.get("audit", {}))
+
+        raw_cap = data.get(
+            "tool_round_cap_fraction", constants.DEFAULT_TOOL_ROUND_CAP_FRACTION
+        )
+        try:
+            cap = float(raw_cap)
+        except (TypeError, ValueError) as e:
+            raise checks.InvalidConfigurationError(
+                f"tool_round_cap_fraction must be a number, got {raw_cap!r}"
+            ) from e
+        self.tool_round_cap_fraction = validate_tool_round_cap_fraction_config(cap)
+
+        self.offload_storage_path = data.get(
+            "offload_storage_path", constants.DEFAULT_OFFLOAD_STORAGE_PATH
+        )
+
+    def _propagate_tls_profile(self) -> None:
+        """Set the TLS security profile on all PostgresConfig instances."""
+        if (
+            self.tls_security_profile is None
+            or self.tls_security_profile.profile_type is None
+        ):
+            return
+        if self.conversation_cache and self.conversation_cache.postgres:
+            self.conversation_cache.postgres.tls_security_profile = (
+                self.tls_security_profile
+            )
+        if self.quota_handlers and self.quota_handlers.storage:
+            self.quota_handlers.storage.tls_security_profile = self.tls_security_profile
+
+    def validate_yaml(self, disable_tls: bool = False) -> None:
+        """Validate OLS config."""
+        if self.conversation_cache is not None:
+            self.conversation_cache.validate_yaml()
+        if self.reference_content is not None:
+            self.reference_content.validate_yaml()
+        if self.tls_config:
+            self.tls_config.validate_yaml(disable_tls)
+        if self.query_filters is not None:
+            for query_filter in self.query_filters:
+                query_filter.validate_yaml()
+        if self.tls_security_profile is not None:
+            self.tls_security_profile.validate_yaml()
+        if self.authentication_config is not None:
+            self.authentication_config.validate_yaml()
+        if self.proxy_config is not None:
+            self.proxy_config.validate_yaml()
+        if self.solr_hybrid is not None:
+            self.solr_hybrid.validate_yaml()
+
+
+class DevConfig(BaseModel):
+    """Developer-mode-only configuration options."""
+
+    enable_dev_ui: bool = False
+    llm_params: dict = {}
+    disable_auth: bool = False
+    disable_tls: bool = False
+    pyroscope_url: Optional[str] = None
+    k8s_auth_token: Optional[str] = None
+    run_on_localhost: bool = False
+    enable_system_prompt_override: bool = False
+    uvicorn_port_number: Optional[int] = None
+
+
+class Config(BaseModel):
+    """Global service configuration."""
+
+    llm_providers: LLMProviders = LLMProviders()
+    ols_config: OLSConfig = OLSConfig()
+    dev_config: DevConfig = DevConfig()
+    mcp_servers: MCPServers = MCPServers()
+
+    def __init__(
+        self,
+        data: Optional[dict] = None,
+        ignore_llm_secrets: bool = False,
+        ignore_missing_certs: bool = False,
+    ) -> None:
+        """Initialize configuration and perform basic validation."""
+        super().__init__()
+        if data is None:
+            return
+        v = data.get("ols_config")
+        if v is not None:
+            self.ols_config = OLSConfig(v, ignore_missing_certs)
+        else:
+            raise checks.InvalidConfigurationError("no OLS config section found")
+        v = data.get("llm_providers")
+        if v is not None:
+            self.llm_providers = LLMProviders(
+                v,
+                ignore_llm_secrets,
+                credential_hot_reload=self.ols_config.credential_hot_reload,
+            )
+        else:
+            raise checks.InvalidConfigurationError(
+                "no LLM providers config section found"
+            )
+
+        # initialize MCP servers
+        self.mcp_servers = MCPServers(servers=data.get("mcp_servers", []))
+
+        # Validate MCP servers now that auth config is available
+        self._validate_mcp_servers()
+        self._compute_tool_budgets()
+
+        # Always initialize dev config, even if there's no config for it.
+        self.dev_config = DevConfig(**data.get("dev_config", {}))
+
+    def _validate_default_provider_and_model(self) -> None:
+        selected_default_provider = self.ols_config.default_provider
+        selected_default_model = self.ols_config.default_model
+
+        provider_specified = selected_default_provider is not None
+        model_specified = selected_default_model is not None
+
+        if not provider_specified:
+            raise checks.InvalidConfigurationError("default_provider is missing")
+        if not model_specified:
+            raise checks.InvalidConfigurationError("default_model is missing")
+
+        # provider and model are specified
+        provider_config = self.llm_providers.providers.get(selected_default_provider)
+        if provider_config is None:
+            raise checks.InvalidConfigurationError(
+                f"default_provider specifies an unknown provider {selected_default_provider}"
+            )
+        model_config = provider_config.models.get(selected_default_model)
+        if model_config is None:
+            raise checks.InvalidConfigurationError(
+                f"default_model specifies an unknown model {selected_default_model}"
+            )
+
+    def _validate_mcp_servers(self) -> None:
+        """Validate MCP servers with auth module context.
+
+        Filters out servers where authorization headers cannot be resolved.
+        """
+        auth_module = getattr(
+            getattr(self.ols_config, "authentication_config", None),
+            "module",
+            None,
+        )
+        self.mcp_servers.servers = checks.validate_mcp_servers(
+            self.mcp_servers.servers,
+            auth_module,
+        )
+
+    def _compute_tool_budgets(self) -> None:
+        """Set tool token budget per model and ensure the context window fits reserved tokens."""
+        reserve_tool_budget = (
+            bool(self.mcp_servers.servers) or self.ols_config.solr_hybrid is not None
+        )
+        for provider in self.llm_providers.providers.values():
+            for model in provider.models.values():
+                if reserve_tool_budget:
+                    model.max_tokens_for_tools = int(
+                        model.context_window_size * model.parameters.tool_budget_ratio
+                    )
+                else:
+                    model.max_tokens_for_tools = 0
+                reserved = (
+                    model.parameters.max_tokens_for_response
+                    + model.max_tokens_for_tools
+                )
+                if model.context_window_size <= reserved:
+                    raise checks.InvalidConfigurationError(
+                        f"Model '{model.name}': context window size {model.context_window_size} "
+                        f"must be greater than max_tokens_for_response "
+                        f"({model.parameters.max_tokens_for_response}) + "
+                        f"tool budget ({model.max_tokens_for_tools})"
+                    )
+
+    def validate_yaml(self) -> None:
+        """Validate all configurations."""
+        self.llm_providers.validate_yaml()
+        self.ols_config.validate_yaml(self.dev_config.disable_tls)
+        self._validate_default_provider_and_model()
