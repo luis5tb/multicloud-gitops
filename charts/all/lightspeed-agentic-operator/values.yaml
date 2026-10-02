@@ -1,0 +1,55 @@
+namespace: lightspeed-agentic-operator
+
+image:
+  # Konflux floating tags -- upstream has no versioned/OLM release yet.
+  operator: quay.io/redhat-user-workloads/crt-nshift-lightspeed-tenant/lightspeed-agentic-operator:main
+  sandbox: quay.io/redhat-user-workloads/crt-nshift-lightspeed-tenant/lightspeed-agentic-sandbox:main
+
+approvalPolicy:
+  maxConcurrentRuns: 5
+
+# Providers are independent and can be enabled together. Each creates an
+# LLMProvider; Vertex providers share one ESO-managed GCP credentials Secret.
+llmProviders:
+  vertex:
+    credentialsSecretName: llm-creds-vertex
+    vaultKey: secret/data/global/llm-creds-vertex
+
+  vertexAnthropic:
+    enabled: false
+    name: vertex-anthropic
+    projectID: ""
+    region: ""
+
+  vertexGoogle:
+    enabled: false
+    name: vertex-google
+    projectID: ""
+    region: ""
+
+  openai:
+    enabled: false
+    name: openai
+    # Optional OpenAI-compatible endpoint override, e.g. a LiteLLM proxy.
+    # Empty uses the provider's default OpenAI endpoint.
+    url: ""
+    credentialsSecretName: llm-creds-openai
+    vaultKey: secret/data/global/llm-creds-openai
+
+# Map keys become Agent resource names. AgenticRun stages select one of these
+# names, and each Agent chooses its provider and that provider's model alias.
+agents: {}
+
+agentDefaults:
+  timeouts:
+    analysisSeconds: 1200
+    executionSeconds: 1200
+    verificationSeconds: 1200
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+global:
+  clusterPlatform: aws

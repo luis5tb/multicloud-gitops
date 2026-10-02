@@ -1,0 +1,8 @@
+apiVersion: v2
+name: lightspeed-agentic-operator
+description: >-
+  Deploys the OpenShift Lightspeed Agentic operator (openshift/lightspeed-agentic-operator),
+  a dev-preview, non-OLM operator installed by mirroring hack/quickstart/deploy-operator.sh
+  and hack/quickstart/deploy-configmap.sh from the upstream repo (pinned CRDs/admission
+  policy vendored from commit 116d2048f96722463d619cf05481d713749139d6).
+version: 0.1.0

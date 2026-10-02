@@ -1,0 +1,138 @@
+{{- $hasDocuments := false }}
+{{ if or .Values.llmProviders.vertexAnthropic.enabled .Values.llmProviders.vertexGoogle.enabled }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  refreshInterval: {{ .Values.secretStore.refreshInterval }}
+  secretStoreRef:
+    name: {{ .Values.secretStore.name }}
+    kind: {{ .Values.secretStore.kind }}
+  target:
+    name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
+    template:
+      type: Opaque
+      data:
+        GOOGLE_APPLICATION_CREDENTIALS: "{{ `{{ .credentials }}` }}"
+  data:
+    - secretKey: credentials
+      remoteRef:
+        key: {{ .Values.llmProviders.vertex.vaultKey }}
+        property: credentials
+{{ $hasDocuments = true }}
+{{ if .Values.llmProviders.vertexAnthropic.enabled }}
+---
+apiVersion: agentic.openshift.io/v1alpha1
+kind: LLMProvider
+metadata:
+  name: {{ .Values.llmProviders.vertexAnthropic.name }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  type: GoogleCloudVertex
+  googleCloudVertex:
+    projectID: {{ .Values.llmProviders.vertexAnthropic.projectID | quote }}
+    region: {{ .Values.llmProviders.vertexAnthropic.region | quote }}
+    modelProvider: Anthropic
+    credentialsSecret:
+      name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
+{{ $hasDocuments = true }}
+{{ end }}
+{{ if .Values.llmProviders.vertexGoogle.enabled }}
+{{ if $hasDocuments }}
+---
+{{ end }}
+apiVersion: agentic.openshift.io/v1alpha1
+kind: LLMProvider
+metadata:
+  name: {{ .Values.llmProviders.vertexGoogle.name }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  type: GoogleCloudVertex
+  googleCloudVertex:
+    projectID: {{ .Values.llmProviders.vertexGoogle.projectID | quote }}
+    region: {{ .Values.llmProviders.vertexGoogle.region | quote }}
+    modelProvider: Google
+    credentialsSecret:
+      name: {{ .Values.llmProviders.vertex.credentialsSecretName }}
+{{ $hasDocuments = true }}
+{{ end }}
+{{ end }}
+{{ if .Values.llmProviders.openai.enabled }}
+{{ if $hasDocuments }}
+---
+{{ end }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ .Values.llmProviders.openai.credentialsSecretName }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  refreshInterval: {{ .Values.secretStore.refreshInterval }}
+  secretStoreRef:
+    name: {{ .Values.secretStore.name }}
+    kind: {{ .Values.secretStore.kind }}
+  target:
+    name: {{ .Values.llmProviders.openai.credentialsSecretName }}
+    template:
+      type: Opaque
+      data:
+        OPENAI_API_KEY: "{{ `{{ .api_key }}` }}"
+  data:
+    - secretKey: api_key
+      remoteRef:
+        key: {{ .Values.llmProviders.openai.vaultKey }}
+        property: api-key
+---
+apiVersion: agentic.openshift.io/v1alpha1
+kind: LLMProvider
+metadata:
+  name: {{ .Values.llmProviders.openai.name }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  type: OpenAI
+  openAI:
+    {{- with .Values.llmProviders.openai.url }}
+    url: {{ . | quote }}
+    {{- end }}
+    credentialsSecret:
+      name: {{ .Values.llmProviders.openai.credentialsSecretName }}
+{{ $hasDocuments = true }}
+{{ end }}
+{{ range $agentName, $agent := .Values.agents }}
+{{ if $hasDocuments }}
+---
+{{ end }}
+{{- $timeouts := $agent.timeouts | default $.Values.agentDefaults.timeouts }}
+apiVersion: agentic.openshift.io/v1alpha1
+kind: Agent
+metadata:
+  name: {{ $agentName }}
+  namespace: {{ $.Values.namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  llmProvider:
+    name: {{ $agent.llmProvider | quote }}
+  model: {{ $agent.model | quote }}
+  timeouts:
+    analysisSeconds: {{ $timeouts.analysisSeconds }}
+    executionSeconds: {{ $timeouts.executionSeconds }}
+    verificationSeconds: {{ $timeouts.verificationSeconds }}
+{{ $hasDocuments = true }}
+{{ end }}
