@@ -25,8 +25,32 @@ rules:
       - deployments
     resourceNames:
       - {{ .Values.appServerPatch.deploymentName | quote }}
+      {{- if .Values.appServerPatch.operatorDeploymentName }}
+      - {{ .Values.appServerPatch.operatorDeploymentName | quote }}
+      {{- end }}
     verbs:
       - patch
+  {{- if .Values.appServerPatch.operatorSubscriptionName }}
+  - apiGroups:
+      - operators.coreos.com
+    resources:
+      - subscriptions
+    resourceNames:
+      - {{ .Values.appServerPatch.operatorSubscriptionName | quote }}
+    verbs:
+      - get
+  # Cannot scope this to the specific installed CSV by resourceNames: its
+  # name carries a version suffix (e.g. lightspeed-operator.v1.1.4) that
+  # changes on every operator upgrade, and is only known at runtime via the
+  # Subscription's status.installedCSV -- RBAC resourceNames must be static.
+  - apiGroups:
+      - operators.coreos.com
+    resources:
+      - clusterserviceversions
+    verbs:
+      - get
+      - patch
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

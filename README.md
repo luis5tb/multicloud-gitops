@@ -56,9 +56,10 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     operator-managed app-server Deployment directly, after the fact, with
     this image and the required `A2A_*` settings (`keycloakIssuerURL`,
     `clusterId`, `rpcUrl`, plus the optional audience/azp overrides) --
-    see that chart's README.md ("Temporary A2A bridge") for how to set it
-    and why it has to re-assert itself periodically instead of being a
-    one-shot patch. Delete it once the operator/OLSConfig CRD natively
+    see that chart's README.md ("Temporary A2A bridge") for how to set it,
+    and why it also scales the operator itself to 0 replicas first (a
+    periodic re-assert against the operator's own reconcile loop turned out
+    to be a losing fight -- confirmed live). Delete it once the operator/OLSConfig CRD natively
     supports a custom service image and A2A configuration.
 
 2. Replace the `acme-agent` application's `image.repository`/`image.tag`

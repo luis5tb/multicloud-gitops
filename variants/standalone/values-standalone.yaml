@@ -408,11 +408,14 @@ clusterGroup:
         # confirmed and enabled).
         - name: identity.keycloak.caBundleSync.enabled
           value: "true"
-        # Disabled until the Lightspeed A2A/SPIFFE workstream
-        # (vendor/lightspeed-service, separate from this chart) actually
-        # deploys an app-server identity to register.
+        # Enabled now that appServerPatch actually deploys the A2A-enabled
+        # app-server image needing this identity to register.
         - name: identity.clusterSpiffeID.enabled
-          value: "false"
+          value: "true"
+        # Must match the cluster's trust domain (see acme-agent's
+        # identity.clusterSpiffeID.trustDomain override above).
+        - name: identity.clusterSpiffeID.trustDomain
+          value: apps.ocp.pgt8r.sandbox288.opentlc.com
         # TEMPORARY A2A bridge (see charts/all/openshift-lightspeed-config/
         # README.md's "Temporary A2A bridge" section) -- patches the
         # operator-managed app-server Deployment with the custom OLS image

@@ -198,7 +198,25 @@ appServerPatch:
   # explicitly above -- each entry is a plain {name, value} pair merged into
   # the container's env by name.
   extraEnv: []
-  schedule: "*/5 * * * *"
+  # The operator reconciles the app-server Deployment's entire container
+  # spec from scratch on every pass -- confirmed live, a patched image and
+  # env vars both get silently wiped within minutes, far faster than any
+  # periodic re-assert job could outrun. So instead of re-patching forever,
+  # the bootstrap Job stops the operator from reconciling at all, once, then
+  # patches: scales operatorDeploymentName to 0 replicas (confirmed live to
+  # actually stick, with no drift-correction observed from OLM either over
+  # several minutes), and best-effort annotates the installed CSV
+  # (resolved dynamically via operatorSubscriptionName's status.installedCSV,
+  # since the CSV name carries a version suffix) with
+  # operatorManagementStateAnnotation -- this operator's own binary does not
+  # reference that annotation key at all (checked directly), so it is not
+  # confirmed to do anything; kept as defense-in-depth only, never relied on
+  # alone. Leaving operatorSubscriptionName/operatorDeploymentName empty
+  # skips this entirely and falls back to patching the app-server Deployment
+  # only (the old, losing-fight behavior).
+  operatorSubscriptionName: lightspeed-operator
+  operatorDeploymentName: lightspeed-operator-controller-manager
+  operatorManagementStateAnnotation: "operator.openshift.io/managementState"
   poll:
     intervalSeconds: 10
     deadlineSeconds: 150

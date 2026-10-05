@@ -117,23 +117,57 @@ Both are properties of the operator-managed app-server Deployment, which
 this chart does not own and which the operator continuously reconciles.
 
 `appServerPatch` (disabled by default) works around this by patching that
-Deployment directly, after the fact:
+Deployment directly, after the fact. An earlier version of this mechanism
+re-applied the patch on a 5-minute `CronJob` schedule, on the assumption the
+operator would only *occasionally* revert it -- confirmed live to be wrong:
+the operator reconciles the app-server Deployment's entire container spec
+from scratch on every pass (45+ Deployment generations observed within
+~90 minutes, with at most two patch attempts from this chart in that
+window -- the operator itself is the aggressor), far faster than any
+reasonable re-assert interval could outrun. A periodic patch can never
+durably win that fight.
+
+Instead, the bootstrap Job now stops the operator from reconciling at all,
+once, before patching:
 
 - `templates/appserver-patch-rbac.yaml` -- a ServiceAccount/Role/RoleBinding
-  scoped to `patch` on exactly the named Deployment
-  (`appServerPatch.deploymentName`, an unconfirmed-guess name like
-  `appServer.podSelectorLabels` above -- verify against `oc get deployment -n
-  <namespace>`).
-- `templates/appserver-patch-job.yaml` -- an ArgoCD `Sync` hook Job that
-  polls for the Deployment to exist (the operator may not have reconciled
-  `OLSConfig` into it yet on a fresh install) and applies a strategic merge
-  patch setting the container's `image` (if `appServerPatch.image.repository`/
-  `tag` are set) and merging the `A2A_*` env vars built from
-  `appServerPatch.a2a`/`extraEnv` -- by name, so any other env var or
-  container the operator set is left alone.
-- `templates/appserver-patch-cronjob.yaml` -- re-applies the same patch on a
-  schedule (`appServerPatch.schedule`), because the operator's own reconcile
-  loop can silently revert it on a later pass.
+  scoped to `patch` on exactly the named Deployments
+  (`appServerPatch.deploymentName` -- an unconfirmed-guess name like
+  `appServer.podSelectorLabels` above, verify against `oc get deployment -n
+  <namespace>` -- and `appServerPatch.operatorDeploymentName`), plus `get` on
+  the named Subscription and `get`/`patch` on `clusterserviceversions`
+  (unscoped by name: the installed CSV's name carries a version suffix only
+  known at runtime, so RBAC `resourceNames` can't pin it).
+- `templates/appserver-patch-job.yaml` -- an ArgoCD `Sync` hook Job that:
+  1. Resolves the installed CSV via `appServerPatch.operatorSubscriptionName`'s
+     `status.installedCSV` and best-effort annotates it with
+     `appServerPatch.operatorManagementStateAnnotation: Unmanaged`. This
+     operator's own binary was checked directly (`strings` on the extracted
+     controller-manager binary) and never references that annotation key --
+     it is **not confirmed to do anything** here, kept only as
+     defense-in-depth in case OLM itself honors it for CSV-owned deployments.
+  2. Scales `appServerPatch.operatorDeploymentName` to 0 replicas. This part
+     **is** confirmed live: observed stable at `spec.replicas=0` with zero
+     drift-correction, from either the operator itself (not running) or OLM,
+     over several minutes of direct observation.
+  3. Only then polls for the app-server Deployment to exist (the operator
+     may not have reconciled `OLSConfig` into it yet on a fresh install) and
+     applies a strategic merge patch setting the container's `image` (if
+     `appServerPatch.image.repository`/`tag` are set) and merging the
+     `A2A_*` env vars built from `appServerPatch.a2a`/`extraEnv` -- by name,
+     so any other env var or container the operator set is left alone.
+
+  Steps 1-2 are skipped entirely if `appServerPatch.operatorSubscriptionName`/
+  `operatorDeploymentName` are left empty, falling back to the old
+  patch-only behavior (which will not persist).
+
+Scaling the operator to 0 also stops it from reconciling *everything else*
+it manages for this OLSConfig (the console plugin, OTEL collector, Solr/RHOKP
+sidecar, the operator-managed MCP server, and OLSConfig status updates) --
+acceptable for this pattern's purposes, but worth knowing if any of those
+need to change later: scale `appServerPatch.operatorDeploymentName` back to
+1 first, make the change, then re-run this Job (or let ArgoCD's next sync
+re-run it) to scale back down.
 
 **This is explicitly temporary.** Delete `appServerPatch` from `values.yaml`,
 `templates/appserver-patch-*.yaml`, and `files/patch_appserver.py` entirely

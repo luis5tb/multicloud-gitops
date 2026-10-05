@@ -156,6 +156,12 @@ containers:
         value: {{ .Values.appServerPatch.poll.intervalSeconds | quote }}
       - name: POLL_DEADLINE_SECONDS
         value: {{ .Values.appServerPatch.poll.deadlineSeconds | quote }}
+      - name: OPERATOR_SUBSCRIPTION_NAME
+        value: {{ .Values.appServerPatch.operatorSubscriptionName | quote }}
+      - name: OPERATOR_DEPLOYMENT_NAME
+        value: {{ .Values.appServerPatch.operatorDeploymentName | quote }}
+      - name: OPERATOR_MANAGEMENT_STATE_ANNOTATION
+        value: {{ .Values.appServerPatch.operatorManagementStateAnnotation | quote }}
       - name: PYTHONDONTWRITEBYTECODE
         value: "1"
     securityContext:
