@@ -107,6 +107,9 @@ Apache-2.0-licensed codebase.
    - `pyproject.toml` (adds `PyJWT[crypto]` and `spiffe` as direct
      dependencies -- `PyJWT` was already present transitively; `spiffe` is
      new)
+   - `Containerfile` (adds an early `COPY ols/version.py` -- see "Local
+     build issues found and fixed" below; check whether the new upstream
+     commit still needs it before re-applying blindly)
    - This `VENDOR.md` file
 5. Copy the refreshed tree over `vendor/lightspeed-service/` (still
    excluding `embeddings_model/` and `.git`), re-apply the diff from step 4,
@@ -130,30 +133,30 @@ Apache-2.0-licensed codebase.
 
 ### Dependency lockfile
 
-**`uv.lock` and `requirements.txt` were not regenerated in this pass.** This
-project resolves/locks dependencies with `uv` (`uv sync --locked`, per the
-`Containerfile`), and `requirements.txt` is a fully pinned, hash-locked
-export produced from that lock. Regenerating it requires resolving the
-*entire* dependency set (including `torch`, `faiss-cpu`, `llama-index`,
-etc.) against PyPI, which was not attempted here because:
-
-- it is a heavy, slow operation unrelated to reviewing the actual code
-  change, and
-- `spiffe==0.3.1` is a small, pure-Python-plus-grpc package with no
-  resolution conflicts expected against the existing lock (it is already
-  used elsewhere in this repository with the same constraints), so the risk
-  of silently introducing a conflicting pin is low but not zero.
-
-Before building a real image from this vendored copy, run (network access
-required):
+**Regenerated** (`uv lock` + the Makefile's own `requirements.txt` export
+command, confirmed with `uv lock --check`) once a real local build actually
+needed it -- not done in the original pass that added `spiffe`/`PyJWT[crypto]`
+to `pyproject.toml`, which is why the first local build attempt hit `error:
+The lockfile at uv.lock needs to be updated, but --locked was provided`:
 
 ```shell
 cd vendor/lightspeed-service
 uv lock
-uv export --no-dev --no-hashes -o requirements.txt   # or the project's existing export command
+uv export --format requirements-txt --no-dev --no-extra evaluation --no-editable --no-emit-package ols --output-file requirements.txt
 ```
 
-and re-run `pip check`/the unit tests to confirm nothing else shifted.
+Resulting changes: `spiffe==0.3.1` and its transitive `pem==23.1.0` added;
+`pyjwt` resolved down from `2.14.0` to `2.13.0` across every consumer
+(`ols`, `msal`, `spiffe` itself) -- `spiffe`'s own `pyjwt[crypto]` constraint
+is the tightest in the graph, so `uv` picked the highest version satisfying
+all of them at once. Still well within `pyproject.toml`'s declared
+`PyJWT[crypto]>=2.10.0,<3.0.0`; not treated as a regression, but worth a
+glance at PyJWT's changelog between 2.13.0 and 2.14.0 before shipping if
+that gap turns out to matter.
+
+`uv lock --check` passes against the current `pyproject.toml`. Re-run
+`pip check`/the unit tests to confirm nothing else shifted before relying on
+this for anything beyond a local build.
 
 ## A2A endpoint (new)
 
@@ -193,13 +196,15 @@ Unit tests are under `tests/unit/app/endpoints/test_a2a_auth.py` and
 `tests/unit/app/endpoints/test_a2a.py`. See their module docstrings and the
 root-level test-run notes below for how to run them.
 
-## Container image build (T1.4 -- not performed in this pass)
+## Container image build (T1.4)
 
-The upstream `Containerfile` is present at `vendor/lightspeed-service/Containerfile`
-and is unmodified by this change (the A2A endpoint is pure Python source
-copied the same way `ols/` already is; no new build stage is required). The
-build command, once `embeddings_model/` is restored (see above) and
-`uv.lock`/`requirements.txt` are regenerated, is the standard:
+The upstream `Containerfile` is present at `vendor/lightspeed-service/Containerfile`.
+The A2A endpoint itself is pure Python source copied the same way `ols/`
+already is (no new build stage required), but one small Containerfile change
+was needed to actually build locally -- see "Local build issues found and
+fixed" below. Once that fix is in place, `embeddings_model/` is restored
+(see above), and `uv.lock`/`requirements.txt` are regenerated, the build
+command is the standard:
 
 ```shell
 podman build -f vendor/lightspeed-service/Containerfile \
@@ -207,14 +212,54 @@ podman build -f vendor/lightspeed-service/Containerfile \
   vendor/lightspeed-service
 ```
 
-**No image was built or pushed in this pass.** Per the task scope, this is a
-source-only change: no `oc apply`/`helm install`/registry push was
-performed, and no registry credentials exist in this task's environment to
-do so. Building and publishing an image by immutable digest -- and wiring
-the OpenShift Lightspeed Operator's `--service-image` override to it -- is
-explicit follow-up work tracked in Phase 1/2 of
-`LIGHTSPEED_IMPLEMENTATION_PLAN.md`, not something this pass claims to have
-done.
+Building and publishing an image by immutable digest -- and wiring the
+OpenShift Lightspeed Operator's `--service-image` override (now
+`appServerPatch` in `charts/all/openshift-lightspeed-config`, a temporary
+bridge -- see that chart's README.md) to it -- is tracked in Phase 0/2 of
+the top-level `README.md`.
+
+### Local build issues found and fixed
+
+Discovered by actually attempting a local, non-hermetic `podman build`
+(something CI never does -- Konflux's hermetic path takes a different code
+path through the Containerfile that avoids the first two of these):
+
+1. **`registry.redhat.io/rhel9/python-312` is an entitled RHEL image, not
+   UBI.** `dnf install` inside it (`gcc gcc-c++ cmake cargo`) needs real Red
+   Hat subscription entitlement certs mounted into the build
+   (`/etc/pki/entitlement`, `/etc/rhsm`) -- a plain `podman login
+   registry.redhat.io` (enough to pull the image itself) is not sufficient.
+   Either register a system (a free Red Hat Developer Subscription works)
+   and mount its entitlement certs via `podman build --volume
+   /etc/pki/entitlement:/etc/pki/entitlement:ro --volume
+   /etc/rhsm/ca:/etc/rhsm/ca:ro ...`, or override
+   `--build-arg BUILDER_BASE_IMAGE=registry.access.redhat.com/ubi9/python-312:9.6
+   --build-arg RUNTIME_BASE_IMAGE=registry.access.redhat.com/ubi9/python-312-minimal:9.6`
+   to use the free UBI equivalents instead (same Python version, no
+   entitlement needed; this pattern's own charts already standardize on the
+   UBI9 minimal image elsewhere). Not fixed in the Containerfile itself --
+   this is an environment/credentials concern, not a code bug.
+2. **`uv sync --locked` fails without `uv.lock` regenerated** for the
+   `spiffe`/`PyJWT[crypto]` additions -- see "Dependency lockfile" below,
+   already documented before this build was attempted.
+3. **`COPY ols ./ols` doesn't happen until *after* the dependency-install
+   `RUN` step** (intentional Docker layer-caching: install deps once, only
+   rebuild on source changes), but `uv sync --no-install-project` still
+   invokes hatchling's `prepare_metadata_for_build_editable` hook to resolve
+   `[tool.hatch.version] path = "ols/version.py"` (`pyproject.toml`'s
+   dynamic version source) despite `--no-install-project`, and fails with
+   `OSError: ... file does not exist: ols/version.py`. Only the hermetic
+   branch avoids this (it calls `uv pip install --no-deps`, never `uv
+   sync`, so it never resolves project metadata) -- which is why Konflux's
+   CI never hit it. **Fixed** in the `Containerfile`: added
+   `COPY ols/version.py ./ols/version.py` right after the Step 1 metadata
+   copy, before the dependency-install `RUN`. `ols/version.py` is a static,
+   rarely-changing one-line version string, so copying it this early barely
+   affects layer-cache invalidation.
+
+None of these three were hit or fixed by whichever earlier pass wrote the
+original "Container image build -- not performed in this pass" note; they
+were only discovered once a real local build was actually attempted.
 
 ## Provenance note
 
