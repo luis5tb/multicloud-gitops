@@ -321,7 +321,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/acme-agent
         - name: image.tag
-          value: 3b27fd56
+          value: 34256970
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
