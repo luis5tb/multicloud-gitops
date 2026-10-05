@@ -730,3 +730,28 @@ oc auth can-i get pods --as=nobody --as-group=keycloak:acme-agent-rca -n <namesp
   talk to the in-cluster Kubernetes API server, whose certificate always
   chains to exactly the projected service-account CA -- an exclusive
   `cafile=` there is correct, not a latent copy of this bug.
+- **OLS's RFC 8693 exchange gets a `401 Unauthorized` from Keycloak's
+  `/token` endpoint** with no detail beyond "Keycloak token exchange for
+  OpenShift MCP failed" (OLS validates and uses the caller's token fine up
+  to this point -- the SPIFFE JWT-SVID fetch itself succeeds, so this is
+  *not* the SPIRE/ZTWIM issue above): check whether
+  `keycloak.lightspeedWorkload.namespace`/`serviceAccount` was ever changed
+  **after** the realm already imported. `keycloak-realm-import.yaml`
+  templates `lightspeed-mcp`'s `jwt.credential.sub` attribute (the exact
+  SPIFFE ID the federated-jwt validator requires the `client_assertion`'s
+  `sub` claim to match) from those two values at import time only -- the
+  same one-shot limitation documented elsewhere in this file for
+  `adminGroupName`/`consoleClientSecretVaultKey`. Moving the OLS app-server
+  to a different namespace (done in this pattern specifically to dodge
+  ZTWIM's `ignoreNamespaces: ["openshift-*"]`, see the SPIRE/ZTWIM entry
+  above) changes the real JWT-SVID's `sub` to the new namespace, but
+  `lightspeed-mcp`'s already-imported `jwt.credential.sub` keeps pointing at
+  the old one -- Keycloak's federated-jwt validator doesn't know the
+  presented assertion's subject, so it rejects it outright. Confirmed by
+  comparing the live client's attribute (Admin REST API:
+  `GET /admin/realms/rca/clients?clientId=lightspeed-mcp`) against the
+  actual JWT-SVID's decoded `sub` claim -- they'd drifted. Fix via the
+  Admin REST API directly (`PUT` the client with the corrected
+  `attributes["jwt.credential.sub"]`); a future full realm re-import would
+  also pick up the new value, but re-importing an existing realm isn't
+  something this pattern's chart does today.
