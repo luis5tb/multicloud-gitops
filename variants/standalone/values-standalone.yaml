@@ -11,7 +11,7 @@
 # contracts").
 global:
   olsClusters:
-    api-ocp.pgt8r.sandbox288.opentlc.com-6443:
+    api-ocp-pgt8r-sandbox288-opentlc-com-6443:
       apiURL: https://api.ocp.pgt8r.sandbox288.opentlc.com:6443
       upstreamHost: lightspeed-app-server.openshift-lightspeed.svc.cluster.local
       upstreamPort: 8443
@@ -37,7 +37,16 @@ clusterGroup:
     praxis-proxy:
     openshift-lightspeed:
       operatorGroup: true
-      targetNamespaces: []
+      # lightspeed-operator's CSV only declares OwnNamespace as a supported
+      # installMode (SingleNamespace/MultiNamespace/AllNamespaces are all
+      # false) -- an empty targetNamespaces here renders an AllNamespaces
+      # OperatorGroup, which OLM then refuses with
+      # "AllNamespaces InstallModeType not supported, cannot configure to
+      # watch all namespaces" / UnsupportedOperatorGroup, permanently
+      # failing the CSV (confirmed on a live cluster: this is not
+      # theoretical). Must be scoped to exactly this namespace.
+      targetNamespaces:
+        - openshift-lightspeed
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -421,7 +430,7 @@ clusterGroup:
         # Same routing id as this file's global.olsClusters map key --
         # must stay in sync with it.
         - name: appServerPatch.a2a.clusterId
-          value: api-ocp.pgt8r.sandbox288.opentlc.com-6443
+          value: api-ocp-pgt8r-sandbox288-opentlc-com-6443
         # Same public A2A endpoint as praxis-proxy's route.host / acme-agent's
         # a2a.remoteAgents[0].endpoint above.
         - name: appServerPatch.a2a.rpcUrl
