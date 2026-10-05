@@ -755,3 +755,22 @@ oc auth can-i get pods --as=nobody --as-group=keycloak:acme-agent-rca -n <namesp
   `attributes["jwt.credential.sub"]`); a future full realm re-import would
   also pick up the new value, but re-importing an existing realm isn't
   something this pattern's chart does today.
+- **OLS's MCP tool call fails with `namespaces is forbidden: User
+  "keycloak:<uuid>" cannot list resource "namespaces" at the cluster
+  scope`, even though the whole identity chain (SPIFFE → Keycloak exchange →
+  OIDC-mapped OpenShift user) is working correctly** -- this is the
+  end-to-end success case surfacing a genuine, by-design RBAC gap, not an
+  auth bug: the chart's `lightspeedRbac` Role/ClusterRole only ever grants
+  `get`/`list` on `pods`/`events` (see `LIGHTSPEED_DESIGN.md`'s "RBAC to
+  grant (and not grant)"), never `namespaces`. The operator-managed MCP
+  server's agentic tool-calling flow calls `namespaces_list` (a
+  cluster-scoped call) on its own initiative even when the user's request
+  already named a specific namespace. Namespace *names* aren't meaningfully
+  sensitive on their own, so the fix is to extend
+  `lightspeedRbac.extraRules` (already the chart's designated escape hatch
+  for exactly this kind of deliberate, reviewed widening -- see its existing
+  `pods/log` example) with a `get`/`list` rule on `namespaces`, rather than
+  changing the chart's own least-privilege default. Done in
+  `variants/standalone/values-standalone.yaml` right next to the
+  `lightspeedRbac.allNamespaces` override this sandbox cluster already
+  opted into.

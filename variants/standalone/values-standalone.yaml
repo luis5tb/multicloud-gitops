@@ -267,6 +267,25 @@ clusterGroup:
         # uncommenting this on anything but a throwaway cluster):
         - name: lightspeedRbac.allNamespaces
           value: "true"
+        # Confirmed live: the operator-managed MCP server's `namespaces_list`
+        # tool is cluster-scoped (`list` on the `namespaces` resource, not
+        # `pods`/`events`), and the agentic tool-calling flow calls it even
+        # when the user already named a specific namespace in their request
+        # -- "failed to list namespaces: namespaces is forbidden" with the
+        # chart's default rules (get/list pods+events only, see
+        # LIGHTSPEED_DESIGN.md's "RBAC to grant (and not grant)"). Namespace
+        # *names* are not meaningfully sensitive on their own and the caller
+        # already opted into allNamespaces above for this sandbox cluster, so
+        # extend the same ClusterRole via the chart's extraRules escape hatch
+        # rather than widening the chart's own least-privilege default.
+        - name: lightspeedRbac.extraRules[0].apiGroups[0]
+          value: ""
+        - name: lightspeedRbac.extraRules[0].resources[0]
+          value: namespaces
+        - name: lightspeedRbac.extraRules[0].verbs[0]
+          value: get
+        - name: lightspeedRbac.extraRules[0].verbs[1]
+          value: list
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
