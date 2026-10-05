@@ -10,6 +10,22 @@ The exposed `acme_agent` is a local ADK coordinator agent. Its configured
 coordinator selects a peer using its description, passes the request to that
 peer, and returns the peer's result without doing domain-specific work itself.
 
+Each peer is wrapped in `google.adk.tools.agent_tool.AgentTool` and attached
+via `tools=`, not `sub_agents=`. A bare `RemoteA2aAgent` with no `mode` set
+(the only option our downstream A2A server supports -- see
+`agents/AUTHENTICATION.md`) is, per its own docstring, "a plain
+`transfer_to_agent` target": calling `transfer_to_agent` ends the current
+task immediately once the hand-off is recorded, with no mechanism to wait
+for and return the peer's actual answer in the same request. `AgentTool`
+instead runs the wrapped agent to completion via its own `Runner` and
+returns its result as a normal function-call return value, which is what a
+single HTTP request/response round trip through this coordinator actually
+needs. The trade-off: no streaming and no multi-turn `input_required`
+hand-back -- both would need the peer to implement `RemoteA2aAgent`'s
+`mode="task"` handshake, which requires real task-lifecycle support
+(`finish_task`, intermediate status updates) on the OLS side that does not
+exist today.
+
 ## Project layout
 
 ```text

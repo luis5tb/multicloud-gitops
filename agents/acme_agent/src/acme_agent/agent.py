@@ -14,6 +14,7 @@ from google.adk.agents.remote_a2a_agent import (
     RemoteA2aAgent,
 )
 from google.adk.models.lite_llm import LiteLlm
+from google.adk.tools.agent_tool import AgentTool
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
@@ -78,7 +79,18 @@ def _model() -> LiteLlm:
 
 
 # This local ADK agent is the public entrypoint. The RemoteA2aAgent instances
-# above are configured downstream sub-agents, not the public endpoint.
+# above are wrapped as AgentTool, not attached via sub_agents=: a bare
+# RemoteA2aAgent with no `mode` set is "a plain transfer_to_agent target"
+# (per its own docstring) -- a conversational hand-off that ends the current
+# task immediately once transfer_to_agent is called, with no mechanism to
+# wait for and return the remote agent's actual answer in the same turn.
+# AgentTool.run_async instead runs the wrapped agent to completion via its
+# own Runner and returns its result as a normal function-call return value,
+# which matches the actual requirement here: a single request/response round
+# trip through OpenShift Lightspeed. RemoteA2aAgent's only alternative,
+# mode="task", requires the remote server to implement ADK's finish_task
+# handshake, which vendor/lightspeed-service's hand-rolled A2A endpoint does
+# not (see agents/AUTHENTICATION.md and that endpoint's own docstring).
 root_agent = Agent(
     model=_model(),
     name=os.getenv("AGENT_NAME", "acme_agent"),
@@ -107,14 +119,14 @@ root_agent = Agent(
         "than attempting delegation anyway; the final authorization of "
         "that URL happens server-side, not by your judgment.\n\n"
         "Once the request contains exactly one explicit, well-formed "
-        "cluster API URL, delegate the full request (including that URL) "
-        "to the configured remote A2A sub-agent, passing the user's request "
-        "without rewriting or dropping important details, and return the "
-        "sub-agent's result. Do not answer from your own knowledge and do "
-        "not invent a result. If no configured sub-agent is suitable, "
-        "explain that the request cannot be routed."
+        "cluster API URL, call the configured downstream tool with the "
+        "user's full request (including that URL), without rewriting or "
+        "dropping important details, and return its result as your answer. "
+        "Do not answer from your own knowledge and do not invent a result. "
+        "If no configured tool is suitable, explain that the request cannot "
+        "be routed."
     ),
-    sub_agents=remote_agents,
+    tools=[AgentTool(agent=remote) for remote in remote_agents],
 )
 
 
