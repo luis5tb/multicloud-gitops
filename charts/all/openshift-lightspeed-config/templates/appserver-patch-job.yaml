@@ -27,6 +27,15 @@ spec:
       labels:
         app.kubernetes.io/name: openshift-lightspeed-config-appserver-patch
         app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        # Without this, changing files/patch_appserver.py's content alone
+        # (the script is mounted from a ConfigMap this Job references, not
+        # inlined in this Job's own spec) doesn't change this Job's own
+        # rendered manifest at all -- confirmed live, ArgoCD did not
+        # re-trigger this Sync hook on a sync where only the script content
+        # changed, even on an explicit forced sync. Same pattern as
+        # charts/all/praxis-proxy/templates/deployment.yaml's checksum/config.
+        checksum/config: {{ include (print $.Template.BasePath "/appserver-patch-script.yaml") . | sha256sum }}
     spec:
 {{ include "openshift-lightspeed-config.appServerPatchPodSpec" . | nindent 6 }}
 {{- end }}
