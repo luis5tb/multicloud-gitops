@@ -15,11 +15,16 @@ fullnameOverride: openshift-lightspeed-config
 # every openshift-*-prefixed namespace from SPIFFE workload registration.
 # That silently breaks appServerPatch's RFC 8693 token exchange (SPIRE
 # never issues the app-server pod a JWT-SVID) with no error anywhere in
-# this chart's own resources to point at the cause. "a2a-openshift-lightspeed"
-# doesn't start with "openshift-", so it avoids the wildcard entirely
-# instead of patching ZTWIM's own ConfigMap (confirmed to fight that patch
-# just as aggressively as lightspeed-operator fought appServerPatch).
-namespace: a2a-openshift-lightspeed
+# this chart's own resources to point at the cause. Confirmed live that
+# the match is NOT a strict "starts with" prefix check either:
+# "a2a-openshift-lightspeed" (doesn't start with "openshift-") was *also*
+# silently excluded, so the matcher treats "openshift-*" closer to a
+# substring/contains check. "a2a-lightspeed" contains no "openshift"
+# substring at all, so it avoids the wildcard regardless of which exact
+# matching semantics are in play -- instead of patching ZTWIM's own
+# ConfigMap (confirmed to fight that patch just as aggressively as
+# lightspeed-operator fought appServerPatch).
+namespace: a2a-lightspeed
 
 # OLSConfig is conventionally a cluster-scoped singleton CR; "cluster" is the
 # assumed/expected name. This chart could not independently confirm the

@@ -217,7 +217,7 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     ```bash
     oc get configmap praxis-proxy -n praxis-proxy -o yaml   # rendered policy.yaml/praxis.yaml
     oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy
-    oc get networkpolicy -n a2a-openshift-lightspeed -o yaml  # OLS ingress restricted to praxis-proxy pods
+    oc get networkpolicy -n a2a-lightspeed -o yaml  # OLS ingress restricted to praxis-proxy pods
 
     # agent-card discovery is intentionally public, no token needed:
     curl -sf https://<praxis route host>/.well-known/agent-card.json

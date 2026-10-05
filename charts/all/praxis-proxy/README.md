@@ -210,7 +210,7 @@ At runtime, inspect the rendered policy and proxy logs with:
 ```bash
 oc get configmap praxis-proxy -n praxis-proxy -o yaml
 oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy
-oc get networkpolicy -n a2a-openshift-lightspeed -o yaml
+oc get networkpolicy -n a2a-lightspeed -o yaml
 ```
 
 ### Validation evidence (T6.1-T6.3, 2026-10-01)

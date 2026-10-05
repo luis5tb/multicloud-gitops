@@ -156,7 +156,7 @@ the full token, only its decoded claims**:
 ```bash
 # From inside a running OpenShift Lightspeed app-server pod (has httpx and
 # the spiffe SDK, per vendor/lightspeed-service's own dependencies):
-oc exec -n a2a-openshift-lightspeed deploy/lightspeed-app-server -- python3 -c '
+oc exec -n a2a-lightspeed deploy/lightspeed-app-server -- python3 -c '
 import base64, json, os
 import httpx
 from spiffe import WorkloadApiClient
