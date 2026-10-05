@@ -153,9 +153,19 @@ once, before patching:
   3. Only then polls for the app-server Deployment to exist (the operator
      may not have reconciled `OLSConfig` into it yet on a fresh install) and
      applies a strategic merge patch setting the container's `image` (if
-     `appServerPatch.image.repository`/`tag` are set) and merging the
-     `A2A_*` env vars built from `appServerPatch.a2a`/`extraEnv` -- by name,
-     so any other env var or container the operator set is left alone.
+     `appServerPatch.image.repository`/`tag` are set), merging the `A2A_*`
+     env vars built from `appServerPatch.a2a`/`extraEnv`, and -- when
+     `appServerPatch.spiffeWorkloadApiMountPath` is set (the default) --
+     mounting SPIRE's `csi.spiffe.io` CSI driver volume into the container.
+     SPIRE's workload API is a CSI volume every workload declares for
+     itself, not something a mutating webhook injects (confirmed by
+     checking `charts/all/acme-agent/templates/deployment.yaml`, the only
+     other consumer of it in this pattern), and OLSConfig/the operator have
+     no field or flag for it either -- without it,
+     `a2a_auth.py`'s `SpiffeWorkloadIdentity` fails every RFC 8693 exchange
+     with "ZTWIM/SPIRE did not issue a JWT-SVID" (confirmed live). All of
+     this merges by name, so any other env var, volume, or container the
+     operator set is left alone.
 
   Steps 1-2 are skipped entirely if `appServerPatch.operatorSubscriptionName`/
   `operatorDeploymentName` are left empty, falling back to the old

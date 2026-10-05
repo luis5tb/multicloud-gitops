@@ -193,7 +193,22 @@ appServerPatch:
     # Defaults to keycloakIssuerURL inside a2a_auth.py itself when empty;
     # only set this if the SPIFFE JWT-SVID assertion audience must differ.
     spiffeJwtAudience: ""
-    spiffeEndpointSocket: ""
+    # Matches spiffeWorkloadApiMountPath below (same unix:// convention
+    # acme-agent's identity.spiffe.workloadApiSocket uses) -- not
+    # cluster-specific, so this default normally doesn't need overriding.
+    spiffeEndpointSocket: "unix:///spiffe-workload-api/spire-agent.sock"
+  # Mounts SPIRE's csi.spiffe.io CSI driver volume into the app-server
+  # container so it can fetch its own JWT-SVID for the RFC 8693 token
+  # exchange -- required for the exchange to work at all (a2a_auth.py's
+  # SpiffeWorkloadIdentity raises A2AConfigurationError without a configured
+  # audience, and there is no SPIFFE identity to request one against without
+  # this volume). Unlike env vars, OLSConfig has no field for this and the
+  # operator has no flag for it either, so this chart adds the volume/mount
+  # directly via appServerPatch, the same way it adds the image and A2A_*
+  # env vars -- see values below and the chart's README "Temporary A2A
+  # bridge" section. Mirrors charts/all/acme-agent's
+  # identity.spiffe.workloadApiMountPath; keep both in sync if changed.
+  spiffeWorkloadApiMountPath: /spiffe-workload-api
   # Escape hatch for any other A2A_* env var this chart doesn't template
   # explicitly above -- each entry is a plain {name, value} pair merged into
   # the container's env by name.

@@ -142,6 +142,7 @@ def main() -> None:
     container_name = os.environ["CONTAINER_NAME"]
     image = os.environ.get("CONTAINER_IMAGE", "").strip()
     container_env = json.loads(os.environ.get("CONTAINER_ENV_JSON", "[]"))
+    spiffe_mount_path = os.environ.get("SPIFFE_VOLUME_MOUNT_PATH", "").strip()
     poll_interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "10"))
     poll_deadline = int(os.environ.get("POLL_DEADLINE_SECONDS", "150"))
     api_server = os.environ.get("KUBERNETES_API", "https://kubernetes.default.svc")
@@ -160,15 +161,31 @@ def main() -> None:
     if container_env:
         container_patch["env"] = container_env
 
-    if "image" not in container_patch and "env" not in container_patch:
-        print("Nothing to patch: no image and no env vars configured")
+    pod_spec_patch: dict = {}
+    if spiffe_mount_path:
+        # SPIRE's workload API is a CSI driver volume, not something a
+        # mutating webhook injects -- every workload that needs it declares
+        # this exact volume itself (see charts/all/acme-agent/templates/
+        # deployment.yaml, the only other consumer in this pattern). OLSConfig
+        # has no field for it and the operator has no flag for it either, so
+        # it goes in alongside the image/env patch above.
+        container_patch["volumeMounts"] = [
+            {"name": "spiffe-workload-api", "mountPath": spiffe_mount_path, "readOnly": True}
+        ]
+        pod_spec_patch["volumes"] = [
+            {"name": "spiffe-workload-api", "csi": {"driver": "csi.spiffe.io", "readOnly": True}}
+        ]
+
+    if len(container_patch) == 1:
+        print("Nothing to patch: no image, env vars, or SPIFFE mount configured")
         return
 
     # A strategic merge patch (not a plain JSON merge patch) so the API
-    # server merges `containers`/`env` by their `name` patchMergeKey instead
-    # of replacing the whole list -- any other container or env var the
-    # operator set stays untouched.
-    patch_body = {"spec": {"template": {"spec": {"containers": [container_patch]}}}}
+    # server merges `containers`/`env`/`volumeMounts`/`volumes` by their
+    # patchMergeKey instead of replacing the whole list -- any other
+    # container, env var, or volume the operator set stays untouched.
+    pod_spec_patch["containers"] = [container_patch]
+    patch_body = {"spec": {"template": {"spec": pod_spec_patch}}}
     path = f"/apis/apps/v1/namespaces/{namespace}/deployments/{deployment_name}"
     patch_headers = {**headers, "Content-Type": "application/strategic-merge-patch+json"}
     data = json.dumps(patch_body).encode("utf-8")

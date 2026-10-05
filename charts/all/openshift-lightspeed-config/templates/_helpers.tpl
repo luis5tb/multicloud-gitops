@@ -152,6 +152,8 @@ containers:
         value: {{ include "openshift-lightspeed-config.appServerPatchImage" . | quote }}
       - name: CONTAINER_ENV_JSON
         value: {{ include "openshift-lightspeed-config.appServerPatchEnvJSON" . | quote }}
+      - name: SPIFFE_VOLUME_MOUNT_PATH
+        value: {{ .Values.appServerPatch.spiffeWorkloadApiMountPath | quote }}
       - name: POLL_INTERVAL_SECONDS
         value: {{ .Values.appServerPatch.poll.intervalSeconds | quote }}
       - name: POLL_DEADLINE_SECONDS
