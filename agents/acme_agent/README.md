@@ -158,6 +158,15 @@ the bundle and rolls the Deployment when it changes, so the long-lived HTTPX
 client reloads its TLS context. Keep `auth.tlsVerify=true`; disabling TLS
 verification also affects the Keycloak token client.
 
+`A2A_CA_BUNDLE` is added to the system's default trust store, not used in
+place of it (`auth.py`'s `_tls_context_trusting`) -- confirmed necessary on a
+live cluster whose ingress certificate chains to a public CA (ZeroSSL):
+the synced managed-ingress-CA bundle only contains the leaf's intermediate
+certificates, not the actual trusted root, so verifying against that bundle
+alone (what `httpx`'s `verify=<path>` does by default) fails with
+`CERTIFICATE_VERIFY_FAILED: unable to get issuer certificate` even though the
+certificate itself is perfectly valid.
+
 The exact Keycloak client policy is deployment-specific, so the chart exposes
 the token URL, client-auth method, and SPIFFE/ZTO settings as values rather
 than assuming a fixed installation.

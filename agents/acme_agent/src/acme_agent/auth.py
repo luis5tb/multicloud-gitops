@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import ssl
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,25 @@ import httpx
 
 from .cluster_context import ClusterIdMissingError, get_cluster_id
 from .config import env_bool
+
+
+def _tls_context_trusting(ca_bundle: str) -> ssl.SSLContext:
+    """Trust the system's default CAs *plus* ca_bundle, not ca_bundle alone.
+
+    httpx's ``verify=<path>`` (and ``ssl.create_default_context(cafile=...)``
+    underneath it) replaces the default trust store entirely with just that
+    file -- fine for a self-signed internal ingress CA (a single root cert
+    is enough on its own), but breaks verification when the real ingress
+    certificate chains to a public CA (e.g. ZeroSSL/Let's Encrypt) and the
+    synced managed-ingress-CA bundle only has the leaf's intermediate chain,
+    not the actual trusted root. load_verify_locations() on top of
+    create_default_context() adds ca_bundle as an extra trust anchor
+    instead, so both cases work.
+    """
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=ca_bundle)
+    return context
+
 
 # The routing header name is a frozen interface decision shared with Praxis
 # and the OLS cluster registry; see LIGHTSPEED_DESIGN.md.
@@ -39,15 +59,17 @@ class AuthSettings:
     spiffe_endpoint_socket: str
     spiffe_jwt_audience: str
     spiffe_timeout: float
-    tls_verify: bool | str
+    tls_verify: bool | str | ssl.SSLContext
     timeout: float
     token_refresh_skew: int
 
     @classmethod
     def from_env(cls) -> "AuthSettings":
         ca_bundle = os.getenv("A2A_CA_BUNDLE", "").strip()
-        tls_verify: bool | str = ca_bundle or env_bool(
-            os.getenv("A2A_TLS_VERIFY"), default=True
+        tls_verify: bool | str | ssl.SSLContext = (
+            _tls_context_trusting(ca_bundle)
+            if ca_bundle
+            else env_bool(os.getenv("A2A_TLS_VERIFY"), default=True)
         )
         return cls(
             mode=os.getenv("A2A_AUTH_MODE", "none").strip().lower(),

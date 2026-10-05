@@ -704,3 +704,29 @@ oc auth can-i get pods --as=nobody --as-group=keycloak:acme-agent-rca -n <namesp
   (see the `role: client` note above) -- so compare the raw `claim.azp`
   value directly (available via `role: user` + `read_claims`), not a mapped
   field, regardless of which claim_mapper preset is configured.
+- **acme-agent logs `Failed to resolve remote A2A agent openshift_lightspeed:
+  ... [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to
+  get issuer certificate`** fetching Praxis's agent card, or the
+  `rca-realm-secrets-reconciler` PostSync Job hits the identical error
+  against Keycloak's own issuer URL: both used
+  `ssl.create_default_context(cafile=ca_bundle)` (or httpx's
+  `verify=<path>`, which does the same thing internally) to trust the
+  synced managed-ingress-CA bundle -- this *replaces* the default trust
+  store with only that bundle instead of adding to it. Harmless when the
+  cluster's ingress uses a self-signed internal CA (a single root cert is
+  trust anchor enough on its own), but this specific cluster's ingress
+  certificate is issued by a real public CA (ZeroSSL, chaining through
+  Sectigo to a USERTrust root) and the synced bundle only contains the
+  leaf's intermediate certificates, not the actual trusted root -- so the
+  chain can never complete no matter how valid the certificate actually is.
+  Fixed everywhere this pattern was used for a connection that could ever
+  hit a public-CA-signed endpoint (`acme_agent/auth.py`'s
+  `_tls_context_trusting`, `charts/all/keycloak-oidc`'s
+  `realm-secrets-reconciler-job.yaml`) by calling
+  `ssl.create_default_context()` first (keeps public-CA trust) and layering
+  the custom bundle on top via `load_verify_locations()`. Not changed in the
+  CA-sync scripts themselves (`sync_keycloak_ca.py`/`sync_ingress_ca.py`) or
+  the new `appServerPatch`'s `patch_appserver.py`, since those only ever
+  talk to the in-cluster Kubernetes API server, whose certificate always
+  chains to exactly the projected service-account CA -- an exclusive
+  `cafile=` there is correct, not a latent copy of this bug.
