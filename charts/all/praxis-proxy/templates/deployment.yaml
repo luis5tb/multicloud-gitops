@@ -78,7 +78,7 @@ spec:
                 - -q
                 - -O
                 - /dev/null
-                - http://127.0.0.1:{{ .Values.service.port }}/health/ready
+                - http://127.0.0.1:{{ .Values.service.port }}/readiness
             periodSeconds: 10
             timeoutSeconds: 5
           resources:

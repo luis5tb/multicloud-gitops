@@ -64,7 +64,7 @@ routes:
   # ready while the application, Keycloak, or the workload identity socket is
   # unavailable.
   - http:
-      path: /health/ready
+      path: /readiness
       method: GET
     authorization:
       pre_invocation:

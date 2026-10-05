@@ -38,7 +38,7 @@ filter_chains:
           # LIGHTSPEED_DESIGN.md SS7 ("Multi-cluster session safety").
           - path: /.well-known/agent-card.json
             cluster: ols-{{ $primaryId }}
-          - path: /health/ready
+          - path: /readiness
             cluster: ols-{{ $primaryId }}
           {{- range $id, $cfg := .Values.global.olsClusters }}
           # Exact allow-listed X-OLS-Cluster match for registered cluster

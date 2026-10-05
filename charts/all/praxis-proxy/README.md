@@ -53,7 +53,7 @@ duplicate the header, it needs an upstream fix or a pre-router guard this
 pinned image does not otherwise provide.
 
 **Known gap -- public-path backend selection with 2+ clusters.** The
-unauthenticated `/.well-known/agent-card.json` and `/health/ready` routes
+unauthenticated `/.well-known/agent-card.json` and `/readiness` routes
 (see "Policy behavior") need exactly one upstream, but the registry has no
 "primary" concept. This chart picks the lexically first registry key. This is
 fine for the single currently-registered cluster but needs a real decision
@@ -135,11 +135,14 @@ public-path backend selection" above for which backend answers them):
 
 - `GET /.well-known/agent-card.json` serves A2A discovery. The card must
   advertise the public Praxis Route, not an internal OLS Service.
-- `GET /health/ready` lets the proxy readiness probe verify both the gateway
-  and the selected OLS backend's readiness. These paths were left unchanged
-  from the prior RCA-era chart; if the real OLS app-server's A2A/health paths
-  differ, update them here (no visibility into the vendored A2A/OLS service
-  from this workstream at the time of writing).
+- `GET /readiness` lets the proxy readiness probe verify both the gateway
+  and the selected OLS backend's readiness -- this is
+  `vendor/lightspeed-service/ols/app/endpoints/health.py`'s real
+  `readiness_probe_get_method` route (no `/v1` prefix), confirmed against
+  the vendored source. This path was originally `/health/ready`, copied
+  from the prior RCA-era chart without verification against the actual
+  vendored OLS service -- confirmed broken (404) against a live backend
+  and fixed here.
 
 All other paths, including the A2A RPC endpoint, hit the authenticated
 catch-all route and then the per-cluster header-routing rules in
@@ -222,7 +225,7 @@ hand-signed RS256 test tokens. Observed, against the pinned binary:
 
 | Case | Result |
 |---|---|
-| Public `/.well-known/agent-card.json`, `/health/ready`, no auth | Forwarded to the registry's primary cluster, 200 from backend |
+| Public `/.well-known/agent-card.json`, `/readiness`, no auth | Forwarded to the registry's primary cluster, 200 from backend |
 | Valid token + `X-OLS-Cluster: <registered-id>` | Routed to that id's own backend (verified both of two registered clusters reach their *own* distinct backend) |
 | Valid token, no `X-OLS-Cluster` | Router rejects, HTTP 404, no forwarding |
 | Valid token, unregistered `X-OLS-Cluster` value | Router rejects, HTTP 404, no forwarding |
