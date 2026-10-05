@@ -233,10 +233,26 @@ clusterGroup:
           value: lightspeed-app-server
         # Namespace scope for lightspeed-mcp-rbac.yaml's Role/RoleBinding,
         # granting the keycloak:acme-agent-rca group read-only MCP access.
-        # Add more namespaces here (lightspeedRbac.namespaces[1], etc.) as
-        # investigation scope grows.
-        - name: lightspeedRbac.namespaces[0]
-          value: "payments"
+        # No override here -- left at the chart's own default (empty list,
+        # see charts/all/keycloak-oidc/values.yaml's lightspeedRbac.namespaces):
+        # renders zero Role/RoleBinding resources, so acme-agent has no MCP
+        # access anywhere until Phase 2 sets this to the real namespace(s)
+        # on your cluster, e.g.:
+        #   - name: lightspeedRbac.namespaces[0]
+        #     value: "<your-namespace>"
+        # Add more namespaces as lightspeedRbac.namespaces[1], etc. as
+        # investigation scope grows. Prefer this explicit list for anything
+        # resembling a real environment -- see LIGHTSPEED_DESIGN.md's
+        # least-privilege guidance.
+        #
+        # Sandbox/demo alternative: uncomment to grant cluster-wide access
+        # instead of an explicit namespace list (a single ClusterRole/
+        # ClusterRoleBinding, not per-namespace Role/RoleBinding -- a real
+        # widening of blast radius, not just a convenience toggle; see that
+        # value's comment in charts/all/keycloak-oidc/values.yaml before
+        # uncommenting this on anything but a throwaway cluster):
+        # - name: lightspeedRbac.allNamespaces
+        #   value: "true"
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy

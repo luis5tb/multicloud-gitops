@@ -239,10 +239,19 @@ lightspeedRbac:
   roleName: lightspeed-mcp-investigate
   # Namespaces this Role/RoleBinding pair is rendered into, one copy per
   # namespace -- starts empty (deny by default); set explicitly per
-  # environment (e.g. the standalone variant sets "payments" as its starting
-  # scope). Add more namespaces here as investigation scope grows; do not
-  # widen via a ClusterRole/ClusterRoleBinding.
+  # environment. Add more namespaces here as investigation scope grows.
+  # Ignored entirely when allNamespaces is true.
   namespaces: []
+  # Opt-in, off by default: renders a single ClusterRole/ClusterRoleBinding
+  # (same rules, same group) instead of the per-namespace Role/RoleBinding
+  # pairs above, granting every caller whose exchanged token carries
+  # groupName read access to pods/events in *every* namespace on the
+  # cluster -- a real widening of blast radius, not just a convenience
+  # toggle. Appropriate for a sandbox/demo cluster where enumerating
+  # namespaces is overkill; for anything resembling a real environment,
+  # prefer the explicit `namespaces` list above and LIGHTSPEED_DESIGN.md's
+  # "Rights to grant (and not grant)" least-privilege guidance.
+  allNamespaces: false
   # Opt-in extra rules merged into every namespace's Role above. Left empty by
   # default: do NOT add "get" on pods/log here casually -- pod logs can
   # contain application secrets, credentials, or other sensitive data a

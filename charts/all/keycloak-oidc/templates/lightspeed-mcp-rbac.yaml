@@ -7,12 +7,53 @@
 # "Rights to grant (and not grant)" section and lightspeedRbac.extraRules in
 # values.yaml for how to deliberately opt into pod-logs access.
 #
+# lightspeedRbac.allNamespaces (off by default) switches this to a single
+# cluster-wide ClusterRole/ClusterRoleBinding instead -- see its blast-radius
+# warning in values.yaml before enabling it anywhere but a sandbox/demo
+# cluster.
+#
 # OpenShift RBAC is the final, authoritative allow/deny for every API call
 # the exchanged token (Token B) makes -- this template is additive to, and
 # does not replace, independent MCP-side tool/toolset restrictions configured
 # elsewhere (see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 2).
 {{- if .Values.lightspeedRbac.enabled }}
 {{- $root := . }}
+{{- if .Values.lightspeedRbac.allNamespaces }}
+# allNamespaces is true: cluster-wide instead of per-namespace -- see the
+# blast-radius warning on lightspeedRbac.allNamespaces in values.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list"]
+  {{- with $root.Values.lightspeedRbac.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+{{- else }}
 {{- range $i, $namespace := .Values.lightspeedRbac.namespaces }}
 {{- if $i }}
 ---
@@ -51,5 +92,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ $root.Values.lightspeedRbac.roleName }}
+{{- end }}
 {{- end }}
 {{- end }}
