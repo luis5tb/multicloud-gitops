@@ -30,7 +30,7 @@ source"; everything not explicitly stated as a frozen interface decision in
 `LIGHTSPEED_IMPLEMENTATION_PLAN.md` is this chart's best-effort assumption
 and must be verified against the actually-installed operator (`oc explain
 olsconfig.spec`, the installed CRD's OpenAPI schema, and
-`oc get pods -n openshift-lightspeed --show-labels`) before being trusted in
+`oc get pods -n <namespace> --show-labels`) before being trusted in
 a real deployment.
 
 ## What this chart creates

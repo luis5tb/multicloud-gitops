@@ -548,7 +548,7 @@ oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy -f
 
 # 3. OLS's inbound validation, its own SPIFFE fetch, and the token-exchange
 #    call (A2A-specific; separate from the stock /v1 REST auth path)
-oc logs -n openshift-lightspeed -l app.kubernetes.io/component=application-server -f
+oc logs -n a2a-openshift-lightspeed -l app.kubernetes.io/component=application-server -f
 
 # 4. Keycloak's own record of every grant/exchange against a client --
 #    enable this once: Admin Console -> Realm Settings -> Events -> Save Events
@@ -557,7 +557,7 @@ oc logs -n openshift-lightspeed -l app.kubernetes.io/component=application-serve
 
 # 5. The passthrough hop -- MCP does no authz itself, so any 401/403 here
 #    is really the API server rejecting the forwarded token
-oc logs -n openshift-lightspeed -l app.kubernetes.io/component=mcp-server -f
+oc logs -n a2a-openshift-lightspeed -l app.kubernetes.io/component=mcp-server -f
 
 # 6. What the API server currently trusts
 oc get authentication.config.openshift.io cluster -o jsonpath='{.spec.oidcProviders[0].issuer.audiences}'

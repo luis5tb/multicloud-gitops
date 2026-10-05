@@ -149,7 +149,10 @@ keycloak:
   # assuming this default -- see LIGHTSPEED_DESIGN.md section 8
   # ("Keycloak client changes").
   lightspeedWorkload:
-    namespace: openshift-lightspeed
+    # Must match openshift-lightspeed-config's own namespace value -- see
+    # that chart's values.yaml comment for why it's deliberately not
+    # "openshift-lightspeed" despite the name.
+    namespace: a2a-openshift-lightspeed
     serviceAccount: lightspeed-app-server
   # Audience value Lightspeed's own A2A inbound validation requires on
   # acme-agent's token -- a plain custom string, included.custom.audience, no

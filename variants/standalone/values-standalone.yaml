@@ -13,9 +13,9 @@ global:
   olsClusters:
     api-ocp-pgt8r-sandbox288-opentlc-com-6443:
       apiURL: https://api.ocp.pgt8r.sandbox288.opentlc.com:6443
-      upstreamHost: lightspeed-app-server.openshift-lightspeed.svc.cluster.local
+      upstreamHost: lightspeed-app-server.a2a-openshift-lightspeed.svc.cluster.local
       upstreamPort: 8443
-      upstreamSNI: lightspeed-app-server.openshift-lightspeed.svc
+      upstreamSNI: lightspeed-app-server.a2a-openshift-lightspeed.svc
 
 clusterGroup:
   name: standalone
@@ -35,7 +35,12 @@ clusterGroup:
     mao:
     acme-agent:
     praxis-proxy:
-    openshift-lightspeed:
+    # Deliberately not "openshift-lightspeed" -- see
+    # charts/all/openshift-lightspeed-config/values.yaml's namespace comment
+    # for why (ZTWIM's spire-controller-manager hardcodes
+    # ignoreNamespaces: [..., "openshift-*"], confirmed live, with no
+    # override surface).
+    a2a-openshift-lightspeed:
       operatorGroup: true
       # lightspeed-operator's CSV only declares OwnNamespace as a supported
       # installMode (SingleNamespace/MultiNamespace/AllNamespaces are all
@@ -46,7 +51,7 @@ clusterGroup:
       # failing the CSV (confirmed on a live cluster: this is not
       # theoretical). Must be scoped to exactly this namespace.
       targetNamespaces:
-        - openshift-lightspeed
+        - a2a-openshift-lightspeed
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -85,7 +90,7 @@ clusterGroup:
       # section for the still-open question of whether a custom/patched
       # operator build is required instead.
       name: lightspeed-operator
-      namespace: openshift-lightspeed
+      namespace: a2a-openshift-lightspeed
       channel: stable
       source: redhat-operators
       sourceNamespace: openshift-marketplace
@@ -237,7 +242,7 @@ clusterGroup:
         # installed operator release before relying on this default (see
         # LIGHTSPEED_DESIGN.md's "How Token B is issued" section).
         - name: keycloak.lightspeedWorkload.namespace
-          value: openshift-lightspeed
+          value: a2a-openshift-lightspeed
         - name: keycloak.lightspeedWorkload.serviceAccount
           value: lightspeed-app-server
         # Namespace scope for lightspeed-mcp-rbac.yaml's Role/RoleBinding,
@@ -389,7 +394,7 @@ clusterGroup:
           value: openai/gpt-oss-20b
     openshift-lightspeed-config:
       name: openshift-lightspeed-config
-      namespace: openshift-lightspeed
+      namespace: a2a-openshift-lightspeed
       argoProject: hub
       path: charts/all/openshift-lightspeed-config
       overrides:
