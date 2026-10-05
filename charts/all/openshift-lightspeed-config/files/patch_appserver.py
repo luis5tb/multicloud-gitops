@@ -83,6 +83,9 @@ def _stop_operator_reconciling(opener, headers: dict, api_server: str, namespace
         "OPERATOR_MANAGEMENT_STATE_ANNOTATION", "operator.openshift.io/managementState"
     ).strip()
 
+    poll_interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "10"))
+    poll_deadline = int(os.environ.get("POLL_DEADLINE_SECONDS", "150"))
+
     if subscription_name:
         sub_path = (
             f"/apis/operators.coreos.com/v1alpha1/namespaces/{namespace}"
@@ -95,6 +98,33 @@ def _stop_operator_reconciling(opener, headers: dict, api_server: str, namespace
                 f"/apis/operators.coreos.com/v1alpha1/namespaces/{namespace}"
                 f"/clusterserviceversions/{installed_csv}"
             )
+
+            # OLM actively enforces its own CSV-declared replica count while
+            # a CSV is still mid-install (phase != Succeeded) -- confirmed
+            # live: scaling the operator to 0 during this window gets
+            # immediately scaled back to 1 by OLM itself (not the operator),
+            # logged as "InstallWaiting ... Deployment does not have minimum
+            # availability". That's a one-time install-phase behavior, not
+            # OLM's steady-state behavior -- once Succeeded, a manual
+            # scale-to-0 was observed to hold with no drift-correction from
+            # OLM. So wait for Succeeded first; only then is scaling down
+            # actually durable.
+            deadline = time.monotonic() + poll_deadline
+            phase = ""
+            while time.monotonic() < deadline:
+                status, csv = _request(opener, headers, api_server, "GET", csv_path)
+                phase = csv.get("status", {}).get("phase", "") if status == 200 else ""
+                if phase == "Succeeded":
+                    break
+                print(f"{namespace}/{installed_csv} phase={phase or 'unknown'} (HTTP {status}), waiting {poll_interval}s for Succeeded")
+                time.sleep(poll_interval)
+            if phase != "Succeeded":
+                print(
+                    f"{namespace}/{installed_csv} never reached Succeeded within "
+                    f"{poll_deadline}s (last phase={phase or 'unknown'}) -- proceeding anyway, "
+                    "but the operator may re-scale itself back up"
+                )
+
             annotate_body = {"metadata": {"annotations": {management_state_annotation: "Unmanaged"}}}
             status, _ = _request(
                 opener,

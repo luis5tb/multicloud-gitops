@@ -146,10 +146,19 @@ once, before patching:
      controller-manager binary) and never references that annotation key --
      it is **not confirmed to do anything** here, kept only as
      defense-in-depth in case OLM itself honors it for CSV-owned deployments.
-  2. Scales `appServerPatch.operatorDeploymentName` to 0 replicas. This part
-     **is** confirmed live: observed stable at `spec.replicas=0` with zero
-     drift-correction, from either the operator itself (not running) or OLM,
-     over several minutes of direct observation.
+  2. Waits for the installed CSV to reach `status.phase: Succeeded` before
+     scaling anything down. Confirmed live: OLM itself (not the operator)
+     actively re-enforces its CSV-declared replica count while a CSV is
+     still mid-install, logged as `InstallWaiting ... Deployment does not
+     have minimum availability` -- scaling to 0 during that window gets
+     immediately scaled back to 1 by OLM, not reconciled, and the bootstrap
+     Job can legitimately win this race on a fresh install (the app-server
+     Deployment it's polling for in step 3 can exist before the operator's
+     own CSV install has fully settled). Once `Succeeded`, a manual
+     scale-to-0 was separately confirmed stable with zero drift-correction
+     from either the operator (not running) or OLM, over several minutes of
+     direct observation -- that's the behavior this waits to reach before
+     scaling `appServerPatch.operatorDeploymentName` to 0 replicas.
   3. Only then polls for the app-server Deployment to exist (the operator
      may not have reconciled `OLSConfig` into it yet on a fresh install) and
      applies a strategic merge patch setting the container's `image` (if
