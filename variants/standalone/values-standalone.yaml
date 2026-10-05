@@ -321,7 +321,14 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/acme-agent
         - name: image.tag
-          value: 34256970
+          # Quoted: this is an all-digit git short SHA, and an unquoted
+          # numeric-looking YAML scalar this large gets parsed as a number
+          # and can come back out the other side of Helm/Argo's rendering
+          # pipeline re-serialized in scientific notation (confirmed live:
+          # it became "3.425697e+07", which then fails to parse as an image
+          # reference -- InvalidImageName). Always quote tags that could be
+          # all-digits.
+          value: "34256970"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
