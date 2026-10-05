@@ -251,8 +251,8 @@ clusterGroup:
         # widening of blast radius, not just a convenience toggle; see that
         # value's comment in charts/all/keycloak-oidc/values.yaml before
         # uncommenting this on anything but a throwaway cluster):
-        # - name: lightspeedRbac.allNamespaces
-        #   value: "true"
+        - name: lightspeedRbac.allNamespaces
+          value: "true"
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
