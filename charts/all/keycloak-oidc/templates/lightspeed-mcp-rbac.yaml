@@ -24,6 +24,16 @@
 # the exchanged token (Token B) makes -- this template is additive to, and
 # does not replace, independent MCP-side tool/toolset restrictions configured
 # elsewhere (see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 2).
+#
+# lightspeedRbac.grantMonitoringView (off by default) additionally binds
+# OpenShift's built-in "cluster-monitoring-view" ClusterRole. Confirmed live
+# that MCP's `list_metrics` tool fails with a bare "client error: 403" (not
+# the usual "... is forbidden: User ... cannot ..." RBAC phrasing) even with
+# useBuiltinViewRole enabled -- cluster/pod metrics (Thanos querier) sit
+# behind OpenShift's monitoring stack's own auth proxy, which performs its
+# own SubjectAccessReview against a separate permission "view" does not
+# include. This is an independent, additive grant, not an alternative to
+# useBuiltinViewRole/the default pods+events rules above.
 {{- if .Values.lightspeedRbac.enabled }}
 {{- $root := . }}
 {{- if and .Values.lightspeedRbac.useBuiltinViewRole .Values.lightspeedRbac.extraRules }}
@@ -108,6 +118,50 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: {{ if $root.Values.lightspeedRbac.useBuiltinViewRole }}ClusterRole{{ else }}Role{{ end }}
   name: {{ if $root.Values.lightspeedRbac.useBuiltinViewRole }}view{{ else }}{{ $root.Values.lightspeedRbac.roleName }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if .Values.lightspeedRbac.grantMonitoringView }}
+---
+{{- if .Values.lightspeedRbac.allNamespaces }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}-monitoring-view
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+{{- else }}
+{{- range $i, $namespace := .Values.lightspeedRbac.namespaces }}
+{{- if $i }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}-monitoring-view
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

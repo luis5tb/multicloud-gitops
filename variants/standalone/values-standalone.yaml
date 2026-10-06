@@ -282,6 +282,14 @@ clusterGroup:
         # sandbox cluster, which already opted into allNamespaces above.
         - name: lightspeedRbac.useBuiltinViewRole
           value: "true"
+        # Confirmed live: MCP's `list_metrics` tool fails with a bare
+        # "client error: 403" even with useBuiltinViewRole above -- cluster/
+        # pod metrics (Thanos querier) sit behind OpenShift monitoring's own
+        # auth proxy, checking a separate permission "view" doesn't include.
+        # See lightspeedRbac.grantMonitoringView's comment in
+        # charts/all/keycloak-oidc/values.yaml.
+        - name: lightspeedRbac.grantMonitoringView
+          value: "true"
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy

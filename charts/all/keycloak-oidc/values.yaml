@@ -275,6 +275,15 @@ lightspeedRbac:
   # template) when this is true: there is no custom Role/ClusterRole left to
   # merge it into.
   useBuiltinViewRole: false
+  # Opt-in, off by default: additionally binds OpenShift's built-in
+  # "cluster-monitoring-view" ClusterRole. Confirmed live that MCP's
+  # `list_metrics` tool fails with a bare "client error: 403" even with
+  # useBuiltinViewRole enabled -- cluster/pod metrics (Thanos querier) sit
+  # behind OpenShift's monitoring stack's own auth proxy, which checks a
+  # separate permission "view" does not include. Independent of and additive
+  # to useBuiltinViewRole/the default rules above, not an alternative to
+  # either -- enable it alongside whichever of those is in use.
+  grantMonitoringView: false
   # Opt-in extra rules merged into every namespace's Role above. Left empty by
   # default: do NOT add "get" on pods/log here casually -- pod logs can
   # contain application secrets, credentials, or other sensitive data a

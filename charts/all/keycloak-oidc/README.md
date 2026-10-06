@@ -112,6 +112,13 @@ ever covers whatever kind an investigation has already hit. `view` still
 excludes Secrets and RBAC objects (same privilege-escalation reasoning), so
 it stays within the same boundary while covering everything else at once --
 a real widening versus the default, appropriate for a sandbox/demo cluster.
+`lightspeedRbac.grantMonitoringView` (off by default, independent of and
+additive to `useBuiltinViewRole`) additionally binds the built-in
+`cluster-monitoring-view` ClusterRole: cluster/pod metrics (Thanos querier)
+sit behind OpenShift monitoring's own auth proxy and its own
+`SubjectAccessReview` check, which neither the default rules nor `view`
+satisfy -- confirmed live via MCP's `list_metrics` tool failing with a bare
+`client error: 403`.
 This is OpenShift RBAC on the exchanged Token B's own mapped identity; it has
 no relationship to any AgenticRun-style admission policy -- OpenShift
 Lightspeed's MCP tools are authorized purely by this RBAC plus whatever

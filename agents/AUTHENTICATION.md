@@ -784,3 +784,14 @@ oc auth can-i get pods --as=nobody --as-group=keycloak:acme-agent-rca -n <namesp
   `variants/standalone/values-standalone.yaml` right next to the
   `lightspeedRbac.allNamespaces` override this sandbox cluster already
   opted into.
+- **OLS's MCP tool call fails with a bare `error fetching metric names:
+  client_error: client error: 403`** (no `"... is forbidden: User ..."`
+  phrasing) **even with `lightspeedRbac.useBuiltinViewRole` enabled** --
+  this is a different authorization domain entirely, not another core-API
+  RBAC gap: MCP's `list_metrics` tool reads cluster/pod metrics via
+  OpenShift's monitoring stack (Thanos querier), which sits behind its own
+  auth proxy performing its own `SubjectAccessReview` against a separate
+  permission that `view` does not include. Fixed by additionally binding the
+  built-in `cluster-monitoring-view` ClusterRole
+  (`lightspeedRbac.grantMonitoringView`, independent of and additive to
+  `useBuiltinViewRole` -- enable both together).
