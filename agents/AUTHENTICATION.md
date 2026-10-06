@@ -511,9 +511,12 @@ whose behalf" story in one column.
                                   live" note on the step-6 sample above)
    ```
 
-   `lightspeed-mcp-rbac.yaml`'s `Role`/`RoleBinding` pair grants exactly this
-   mapped group `get`/`list` on `pods`/`events` in the namespaces listed
-   under `lightspeedRbac.namespaces` -- nothing else. There is no
+   `lightspeed-mcp-rbac.yaml`'s `Role`/`RoleBinding` pair grants this mapped
+   group read access in the namespaces listed under `lightspeedRbac.namespaces`
+   -- by default just `get`/`list` on `pods`/`events`, or (see
+   `lightspeedRbac.useBuiltinViewRole` in `charts/all/keycloak-oidc/values.yaml`)
+   OpenShift's built-in `view` ClusterRole, which covers essentially every
+   resource kind except Secrets and RBAC objects. There is no
    namespace-scoping admission policy layered on top of RBAC the way the old
    `AgenticRun`-based flow had; OpenShift RBAC is the sole, final authority
    on every Kubernetes API call MCP makes.
@@ -755,22 +758,29 @@ oc auth can-i get pods --as=nobody --as-group=keycloak:acme-agent-rca -n <namesp
   `attributes["jwt.credential.sub"]`); a future full realm re-import would
   also pick up the new value, but re-importing an existing realm isn't
   something this pattern's chart does today.
-- **OLS's MCP tool call fails with `namespaces is forbidden: User
-  "keycloak:<uuid>" cannot list resource "namespaces" at the cluster
-  scope`, even though the whole identity chain (SPIFFE → Keycloak exchange →
-  OIDC-mapped OpenShift user) is working correctly** -- this is the
-  end-to-end success case surfacing a genuine, by-design RBAC gap, not an
-  auth bug: the chart's `lightspeedRbac` Role/ClusterRole only ever grants
-  `get`/`list` on `pods`/`events` (see `LIGHTSPEED_DESIGN.md`'s "RBAC to
-  grant (and not grant)"), never `namespaces`. The operator-managed MCP
-  server's agentic tool-calling flow calls `namespaces_list` (a
-  cluster-scoped call) on its own initiative even when the user's request
-  already named a specific namespace. Namespace *names* aren't meaningfully
-  sensitive on their own, so the fix is to extend
-  `lightspeedRbac.extraRules` (already the chart's designated escape hatch
-  for exactly this kind of deliberate, reviewed widening -- see its existing
-  `pods/log` example) with a `get`/`list` rule on `namespaces`, rather than
-  changing the chart's own least-privilege default. Done in
+- **OLS's MCP tool call fails with `<resource> is forbidden: User
+  "keycloak:<uuid>" cannot list resource "<resource>"`, even though the
+  whole identity chain (SPIFFE → Keycloak exchange → OIDC-mapped OpenShift
+  user) is working correctly** -- this is the end-to-end success case
+  surfacing a genuine, by-design RBAC gap, not an auth bug. Hit twice, with
+  two different resources: first `namespaces` (the operator-managed MCP
+  server's agentic tool-calling flow calls the cluster-scoped
+  `namespaces_list` tool on its own initiative, even when the user's request
+  already named a specific namespace), then `deployments.apps` in a specific
+  namespace (via the generic `resources_list` tool, which is not
+  pod-specific and can ask about any resource kind the model decides is
+  relevant). The chart's `lightspeedRbac` Role/ClusterRole only ever grants
+  `get`/`list` on `pods`/`events` by default (see `LIGHTSPEED_DESIGN.md`'s
+  "RBAC to grant (and not grant)"), so each new resource kind the model
+  tries is, by construction, a new gap. The first fix extended
+  `lightspeedRbac.extraRules` for just `namespaces`; hitting a second,
+  different resource kind right after confirmed this would keep recurring
+  one kind at a time. Replaced with `lightspeedRbac.useBuiltinViewRole`
+  (binds OpenShift's built-in `view` ClusterRole instead -- see its comment
+  in `charts/all/keycloak-oidc/values.yaml`): covers essentially every
+  resource kind at once, while still excluding Secrets and RBAC objects
+  (the same privilege-escalation boundary `LIGHTSPEED_DESIGN.md` already
+  draws), avoiding further resource-by-resource whack-a-mole. Set in
   `variants/standalone/values-standalone.yaml` right next to the
   `lightspeedRbac.allNamespaces` override this sandbox cluster already
   opted into.

@@ -255,6 +255,26 @@ lightspeedRbac:
   # prefer the explicit `namespaces` list above and LIGHTSPEED_DESIGN.md's
   # "Rights to grant (and not grant)" least-privilege guidance.
   allNamespaces: false
+  # Opt-in, off by default: binds OpenShift's built-in "view" ClusterRole
+  # instead of the hand-picked pods/events rule list above. Confirmed live
+  # that MCP's `resources_list` tool is not pod-specific -- it can ask about
+  # any resource kind (Deployments, Services, Routes, ...), and the
+  # hand-picked list only ever covers whatever kind has already been hit by
+  # a real investigation; every new kind the model decides to inspect is a
+  # new RBAC gap to chase. "view" is Kubernetes' standard, well-documented
+  # read-only role: it deliberately excludes Secrets and RBAC objects (the
+  # same privilege-escalation reasoning this chart already follows -- reading
+  # Secrets would expose ServiceAccount credentials), so it stays within
+  # LIGHTSPEED_DESIGN.md's "no Secret/RBAC access, no writes by default"
+  # boundary while covering everything else an investigation tool would
+  # plausibly need to read. A real widening of blast radius versus the
+  # default pods/events-only grant -- appropriate for a sandbox/demo cluster;
+  # for anything resembling a real environment, prefer the default narrow
+  # grant plus explicit `extraRules` entries for the specific resource kinds
+  # actually needed. `extraRules` below has no effect (and is rejected by the
+  # template) when this is true: there is no custom Role/ClusterRole left to
+  # merge it into.
+  useBuiltinViewRole: false
   # Opt-in extra rules merged into every namespace's Role above. Left empty by
   # default: do NOT add "get" on pods/log here casually -- pod logs can
   # contain application secrets, credentials, or other sensitive data a

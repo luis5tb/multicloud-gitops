@@ -267,25 +267,21 @@ clusterGroup:
         # uncommenting this on anything but a throwaway cluster):
         - name: lightspeedRbac.allNamespaces
           value: "true"
-        # Confirmed live: the operator-managed MCP server's `namespaces_list`
-        # tool is cluster-scoped (`list` on the `namespaces` resource, not
-        # `pods`/`events`), and the agentic tool-calling flow calls it even
-        # when the user already named a specific namespace in their request
-        # -- "failed to list namespaces: namespaces is forbidden" with the
-        # chart's default rules (get/list pods+events only, see
-        # LIGHTSPEED_DESIGN.md's "RBAC to grant (and not grant)"). Namespace
-        # *names* are not meaningfully sensitive on their own and the caller
-        # already opted into allNamespaces above for this sandbox cluster, so
-        # extend the same ClusterRole via the chart's extraRules escape hatch
-        # rather than widening the chart's own least-privilege default.
-        - name: lightspeedRbac.extraRules[0].apiGroups[0]
-          value: ""
-        - name: lightspeedRbac.extraRules[0].resources[0]
-          value: namespaces
-        - name: lightspeedRbac.extraRules[0].verbs[0]
-          value: get
-        - name: lightspeedRbac.extraRules[0].verbs[1]
-          value: list
+        # Confirmed live, twice: the operator-managed MCP server's generic
+        # investigation tools (`namespaces_list`, `resources_list`) are not
+        # pod-specific -- they can ask about any resource kind the model
+        # decides is relevant (namespaces, Deployments, ...), and the chart's
+        # default pods/events-only rule list only ever covers whatever kind
+        # has already been hit by a real investigation; every new kind is a
+        # new RBAC gap. Switched to OpenShift's built-in "view" ClusterRole
+        # (see its comment in charts/all/keycloak-oidc/values.yaml) instead
+        # of chasing individual resource kinds one at a time via extraRules --
+        # still excludes Secrets and RBAC objects, same boundary
+        # LIGHTSPEED_DESIGN.md's "Rights to grant (and not grant)" draws,
+        # just not re-derived resource-by-resource. Appropriate for this
+        # sandbox cluster, which already opted into allNamespaces above.
+        - name: lightspeedRbac.useBuiltinViewRole
+          value: "true"
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
@@ -352,7 +348,7 @@ clusterGroup:
           # it became "3.425697e+07", which then fails to parse as an image
           # reference -- InvalidImageName). Always quote tags that could be
           # all-digits.
-          value: "34256970"
+          value: "3256ea38"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name

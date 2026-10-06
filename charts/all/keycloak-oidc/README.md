@@ -104,6 +104,14 @@ group `get`/`list` on `pods` and `events`, in exactly the namespaces listed
 under `lightspeedRbac.namespaces`, and nothing else by default (no pod logs,
 no Secrets, no RBAC objects, no write verbs -- see
 `LIGHTSPEED_DESIGN.md`'s "Rights to grant (and not grant)" section).
+`lightspeedRbac.useBuiltinViewRole` (off by default) swaps this hand-picked
+rule list for OpenShift's built-in `view` ClusterRole instead: confirmed live
+that the MCP server's investigation tools (`resources_list`, etc.) are not
+pod-specific and can ask about any resource kind, so the narrow default only
+ever covers whatever kind an investigation has already hit. `view` still
+excludes Secrets and RBAC objects (same privilege-escalation reasoning), so
+it stays within the same boundary while covering everything else at once --
+a real widening versus the default, appropriate for a sandbox/demo cluster.
 This is OpenShift RBAC on the exchanged Token B's own mapped identity; it has
 no relationship to any AgenticRun-style admission policy -- OpenShift
 Lightspeed's MCP tools are authorized purely by this RBAC plus whatever

@@ -1,14 +1,22 @@
 # Least-privilege, namespace-scoped RBAC for the mapped keycloak:acme-agent-rca
 # group's own direct OpenShift MCP reads (lightspeedRbac.* in values.yaml).
-# This grants exactly the read-only verbs an investigation MCP tool needs
-# (get/list on pods and events), in exactly the namespaces listed in
-# lightspeedRbac.namespaces, and nothing else: no pod logs, no Secrets, no
+# By default this grants exactly the read-only verbs an investigation MCP
+# tool needs (get/list on pods and events), in exactly the namespaces listed
+# in lightspeedRbac.namespaces, and nothing else: no pod logs, no Secrets, no
 # RBAC objects, no write verbs by default. See LIGHTSPEED_DESIGN.md's
 # "Rights to grant (and not grant)" section and lightspeedRbac.extraRules in
 # values.yaml for how to deliberately opt into pod-logs access.
 #
+# lightspeedRbac.useBuiltinViewRole (off by default) switches the RoleRef to
+# OpenShift's built-in "view" ClusterRole instead of a hand-picked rule list
+# -- see its blast-radius note in values.yaml before enabling it anywhere but
+# a sandbox/demo cluster. lightspeedRbac.extraRules is meaningless (and
+# rejected below) when this is enabled: there is no custom Role/ClusterRole
+# left to merge extra rules into.
+#
 # lightspeedRbac.allNamespaces (off by default) switches this to a single
-# cluster-wide ClusterRole/ClusterRoleBinding instead -- see its blast-radius
+# cluster-wide ClusterRole/ClusterRoleBinding (or, with useBuiltinViewRole, a
+# ClusterRoleBinding straight to "view") instead -- see its blast-radius
 # warning in values.yaml before enabling it anywhere but a sandbox/demo
 # cluster.
 #
@@ -18,9 +26,14 @@
 # elsewhere (see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 2).
 {{- if .Values.lightspeedRbac.enabled }}
 {{- $root := . }}
+{{- if and .Values.lightspeedRbac.useBuiltinViewRole .Values.lightspeedRbac.extraRules }}
+{{- fail "lightspeedRbac.extraRules has no effect when lightspeedRbac.useBuiltinViewRole is true -- there is no custom Role/ClusterRole left to merge them into. Unset one or the other." }}
+{{- end }}
 {{- if .Values.lightspeedRbac.allNamespaces }}
-# allNamespaces is true: cluster-wide instead of per-namespace -- see the
-# blast-radius warning on lightspeedRbac.allNamespaces in values.yaml.
+{{- if not .Values.lightspeedRbac.useBuiltinViewRole }}
+# allNamespaces is true and useBuiltinViewRole is false: cluster-wide custom
+# ClusterRole instead of per-namespace Role -- see the blast-radius warning
+# on lightspeedRbac.allNamespaces in values.yaml.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -37,6 +50,7 @@ rules:
   {{- toYaml . | nindent 2 }}
   {{- end }}
 ---
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -52,12 +66,13 @@ subjects:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ $root.Values.lightspeedRbac.roleName }}
+  name: {{ if .Values.lightspeedRbac.useBuiltinViewRole }}view{{ else }}{{ $root.Values.lightspeedRbac.roleName }}{{ end }}
 {{- else }}
 {{- range $i, $namespace := .Values.lightspeedRbac.namespaces }}
 {{- if $i }}
 ---
 {{- end }}
+{{- if not $root.Values.lightspeedRbac.useBuiltinViewRole }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -75,6 +90,7 @@ rules:
   {{- toYaml . | nindent 2 }}
   {{- end }}
 ---
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -90,8 +106,8 @@ subjects:
     apiGroup: rbac.authorization.k8s.io
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ $root.Values.lightspeedRbac.roleName }}
+  kind: {{ if $root.Values.lightspeedRbac.useBuiltinViewRole }}ClusterRole{{ else }}Role{{ end }}
+  name: {{ if $root.Values.lightspeedRbac.useBuiltinViewRole }}view{{ else }}{{ $root.Values.lightspeedRbac.roleName }}{{ end }}
 {{- end }}
 {{- end }}
 {{- end }}
