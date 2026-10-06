@@ -356,7 +356,7 @@ clusterGroup:
           # it became "3.425697e+07", which then fails to parse as an image
           # reference -- InvalidImageName). Always quote tags that could be
           # all-digits.
-          value: "3256ea38"
+          value: "1370273c"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
