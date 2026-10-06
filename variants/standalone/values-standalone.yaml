@@ -313,6 +313,12 @@ clusterGroup:
         # OLS may take a while to complete a tool-using, multi-turn analysis.
         - name: route.timeout
           value: 22m
+        # Temporarily verbose while actively debugging routing/auth on this
+        # sandbox cluster -- see charts/all/praxis-proxy/values.yaml's
+        # logLevel comment. Dial back (or scope per-crate) once done; this is
+        # not meant to stay at debug indefinitely on a real environment.
+        - name: logLevel
+          value: debug
         - name: identity.keycloak.issuerUrl
           value: https://keycloak.apps.ocp.pgt8r.sandbox288.opentlc.com/realms/rca
         # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide

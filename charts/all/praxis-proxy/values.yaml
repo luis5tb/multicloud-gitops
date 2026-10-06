@@ -2,6 +2,20 @@ fullnameOverride: praxis-proxy
 
 replicaCount: 1
 
+# RUST_LOG for the Praxis binary (it's built on Rust's `tracing` ecosystem).
+# Unset by default -- the binary's own built-in default applies (sparse,
+# roughly info-level: occasional events like a JWKS refresh, not per-request
+# detail). Can be a bare level ("debug") applied to the whole binary, or
+# scoped per-crate/module to avoid flooding logs with irrelevant detail, e.g.
+# "info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug" (crate
+# names are literally the module-path prefix already shown in each log
+# line -- praxis_filter covers routing/load-balancing, see
+# praxis_policy_plugin_identity_jwt for JWT validation). Confirmed live that
+# per-cluster routing/request counts are also available without any log
+# level change at all, via the admin-only (loopback) metrics endpoint:
+# `oc exec <pod> -- wget -q -O - http://127.0.0.1:9901/metrics`.
+logLevel: ""
+
 image:
   repository: ghcr.io/praxis-proxy/ai
   # Pin an upstream release; do not use latest for the authorization gateway.

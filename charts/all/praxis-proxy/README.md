@@ -213,6 +213,31 @@ oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy
 oc get networkpolicy -n a2a-lightspeed -o yaml
 ```
 
+**Per-cluster routing/request counts, without changing any log level at
+all**: confirmed live that the admin port (`127.0.0.1:9901`, loopback-only,
+not exposed outside the pod) serves a Prometheus-format `/metrics` endpoint
+with per-cluster counters -- the quickest way to confirm a request actually
+reached the expected upstream cluster/endpoint, rather than inferring it
+from ordinary logs (which don't mention routing at all by default):
+
+```bash
+oc exec -n praxis-proxy <praxis-pod> -- wget -q -O - http://127.0.0.1:9901/metrics
+# praxis_upstream_requests_total{cluster="ols-<id>",endpoint="<host>:<port>",status_class="2xx"} <n>
+# praxis_http_requests_total{method="POST",status_class="2xx",route="/*",cluster="ols-<id>"} <n>
+```
+
+**Log verbosity (`logLevel` in `values.yaml`, wired to `RUST_LOG`)**: unset
+by default (the binary's own sparse, roughly info-level default applies --
+occasional events like a JWKS refresh, not per-request detail). The image is
+built on Rust's `tracing` ecosystem; crate names are literally the
+module-path prefix already shown in each log line (e.g.
+`praxis_policy_plugin_identity_jwt::resolver: ...`), so `logLevel` can scope
+verbosity to just the component being investigated instead of flooding logs
+with everything, e.g. `info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug`
+(`praxis_filter` covers routing/load-balancing). A bare level (`debug`)
+applies to the whole binary. Not meant to stay at `debug` indefinitely on a
+real environment -- see its comment in `values.yaml`.
+
 ### Validation evidence (T6.1-T6.3, 2026-10-01)
 
 Rendered this chart's `praxis.yaml`/`policy.yaml` for one and two
