@@ -1,0 +1,100 @@
+{{- if .Values.policy.enforcementTest.enabled }}
+{{- $et := .Values.policy.enforcementTest }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-enforcement-check-script
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+data:
+  enforcement_check.py: |-
+{{ .Files.Get "files/enforcement_check.py" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-enforcement-check
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    # PostSync so Praxis is already rolled out and routable before the check
+    # runs. A detected fail-open exits non-zero and fails this hook, surfacing
+    # the regression on the sync instead of letting it pass silently.
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        {{- include "praxis-proxy.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      restartPolicy: Never
+      containers:
+        - name: enforcement-check
+          image: {{ $et.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "-B", "/opt/app-root/src/enforcement_check.py"]
+          env:
+            - name: PRAXIS_URL
+              value: {{ printf "http://%s.%s.svc:%v" (include "praxis-proxy.fullname" .) .Release.Namespace .Values.service.port | quote }}
+            - name: PROTECTED_PATH
+              value: {{ $et.protectedPath | quote }}
+            - name: TIMEOUT_SECONDS
+              value: {{ $et.timeoutSeconds | quote }}
+            {{- if $et.minter.clientId }}
+            - name: KEYCLOAK_TOKEN_URL
+              value: {{ printf "%s/protocol/openid-connect/token" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) | quote }}
+            - name: MINT_CLIENT_ID
+              value: {{ $et.minter.clientId | quote }}
+            - name: MINT_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $et.minter.clientSecret.name | quote }}
+                  key: {{ $et.minter.clientSecret.key | quote }}
+            {{- if .Values.policy.caBundleConfigMap.name }}
+            - name: CA_BUNDLE_FILE
+              value: {{ printf "/etc/praxis-ca/%s" .Values.policy.caBundleConfigMap.key | quote }}
+            {{- end }}
+            {{- end }}
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $et.resources | nindent 12 }}
+          volumeMounts:
+            - name: check-script
+              mountPath: /opt/app-root/src/enforcement_check.py
+              subPath: enforcement_check.py
+              readOnly: true
+            {{- if and $et.minter.clientId .Values.policy.caBundleConfigMap.name }}
+            - name: praxis-ca
+              mountPath: /etc/praxis-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: check-script
+          configMap:
+            name: {{ include "praxis-proxy.fullname" . }}-enforcement-check-script
+            defaultMode: 0444
+        {{- if and $et.minter.clientId .Values.policy.caBundleConfigMap.name }}
+        - name: praxis-ca
+          configMap:
+            name: {{ .Values.policy.caBundleConfigMap.name | quote }}
+        {{- end }}
+{{- end }}

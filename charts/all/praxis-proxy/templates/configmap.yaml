@@ -1,0 +1,38 @@
+{{- if empty .Values.policy.allowedCallers }}
+{{- fail "policy.allowedCallers must contain at least one client; an empty allow-list would only require a valid token" }}
+{{- end }}
+{{- /*
+files/policy.yaml interpolates each entry directly into a single-quoted APL
+string literal (claim.azp != '<entry>'). A value containing a single quote
+could break out of that literal and inject arbitrary APL into the rendered
+policy document -- reject anything that isn't a plain Keycloak client ID
+shape before it ever reaches that template.
+*/}}
+{{- range .Values.policy.allowedCallers }}
+{{- if or (not (kindIs "string" .)) (not (regexMatch "^[A-Za-z0-9._-]+$" .)) }}
+{{- fail (printf "policy.allowedCallers entries must be safe Keycloak client IDs (letters, digits, '.', '_', '-' only); got %q" .) }}
+{{- end }}
+{{- end }}
+{{- if empty .Values.global.olsClusters }}
+{{- fail "global.olsClusters must contain at least one registered cluster; see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 6" }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (not .Values.policy.caBundleConfigMap.name) }}
+{{- fail "policy.caBundleConfigMap.name is required when policy.caBundleSync.enabled is true" }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (not .Values.policy.caBundleSync.targetConfigMapName) }}
+{{- fail "policy.caBundleSync.targetConfigMapName is required when policy.caBundleSync.enabled is true" }}
+{{- end }}
+{{- if and .Values.policy.caBundleSync.enabled (ne .Values.policy.caBundleConfigMap.name .Values.policy.caBundleSync.targetConfigMapName) }}
+{{- fail "policy.caBundleConfigMap.name must match policy.caBundleSync.targetConfigMapName" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+data:
+  praxis.yaml: |
+{{ tpl (.Files.Get "files/praxis.yaml") . | indent 4 }}
+  policy.yaml: |
+{{ tpl (.Files.Get "files/policy.yaml") . | indent 4 }}
