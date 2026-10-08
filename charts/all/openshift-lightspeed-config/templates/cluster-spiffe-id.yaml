@@ -1,0 +1,28 @@
+{{- if .Values.identity.clusterSpiffeID.enabled }}
+{{- /*
+trustDomain is derived from global.clusterBaseDomain (apps.<base>) when not
+explicitly set -- see _helpers.tpl's effectiveTrustDomain; the derivation fails
+loud if the anchor is unresolvable, replacing the old non-empty guard.
+*/}}
+# Registers the *operator-created* app-server ServiceAccount
+# (lightspeed-app-server, per T0.9's frozen interface table) for a SPIFFE
+# JWT-SVID, using this pattern's established ClusterSPIFFEID approach.
+# This chart does not create that ServiceAccount; podSelector below targets
+# the operator-managed app-server pods by an UNCONFIRMED GUESS at their
+# labels (appServer.podSelectorLabels in values.yaml -- see
+# templates/networkpolicy.yaml and README.md for why this is not a verified
+# fact and must be checked against the actually-installed operator).
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ .Values.identity.clusterSpiffeID.name }}
+spec:
+  spiffeIDTemplate: "spiffe://{{ include "openshift-lightspeed-config.effectiveTrustDomain" . }}/ns/{{ .Values.namespace }}/sa/{{ .Values.identity.clusterSpiffeID.serviceAccountName }}"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Values.namespace }}
+  podSelector:
+    matchLabels:
+      {{- include "openshift-lightspeed-config.appServerSelectorLabels" . | nindent 6 }}
+  jwtTtl: "300s"
+{{- end }}

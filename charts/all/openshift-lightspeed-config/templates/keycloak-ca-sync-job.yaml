@@ -1,0 +1,23 @@
+{{- if .Values.identity.keycloak.caBundleSync.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-bootstrap
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openshift-lightspeed-config-ca-sync
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+{{ include "openshift-lightspeed-config.keycloakCaSyncPodSpec" . | nindent 6 }}
+{{- end }}

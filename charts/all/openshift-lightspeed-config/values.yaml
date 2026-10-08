@@ -1,0 +1,419 @@
+fullnameOverride: openshift-lightspeed-config
+
+# Cluster-wide anchors shared across this pattern's charts (supplied by the
+# clustergroup values layer). Empty defaults keep the chart generic; the real
+# values come from global.* at deploy time. See _helpers.tpl's domain-derivation
+# block -- the appServerPatch A2A Keycloak issuer / RPC URL and the SPIFFE trust
+# domain all derive from global.clusterBaseDomain when not explicitly set.
+global:
+  # Base cluster domain WITHOUT the apps. prefix, e.g. ocp.example.com; falls
+  # back to the framework-injected global.localClusterDomain (apps wildcard
+  # domain) with apps. stripped when empty.
+  clusterBaseDomain: ""
+  localClusterDomain: ""
+  # Keycloak realm the issuer URL derives from (must equal the keycloak-oidc
+  # Application's keycloak.realm). Defaults to rca.
+  keycloakRealm: ""
+  # Shared cluster-routing registry; the appserver-patch Job validates that
+  # appServerPatch.a2a.clusterId is one of its keys (and that each key matches
+  # the id derived from its apiURL). Populated by the clustergroup values layer.
+  olsClusters: {}
+
+# Must match the namespace this Application is installed into
+# (variants/standalone/values-standalone.yaml) and the namespace carrying the
+# lightspeed-operator Subscription's OperatorGroup.
+#
+# Deliberately NOT "openshift-lightspeed" (the operator's own suggested
+# namespace, per its CSV's operatorframework.io/suggested-namespace
+# annotation -- a suggestion, not an enforced requirement; OLM installs the
+# operator fine under any name) -- confirmed live that the Zero Trust
+# Workload Identity Manager's spire-controller-manager hardcodes
+# ignoreNamespaces: [..., "openshift-*"] with no CRD field, flag, or env var
+# to override it (checked the ZeroTrustWorkloadIdentityManager CRD's spec
+# and the operator's own Deployment args/env directly), blanket-excluding
+# every openshift-*-prefixed namespace from SPIFFE workload registration.
+# That silently breaks appServerPatch's RFC 8693 token exchange (SPIRE
+# never issues the app-server pod a JWT-SVID) with no error anywhere in
+# this chart's own resources to point at the cause. Confirmed live that
+# the match is NOT a strict "starts with" prefix check either:
+# "a2a-openshift-lightspeed" (doesn't start with "openshift-") was *also*
+# silently excluded, so the matcher treats "openshift-*" closer to a
+# substring/contains check. "a2a-lightspeed" contains no "openshift"
+# substring at all, so it avoids the wildcard regardless of which exact
+# matching semantics are in play -- instead of patching ZTWIM's own
+# ConfigMap (confirmed to fight that patch just as aggressively as
+# lightspeed-operator fought appServerPatch).
+namespace: a2a-lightspeed
+
+# OLSConfig is conventionally a cluster-scoped singleton CR; "cluster" is the
+# assumed/expected name. This chart could not independently confirm the
+# exact CRD constraint (e.g. whether the name is schema-enforced) against a
+# trustworthy source -- verify with `oc explain olsconfig.metadata.name` or
+# the installed CRD before assuming a different name works.
+olsConfigName: cluster
+
+# Used only by the Keycloak CA sync Job/CronJob container below -- a small
+# Python script calling the Kubernetes API with its projected SA token, not
+# the Lightspeed service image. The operator selects the app-server/MCP
+# images itself (its --service-image flag / OLSConfig.spec.ols.serviceImage);
+# see README.md.
+image:
+  repository: registry.access.redhat.com/ubi9/python-312
+  tag: latest
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+llm:
+  # Same Gemini-on-Vertex project/location this pattern has always used.
+  defaultProvider: vertex-google
+  defaultModel: gemini-3.8-flash
+  vertex:
+    providerName: vertex-google
+    projectID: redhat-marketplace-dev
+    location: global
+    model: gemini-3.8-flash
+    # OLSConfig's google_vertex provider reads the credential from this key
+    # inside credentialsSecretRef by default when credentialKey is set
+    # explicitly here to "apitoken" (the operator's own default for
+    # google_vertex providers when the field is omitted; set explicitly for
+    # readability and to pin behavior across operator versions).
+    credentialKey: apitoken
+    # Deliberately its own Secret name, in case another component ever
+    # reads the same Vault path into its own differently-shaped Secret.
+    credentialsSecretName: ols-llm-creds-vertex
+    # Same underlying Vault ADC JSON as the llm-creds-vertex entry in
+    # values-secret.yaml.template (that file is
+    # outside this chart's ownership -- its "llm-creds-vertex" block must be
+    # uncommented/populated for either operator's ExternalSecret to resolve).
+    vaultKey: secret/data/global/llm-creds-vertex
+    vaultProperty: credentials
+
+ols:
+  # See LIGHTSPEED_DESIGN.md section 4: true (the default when
+  # omitted) makes the operator auto-deploy and wire in the built-in
+  # OpenShift MCP server. Do not also add spec.mcpServers for it.
+  #
+  # MCP hardening (require_oauth/skip_jwt_verification/cluster_auth_mode) is
+  # NOT configured here: a CRD investigation confirmed there is NO OLSConfig
+  # field to set it (the operator hardcodes the MCP config TOML in its own
+  # internal/controller/ocpmcp/assets.go). An earlier draft of this chart
+  # rendered a speculative spec.ols.mcpServerSecurity stanza here on the
+  # chance such a field existed -- it does not, and a structural CRD schema
+  # would have silently pruned it, so it has been removed. The actual MCP
+  # hardening this pattern applies ("Mode A") lives in appServerPatch.
+  # mcpHardening below, which patches the operator-generated MCP ConfigMap
+  # directly. See README.md's "MCP hardening" section.
+  introspectionEnabled: true
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+identity:
+  keycloak:
+    # This pattern's established identity.keycloak.caBundleSync approach: it
+    # actually syncs the cluster's *managed ingress* CA bundle (which also
+    # signs Keycloak's own Route certificate), not a Keycloak-specific CA.
+    # Unlike the ConfigMap target other charts use, this copy writes a
+    # Secret instead.
+    #
+    # RESERVED FOR A FUTURE "MODE B" (MCP-side JWT validation), disabled by
+    # default. The MCP hardening this chart actually enables is "Mode A"
+    # (appServerPatch.mcpHardening below): require_oauth=true +
+    # skip_jwt_verification=true + cluster_auth_mode=passthrough, where the
+    # OpenShift API server validates the forwarded token, so MCP needs no CA.
+    # "Mode B" would additionally have MCP validate the Keycloak JWT itself
+    # (authorization_url + certificate_authority), which needs the issuer's
+    # CA mounted from a Secret -- that is what this sync would feed. See
+    # LIGHTSPEED_DESIGN.md section 5 and README.md's "MCP hardening" section,
+    # and files/sync_keycloak_ca.py.
+    caBundleSecret:
+      name: ols-keycloak-ca
+      key: ca.crt
+    caBundleSync:
+      enabled: false
+      sourceNamespace: openshift-config-managed
+      sourceConfigMap: default-ingress-cert
+      sourceKey: ca-bundle.crt
+      schedule: "*/5 * * * *"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
+
+  # ZTWIM/SPIRE registration for the *operator-created* app-server
+  # ServiceAccount (lightspeed-app-server) -- this chart does not create that
+  # ServiceAccount itself (see T0.9's frozen interface table). Disabled by
+  # default because the cluster trust domain is installation-specific. Only
+  # meaningful once the Lightspeed A2A/SPIFFE workstream (vendor/lightspeed-service,
+  # separate from this chart) is deployed.
+  clusterSpiffeID:
+    enabled: false
+    name: ols-app-server
+    trustDomain: ""
+    serviceAccountName: lightspeed-app-server
+
+# UNCONFIRMED GUESS: this chart has no trustworthy source for the actual pod
+# labels the Lightspeed Operator applies to its managed app-server
+# Deployment. The values below are a best-effort guess based on common
+# operator labeling conventions (app.kubernetes.io/* selector labels), not a
+# confirmed fact. Verify with
+# `oc get pods -n <namespace> --show-labels | grep lightspeed` against the
+# actually-installed operator and correct this value -- otherwise
+# templates/networkpolicy.yaml and templates/cluster-spiffe-id.yaml, which
+# both select pods by this map, may silently match nothing.
+appServer:
+  podSelectorLabels:
+    app.kubernetes.io/component: application-server
+    app.kubernetes.io/managed-by: lightspeed-operator
+    app.kubernetes.io/name: lightspeed-service-api
+    app.kubernetes.io/part-of: openshift-lightspeed
+
+# TEMPORARY A2A bridge -- see README.md's "Temporary A2A bridge" section.
+# OLSConfig has no field for a custom app-server image (the operator picks
+# that via its own --service-image startup flag, not OLSConfig -- see the
+# top-level README.md Phase 0) and no field for the A2A_* environment
+# variables vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py requires
+# to serve A2A requests at all. Disabled by default: this patches the
+# operator-managed app-server Deployment directly, after the fact, via a
+# bootstrap Job plus a re-asserting CronJob (the operator's own reconcile
+# loop can silently overwrite this patch on a later pass). DELETE this
+# entire block, templates/appserver-patch-*.yaml, and
+# files/patch_appserver.py once the Operator/OLSConfig CRD natively supports
+# a custom service image and A2A configuration.
+appServerPatch:
+  enabled: false
+  # UNCONFIRMED GUESS, same caveat as appServer.podSelectorLabels above --
+  # verify both against `oc get deployment -n <namespace>` and `oc get
+  # deployment <name> -o jsonpath='{.spec.template.spec.containers[*].name}'`
+  # on the installed operator before relying on this.
+  deploymentName: lightspeed-app-server
+  containerName: lightspeed-service-api
+  # The custom, A2A-enabled OLS image built from
+  # vendor/lightspeed-service/Containerfile (see the top-level README.md
+  # Phase 0). Left empty, this patch only touches env vars, not the image.
+  image:
+    repository: ""
+    tag: ""
+  a2a:
+    # Required -- vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py's
+    # A2ASettings.from_env() raises A2AConfigurationError without these
+    # three, so the A2A endpoint will not start at all if they're unset.
+    keycloakIssuerURL: ""
+    clusterId: ""
+    rpcUrl: ""
+    # Optional path to a mounted CA bundle file trusted for TLS to
+    # keycloakIssuerURL. Setting this only sets the env var; it does not
+    # mount a volume into the operator-managed pod, so only set it if the
+    # pod's default trust store already has that file at this path.
+    keycloakCaBundle: ""
+    # These default to a2a_auth.py's own frozen module constants;
+    # override only if your Keycloak realm's client IDs/audiences actually
+    # differ from this pattern's defaults (charts/all/keycloak-oidc's
+    # lightspeedA2aAudience, acmeClientId, and mcpAudienceClientId
+    # respectively).
+    inboundAudience: lightspeed-a2a
+    # Allowed inbound caller(s): the Keycloak client IDs (azp) OLS accepts on
+    # A2A requests. A LIST, rendered joined-by-comma (no spaces) into the
+    # A2A_INBOUND_AZP env var vendor/lightspeed-service parses -- e.g.
+    # [acme-agent] -> "acme-agent", [acme-agent, orchestrator] ->
+    # "acme-agent,orchestrator". Defaults to a single-item list to preserve
+    # the previous single-caller behavior; add entries to allow more callers.
+    inboundAzp:
+      - acme-agent
+    exchangeAudience: openshift-mcp
+    exchangeClientAssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
+    # Defaults to keycloakIssuerURL inside a2a_auth.py itself when empty;
+    # only set this if the SPIFFE JWT-SVID assertion audience must differ.
+    spiffeJwtAudience: ""
+    # Matches spiffeWorkloadApiMountPath below (same unix:// convention
+    # acme-agent's identity.spiffe.workloadApiSocket uses) -- not
+    # cluster-specific, so this default normally doesn't need overriding.
+    spiffeEndpointSocket: "unix:///spiffe-workload-api/spire-agent.sock"
+  # Mounts SPIRE's csi.spiffe.io CSI driver volume into the app-server
+  # container so it can fetch its own JWT-SVID for the RFC 8693 token
+  # exchange -- required for the exchange to work at all (a2a_auth.py's
+  # SpiffeWorkloadIdentity raises A2AConfigurationError without a configured
+  # audience, and there is no SPIFFE identity to request one against without
+  # this volume). Unlike env vars, OLSConfig has no field for this and the
+  # operator has no flag for it either, so this chart adds the volume/mount
+  # directly via appServerPatch, the same way it adds the image and A2A_*
+  # env vars -- see values below and the chart's README "Temporary A2A
+  # bridge" section. Mirrors charts/all/acme-agent's
+  # identity.spiffe.workloadApiMountPath; keep both in sync if changed.
+  spiffeWorkloadApiMountPath: /spiffe-workload-api
+  # Escape hatch for any other A2A_* env var this chart doesn't template
+  # explicitly above -- each entry is a plain {name, value} pair merged into
+  # the container's env by name.
+  extraEnv: []
+  # The operator reconciles the app-server Deployment's entire container
+  # spec from scratch on every pass -- confirmed live, a patched image and
+  # env vars both get silently wiped within minutes, far faster than any
+  # periodic re-assert job could outrun. So instead of re-patching forever,
+  # the bootstrap Job stops the operator from reconciling at all, once, then
+  # patches. It stops the operator two ways:
+  #
+  #   1. PRIMARY / supported: annotate the OLSConfig CR (olsConfigName, see
+  #      top of this file -- default "cluster") with
+  #      operatorManagementStateAnnotation=Unmanaged. Per Red Hat's docs this
+  #      is THE supported way to pause the Lightspeed Operator's reconcile of
+  #      its managed resources, and a CRD investigation confirmed the target
+  #      is the OLSConfig CR, not the CSV. (An earlier version of this chart
+  #      annotated the CSV instead; that was wrong -- this operator's binary
+  #      never references the annotation on the CSV -- and has been changed.)
+  #      NOTE: the OLSConfig-CR annotation path has NOT yet been verified live
+  #      on this cluster, which is why the scale-to-0 below is kept as a
+  #      confirmed fallback.
+  #   2. FALLBACK / empirically confirmed: scale operatorDeploymentName to 0
+  #      replicas. Confirmed live to actually stick, with no drift-correction
+  #      observed from OLM over several minutes, once the CSV has reached
+  #      Succeeded (OLM re-enforces the CSV replica count only while the CSV
+  #      is still mid-install -- the Job waits for Succeeded first).
+  #
+  # Resolving the installed CSV (dynamically via operatorSubscriptionName's
+  # status.installedCSV, since the CSV name carries a version suffix) is still
+  # needed to wait for Succeeded before the scale-to-0 fallback. Leaving
+  # operatorDeploymentName empty skips the scale-to-0; leaving olsConfigName
+  # empty skips the annotation. Leaving operatorSubscriptionName empty skips
+  # the Succeeded wait (and falls back to patching the app-server Deployment
+  # only -- the old, losing-fight behavior).
+  operatorSubscriptionName: lightspeed-operator
+  operatorDeploymentName: lightspeed-operator-controller-manager
+  # Annotation key set to "Unmanaged" on the OLSConfig CR (primary) to pause
+  # the operator's reconcile. operator.openshift.io/managementState is the
+  # OpenShift convention Red Hat's Lightspeed docs point at for this.
+  operatorManagementStateAnnotation: "operator.openshift.io/managementState"
+  # PROVISIONING GATE (self-heal). CSV=Succeeded only means the operator is
+  # installed, NOT that it finished reconciling the OLSConfig children. Stopping
+  # it on Succeeded alone races that reconcile -- observed live: the operator was
+  # frozen before it created the `lightspeed-postgres-bootstrap` Secret, so
+  # postgres stuck in ContainerCreating (secret not found), the app-server's
+  # wait-for-postgres init crash-looped, its Service had no endpoints, and
+  # praxis-proxy went Degraded with connection-refused -- while this app still
+  # showed Synced/Healthy (ArgoCD doesn't track operator-owned resources).
+  # Before stopping, the Job now waits for this operator-managed postgres
+  # Deployment to report an available replica (proves the bootstrap Secret
+  # exists and postgres is up, i.e. a stop is now safe). If it is not available,
+  # the Job first un-pauses the operator (OLSConfig -> Managed, scale operator
+  # to operatorReplicas) so it can finish/recover, then waits. If it never comes
+  # up within poll.provisionDeadlineSeconds, the Job leaves the operator RUNNING
+  # and skips the stop/patch, retrying on the next sync rather than re-freezing
+  # a broken stack. Leave empty to disable the gate (old, race-prone behavior).
+  postgresDeploymentName: lightspeed-postgres-server
+  # Replica count restored on the operator Deployment when the gate un-pauses it
+  # (1 matches the operator's CSV-declared count).
+  operatorReplicas: 1
+  # Job .spec.activeDeadlineSeconds. Must exceed poll.provisionDeadlineSeconds
+  # (the provisioning wait) plus the CSV-Succeeded wait and patch retries.
+  jobActiveDeadlineSeconds: 600
+  # TEMPORARY, Mode A MCP hardening -- see README.md's "MCP hardening"
+  # section. The operator-generated OpenShift MCP server ships with
+  # require_oauth=false, so a tokenless call falls back to the MCP pod's
+  # ServiceAccount -- a confused-deputy bypass of the whole Keycloak/SPIFFE/
+  # RBAC identity chain (LIGHTSPEED_DESIGN.md section 5). A CRD investigation
+  # confirmed there is NO OLSConfig field to harden this; the operator
+  # hardcodes the MCP config TOML. So, only after the operator is stopped
+  # (above), this patches the operator-generated MCP ConfigMap TOML directly
+  # to set require_oauth=true + skip_jwt_verification=true +
+  # cluster_auth_mode=passthrough ("Mode A": MCP requires a bearer, the
+  # OpenShift API server validates it via passthrough -- no CA mount or
+  # authorization_url needed, that is the heavier "Mode B"), then forces a
+  # rollout of the MCP Deployment. DELETE this whole block once the
+  # Operator/OLSConfig CRD exposes require_oauth natively.
+  mcpHardening:
+    enabled: false
+    # CONFIRMED from operator source (openshift/lightspeed-operator):
+    # the ConfigMap name is utils.OpenShiftMCPServerConfigCmName and the data
+    # key holding the TOML is OpenShiftMCPServerConfigFilename = "config.toml"
+    # (NOT "<name>.toml"). In .Values.namespace.
+    configMapName: openshift-mcp-server-config
+    configMapKey: config.toml
+    # CONFIRMED from operator source: Deployment/container/SA name is
+    # utils.OpenShiftMCPServerDeploymentName. Rolled by stamping the operator's
+    # own force-reload pod-template annotation (see patch_appserver.py).
+    deploymentName: openshift-mcp-server
+    # CONFIRMED from operator source -- the MCP pod labels (note these DIFFER
+    # from appServer.podSelectorLabels above: component/name are
+    # openshift-mcp-server here, and there is an extra bare `app` label).
+    # Reserved for a future label-based NetworkPolicy/discovery path; the
+    # rollout restarts by deploymentName, so this is not load-bearing for
+    # Mode A itself.
+    podSelectorLabels:
+      app: openshift-mcp-server
+      app.kubernetes.io/component: openshift-mcp-server
+      app.kubernetes.io/managed-by: lightspeed-operator
+      app.kubernetes.io/name: openshift-mcp-server
+      app.kubernetes.io/part-of: openshift-lightspeed
+    # The three Mode A TOML values, written as top-level keys (booleans
+    # unquoted, cluster_auth_mode quoted). CONFIRMED against the MCP server
+    # source: with skip_jwt_verification=true AND no authorization_url, the
+    # passthrough branch does no JWT/JWKS parsing and forwards the bearer
+    # unmodified to the kube API server (which validates Token B +
+    # extraAudiences: openshift-mcp + RBAC) -- so Mode A needs no CA. Override
+    # only to diverge; Mode B (authorization_url + certificate_authority) is
+    # not templated here (see identity.keycloak.caBundleSync, reserved for it).
+    requireOauth: true
+    skipJwtVerification: true
+    clusterAuthMode: passthrough
+    # Correct the operator-generated `alertmanager_url` in the MCP config.toml
+    # (under [toolset_configs."observability/metrics"]). The operator ships a
+    # port that does not exist on OpenShift's alertmanager-main Service --
+    # observed live: :9095, but the Service only exposes web=9094,
+    # tenancy=9092, metrics=9097. A connection to an undefined Service port is
+    # blackholed, so the MCP's alerts tool (GetAlertsHandler) hangs for 30s and
+    # fails with "context deadline exceeded", which stalls the whole agent
+    # request (the ACME UI shows "NetworkError"). 9094 is the web API port
+    # (the `?filter=namespace=...` v2 query the MCP uses), mirroring the
+    # non-tenancy thanos-querier:9091 the operator already uses for
+    # prometheus_url -- both rely on the caller's cluster-monitoring-view grant.
+    # Set empty to leave the operator's value untouched. Replaced in place only
+    # if the key exists (never relocated out of its toolset section). This
+    # whole block is part of the TEMPORARY Mode A bridge -- delete it once the
+    # Operator/OLSConfig CRD lets the MCP's alertmanager URL be configured, or
+    # the operator ships the correct port.
+    alertmanagerUrl: "https://alertmanager-main.openshift-monitoring.svc.cluster.local:9094"
+  poll:
+    intervalSeconds: 10
+    deadlineSeconds: 150
+    # How long the provisioning gate waits for postgres to become available
+    # (operator reconcile + postgres image pull + startup) before giving up for
+    # this run. Kept under jobActiveDeadlineSeconds above.
+    provisionDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# Restricts ingress to the operator-managed app-server pods (selected via
+# appServer.podSelectorLabels above) to same-namespace traffic and the
+# Praxis gateway. Any NetworkPolicy the operator itself creates for these pods is
+# independent of this one and not something this chart inspected or can
+# assume the contents of; Kubernetes NetworkPolicies targeting the same pods
+# are additive (OR'd), so this policy cannot narrow access an operator-owned
+# policy already grants elsewhere. See README.md.
+networkPolicy:
+  enabled: true
+  praxisPodSelector:
+    app.kubernetes.io/name: praxis-proxy
+    app.kubernetes.io/instance: praxis-proxy
+  praxisNamespace: praxis-proxy
+  port: 8443
+
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

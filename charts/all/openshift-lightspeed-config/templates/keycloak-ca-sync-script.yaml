@@ -1,0 +1,14 @@
+{{- if .Values.identity.keycloak.caBundleSync.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+data:
+  sync_keycloak_ca.py: |-
+{{ .Files.Get "files/sync_keycloak_ca.py" | indent 4 }}
+{{- end }}

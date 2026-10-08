@@ -1,0 +1,95 @@
+{{- if .Values.identity.keycloak.caBundleSync.enabled }}
+{{- if not .Values.identity.keycloak.caBundleSecret.name }}
+{{- fail "identity.keycloak.caBundleSecret.name is required when caBundleSync.enabled is true" }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.identity.keycloak.caBundleSync.sourceNamespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - {{ .Values.identity.keycloak.caBundleSync.sourceConfigMap | quote }}
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.identity.keycloak.caBundleSync.sourceNamespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+    namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - {{ .Values.identity.keycloak.caBundleSecret.name | quote }}
+    verbs:
+      - get
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+    namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-keycloak-ca-sync
+{{- end }}

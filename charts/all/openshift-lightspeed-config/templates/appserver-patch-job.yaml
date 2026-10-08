@@ -1,0 +1,62 @@
+{{- if .Values.appServerPatch.enabled }}
+{{- /*
+keycloakIssuerURL and rpcUrl are derived from global.clusterBaseDomain when not
+explicitly set (see _helpers.tpl's effective* helpers); the derivation fails
+loud if the anchor is unresolvable, so their old non-empty guards are redundant.
+*/}}
+{{- if not .Values.appServerPatch.a2a.clusterId }}
+{{- fail "appServerPatch.a2a.clusterId must be set when appServerPatch.enabled is true (A2A_CLUSTER_ID)." }}
+{{- end }}
+{{- if not (hasKey (.Values.global.olsClusters | default dict) .Values.appServerPatch.a2a.clusterId) }}
+{{- fail (printf "appServerPatch.a2a.clusterId %q must be a KEY of global.olsClusters (the shared cluster-routing registry) -- it is the X-OLS-Cluster routing id this app-server advertises, and Praxis will reject anything not in that one map. Known keys: %v. Mirror the derive_cluster_id algorithm (f\"{host}:{port}\" with lowercase host and every '.'/':' replaced by '-'); see AGENTS.md." .Values.appServerPatch.a2a.clusterId (keys (.Values.global.olsClusters | default dict))) }}
+{{- end }}
+{{- /*
+VALIDATION-ONLY (I6): re-derive each registry key from its own apiURL and fail
+on a mismatch, so a hand-edited global.olsClusters key that drifts from the
+derive_cluster_id algorithm is caught at render time (the exact footgun AGENTS.md
+calls out, where acme-agent crash-loops and Praxis/Envoy rejects a dotted
+cluster name). This is the single Helm id derivation in the whole pattern, used
+only to validate -- acme/praxis consume the authored key, they never derive it.
+*/}}
+{{- range $id, $cfg := (.Values.global.olsClusters | default dict) }}
+{{- if $cfg.apiURL }}
+{{- $expected := include "openshift-lightspeed-config.deriveClusterId" $cfg.apiURL }}
+{{- if ne $id $expected }}
+{{- fail (printf "global.olsClusters key %q does not match the id derived from its apiURL %q (expected %q). The key must equal derive_cluster_id: f\"{host}:{port}\" with lowercase host and every '.'/':' replaced by '-' (see AGENTS.md). A drifted key makes acme-agent crash-loop and Praxis/Envoy reject the cluster name." $id $cfg.apiURL $expected) }}
+{{- end }}
+{{- end }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch-bootstrap
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "4"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  # Must comfortably exceed appServerPatch.poll.provisionDeadlineSeconds (the
+  # Job may wait that long for the operator to finish provisioning before it
+  # stops it) plus the CSV-Succeeded wait and the patch retries.
+  activeDeadlineSeconds: {{ .Values.appServerPatch.jobActiveDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openshift-lightspeed-config-appserver-patch
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        # Without this, changing files/patch_appserver.py's content alone
+        # (the script is mounted from a ConfigMap this Job references, not
+        # inlined in this Job's own spec) doesn't change this Job's own
+        # rendered manifest at all -- confirmed live, ArgoCD did not
+        # re-trigger this Sync hook on a sync where only the script content
+        # changed, even on an explicit forced sync. Same pattern as
+        # charts/all/praxis-proxy/templates/deployment.yaml's checksum/config.
+        checksum/config: {{ include (print $.Template.BasePath "/appserver-patch-script.yaml") . | sha256sum }}
+    spec:
+{{ include "openshift-lightspeed-config.appServerPatchPodSpec" . | nindent 6 }}
+{{- end }}
