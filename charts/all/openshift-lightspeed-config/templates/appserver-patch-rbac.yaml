@@ -1,0 +1,147 @@
+{{- if .Values.appServerPatch.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+rules:
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    resourceNames:
+      - {{ .Values.appServerPatch.deploymentName | quote }}
+      {{- if .Values.appServerPatch.operatorDeploymentName }}
+      - {{ .Values.appServerPatch.operatorDeploymentName | quote }}
+      {{- end }}
+      {{- if .Values.appServerPatch.postgresDeploymentName }}
+      # Provisioning gate: read this operator-managed postgres Deployment's
+      # status (availableReplicas) before stopping the operator, to confirm the
+      # operator finished creating the bootstrap Secret and postgres came up.
+      - {{ .Values.appServerPatch.postgresDeploymentName | quote }}
+      {{- end }}
+      {{- if .Values.appServerPatch.mcpHardening.enabled }}
+      # Mode A: force a rollout of the operator-generated MCP Deployment onto
+      # the hardened ConfigMap (patched below) via a
+      # kubectl.kubernetes.io/restartedAt pod-template annotation.
+      - {{ .Values.appServerPatch.mcpHardening.deploymentName | quote }}
+      {{- end }}
+    verbs:
+      # get: read the postgres (and operator) Deployment status for the
+      # provisioning gate. patch: scale the operator and patch the app-server
+      # (and MCP) Deployment.
+      - get
+      - patch
+  {{- if .Values.appServerPatch.mcpHardening.enabled }}
+  # Mode A MCP hardening: read the operator-generated MCP ConfigMap and patch
+  # its TOML (require_oauth/skip_jwt_verification/cluster_auth_mode).
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - {{ .Values.appServerPatch.mcpHardening.configMapName | quote }}
+    verbs:
+      - get
+      - patch
+  {{- end }}
+  {{- if .Values.appServerPatch.operatorSubscriptionName }}
+  - apiGroups:
+      - operators.coreos.com
+    resources:
+      - subscriptions
+    resourceNames:
+      - {{ .Values.appServerPatch.operatorSubscriptionName | quote }}
+    verbs:
+      - get
+  # Cannot scope this to the specific installed CSV by resourceNames: its
+  # name carries a version suffix (e.g. lightspeed-operator.v1.1.4) that
+  # changes on every operator upgrade, and is only known at runtime via the
+  # Subscription's status.installedCSV -- RBAC resourceNames must be static.
+  # Only `get` is needed: the CSV is read to wait for phase=Succeeded before
+  # the scale-to-0 fallback. (The operator-stop is now done by annotating the
+  # OLSConfig CR, below -- not the CSV, which an earlier version wrongly
+  # patched.)
+  - apiGroups:
+      - operators.coreos.com
+    resources:
+      - clusterserviceversions
+    verbs:
+      - get
+  {{- end }}
+---
+{{- if .Values.olsConfigName }}
+# OLSConfig is a cluster-scoped singleton (see values.yaml's olsConfigName
+# comment; verify with `oc get crd olsconfigs.ols.openshift.io -o
+# jsonpath='{.spec.scope}'`), so pausing the operator by annotating it needs
+# a ClusterRole, pinned to the single CR by name. This is the PRIMARY,
+# Red Hat-documented operator-stop mechanism (see task 3 / values.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch-olsconfig
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+rules:
+  - apiGroups:
+      - ols.openshift.io
+    resources:
+      - olsconfigs
+    resourceNames:
+      - {{ .Values.olsConfigName | quote }}
+    verbs:
+      - get
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch-olsconfig
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+    namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch-olsconfig
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+    namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-appserver-patch
+{{- end }}

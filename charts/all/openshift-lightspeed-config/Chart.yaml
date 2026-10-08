@@ -1,0 +1,21 @@
+apiVersion: v2
+name: openshift-lightspeed-config
+description: >-
+  Configures the OpenShift Lightspeed Operator (ols.openshift.io) installed via
+  the lightspeed-operator Subscription: the OLSConfig custom resource (Gemini
+  on Vertex, operator-managed MCP introspection), the Vault-backed Vertex
+  credential Secret, Keycloak issuer CA sync, app-server SPIFFE registration
+  and an ingress NetworkPolicy. Does not deploy the Lightspeed service/MCP
+  server Deployments themselves -- those are reconciled by the operator from
+  this OLSConfig. See README.md for an open, unresolved MCP-hardening gap.
+type: application
+version: 0.1.0
+# Not pinned to a specific operator release: this chart was not able to
+# independently confirm an installed version against a trustworthy source.
+appVersion: "unknown"
+keywords:
+  - lightspeed
+  - ols
+  - openshift
+  - mcp
+  - vertex-ai

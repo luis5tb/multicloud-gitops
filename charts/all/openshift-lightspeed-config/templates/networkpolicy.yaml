@@ -1,0 +1,46 @@
+{{- if .Values.networkPolicy.enabled }}
+# Restricts ingress to the operator-managed Lightspeed app-server pods to
+# same-namespace traffic and the Praxis gateway.
+#
+# The podSelector below (appServer.podSelectorLabels in values.yaml) is an
+# UNCONFIRMED GUESS at the labels the Lightspeed Operator applies to its
+# managed app-server Deployment -- this chart does not control those labels,
+# since that Deployment is reconciled by the operator from the OLSConfig CR,
+# not by this chart, and had no trustworthy source to confirm the real
+# values against (see README.md). Verify against the actually-installed
+# operator (`oc get pods -n <namespace> --show-labels`) and correct
+# values.yaml's appServer.podSelectorLabels if they don't match -- otherwise
+# this policy silently selects zero pods and has no effect.
+#
+# Whatever NetworkPolicy, if any, the operator creates for these pods on its
+# own is independent of this one; this chart did not inspect its contents.
+# NetworkPolicies targeting the same pods are additive (OR'd), so this
+# policy cannot narrow access an operator-owned policy already grants.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}-app-server
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "openshift-lightspeed-config.appServerSelectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.praxisPodSelector | nindent 14 }}
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.praxisNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.namespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.port }}
+{{- end }}

@@ -1,0 +1,46 @@
+# apiVersion ols.openshift.io/v1alpha1 and the google_vertex provider shape
+# below (including the googleVertexConfig.projectID/location field names)
+# follow LIGHTSPEED_IMPLEMENTATION_PLAN.md's frozen interface assumptions
+# (T0.9). This chart has no trustworthy, independently-confirmed source for
+# the installed operator's actual CRD schema -- verify with
+# `oc explain olsconfig.spec` (or the installed CRD's OpenAPI schema)
+# against the real cluster before relying on this rendering unchanged.
+apiVersion: ols.openshift.io/v1alpha1
+kind: OLSConfig
+metadata:
+  # OLSConfig is conventionally a cluster-scoped singleton; "cluster" is the
+  # assumed name (see values.yaml's olsConfigName comment -- unconfirmed
+  # whether a different name would be rejected).
+  name: {{ .Values.olsConfigName }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    # The lightspeed-operator Subscription/CSV may not have registered the
+    # OLSConfig CRD yet on this Application's first sync -- the classic
+    # Argo CD race against an operator that hasn't finished installing.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  llm:
+    providers:
+      - name: {{ .Values.llm.vertex.providerName }}
+        type: google_vertex
+        credentialsSecretRef:
+          name: {{ .Values.llm.vertex.credentialsSecretName }}
+        credentialKey: {{ .Values.llm.vertex.credentialKey }}
+        googleVertexConfig:
+          projectID: {{ .Values.llm.vertex.projectID | quote }}
+          location: {{ .Values.llm.vertex.location | quote }}
+        models:
+          - name: {{ .Values.llm.vertex.model | quote }}
+  ols:
+    defaultProvider: {{ .Values.llm.defaultProvider | quote }}
+    defaultModel: {{ .Values.llm.defaultModel | quote }}
+    introspectionEnabled: {{ .Values.ols.introspectionEnabled }}
+    # NOTE: there is intentionally no MCP-hardening stanza here. A CRD
+    # investigation confirmed the OLSConfig CRD exposes no field to set
+    # require_oauth / MCP auth (the operator hardcodes the MCP config TOML).
+    # MCP "Mode A" hardening is applied out-of-band by appServerPatch.
+    # mcpHardening, which patches the operator-generated MCP ConfigMap
+    # directly after pausing the operator -- see README.md's "MCP hardening"
+    # section.
