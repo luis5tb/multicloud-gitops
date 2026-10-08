@@ -7,7 +7,9 @@ global:
     syncPolicy: Automatic
     installPlanApproval: Automatic
 main:
-  variant: hub
+  variant: standalone
   multiSourceConfig:
     enabled: true
+    #clusterGroupGitRepoUrl: https://github.com/mbaldessari/clustergroup-chart
+    #clusterGroupChartGitRevision: backstage
     clusterGroupChartVersion: "0.9.*"

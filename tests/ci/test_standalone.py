@@ -46,6 +46,7 @@ def test_pod_status_standalone(openshift_dyn_client):
         "hello-world",
         "config-demo",
         "external-secrets",
+        "mao",
         # "non-existing"
     ]
     components.assert_pod_status(openshift_dyn_client, projects, skip_check=[])
