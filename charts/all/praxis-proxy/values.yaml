@@ -1,0 +1,198 @@
+fullnameOverride: praxis-proxy
+
+replicaCount: 1
+
+# RUST_LOG for the Praxis binary (it's built on Rust's `tracing` ecosystem).
+# Unset by default -- the binary's own built-in default applies (sparse,
+# roughly info-level: occasional events like a JWKS refresh, not per-request
+# detail). Can be a bare level ("debug") applied to the whole binary, or
+# scoped per-crate/module to avoid flooding logs with irrelevant detail, e.g.
+# "info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug" (crate
+# names are literally the module-path prefix already shown in each log
+# line -- praxis_filter covers routing/load-balancing, see
+# praxis_policy_plugin_identity_jwt for JWT validation). Confirmed live that
+# per-cluster routing/request counts are also available without any log
+# level change at all, via the admin-only (loopback) metrics endpoint:
+# `oc exec <pod> -- wget -q -O - http://127.0.0.1:9901/metrics`.
+logLevel: ""
+
+image:
+  repository: ghcr.io/praxis-proxy/ai
+  # Pin an upstream release; do not use latest for the authorization gateway.
+  #
+  # DELIBERATELY NOT BUMPED to "0.7.2": that is a Praxis *Core* pre-release
+  # tag, not a praxis-proxy/ai release. Checked 2026-10-01 (see chart
+  # README "Upstream maturity and pinning" and
+  # LIGHTSPEED_DESIGN.md SS7): the newest published `ai` release is
+  # still v0.4.1 (2026-09-26, skopeo-confirmed against this exact digest --
+  # no numeric tag beyond 0.4.1 exists in the registry), and its own
+  # Cargo.lock resolves praxis-proxy-core to 0.7.0. The `ai` main branch
+  # (commit 4110021, 2026-10-01) has moved its Cargo.lock to resolve
+  # praxis-proxy-core 0.7.2, so upstream is actively integrating it, but
+  # `main` is an unpinned floating branch with no release/tag/digest --
+  # not something to deploy from. Building our own image from that commit
+  # is out of scope for this pass (no Rust toolchain/publish credentials
+  # here); re-check for a new tagged `ai` release before the next bump.
+  tag: "0.4.1"
+  digest: sha256:83c86c059162cd17a0ee7bc3e5146e4be02f811bada6d38027acc6668b8be903
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+service:
+  port: 8080
+
+route:
+  enabled: false
+  host: ""
+  # Optional OpenShift HAProxy route timeout for long-running A2A requests.
+  timeout: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+# The routed-to backends come from .Values.global.olsClusters (the shared
+# cluster registry defined in variants/<variant>/values-<variant>.yaml under
+# global.olsClusters -- see LIGHTSPEED_DESIGN.md SS7 and
+# LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 6). Praxis reads only the map key
+# (a DNS-safe cluster ID) plus upstreamHost/upstreamPort/upstreamSNI from each
+# entry; it never reads apiURL (that field is ACME-only -- Praxis must never
+# route from caller-supplied data). This default is empty on purpose so a
+# `helm lint`/`helm template` run with no registry fails fast with a clear
+# message instead of silently rendering zero routes.
+global:
+  olsClusters: {}
+  # Single cluster-domain anchor shared across this pattern's charts (see
+  # templates/_helpers.tpl). Base domain WITHOUT the apps. prefix, e.g.
+  # ocp.example.com; falls back to the framework-injected localClusterDomain
+  # (apps wildcard domain) with apps. stripped. Empty here keeps the chart
+  # generic -- the real value comes from the clustergroup values layer.
+  clusterBaseDomain: ""
+  localClusterDomain: ""
+  # Keycloak realm the issuer URL derives from (must equal the keycloak-oidc
+  # Application's keycloak.realm). Defaults to rca.
+  keycloakRealm: ""
+
+# In-cluster defaults for each global.olsClusters entry's upstream fields, so a
+# deployer only supplies the map KEY (cluster id) + apiURL per cluster. These
+# are fixed operator-managed Lightspeed app-server Service coordinates in the
+# a2a-lightspeed namespace, not cluster-domain-dependent; an entry may still
+# override any of them (e.g. a future cross-cluster backend). See
+# files/praxis.yaml.
+upstreamDefaults:
+  host: lightspeed-app-server.a2a-lightspeed.svc.cluster.local
+  port: 8443
+  sni: lightspeed-app-server.a2a-lightspeed.svc
+
+# TLS trust for the operator-managed Lightspeed app-server upstream(s). The
+# policy plugin's SSL_CERT_FILE (configured via policy.caBundleConfigMap
+# below) is a *separate* trust store used only for the Keycloak JWKS fetch;
+# it is not automatically valid for the OLS app-server's serving certificate,
+# so upstream TLS gets its own trust configuration here.
+upstreamTLS:
+  # When true, every olsClusters endpoint is dialed over HTTPS with a
+  # verified server certificate and the entry's upstreamSNI. There is
+  # currently no plaintext upstream option: every known/planned OLS
+  # app-server Service is HTTPS-only (operator-managed), so this is not
+  # exposed as a per-cluster toggle.
+  enabled: true
+  # This chart creates a ConfigMap annotated
+  # `service.beta.openshift.io/inject-cabundle: "true"` so the in-cluster
+  # OpenShift service-ca-operator injects the current serving CA bundle
+  # (key `service-ca.crt`) with no manual sync job. That only establishes
+  # trust for Services in *this same* OpenShift cluster -- it cannot trust a
+  # future cross-cluster OLS entry (see chart README and
+  # LIGHTSPEED_DESIGN.md SS7 "Multi-cluster session safety"). A
+  # future cross-cluster entry needs a distributed/synced CA source similar
+  # to policy.caBundleSync below, not this annotation.
+
+identity:
+  keycloak:
+    # Derived from global.clusterBaseDomain + global.keycloakRealm when empty
+    # (https://keycloak.apps.<base>/realms/<realm>) -- see
+    # templates/_helpers.tpl's effectiveIssuerUrl. Set explicitly only to
+    # override that derivation.
+    issuerUrl: ""
+    # Must match keycloak.lightspeedA2aAudience in charts/all/keycloak-oidc --
+    # the custom inbound audience ACME's token carries and OpenShift
+    # Lightspeed's own A2A validator independently checks again downstream.
+    audience: lightspeed-a2a
+
+policy:
+  allowedCallers:
+    - acme-agent
+  # Allow-list enforcement check (PostSync hook Job). Guards against a silent
+  # fail-open regression: the pinned Praxis image has admitted every
+  # validly-signed token before (see files/policy.yaml and AGENTS.md), so this
+  # asserts the proxy DENIES a caller whose azp is not in the allow-list. A
+  # forwarded/200 fails the Job (and the sync) instead of going unnoticed.
+  # Enabled by default. See files/enforcement_check.py and the chart README.
+  enforcementTest:
+    enabled: true
+    # Image for the check Job (Python stdlib only -- no extra deps).
+    image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
+    # Any protected path (not /.well-known/agent-card.json or /readiness, which
+    # are public by design) -- the catch-all route requires auth.
+    protectedPath: /
+    timeoutSeconds: 30
+    # STRONG check (opt-in): credentials for a Keycloak client whose azp is NOT
+    # in allowedCallers above. When set, the Job mints a real, validly-signed
+    # token and asserts Praxis denies it on azp -- the check that actually
+    # catches the allow-list fail-open. Left empty, the Job runs only the
+    # weaker always-on check (unauthenticated/bad-token requests are rejected),
+    # which does NOT exercise that specific fail-open. See chart README.
+    minter:
+      clientId: ""
+      clientSecret:
+        # Reference an existing Secret key holding the client secret.
+        name: ""
+        key: client-secret
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+  # Praxis AI 0.4.1 only exposes a filter-wide private-destination opt-in.
+  # Enable only when a statically configured policy endpoint (such as the
+  # Keycloak JWKS URL) resolves to a non-public cluster address. This also
+  # permits loopback and link-local destinations, so keep policy callouts
+  # operator-controlled and never user-supplied.
+  allowPrivateIdp: false
+  caBundleConfigMap:
+    name: ""
+    key: ca-bundle.crt
+  caBundleSync:
+    enabled: false
+    sourceNamespace: openshift-config-managed
+    sourceConfigMap: default-ingress-cert
+    sourceKey: ca-bundle.crt
+    targetConfigMapName: praxis-keycloak-ca
+    schedule: "*/5 * * * *"
+    image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+securityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

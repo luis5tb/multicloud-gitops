@@ -1,0 +1,138 @@
+plugins:
+  - name: jwt-client
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    # `read_claims` is required for the catch-all route's pre_invocation
+    # predicate below to see `claim.azp` at all -- see the long comment on
+    # that route for why, and do not remove this capability while that
+    # predicate (or any claim.* predicate) exists.
+    capabilities:
+      - perform_http
+      - read_claims
+    on_error: fail
+    config:
+      # DELIBERATELY "user", not "client", despite this resolving an OAuth
+      # *client* (acme-agent's service-account) token. Empirically verified
+      # against the exact pinned image (ghcr.io/praxis-proxy/ai:0.4.1, whose
+      # Cargo.lock resolves praxis-policy to 0.3.1): with `role: client`,
+      # identity resolution runs and the claim_mapper logs attempt the
+      # "client" claim_map section (confirmed via RUST_LOG=debug -- see
+      # chart README "Header routing and the role: user workaround"), but
+      # the resulting `client.*` bag namespace (`client.client_id`,
+      # `client.claim.azp`, etc., per
+      # https://github.com/praxis-proxy/policy/blob/v0.3.1/docs/content/cmf-extensions.md)
+      # never becomes visible to this route's pre_invocation predicates in
+      # this pinned build: `exists(client.client_id)` and
+      # `exists(client.claim.azp)` both evaluate false for a token that
+      # demonstrably has `azp` set, with every read_* capability granted.
+      # `role: user` populates `subject.*`/`claim.*` instead, and those
+      # *are* visible (`exists(subject.id)`/`exists(claim.azp)` both
+      # evaluate true for the same token). This looks like a genuine defect
+      # or incomplete feature in this exact historical PPE version, not a
+      # config mistake; re-test with `role: client` when the image is next
+      # upgraded, since that is the semantically correct role for a
+      # service-account/OAuth-client caller.
+      role: user
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{{ trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .) }}"
+          audiences:
+            - {{ .Values.identity.keycloak.audience | quote }}
+          algorithms:
+            - RS256
+          decoding_key:
+            kind: jwks_url
+            url: "{{ printf "%s/protocol/openid-connect/certs" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) }}"
+      claim_mapper: keycloak
+
+routes:
+  # The A2A discovery document is public by design. Its RPC URL still points
+  # at the public Praxis Route, never directly at an internal OLS Service.
+  # This path is cluster-neutral: it is not gated by X-OLS-Cluster (see
+  # files/praxis.yaml's router filter and its documented single-cluster
+  # caveat for which backend currently answers it).
+  - http:
+      path: /.well-known/agent-card.json
+      method: GET
+    authorization:
+      pre_invocation:
+        - "allow"
+
+  # Readiness is routed through to the backend OLS instance the router
+  # selects for this path (see files/praxis.yaml) so the proxy is not marked
+  # ready while the application, Keycloak, or the workload identity socket is
+  # unavailable.
+  - http:
+      path: /readiness
+      method: GET
+    authorization:
+      pre_invocation:
+        - "allow"
+
+  # Catch-all: every other HTTP request requires a valid Keycloak client
+  # token and an explicit allow-list match. The earlier exact routes take
+  # priority. This authentication/authorization step runs in the `policy`
+  # filter, which is ordered strictly before the `router`/`load_balancer`
+  # filters in files/praxis.yaml's filter_chain -- a request denied here
+  # never reaches the per-cluster X-OLS-Cluster routing logic, let alone an
+  # upstream.
+  #
+  # NOTE: this allow-list matches the caller only (claim.azp), not the
+  # requested X-OLS-Cluster. Core's APL `http:` route selector documented
+  # here accepts only path/path_prefix/method -- not headers (see
+  # https://github.com/praxis-proxy/policy/blob/v0.4.0/docs/content/http-routing.md:
+  # "Anything other than path, path_prefix, and method in that map is a load
+  # error") -- so per-cluster target enforcement is Core router's job
+  # (files/praxis.yaml), not this policy document's. When a second caller is
+  # introduced, build a caller x cluster allow-list there instead of here;
+  # see LIGHTSPEED_DESIGN.md SS7.
+  #
+  # CORRECTED (empirically, against the pinned image -- see the long comment
+  # on the jwt-client plugin's `role` field above):
+  #
+  #   * Compare `claim.azp`, not `claim.client_id`/`client.client_id`. The
+  #     "keycloak" claim_mapper preset's documented "client" claim_map
+  #     section (which would populate `client.client_id` from
+  #     client_id/azp/clientId) never becomes visible to this route's
+  #     predicates in this pinned build regardless of granted capabilities.
+  #     Raw claims under `claim.*` (role: user + read_claims, see above) are
+  #     visible, so compare the raw `azp` claim directly instead of a mapped
+  #     field. This chart previously compared `claim.client_id`, which was
+  #     *always* undefined here and therefore never matched -- every holder
+  #     of a validly-signed token reached the backend regardless of `azp`,
+  #     not just the allow-listed caller. Verified both ways with a live
+  #     container and two tokens differing only in `azp`.
+  #   * Use an explicit `deny(...)` action, not a bare comparison. A bare
+  #     predicate with no action is a documented no-op fallthrough in this
+  #     engine's effects model
+  #     (https://github.com/praxis-proxy/policy/blob/v0.3.1/docs/content/apl/effects.md:
+  #     "pre_invocation: ... run in sequence until one denies"; `allow` is
+  #     explicitly a no-op and nothing says a bare predicate becomes an
+  #     implicit allow-or-deny) and was verified live to never deny either
+  #     an allow-listed or a non-allow-listed caller. Wrapping it in
+  #     `require(...)` instead is *also* broken on this pinned build (see
+  #     the next paragraph), so the only form verified to work here is an
+  #     explicit `deny(...)` action on the negated condition.
+  #   * `require(...)` is -- separately -- known broken on this exact
+  #     pinned build: wrapping a comparison in `require(...)` is accepted by
+  #     the config schema but was observed to deny unconditionally,
+  #     regardless of the claim compared, so it cannot be used as a
+  #     carve-out either. Revalidate both quirks (the silent client.*
+  #     visibility gap and the require() behavior) before relying on either
+  #     form again on a future image.
+  #
+  # This renders one `claim.azp != '<allowed>'` conjunct per
+  # policy.allowedCallers entry, ANDed together, so the rule denies unless
+  # azp matches at least one allow-listed caller (De Morgan's form of
+  # "azp in allowedCallers", since APL's `in` operator needs a `data.*`
+  # set attribute rather than an inline list -- see
+  # https://github.com/praxis-proxy/policy/blob/v0.4.0/docs/content/apl/attributes.md).
+  - http:
+      path_prefix: /
+    authentication:
+      steps:
+        - jwt-client
+    authorization:
+      pre_invocation:
+        - {{ $conds := list }}{{ range .Values.policy.allowedCallers }}{{ $conds = append $conds (printf "claim.azp != '%s'" .) }}{{ end }}{{ printf "%s: deny('not an allow-listed caller')" (join " & " $conds) | quote }}

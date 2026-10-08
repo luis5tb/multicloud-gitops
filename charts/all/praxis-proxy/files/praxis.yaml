@@ -1,0 +1,105 @@
+{{- if empty .Values.global.olsClusters }}
+{{- fail "global.olsClusters must contain at least one registered cluster; see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 6" }}
+{{- end }}
+{{- $sortedIds := keys .Values.global.olsClusters | sortAlpha }}
+{{- $primaryId := first $sortedIds }}
+listeners:
+  - name: ols-a2a
+    address: "0.0.0.0:{{ .Values.service.port }}"
+    filter_chains: [authorization-and-routing]
+
+filter_chains:
+  - name: authorization-and-routing
+    filters:
+      - filter: policy
+        config_path: /etc/praxis/config/policy.yaml
+        # This is separate from insecure_options below: it permits the policy
+        # engine's configured IdP/JWKS callouts to resolve to private IPs.
+        allow_private_idp: {{ .Values.policy.allowPrivateIdp }}
+        # This gateway authorizes generic HTTP/A2A requests, not MCP entity
+        # requests, so it intentionally has no protocol-classifier requirement.
+        require_protocol_metadata: false
+        init_timeout_secs: 30
+
+      - filter: router
+        routes:
+          # The A2A discovery document and readiness probe are public (see
+          # policy.yaml) and are not selected by X-OLS-Cluster. Exact-path
+          # routes always outrank the header-matched path_prefix routes
+          # below regardless of declaration order (Core router: "exact path
+          # outranks a prefix"), so these two are safe to list first.
+          #
+          # KNOWN GAP for a *second* registered cluster: the registry has no
+          # "primary"/display concept, so there is no principled way yet to
+          # pick which OLS instance answers an unauthenticated, cluster-
+          # neutral card/health request. This chart picks the lexically
+          # first registry key ("{{ $primaryId }}" today). Revisit this
+          # before registering a second olsClusters entry -- see
+          # LIGHTSPEED_DESIGN.md SS7 ("Multi-cluster session safety").
+          - path: /.well-known/agent-card.json
+            cluster: ols-{{ $primaryId }}
+          - path: /readiness
+            cluster: ols-{{ $primaryId }}
+          {{- range $id, $cfg := .Values.global.olsClusters }}
+          # Exact allow-listed X-OLS-Cluster match for registered cluster
+          # "{{ $id }}". Core's router (routes[].headers, exact value match,
+          # confirmed identical in Core v0.7.0 -- what this pinned ai:0.4.1
+          # image embeds -- and Core v0.7.2 docs) rejects with HTTP 404 any
+          # request whose header is absent, holds an unregistered value, or
+          # otherwise matches no route below: there is no default/catch-all
+          # cluster and no fallback to another entry. Verified empirically
+          # against the pinned image; see chart README "Header routing".
+          #
+          # CAVEAT (verify before trusting multi-valued headers): Core's
+          # header matcher (crates/filter .../router/matching.rs
+          # `headers_match`) checks *all* values of a repeated header with
+          # OR semantics -- `get_all(key).any(|v| v == required_value)`. A
+          # request smuggling two X-OLS-Cluster values, one legitimate and
+          # one not, still matches this route if *any* value equals
+          # "{{ $id }}". There is no router config knob to instead reject a
+          # multi-valued header outright; this is an upstream gap this
+          # chart's configuration cannot close on its own. See chart README.
+          - path_prefix: /
+            headers:
+              X-OLS-Cluster: {{ $id | quote }}
+            cluster: ols-{{ $id }}
+          {{- end }}
+
+      - filter: load_balancer
+        clusters:
+          {{- range $id, $cfg := .Values.global.olsClusters }}
+          - name: ols-{{ $id }}
+            endpoints:
+              - "{{ $cfg.upstreamHost | default $.Values.upstreamDefaults.host }}:{{ $cfg.upstreamPort | default $.Values.upstreamDefaults.port }}"
+            {{- if $.Values.upstreamTLS.enabled }}
+            # The operator-managed Lightspeed app-server Service is HTTPS
+            # only. `tls.ca.ca_path` points at the OpenShift service-ca
+            # bundle this chart requests via an inject-cabundle ConfigMap
+            # (see templates/upstream-ca-configmap.yaml); it is a different
+            # trust store from the policy plugin's Keycloak-JWKS CA bundle.
+            # This schema (clusters[].tls.{sni,verify,ca.ca_path}) is
+            # identical between Core v0.7.0 (what ai:0.4.1 embeds) and
+            # v0.7.2 per upstream docs; verified structurally against the
+            # pinned binary with --validate, see chart README.
+            tls:
+              sni: {{ $cfg.upstreamSNI | default $.Values.upstreamDefaults.sni | quote }}
+              verify: true
+              ca:
+                ca_path: /etc/praxis/upstream-ca/ca-bundle.crt
+            {{- end }}
+          {{- end }}
+
+admin:
+  # Kept on loopback: only container-local health probes can access it.
+  address: "127.0.0.1:9901"
+
+# Praxis currently requires both opt-ins for its static in-cluster OLS
+# upstream(s): allow_private_endpoints for config-load-time validation of the
+# load_balancer cluster endpoints, and allow_private_upstreams for the
+# runtime connection check. These flags do not configure policy-engine
+# callouts. Keep every upstream fixed in this chart (sourced only from the
+# operator-controlled global.olsClusters registry, never from a caller
+# header or URL) and restrict OLS ingress with NetworkPolicy in its chart.
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true

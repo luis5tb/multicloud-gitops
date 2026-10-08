@@ -1,0 +1,17 @@
+{{- if .Values.upstreamTLS.enabled }}
+# OpenShift's service-ca-operator injects the current cluster service-serving
+# CA bundle into this ConfigMap's `service-ca.crt` key because of the
+# annotation below -- no sync Job/CronJob is needed, unlike the Keycloak
+# ingress-CA bundle synced by ca-sync-*.yaml in this chart. This only
+# establishes trust for Services in *this* OpenShift cluster; see
+# values.yaml's upstreamTLS comment and the chart README for the
+# cross-cluster limitation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-upstream-ca
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+{{- end }}
