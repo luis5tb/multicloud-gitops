@@ -1,3 +1,38 @@
+# SINGLE CLUSTER-DOMAIN ANCHOR. Almost everything cluster-specific in this file
+# derives from global.clusterBaseDomain -- the cluster's base domain WITHOUT the
+# apps. prefix (what `oc whoami --show-server` shows after `api.` and before
+# `:6443`). From it each chart's templates derive the Keycloak issuer, console
+# route, SPIFFE trust domain, public A2A host and the olsClusters apiURL, so you
+# no longer hand-repeat the domain across ~11 overrides (see AGENTS.md and each
+# chart's _helpers.tpl). The clustergroup framework also injects
+# global.localClusterDomain (this cluster's apps wildcard domain); clusterBaseDomain
+# falls back to that with `apps.` stripped, so on many clusters you can leave
+# clusterBaseDomain empty and edit nothing here at all. Any derived value is still
+# explicitly overridable in the per-app overrides below.
+#
+# Shared cluster-selection registry for the ACME -> Praxis -> OpenShift
+# Lightspeed routing path. See LIGHTSPEED_DESIGN.md SS7 and
+# LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 6 (frozen interface). ACME reads only
+# `apiURL` + the map key (the routing ID it sends as X-OLS-Cluster); Praxis reads
+# the map key + upstream fields and must never route from apiURL or any
+# caller-supplied value. Both workstreams render from this ONE map -- do not fork
+# a second copy. Each entry now needs only its KEY + apiURL: the in-cluster
+# upstreamHost/upstreamPort/upstreamSNI default to the operator-managed
+# Lightspeed app-server Service (see charts/all/praxis-proxy's upstreamDefaults),
+# overridable per entry for a future cross-cluster backend. The key MUST equal
+# derive_cluster_id(apiURL) -- lowercase host, every '.'/':' replaced by '-';
+# openshift-lightspeed-config's render validates this and fails loud on a drift
+# (the footgun AGENTS.md calls out). To add a second cluster (goal 5), add
+# another entry.
+global:
+  clusterBaseDomain: ocp.gds8q.sandbox2033.opentlc.com
+  # Keycloak realm the issuer URLs derive from; must equal the keycloak-oidc
+  # Application's keycloak.realm override below (default rca).
+  keycloakRealm: rca
+  olsClusters:
+    api-ocp-gds8q-sandbox2033-opentlc-com-6443:
+      apiURL: https://api.ocp.gds8q.sandbox2033.opentlc.com:6443
+
 clusterGroup:
   name: standalone
   namespaces:
@@ -6,28 +41,88 @@ clusterGroup:
       operatorGroup: true
       targetNamespaces: []
     external-secrets:
-    config-demo:
-    hello-world:
+    redhat-ods-operator:
+      operatorGroup: true
+      targetNamespaces: []
+    zero-trust-workload-identity-manager:
+      operatorGroup: true
+    keycloak-system:
+      operatorGroup: true
+    mao:
+    acme-agent:
+    praxis-proxy:
+    # Deliberately not "openshift-lightspeed" -- see
+    # charts/all/openshift-lightspeed-config/values.yaml's namespace comment
+    # for why (ZTWIM's spire-controller-manager hardcodes
+    # ignoreNamespaces: [..., "openshift-*"], confirmed live, with no
+    # override surface).
+    a2a-lightspeed:
+      operatorGroup: true
+      # lightspeed-operator's CSV only declares OwnNamespace as a supported
+      # installMode (SingleNamespace/MultiNamespace/AllNamespaces are all
+      # false) -- an empty targetNamespaces here renders an AllNamespaces
+      # OperatorGroup, which OLM then refuses with
+      # "AllNamespaces InstallModeType not supported, cannot configure to
+      # watch all namespaces" / UnsupportedOperatorGroup, permanently
+      # failing the CSV (confirmed on a live cluster: this is not
+      # theoretical). Must be scoped to exactly this namespace.
+      targetNamespaces:
+        - a2a-lightspeed
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
       namespace: external-secrets-operator
       channel: stable-v1
+    # RHOAI/KServe dependency, not part of the OLS/A2A investigation flow:
+    # OpenShift AI's single-model (KServe) serving stack requires Service Mesh.
+    # Keep in sync with the rhoai subscription / rhoai-config application below.
+    servicemesh:
+      name: servicemeshoperator
+      namespace: openshift-operators
+      channel: stable
+    # RHOAI/KServe dependency, not part of the OLS/A2A investigation flow:
+    # KServe's model-serving authorization (Authorino) backs RHOAI serverless
+    # inference endpoints. Keep in sync with the rhoai subscription below.
+    authorino:
+      name: authorino-operator
+      namespace: openshift-operators
+      channel: tech-preview-v1
+      source: redhat-operators
+      sourceNamespace: openshift-marketplace
+    rhoai:
+      name: rhods-operator
+      namespace: redhat-ods-operator
+    ztwim:
+      name: openshift-zero-trust-workload-identity-manager
+      namespace: zero-trust-workload-identity-manager
+      channel: stable-v1
+    rhbk:
+      name: rhbk-operator
+      namespace: keycloak-system
+      channel: stable-v26.4
+    lightspeed-operator:
+      # Package name taken from the Red Hat Operators catalog; channel is a
+      # best guess ("stable" is the conventional default-channel name used
+      # by most Red Hat operators) -- NEEDS CONFIRMATION AGAINST THE LIVE
+      # CATALOG before cutover (e.g. `oc get packagemanifest lightspeed-operator
+      # -o yaml` on the target cluster). source/sourceNamespace likewise
+      # assume the operator this pattern needs is published to the stock
+      # redhat-operators catalog; see
+      # charts/all/openshift-lightspeed-config/README.md's "MCP hardening"
+      # section for the still-open question of whether a custom/patched
+      # operator build is required instead.
+      name: lightspeed-operator
+      namespace: a2a-lightspeed
+      channel: stable
+      source: redhat-operators
+      sourceNamespace: openshift-marketplace
   argoProjects:
     - hub
-    - config-demo
-    - hello-world
-  # Explicitly mention the cluster-state based overrides we plan to use for this pattern.
-  # We can use self-referential variables because the chart calls the tpl function with these variables defined
+    - openshift-ai
+
   sharedValueFiles:
     - '/overrides/values-{{ $.Values.global.clusterPlatform }}.yaml'
-  # sharedValueFiles is a flexible mechanism that will add the listed valuefiles to every app defined in the
-  # applications section.
-  #
-  # This kind of variable substitution will work with any of the variables the Validated Patterns operator knows
-  # about and sets, so this is also possible, for example:
-  #   - '/overrides/values-{{ $.Values.global.hubClusterDomain }}.yaml'
-  #   - '/overrides/values-{{ $.Values.global.localClusterDomain }}.yaml'
+
   applications:
     vault:
       name: vault
@@ -41,27 +136,432 @@ clusterGroup:
       argoProject: hub
       chart: openshift-external-secrets
       chartVersion: 0.0.*
-    config-demo:
-      name: config-demo
-      namespace: config-demo
-      argoProject: config-demo
-      path: charts/all/config-demo
-    hello-world:
-      name: hello-world
-      namespace: hello-world
-      argoProject: hello-world
-      path: charts/all/hello-world
-  imperative:
-    # NOTE: We *must* use lists and not hashes. As hashes lose ordering once parsed by helm
-    # The default schedule is every 10 minutes: imperative.schedule
-    # Total timeout of all jobs is 1h: imperative.activeDeadlineSeconds
-    # imagePullPolicy is set to always: imperative.imagePullPolicy
-    # For additional overrides that apply to the jobs, please refer to
-    # https://validatedpatterns.io/patterns/multicloud-gitops/mcg-imperative-actions/
-    jobs:
-      - name: hello-world
-        # ansible playbook to be run
-        playbook: rhvp.cluster_utils.hello_world
-        # per playbook timeout in seconds
-        timeout: 234
-        # verbosity: "-v"
+    rhoai-config:
+      name: rhoai-config
+      namespace: redhat-ods-operator
+      project: openshift-ai
+      path: charts/all/rhoai-config
+    zero-trust-workload-identity-manager:
+      name: zero-trust-workload-identity-manager
+      namespace: zero-trust-workload-identity-manager
+      argoProject: hub
+      chart: ztwim
+      chartVersion: 0.1.*
+      # No trustDomain override needed: the chart defaults spire.trustDomain
+      # to global.localClusterDomain (this cluster's apps domain), which is
+      # exactly the value acme-agent's
+      # identity.clusterSpiffeID.trustDomain override below must match.
+      # Look it up after install with:
+      #   oc get zerotrustworkloadidentitymanager cluster -o jsonpath='{.spec.trustDomain}'
+    keycloak:
+      name: keycloak
+      namespace: keycloak-system
+      argoProject: hub
+      chart: rhbk
+      chartVersion: 0.1.*
+      overrides:
+        # Vault paths for the admin/DB passwords defined in values-secret.yaml.template
+        - name: keycloak.adminUser.passwordVaultKey
+          value: secret/data/global/rhbk
+        - name: keycloak.postgresqlDb.passwordVaultKey
+          value: secret/data/global/rhbk
+        - name: keycloak.spiffeIdentityProvider.enabled
+          value: "true"
+    keycloak-oidc:
+      name: keycloak-oidc
+      namespace: keycloak-system
+      argoProject: hub
+      path: charts/all/keycloak-oidc
+      overrides:
+        - name: keycloak.namespace
+          value: keycloak-system
+        - name: keycloak.name
+          value: keycloak
+        - name: keycloak.realm
+          value: rca
+        # Bootstrap the managed ingress CA into openshift-config (for the
+        # Authentication OIDC provider) and keycloak-system (for the realm
+        # reconciler), then refresh both copies periodically for CA rotation.
+        - name: openshiftOIDC.caConfigMapName
+          value: keycloak-oidc-ca
+        - name: openshiftOIDC.caBundleSync.enabled
+          value: "true"
+        - name: realmSecretsReconciler.caBundleConfigMapName
+          value: keycloak-oidc-ca
+        # Native OIDC is cluster-wide and switches Authentication/cluster's
+        # spec.type for the ENTIRE cluster at once (console, oc login,
+        # everything) -- so it is opt-in, and must stay "false" here until
+        # the pre-flight checklist in charts/all/keycloak-oidc/README.md has
+        # been walked start to finish. Enabling it before the realm import
+        # has actually succeeded and the console client's Secret exists
+        # locks out console AND CLI login cluster-wide with
+        # ExternalOIDCControllerDegraded (this has happened -- recovery
+        # command is in that README too).
+        - name: openshiftOIDC.enabled
+          value: "true"
+        # openshiftOIDC.issuerURL and openshiftOIDC.consoleRoute are no longer
+        # set here: both derive from global.clusterBaseDomain at the top of this
+        # file (https://keycloak.apps.<base>/realms/<realm> and
+        # https://console-openshift-console.apps.<base>). Add an explicit
+        # override here only to diverge from that derivation.
+        # Cluster-admin ServiceAccount + non-expiring token Secret in
+        # openshift-config, independent of openshiftOIDC.enabled. Safe to
+        # enable any time; run `make admin-break-glass-kubeconfig` after
+        # this syncs. See charts/all/keycloak-oidc/README.md.
+        - name: breakGlass.enabled
+          value: "true"
+        # Keycloak group bound to cluster-admin once openshiftOIDC.enabled
+        # is true. Named plainly, not "rca-admins" -- cluster-admin access
+        # granted through Keycloak has nothing to do with the RCA agent
+        # specifically. NOTE: the realm import on this cluster already
+        # succeeded before this override existed, so it won't retroactively
+        # create this group -- create it once manually in the Admin Console
+        # (Groups -> New group -> "cluster-admins"), then add your user to
+        # it, before enabling openshiftOIDC.
+        - name: keycloak.adminGroupName
+          value: cluster-admins
+        # Generates openshift-console's client secret from Vault instead of
+        # the manual Admin Console copy step in the README -- see
+        # keycloak.consoleClientSecretVaultKey in
+        # charts/all/keycloak-oidc/values.yaml. Unlike adminGroupName above,
+        # this does NOT depend on the one-shot realm import: the
+        # realm-secrets-reconciler PostSync hook re-asserts the console
+        # client's secret (and, once openshiftOIDC.enabled, its redirectUris)
+        # against the running realm on every sync, so it applies even though
+        # this realm imported before the override existed.
+        - name: keycloak.consoleClientSecretVaultKey
+          value: secret/data/global/rhbk
+        # Creates a human user in this realm, in keycloak.adminGroupName
+        # above (-> cluster-admin), with an initial password from Vault --
+        # see keycloak.consoleAdminUser in charts/all/keycloak-oidc/values.yaml.
+        # Same one-shot caveat as adminGroupName above. Change
+        # keycloak.consoleAdminUser.username below if "cluster-admin" (the
+        # chart default) isn't the name you want.
+        - name: keycloak.consoleAdminUser.enabled
+          value: "true"
+        - name: keycloak.consoleAdminUser.passwordVaultKey
+          value: secret/data/global/rhbk
+
+        # Federate the acme-agent/lightspeed-mcp confidential clients'
+        # authentication against SPIRE's OIDC discovery provider, so
+        # SPIFFE-identified workloads authenticate to Keycloak without a
+        # static secret. See:
+        # https://www.keycloak.org/2026/01/federated-client-authentication
+        # trustDomain is not set here: it derives from global.clusterBaseDomain
+        # (apps.<base>). bundleEndpoint is an in-cluster Service URL, not
+        # domain-derived, so it stays explicit below.
+        - name: keycloak.spiffeIdentityProvider.bundleEndpoint
+          value: https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
+        # Namespace/ServiceAccount pair ZTWIM/SPIRE issues ACME's JWT-SVID
+        # for. Must match charts/all/acme-agent's own Deployment exactly.
+        - name: keycloak.acmeWorkload.namespace
+          value: acme-agent
+        - name: keycloak.acmeWorkload.serviceAccount
+          value: acme-agent
+        # Namespace/ServiceAccount pair the OpenShift Lightspeed Operator
+        # creates its app-server workload in, used to compute the
+        # lightspeed-mcp client's expected federated subject. Confirm the
+        # real operator-created ServiceAccount name on this cluster's
+        # installed operator release before relying on this default (see
+        # LIGHTSPEED_DESIGN.md's "How Token B is issued" section).
+        - name: keycloak.lightspeedWorkload.namespace
+          value: a2a-lightspeed
+        - name: keycloak.lightspeedWorkload.serviceAccount
+          value: lightspeed-app-server
+        # Namespace scope for lightspeed-mcp-rbac.yaml's Role/RoleBinding,
+        # granting the keycloak:acme-agent-rca group read-only MCP access.
+        # No override here -- left at the chart's own default (empty list,
+        # see charts/all/keycloak-oidc/values.yaml's lightspeedRbac.namespaces):
+        # renders zero Role/RoleBinding resources, so acme-agent has no MCP
+        # access anywhere until Phase 2 sets this to the real namespace(s)
+        # on your cluster, e.g.:
+        #   - name: lightspeedRbac.namespaces[0]
+        #     value: "<your-namespace>"
+        # Add more namespaces as lightspeedRbac.namespaces[1], etc. as
+        # investigation scope grows. Prefer this explicit list for anything
+        # resembling a real environment -- see LIGHTSPEED_DESIGN.md's
+        # least-privilege guidance.
+        #
+        # Sandbox/demo alternative: uncomment to grant cluster-wide access
+        # instead of an explicit namespace list (a single ClusterRole/
+        # ClusterRoleBinding, not per-namespace Role/RoleBinding -- a real
+        # widening of blast radius, not just a convenience toggle; see that
+        # value's comment in charts/all/keycloak-oidc/values.yaml before
+        # uncommenting this on anything but a throwaway cluster):
+        - name: lightspeedRbac.allNamespaces
+          value: "true"
+        # Confirmed live, twice: the operator-managed MCP server's generic
+        # investigation tools (`namespaces_list`, `resources_list`) are not
+        # pod-specific -- they can ask about any resource kind the model
+        # decides is relevant (namespaces, Deployments, ...), and the chart's
+        # default pods/events-only rule list only ever covers whatever kind
+        # has already been hit by a real investigation; every new kind is a
+        # new RBAC gap. Switched to OpenShift's built-in "view" ClusterRole
+        # (see its comment in charts/all/keycloak-oidc/values.yaml) instead
+        # of chasing individual resource kinds one at a time via extraRules --
+        # still excludes Secrets and RBAC objects, same boundary
+        # LIGHTSPEED_DESIGN.md's "Rights to grant (and not grant)" draws,
+        # just not re-derived resource-by-resource. Appropriate for this
+        # sandbox cluster, which already opted into allNamespaces above.
+        - name: lightspeedRbac.useBuiltinViewRole
+          value: "true"
+        # Confirmed live: MCP's `list_metrics` tool fails with a bare
+        # "client error: 403" even with useBuiltinViewRole above -- cluster/
+        # pod metrics (Thanos querier) sit behind OpenShift monitoring's own
+        # auth proxy, checking a separate permission "view" doesn't include.
+        # See lightspeedRbac.grantMonitoringView's comment in
+        # charts/all/keycloak-oidc/values.yaml.
+        - name: lightspeedRbac.grantMonitoringView
+          value: "true"
+        # Opt-in SCOPED WRITE: let the agent actually apply changes (not just
+        # diagnose) in the listed namespace(s) only, via a RoleBinding to the
+        # built-in "edit" ClusterRole. A deliberate blast-radius widening over
+        # the read-only default -- read stays as scoped above; write is limited
+        # to exactly these namespaces. Writes are attributed to the real caller
+        # via the identity chain (auditable). Add more as writeNamespaces[1],
+        # etc. Remove to return the agent to read-only. The MCP server already
+        # exposes write tools (its config read_only=false, set by the
+        # appServerPatch bridge). See lightspeedRbac.writeNamespaces in
+        # charts/all/keycloak-oidc/values.yaml.
+        - name: lightspeedRbac.writeNamespaces[0]
+          value: payments
+    praxis-proxy:
+      name: praxis-proxy
+      namespace: praxis-proxy
+      argoProject: hub
+      path: charts/all/praxis-proxy
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          name: praxis-proxy
+          namespace: praxis-proxy
+          jsonPointers:
+            - /spec/template/metadata/annotations/ca-bundle-sync-sha256
+      overrides:
+        # Public, policy-enforcing gateway in front of OpenShift Lightspeed.
+        # Ingress to the OLS app-server is limited to this proxy by the
+        # NetworkPolicy configured in the openshift-lightspeed-config chart.
+        - name: route.enabled
+          value: "true"
+        # route.host derives from global.clusterBaseDomain
+        # (openshift-lightspeed.apps.<base>); override here only to diverge.
+        # OLS may take a while to complete a tool-using, multi-turn analysis.
+        - name: route.timeout
+          value: 22m
+        # Temporarily verbose while actively debugging routing/auth on this
+        # sandbox cluster -- see charts/all/praxis-proxy/values.yaml's
+        # logLevel comment. Dial back (or scope per-crate) once done; this is
+        # not meant to stay at debug indefinitely on a real environment.
+        - name: logLevel
+          value: debug
+        # identity.keycloak.issuerUrl derives from global.clusterBaseDomain +
+        # global.keycloakRealm (https://keycloak.apps.<base>/realms/<realm>);
+        # override here only to diverge.
+        # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide
+        # private IdP egress switch. Its only configured callout is this
+        # static Keycloak JWKS URL; do not add user-controlled URLs here.
+        - name: policy.allowPrivateIdp
+          value: "true"
+        # Praxis's policy transport uses OpenSSL's trust file. Sync the
+        # managed ingress CA into this namespace for the Keycloak JWKS fetch.
+        - name: policy.caBundleConfigMap.name
+          value: praxis-keycloak-ca
+        - name: policy.caBundleSync.enabled
+          value: "true"
+        # Upstream selection is no longer a single fixed host/port: Praxis
+        # now routes per request to one of the backends registered under the
+        # top-level global.olsClusters map (added above), matched by an
+        # exact X-OLS-Cluster header per cluster ID. See
+        # charts/all/praxis-proxy/files/praxis.yaml and its README. The
+        # former `upstream.host`/`upstream.port` single-backend override is
+        # intentionally removed; do not re-add it.
+    acme-agent:
+      name: acme-agent
+      namespace: acme-agent
+      argoProject: hub
+      path: charts/all/acme-agent
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          name: acme-agent
+          namespace: acme-agent
+          jsonPointers:
+            - /spec/template/metadata/annotations/ca-bundle-sync-sha256
+      overrides:
+        - name: image.repository
+          value: quay.io/ltomasbo/acme-agent
+        - name: image.tag
+          # Quoted: this is an all-digit git short SHA, and an unquoted
+          # numeric-looking YAML scalar this large gets parsed as a number
+          # and can come back out the other side of Helm/Argo's rendering
+          # pipeline re-serialized in scientific notation (confirmed live:
+          # it became "3.425697e+07", which then fails to parse as an image
+          # reference -- InvalidImageName). Always quote tags that could be
+          # all-digits.
+          value: "7971b535"
+        # Trust the cluster's managed ingress CA for the HTTPS Praxis route
+        # and Keycloak token endpoint, keeping certificate verification on.
+        - name: auth.caBundleConfigMap.name
+          value: acme-agent-ingress-ca
+        - name: auth.caBundleConfigMap.key
+          value: ca-bundle.crt
+        - name: auth.caBundleSync.enabled
+          value: "true"
+        # Praxis's public Route is this downstream agent's endpoint -- its
+        # single stable public hostname, fronting whichever OLS backend it
+        # selects per request, not a per-cluster OLS Service DNS name directly
+        # (Praxis routes by the X-OLS-Cluster header, never ACME). It is not set
+        # here: an entry with no endpoint derives it from global.clusterBaseDomain
+        # (https://openshift-lightspeed.apps.<base>), the same host praxis-proxy's
+        # route derives. google-adk's RemoteA2aAgent requires https (or loopback)
+        # for the agent card and every RPC url inside it, which the derived https
+        # URL satisfies. A single downstream agent is still a one-item
+        # a2a.remoteAgents list; there is no separate single-agent shorthand.
+        - name: a2a.remoteAgents[0].name
+          value: openshift_lightspeed
+        - name: a2a.remoteAgents[0].description
+          value: Answers OpenShift questions and investigates cluster incidents using OpenShift Lightspeed grounded against the live cluster via its OpenShift MCP tools.
+        # No ACME-specific olsClusters override here: the chart now reads
+        # the single shared `global.olsClusters` registry declared at the
+        # top of this file directly (see charts/all/acme-agent/values.yaml
+        # and LIGHTSPEED_DESIGN.md SS7) -- ACME and Praxis render
+        # their allow-lists from one map, not two independently maintained
+        # copies.
+        # Allow 60s beyond OLS's analysis for polling and returning the
+        # final A2A response.
+        - name: a2a.requestTimeout
+          value: "1260"
+        - name: auth.mode
+          value: keycloak
+        # auth.keycloak.issuerUrl and .tokenUrl derive from
+        # global.clusterBaseDomain + global.keycloakRealm (the token URL is the
+        # issuer + /protocol/openid-connect/token); override only to diverge.
+        - name: auth.keycloak.clientId
+          value: acme-agent
+        - name: identity.spiffe.enabled
+          value: "true"
+        - name: identity.clusterSpiffeID.enabled
+          value: "true"
+        # identity.clusterSpiffeID.trustDomain derives from
+        # global.clusterBaseDomain (apps.<base>), which is exactly the cluster's
+        # trust domain (see the zero-trust-workload-identity-manager application's
+        # comment above); override only to diverge.
+        - name: route.enabled
+          value: "true"
+        # Allow the browser's A2A request to survive the long-running analysis.
+        - name: route.timeout
+          value: 22m
+        - name: litellm.apiBase
+          value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
+        - name: litellm.model
+          value: openai/gpt-oss-20b
+    openshift-lightspeed-config:
+      name: openshift-lightspeed-config
+      namespace: a2a-lightspeed
+      argoProject: hub
+      path: charts/all/openshift-lightspeed-config
+      overrides:
+        # MCP hardening: a CRD investigation confirmed there is NO OLSConfig
+        # field to set require_oauth / harden MCP auth (the operator hardcodes
+        # the MCP config TOML). So there is nothing to enable at the OLSConfig
+        # level; the hardening is applied by appServerPatch.mcpHardening below
+        # (Mode A), which patches the operator-generated MCP ConfigMap
+        # directly. See charts/all/openshift-lightspeed-config/README.md's
+        # "MCP hardening" section and LIGHTSPEED_DESIGN.md section 5.
+        #
+        # caBundleSync reuses this pattern's established managed-ingress-CA
+        # sync (adapted to a Secret target), RESERVED for a future "Mode B"
+        # (MCP-side JWT validation). Mode A (passthrough) needs no CA, so this
+        # stays enabled only to keep the Secret populated for Mode B.
+        - name: identity.keycloak.caBundleSync.enabled
+          value: "true"
+        # Enabled now that appServerPatch actually deploys the A2A-enabled
+        # app-server image needing this identity to register.
+        - name: identity.clusterSpiffeID.enabled
+          value: "true"
+        # identity.clusterSpiffeID.trustDomain derives from
+        # global.clusterBaseDomain (apps.<base>) -- the cluster's trust domain;
+        # override only to diverge.
+        # TEMPORARY A2A bridge (see charts/all/openshift-lightspeed-config/
+        # README.md's "Temporary A2A bridge" section) -- patches the
+        # operator-managed app-server Deployment with the custom OLS image
+        # and the A2A_* env vars vendor/lightspeed-service's A2A endpoint
+        # requires, since OLSConfig has no field for either. Delete this
+        # override block entirely once the Operator/OLSConfig CRD natively
+        # supports a custom service image and A2A configuration.
+        - name: appServerPatch.enabled
+          value: "true"
+        # Set these once Phase 0 step 1's podman build/push has actually
+        # happened -- empty means this patch only sets the A2A_* env vars
+        # below, not the image.
+        - name: appServerPatch.image.repository
+          value: quay.io/ltomasbo/openshift-lightspeed
+        - name: appServerPatch.image.tag
+          # Quote: a git short SHA that happens to be all-digits would otherwise
+          # parse as a number and re-serialize in scientific notation, breaking
+          # the image reference (AGENTS.md hard-won lesson).
+          value: "5b5ada51"
+        # appServerPatch.a2a.keycloakIssuerURL derives from
+        # global.clusterBaseDomain + global.keycloakRealm, and
+        # appServerPatch.a2a.rpcUrl from global.clusterBaseDomain
+        # (https://openshift-lightspeed.apps.<base>) -- the same values
+        # keycloak-oidc/praxis/acme derive; override only to diverge.
+        #
+        # clusterId must be a KEY of global.olsClusters above (the X-OLS-Cluster
+        # routing id this app-server advertises). It is kept explicit -- not
+        # derived -- because with multiple registered clusters this names WHICH
+        # one this app-server serves; the chart validates it against the registry
+        # (and that each key matches derive_cluster_id(apiURL)) at render time.
+        - name: appServerPatch.a2a.clusterId
+          value: api-ocp-gds8q-sandbox2033-opentlc-com-6443
+        # Mode A MCP hardening: closes the MCP tokenless confused-deputy gap
+        # (LIGHTSPEED_DESIGN.md section 5). The operator-generated OpenShift
+        # MCP server ships with require_oauth=false, so a tokenless call falls
+        # back to the MCP pod's ServiceAccount, bypassing the whole Keycloak/
+        # SPIFFE/RBAC identity chain. The OLSConfig CRD has no field to harden
+        # this (confirmed), so the appServerPatch bridge patches the operator-
+        # generated MCP ConfigMap directly to set require_oauth=true +
+        # skip_jwt_verification=true + cluster_auth_mode=passthrough (require a
+        # bearer; the OpenShift API server validates it via passthrough), after
+        # pausing the operator by annotating the OLSConfig CR Unmanaged. This
+        # is a TEMPORARY bridge -- delete it once the operator exposes
+        # require_oauth natively via OLSConfig.
+        - name: appServerPatch.mcpHardening.enabled
+          value: "true"
+    mao-mongo:
+      name: mao-mongo
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/mongo
+    mao-redis:
+      name: mao-redis
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/redis
+      overrides:
+        # Keep this in sync with the connection secret consumed by the API and worker.
+        - name: connectionSecret.name
+          value: mao-secret-redis
+    mao-temporal:
+      name: mao-temporal
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/temporal
+    mao-worker:
+      name: mao-worker
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/mas-worker
+    mao-api:
+      name: mao-api
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/mas-api
+      overrides:
+        # DevTokenValidator supplies the synthetic username "dev". Keep this
+        # development-only allow-list in sync with the dev authentication mode.
+        - name: identity.adminAllowedUsers
+          value: '["dev"]'
+  argoCD:
+    resourceTrackingMethod: annotation
+    resourceExclusions: null
