@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mas-worker.fullname" . }}
+  labels:
+    {{- include "mas-worker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mas-worker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "mas-worker.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "mas-worker.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: {{ include "mas-worker.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: ROLE
+              value: temporal-worker
+            - name: WORKER_THREADS
+              value: {{ .Values.worker.threads | quote }}
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.uri
+                  optional: true
+            - name: MONGODB_IP
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.host
+            - name: MONGODB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.port
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.username
+                  optional: true
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.password
+                  optional: true
+            - name: MONGODB_TLS
+              value: {{ .Values.mongo.tls | quote }}
+            - name: MONGO_DB
+              value: {{ .Values.mongo.database | quote }}
+            - name: REDIS_IP
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.secretName }}
+                  key: db.endpoint
+                  optional: true
+            - name: REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.secretName }}
+                  key: db.port
+                  optional: true
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.secretName }}
+                  key: db.auth_token
+                  optional: true
+            - name: TEMPORAL_IP
+              value: {{ .Values.temporal.host | quote }}
+            - name: TEMPORAL_PORT
+              value: {{ .Values.temporal.port | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.temporal.namespace | quote }}
+            - name: IDENTITY_PROVIDER_MODE
+              value: {{ .Values.identity.providerMode | quote }}
+            - name: SSO_ISSUER_URI
+              value: {{ .Values.identity.ssoIssuerUri | quote }}
+            - name: SSO_AUDIENCE
+              value: {{ .Values.identity.ssoAudience | quote }}
+            - name: ADMIN_ALLOWED_USERS
+              value: {{ .Values.identity.adminAllowedUsers | quote }}
+            - name: LANGFUSE_ENABLED
+              value: {{ .Values.langfuse.enabled | quote }}
+            - name: LANGFUSE_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.langfuse.secretName }}
+                  key: langfuse.baseurl
+                  optional: true
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.langfuse.secretName }}
+                  key: langfuse.public
+                  optional: true
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.langfuse.secretName }}
+                  key: langfuse.secret
+                  optional: true
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: shared-storage
+              mountPath: {{ .Values.sharedStorage.mountPath }}
+      volumes:
+        - name: shared-storage
+          {{- if .Values.sharedStorage.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.sharedStorage.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

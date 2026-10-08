@@ -1,0 +1,23 @@
+{{- if .Values.route.enabled }}
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: {{ include "temporal.fullname" . }}-ui
+  labels:
+    {{- include "temporal.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.route.host }}
+  host: {{ .Values.route.host | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "temporal.fullname" . }}
+    weight: 100
+  port:
+    targetPort: ui
+  {{- with .Values.route.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}

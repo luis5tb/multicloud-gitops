@@ -1,0 +1,9 @@
+MAS API: {{ include "mas-api.fullname" . }}:{{ .Values.service.port }}  (ROLE=serve)
+
+{{- if .Values.route.enabled }}
+Route:
+  oc get route {{ include "mas-api.fullname" . }} -o jsonpath='https://{.spec.host}/api/health/{"\n"}'
+{{- else }}
+Port-forward:
+  oc port-forward svc/{{ include "mas-api.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}

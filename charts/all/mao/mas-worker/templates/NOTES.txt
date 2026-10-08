@@ -1,0 +1,6 @@
+MAS Temporal worker (no Service — no HTTP port).
+
+  ROLE=temporal-worker  threads={{ .Values.worker.threads }}
+  Mongo secret: {{ .Values.mongo.secretName }}
+  Redis secret: {{ .Values.redis.secretName }}
+  Temporal: {{ .Values.temporal.host }}:{{ .Values.temporal.port }} (namespace {{ .Values.temporal.namespace }})

@@ -1,0 +1,10 @@
+Temporal frontend (gRPC, internal): {{ include "temporal.fullname" . }}:{{ .Values.service.port }}
+  MAS env: TEMPORAL_IP={{ include "temporal.fullname" . }} TEMPORAL_PORT={{ .Values.service.port }} TEMPORAL_NAMESPACE=default
+
+{{- if .Values.route.enabled }}
+UI Route:
+  oc get route {{ include "temporal.fullname" . }}-ui -o jsonpath='{.spec.host}{"\n"}'
+{{- else }}
+Port-forward the UI:
+  oc port-forward svc/{{ include "temporal.fullname" . }} {{ .Values.service.uiPort }}:{{ .Values.service.uiPort }}
+{{- end }}
