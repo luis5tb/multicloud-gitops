@@ -1,0 +1,21 @@
+{{- if .Values.identity.clusterSpiffeID.enabled }}
+{{- /*
+trustDomain is derived from global.clusterBaseDomain (apps.<base>) when not
+explicitly set -- see _helpers.tpl's effectiveTrustDomain; the derivation fails
+loud if the anchor is unresolvable, replacing the old non-empty guard.
+*/}}
+{{- $serviceAccountName := include "acme-agent.serviceAccountName" . }}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: {{ .Values.identity.clusterSpiffeID.name }}
+spec:
+  spiffeIDTemplate: "spiffe://{{ include "acme-agent.effectiveTrustDomain" . }}/ns/{{ .Release.Namespace }}/sa/{{ $serviceAccountName }}"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  podSelector:
+    matchLabels:
+      {{- include "acme-agent.selectorLabels" . | nindent 6 }}
+  jwtTtl: "300s"
+{{- end }}

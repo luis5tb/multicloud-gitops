@@ -1,0 +1,21 @@
+{{- if .Values.auth.caBundleSync.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "acme-agent.fullname" . }}-ca-bootstrap
+  labels:
+    {{- include "acme-agent.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        {{- include "acme-agent.labels" . | nindent 8 }}
+    spec:
+{{ include "acme-agent.caSyncPodSpec" . | nindent 6 }}
+{{- end }}
