@@ -1,0 +1,16 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "enabledManagers": ["tekton"],
+    "packageRules": [
+        {
+            "matchManagers": ["tekton"],
+            "groupName": "Konflux Tekton Task Updates"
+        }
+    ],
+    "schedule": ["before 4am"],
+    "timezone": "Europe/Prague",
+    "addLabels": [
+        "lgtm",
+        "approved"
+    ]
+}

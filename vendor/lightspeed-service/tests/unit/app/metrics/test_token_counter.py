@@ -1,0 +1,236 @@
+"""Unit tests for GenericTokenCounter and TokenMetricUpdater classes."""
+
+import pytest
+
+from ols import config
+
+# needs to be setup there before is_user_authorized is imported
+config.ols_config.authentication_config.module = "k8s"
+
+
+from ols.app.metrics import GenericTokenCounter  # noqa:E402
+from ols.app.metrics.token_counter import TokenMetricUpdater  # noqa:E402
+
+
+class MockLLM:
+    """Mocked LLM to be used in unit tests."""
+
+    def get_num_tokens(self, prompt):
+        """Poor man's token counter."""
+        return len(prompt.split(" "))
+
+
+@pytest.mark.asyncio
+async def test_on_llm_start():
+    """Test the GenericTokenCounter.on_llm_start method."""
+    llm = MockLLM()
+
+    # initialize new token counter
+    generic_token_counter = GenericTokenCounter(llm)
+
+    # a beginning the counters should be zeroed
+    assert generic_token_counter.token_counter.llm_calls == 0
+    assert generic_token_counter.token_counter.input_tokens == 0
+
+    # check the textual representation as well
+    expected = (
+        "GenericTokenCounter: input_tokens: 0 output_tokens: 0 "
+        "reasoning_tokens: 0 LLM calls: 0"
+    )
+    assert str(generic_token_counter) == expected
+
+    # token count for empty input
+    await generic_token_counter.on_llm_start({}, [])
+
+    # token counter needs to be zero as mocked LLM does not process anything
+    assert generic_token_counter.token_counter.llm_calls == 1
+    assert generic_token_counter.token_counter.input_tokens == 0
+
+    # check the textual representation as well
+    expected = (
+        "GenericTokenCounter: input_tokens: 0 output_tokens: 0 "
+        "reasoning_tokens: 0 LLM calls: 1"
+    )
+    assert str(generic_token_counter) == expected
+
+    # now the prompt will be tokenized into 5 tokens
+    await generic_token_counter.on_llm_start({}, ["this is just a test"])
+    assert generic_token_counter.token_counter.llm_calls == 2
+    assert generic_token_counter.token_counter.input_tokens == 5
+
+    # check the textual representation as well
+    expected = (
+        "GenericTokenCounter: input_tokens: 5 output_tokens: 0 "
+        "reasoning_tokens: 0 LLM calls: 2"
+    )
+    assert str(generic_token_counter) == expected
+
+
+@pytest.mark.asyncio
+async def test_on_llm_end():
+    """Test the GenericTokenCounter.on_llm_new_token method."""
+    llm = MockLLM()
+
+    # initialize new token counter
+    generic_token_counter = GenericTokenCounter(llm)
+    assert generic_token_counter.token_counter.input_tokens == 0
+    assert generic_token_counter.token_counter.output_tokens == 0
+
+    # check the textual representation as well
+    expected = (
+        "GenericTokenCounter: input_tokens: 0 output_tokens: 0 "
+        "reasoning_tokens: 0 LLM calls: 0"
+    )
+    assert str(generic_token_counter) == expected
+
+    # empty token
+    await generic_token_counter.on_llm_new_token("")
+    await generic_token_counter.on_llm_new_token(None)
+
+    # for empty response, counters should not change
+    assert generic_token_counter.token_counter.input_tokens == 0
+    assert generic_token_counter.token_counter.output_tokens == 0
+
+    # check the textual representation as well
+    expected = (
+        "GenericTokenCounter: input_tokens: 0 output_tokens: 0 "
+        "reasoning_tokens: 0 LLM calls: 0"
+    )
+    assert str(generic_token_counter) == expected
+
+    # non-empty response
+    await generic_token_counter.on_llm_new_token("hello")
+    await generic_token_counter.on_llm_new_token("there")
+
+    # for non-empty response, counters should change
+    assert generic_token_counter.token_counter.input_tokens == 0
+    assert generic_token_counter.token_counter.output_tokens == 2
+
+    # check the textual representation as well
+    expected = (
+        "GenericTokenCounter: input_tokens: 0 output_tokens: 2 "
+        "reasoning_tokens: 0 LLM calls: 0"
+    )
+    assert str(generic_token_counter) == expected
+
+
+@pytest.mark.asyncio
+async def test_on_llm_new_token_list_content_with_text_and_reasoning():
+    """Test on_llm_new_token counts text and reasoning tokens from list content."""
+    llm = MockLLM()
+    counter = GenericTokenCounter(llm)
+
+    list_content = [
+        {"type": "text", "text": "hello world"},
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "thinking step"}],
+        },
+        "not-a-dict-ignored",
+        {"type": "unknown_block"},
+    ]
+    await counter.on_llm_new_token(list_content)
+
+    assert counter.token_counter.output_tokens == 2
+    assert counter.token_counter.reasoning_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_on_llm_new_token_list_content_empty_blocks():
+    """Test on_llm_new_token handles empty text and reasoning gracefully."""
+    llm = MockLLM()
+    counter = GenericTokenCounter(llm)
+
+    list_content = [
+        {"type": "text", "text": ""},
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": ""}]},
+        {"type": "reasoning", "summary": []},
+    ]
+    await counter.on_llm_new_token(list_content)
+
+    assert counter.token_counter.output_tokens == 0
+    assert counter.token_counter.reasoning_tokens == 0
+
+
+def test_token_metric_updater_reports_reasoning_tokens():
+    """Test TokenMetricUpdater.__exit__ increments the reasoning token metric."""
+    llm = MockLLM()
+    updater = TokenMetricUpdater(llm=llm, provider="test_provider", model="test_model")
+
+    updater.token_counter.token_counter.input_tokens = 10
+    updater.token_counter.token_counter.output_tokens = 20
+    updater.token_counter.token_counter.reasoning_tokens = 5
+    updater.token_counter.token_counter.llm_calls = 1
+
+    updater.__exit__(None, None, None)
+
+
+def test_token_metric_updater_observes_genai_token_histogram():
+    """Test TokenMetricUpdater.__exit__ observes gen_ai token usage histogram."""
+    from ols.app.metrics.metrics import gen_ai_client_token_usage
+
+    llm = MockLLM()
+    updater = TokenMetricUpdater(llm=llm, provider="test_prov", model="test_mod")
+    updater.token_counter.token_counter.input_tokens = 100
+    updater.token_counter.token_counter.output_tokens = 50
+    updater.token_counter.token_counter.llm_calls = 1
+
+    before_input = gen_ai_client_token_usage.labels(
+        gen_ai_operation_name="chat",
+        gen_ai_token_type="input",  # noqa: S106
+        gen_ai_request_model="test_mod",
+        gen_ai_provider_name="test_prov",
+    )._sum.get()
+    before_output = gen_ai_client_token_usage.labels(
+        gen_ai_operation_name="chat",
+        gen_ai_token_type="output",  # noqa: S106
+        gen_ai_request_model="test_mod",
+        gen_ai_provider_name="test_prov",
+    )._sum.get()
+
+    updater.__exit__(None, None, None)
+
+    after_input = gen_ai_client_token_usage.labels(
+        gen_ai_operation_name="chat",
+        gen_ai_token_type="input",  # noqa: S106
+        gen_ai_request_model="test_mod",
+        gen_ai_provider_name="test_prov",
+    )._sum.get()
+    after_output = gen_ai_client_token_usage.labels(
+        gen_ai_operation_name="chat",
+        gen_ai_token_type="output",  # noqa: S106
+        gen_ai_request_model="test_mod",
+        gen_ai_provider_name="test_prov",
+    )._sum.get()
+
+    assert after_input - before_input == 100.0
+    assert after_output - before_output == 50.0
+
+
+def test_token_metric_updater_observes_histogram_on_failure_with_tokens() -> None:
+    """Verify histogram records accumulated tokens even when LLM call fails."""
+    from ols.app.metrics.metrics import gen_ai_client_token_usage
+
+    llm = MockLLM()
+    updater = TokenMetricUpdater(llm=llm, provider="fail_prov", model="fail_mod")
+    updater.token_counter.token_counter.input_tokens = 200
+    updater.token_counter.token_counter.output_tokens = 0
+    updater.token_counter.token_counter.llm_calls = 1
+
+    before = gen_ai_client_token_usage.labels(
+        gen_ai_operation_name="chat",
+        gen_ai_token_type="input",  # noqa: S106
+        gen_ai_request_model="fail_mod",
+        gen_ai_provider_name="fail_prov",
+    )._sum.get()
+
+    updater.__exit__(RuntimeError, RuntimeError("LLM failed"), None)
+
+    after = gen_ai_client_token_usage.labels(
+        gen_ai_operation_name="chat",
+        gen_ai_token_type="input",  # noqa: S106
+        gen_ai_request_model="fail_mod",
+        gen_ai_provider_name="fail_prov",
+    )._sum.get()
+
+    assert after - before == 200.0

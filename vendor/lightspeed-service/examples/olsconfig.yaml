@@ -1,0 +1,153 @@
+# This is a sample config for reference.
+# Update properties with actual value; Ex: use the actual model name.
+llm_providers:
+  - name: my_openai
+    type: openai
+    url: "https://api.openai.com/v1"
+    credentials_path: openai_api_key.txt
+    models:
+      - name: model-name-1
+      - name: model-name-2
+        # Temperature is omitted unless configured for the model.
+        # For models that require reasoning effort 'none' to use temperature:
+        # parameters:
+        #   reasoning_config:
+        #     effort: none
+        #   temperature: 0.7
+  - name: my_azure_openai
+    type: azure_openai
+    url: "https://myendpoint.openai.azure.com/"
+    credentials_path: azure_openai_api_key.txt
+    api_version: "2024-02-15-preview"
+    deployment_name: my_azure_openai_deployment_name
+    models:
+      - name: model-name
+  - name: my_watsonx
+    type: watsonx
+    url: "https://us-south.ml.cloud.ibm.com"
+    credentials_path: watsonx_api_key.txt
+    project_id: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+    models:
+      - name: model-name
+  - name: my_rhoai
+    type: rhoai_vllm
+    url: "http://localhost:8000/v1"
+    credentials_path: rhoai_api_key.txt
+    models:
+      - name: mistral-7b-instruct-v0.3
+  - name: my_rhelai
+    type: rhelai_vllm
+    url: "http://localhost:8000/v1"
+    credentials_path: rhelai_api_key.txt
+    models:
+      - name: model-name
+  - name: my_google_vertex
+    type: google_vertex_anthropic
+    url: "https://us-east5-aiplatform.googleapis.com"
+    credentials_path: gcp_credentials.txt
+    project_id: my-gcp-project
+    google_vertex_anthropic_config:
+      project: my-gcp-project
+      location: us-east5
+    models:
+      - name: claude-opus-4-6
+  - name: my_bedrock
+    type: bedrock
+    url: "https://bedrock-mantle.us-east-1.api.aws"
+    # Bearer token auth — credentials_path is a file with the API key
+    credentials_path: bedrock_api_key.txt
+    models:
+      # use fully qualified Bedrock model IDs (e.g. anthropic.claude-opus-4-7,
+      # openai.gpt-5.4-mini, deepseek.v3.1)
+      - name: anthropic.claude-opus-4-7
+      # For models that support temperature, set it per model:
+      # - name: openai.gpt-6-luna
+      #   parameters:
+      #     reasoning_config:
+      #       effort: none
+      #     temperature: 0.7
+  # - name: my_bedrock_iam
+  #   type: bedrock
+  #   url: "https://bedrock-mantle.us-east-1.api.aws"
+  #   # IAM auth — credentials_path is a directory with aws_access_key_id,
+  #   # aws_secret_access_key, and optionally role_arn files
+  #   credentials_path: /path/to/aws_creds_dir/
+  #   models:
+  #     - name: anthropic.claude-opus-4-7
+  - name: instructlab
+    type: openai
+    url: "http://localhost:8000/v1"
+    credentials_path: openai_api_key.txt
+    models:
+      - name: model-name
+ols_config:
+  # max_workers: 1
+  # Product docs via Solr hybrid (OKP).  Omit solr_hybrid to disable.
+  solr_hybrid:
+    solr_http_base: "https://solr.example.com:8983"
+  # BYOK / local FAISS indexes (user-supplied content only).
+  reference_content:
+    indexes:
+      - product_docs_index_path: "./vector_db/user_application_docs/version_1"
+        product_docs_index_id: user-application-docs-version_1
+  conversation_cache:
+    type: memory
+    memory:
+      max_entries: 1000
+  logging_config:
+    app_log_level: info
+    lib_log_level: warning
+    uvicorn_log_level: info
+    suppress_metrics_in_log: false
+    suppress_auth_checks_warning_in_log: false
+  default_provider: my_watsonx
+  default_model: model-name
+  expire_llm_is_ready_persistent_state: -1
+  # query_filters:
+  #   - name: foo_filter
+  #     pattern: '\b(?:foo)\b'
+  #     replace_with: "deployment"
+  #   - name: bar_filter
+  #     pattern: '\b(?:bar)\b'
+  #     replace_with: "openshift"
+  authentication_config:
+    module: "k8s"
+    k8s_cluster_api: "https://api.example.com:6443"
+    k8s_ca_cert_path: "/Users/home/ca.crt"
+    skip_tls_verification: false
+  user_data_collection:
+    feedback_disabled: false
+    feedback_storage: "/tmp/data/feedback"
+    transcripts_disabled: false
+    transcripts_storage: "/tmp/data/transcripts"
+    # config_status is automatically enabled when feedback or transcripts is enabled
+    # and stored in a sibling directory to feedback/transcripts storage
+  tls_config:
+    tls_certificate_path: /app-root/certs/certificate.crt
+    tls_key_path: /app-root/certs/private.key
+    tls_key_password_path: /app-root/certs/password.txt
+  tlsSecurityProfile:
+    type: Custom
+    ciphers:
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    minTLSVersion: VersionTLS13
+dev_config:
+  # config options specific to dev environment - launching OLS in local
+  enable_dev_ui: true
+  disable_auth: true
+  disable_tls: true
+  pyroscope_url: "https://pyroscope.pyroscope.svc.cluster.local:4040"
+  enable_system_prompt_override: true
+  # uvicorn_port_number: 8081
+  # llm_params:
+  #   temperature_override: 0
+  # k8s_auth_token: optional_token_when_no_available_kube_config
+
+# MCP servers - enables tool calling if present
+mcp_servers:
+  - name: openshift
+    url: http://localhost:8080
+    headers:
+      Authorization: kubernetes  # Special placeholder - uses k8s token from request
+    # timeout: 30  # Optional timeout in seconds
