@@ -1,0 +1,113 @@
+# Matches docker-compose `mas-api`: ROLE=serve, port 8002, same image as mas-worker.
+
+fullnameOverride: mas-api
+
+image:
+  registry: ""
+  repository: quay.io/redhat-services-prod/mas-tenant/mas-api
+  tag: latest
+  pullPolicy: Always
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8002
+
+api:
+  port: "8002"
+  gunicornWorkers: "4"
+  gunicornThreads: "1"
+  gunicornTimeout: "420"
+
+mongo:
+  secretName: mao-secret-mongo
+  tls: "false"
+  database: unifaidb
+
+redis:
+#  secretName: in-memory-db
+  secretName: mao-secret-redis
+
+temporal:
+  host: temporal
+  port: "7233"
+  namespace: default
+
+identity:
+  # The Pattern can override this to prod and provide the SSO settings below.
+  # dev is useful for an out-of-the-box installation and must not be used for
+  # an internet-facing deployment.
+  providerMode: dev
+  ssoIssuerUri: "https://sso.stage.redhat.com/auth/realms/redhat-external"
+  ssoAudience: ""
+  adminAllowedUsers: '[]'
+
+langfuse:
+  enabled: "false"
+  secretName: mao-secret-langfuse
+
+sharedStorage:
+  mountPath: /app/shared
+  existingClaim: ""
+
+# HTTP — Route is the OpenShift equivalent of compose publishing 8002.
+# The old OpenShift template left this disabled on the public cluster; set enabled: false if needed.
+route:
+  enabled: true
+  host: ""
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+livenessProbe:
+  httpGet:
+    path: /api/health/
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /api/health/
+    port: http
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /api/health/
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
