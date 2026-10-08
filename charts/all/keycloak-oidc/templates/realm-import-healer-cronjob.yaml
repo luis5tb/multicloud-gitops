@@ -1,0 +1,68 @@
+{{- if and .Values.realmImport.enabled .Values.realmImport.selfHeal.enabled }}
+# Heals a KeycloakRealmImport that lost the fresh-install race against the
+# Keycloak CR's creation and is stuck in HasErrors (the controller never
+# retries on its own). See files/heal_realm_import.py and AGENTS.md
+# "Hard-won lessons". A CronJob rather than a one-shot hook so it also heals
+# any later recurrence, not just the install-time race.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "keycloak-oidc.fullname" . }}-realm-import-healer
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "6"
+spec:
+  schedule: {{ .Values.realmImport.selfHeal.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels:
+            {{- include "keycloak-oidc.labels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "keycloak-oidc.fullname" . }}-realm-import-healer
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: heal-realm-import
+              image: {{ .Values.realmImport.selfHeal.image | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "-B", "/opt/app-root/src/heal_realm_import.py"]
+              env:
+                - name: KEYCLOAK_NAMESPACE
+                  value: {{ .Values.keycloak.namespace | quote }}
+                - name: KEYCLOAK_NAME
+                  value: {{ .Values.keycloak.name | quote }}
+                - name: REALM_IMPORT_NAME
+                  value: {{ .Values.keycloak.realm | quote }}
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                {{- toYaml .Values.realmImport.selfHeal.resources | nindent 16 }}
+              volumeMounts:
+                - name: healer-script
+                  mountPath: /opt/app-root/src/heal_realm_import.py
+                  subPath: heal_realm_import.py
+                  readOnly: true
+          volumes:
+            - name: healer-script
+              configMap:
+                name: {{ include "keycloak-oidc.fullname" . }}-realm-import-healer-script
+                defaultMode: 0444
+{{- end }}

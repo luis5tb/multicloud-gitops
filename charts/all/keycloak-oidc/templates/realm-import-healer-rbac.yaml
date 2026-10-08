@@ -1,0 +1,52 @@
+{{- if and .Values.realmImport.enabled .Values.realmImport.selfHeal.enabled }}
+{{- $serviceAccount := printf "%s-realm-import-healer" (include "keycloak-oidc.fullname" .) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccount }}
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $serviceAccount }}
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+rules:
+  # Read the Keycloak CR to confirm it is Ready before touching the import.
+  - apiGroups: ["k8s.keycloak.org"]
+    resources: ["keycloaks"]
+    resourceNames: [{{ .Values.keycloak.name | quote }}]
+    verbs: ["get"]
+  # Read, and (only when stuck in HasErrors) delete, the realm import. No
+  # create/patch: ArgoCD owns recreation.
+  - apiGroups: ["k8s.keycloak.org"]
+    resources: ["keycloakrealmimports"]
+    resourceNames: [{{ .Values.keycloak.realm | quote }}]
+    verbs: ["get", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $serviceAccount }}
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ .Values.keycloak.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $serviceAccount }}
+{{- end }}

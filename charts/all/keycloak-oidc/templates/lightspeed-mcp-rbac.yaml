@@ -1,0 +1,236 @@
+# Least-privilege, namespace-scoped RBAC for the mapped keycloak:acme-agent-rca
+# group's own direct OpenShift MCP reads (lightspeedRbac.* in values.yaml).
+# By default this grants exactly the read-only verbs an investigation MCP
+# tool needs (get/list on pods and events), in exactly the namespaces listed
+# in lightspeedRbac.namespaces, and nothing else: no pod logs, no Secrets, no
+# RBAC objects, no write verbs by default. See LIGHTSPEED_DESIGN.md's
+# "Rights to grant (and not grant)" section and lightspeedRbac.extraRules in
+# values.yaml for how to deliberately opt into pod-logs access.
+#
+# lightspeedRbac.useBuiltinViewRole (off by default) switches the RoleRef to
+# OpenShift's built-in "view" ClusterRole instead of a hand-picked rule list
+# -- see its blast-radius note in values.yaml before enabling it anywhere but
+# a sandbox/demo cluster. lightspeedRbac.extraRules is meaningless (and
+# rejected below) when this is enabled: there is no custom Role/ClusterRole
+# left to merge extra rules into.
+#
+# lightspeedRbac.allNamespaces (off by default) switches this to a single
+# cluster-wide ClusterRole/ClusterRoleBinding (or, with useBuiltinViewRole, a
+# ClusterRoleBinding straight to "view") instead -- see its blast-radius
+# warning in values.yaml before enabling it anywhere but a sandbox/demo
+# cluster.
+#
+# OpenShift RBAC is the final, authoritative allow/deny for every API call
+# the exchanged token (Token B) makes -- this template is additive to, and
+# does not replace, independent MCP-side tool/toolset restrictions configured
+# elsewhere (see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 2).
+#
+# lightspeedRbac.grantMonitoringView (off by default) additionally binds
+# OpenShift's built-in "cluster-monitoring-view" ClusterRole. Confirmed live
+# that MCP's `list_metrics` tool fails with a bare "client error: 403" (not
+# the usual "... is forbidden: User ... cannot ..." RBAC phrasing) even with
+# useBuiltinViewRole enabled -- cluster/pod metrics (Thanos querier) sit
+# behind OpenShift's monitoring stack's own auth proxy, which performs its
+# own SubjectAccessReview against a separate permission "view" does not
+# include. This is an independent, additive grant, not an alternative to
+# useBuiltinViewRole/the default pods+events rules above.
+{{- if .Values.lightspeedRbac.enabled }}
+{{- $root := . }}
+{{- if and .Values.lightspeedRbac.useBuiltinViewRole .Values.lightspeedRbac.extraRules }}
+{{- fail "lightspeedRbac.extraRules has no effect when lightspeedRbac.useBuiltinViewRole is true -- there is no custom Role/ClusterRole left to merge them into. Unset one or the other." }}
+{{- end }}
+{{- if .Values.lightspeedRbac.allNamespaces }}
+{{- if not .Values.lightspeedRbac.useBuiltinViewRole }}
+# allNamespaces is true and useBuiltinViewRole is false: cluster-wide custom
+# ClusterRole instead of per-namespace Role -- see the blast-radius warning
+# on lightspeedRbac.allNamespaces in values.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list"]
+  {{- with $root.Values.lightspeedRbac.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ if .Values.lightspeedRbac.useBuiltinViewRole }}view{{ else }}{{ $root.Values.lightspeedRbac.roleName }}{{ end }}
+{{- else }}
+{{- range $i, $namespace := .Values.lightspeedRbac.namespaces }}
+{{- if $i }}
+---
+{{- end }}
+{{- if not $root.Values.lightspeedRbac.useBuiltinViewRole }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list"]
+  {{- with $root.Values.lightspeedRbac.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: {{ if $root.Values.lightspeedRbac.useBuiltinViewRole }}ClusterRole{{ else }}Role{{ end }}
+  name: {{ if $root.Values.lightspeedRbac.useBuiltinViewRole }}view{{ else }}{{ $root.Values.lightspeedRbac.roleName }}{{ end }}
+{{- end }}
+{{- end }}
+{{- if .Values.lightspeedRbac.grantMonitoringView }}
+---
+{{- if .Values.lightspeedRbac.allNamespaces }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}-monitoring-view
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+{{- else }}
+{{- range $i, $namespace := .Values.lightspeedRbac.namespaces }}
+{{- if $i }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}-monitoring-view
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+{{- end }}
+{{- end }}
+---
+# The Alertmanager web API (the MCP alerts tool's target) sits behind its own
+# kube-rbac-proxy, which authorizes a GET as `get` on alertmanagers/api
+# (name {{ $root.Values.lightspeedRbac.alertmanagerName }}) in
+# monitoring.coreos.com -- a permission cluster-monitoring-view does NOT
+# include, so without this the MCP's GetAlertsHandler gets HTTP 403 (confirmed
+# live) even though metrics work. Unlike the metrics grant this is always
+# cluster-scoped: the proxy's SubjectAccessReview is fixed to the
+# openshift-monitoring Alertmanager CR (not the app namespace being
+# investigated), and that web API returns alerts cluster-wide anyway
+# (per-namespace alert access is a separate tenancy-port path the MCP does not
+# use). Scoped to verb `get` on the single named Alertmanager only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}-alertmanager-view
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+rules:
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["alertmanagers/api"]
+    resourceNames: [{{ $root.Values.lightspeedRbac.alertmanagerName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}-alertmanager-view
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $root.Values.lightspeedRbac.roleName }}-alertmanager-view
+{{- end }}
+{{- range $namespace := .Values.lightspeedRbac.writeNamespaces }}
+---
+# Opt-in SCOPED WRITE: bind writeClusterRole (OpenShift's built-in "edit" by
+# default) to the investigation group in this one namespace, so the delegated
+# caller can create/update/patch/delete most resources HERE ONLY -- "edit"
+# still excludes reading Secrets and changing RBAC. A deliberate blast-radius
+# widening over the read-only default (see values.yaml); writes are attributed
+# to the real caller via the identity chain. Requires the MCP server to expose
+# write tools (its config's read_only=false, set by the appServerPatch bridge).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $root.Values.lightspeedRbac.roleName }}-write
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ $root.Values.lightspeedRbac.syncWave | quote }}
+subjects:
+  - kind: Group
+    name: {{ $root.Values.lightspeedRbac.groupName | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $root.Values.lightspeedRbac.writeClusterRole }}
+{{- end }}
+{{- end }}
