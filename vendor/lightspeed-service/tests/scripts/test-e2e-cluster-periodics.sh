@@ -1,0 +1,157 @@
+#!/bin/bash
+set -eou pipefail
+
+# Input env variables:
+# - [PROVIDERNAME]_PROVIDER_KEY_PATH - path to a file containing the credentials
+#   to be used with the llm provider. For Bedrock providers this is a
+#   discriminator string ("iam" or "iam_role") instead of a file path;
+#   see ensure_bedrock_iam_secret() in ols_installer.py.
+# - OLS_IMAGE - pullspec for the ols image to deploy on the cluster
+# - BEDROCK_AWS_ACCESS_KEY_ID        - (Bedrock IAM) AWS access key ID
+# - BEDROCK_AWS_SECRET_ACCESS_KEY    - (Bedrock IAM) AWS secret access key
+# - BEDROCK_ROLE_AWS_ACCESS_KEY_ID   - (Bedrock IAM role) AWS access key ID
+# - BEDROCK_ROLE_AWS_SECRET_ACCESS_KEY - (Bedrock IAM role) AWS secret access key
+# - BEDROCK_ROLE_ARN                 - (Bedrock IAM role) AWS role ARN
+
+
+# Script flow:
+# 1) Install OLS into a namespace on the cluster with valid config/api tokens and exposed via a route
+# 2) Setup a service account w/ permission to access OLS
+# 3) Wait for the ols api server to be available
+# 4) Invoke the test-e2e Makefile target
+
+make install-deps && make install-deps-test
+
+DIR="${BASH_SOURCE%/*}"
+if [[ ! -d "$DIR" ]]; then DIR="$PWD"; fi
+. "$DIR/utils.sh"
+
+# install operator-sdk 
+export ARCH=$(case $(uname -m) in x86_64) echo -n amd64 ;; aarch64) echo -n arm64 ;; *) echo -n $(uname -m) ;; esac)
+export OS=$(uname | awk '{print tolower($0)}')
+export OPERATOR_SDK_DL_URL=https://github.com/operator-framework/operator-sdk/releases/download/v1.36.1
+curl -LO ${OPERATOR_SDK_DL_URL}/operator-sdk_${OS}_${ARCH}
+mkdir -p $HOME/.local/bin
+chmod +x operator-sdk_${OS}_${ARCH} && mv operator-sdk_${OS}_${ARCH} $HOME/.local/bin/operator-sdk
+export PATH=$HOME/.local/bin:$PATH
+operator-sdk version
+
+function run_suites() {
+  local rc=0
+
+  set +e
+  # If changes are done in this file, please make sure they reflect in test-e2e-cluster.sh
+
+  # runsuite arguments:
+  # suiteid test_tags provider provider_keypath model ols_image os_config_suffix
+  # empty test_tags means run all tests
+  if [ -z "${DISCONNECTED:-}" ]; then
+    # Tests for not disconnected environments
+    run_suite "azure_openai" "not certificates and not (tool_calling and not smoketest and not rag) and not byok1 and not byok2 and not quota_limits and not data_export" "azure_openai" "$AZUREOPENAI_PROVIDER_KEY_PATH" "gpt-5.4-mini" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "openai" "not azure_entra_id and not certificates and not (tool_calling and not smoketest and not rag) and not byok1 and not byok2 and not quota_limits and not data_export" "openai" "$OPENAI_PROVIDER_KEY_PATH" "gpt-5.4-mini" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "google_vertex" "not azure_entra_id and not certificates and not (tool_calling and not smoketest) and not byok1 and not byok2 and not quota_limits and not data_export" "google_vertex" "$VERTEX_PROVIDER_KEY_PATH" "gemini-3.1-flash-lite" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "google_vertex_anthropic" "not azure_entra_id and not certificates and not (tool_calling and not smoketest) and not byok1 and not byok2 and not quota_limits and not data_export" "google_vertex_anthropic" "$VERTEX_PROVIDER_KEY_PATH" "claude-sonnet-4-6" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "watsonx" "not azure_entra_id and not certificates and not (tool_calling and not smoketest) and not byok1 and not byok2 and not quota_limits and not data_export" "watsonx" "$WATSONX_PROVIDER_KEY_PATH" "ibm/granite-4-h-small" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "rhaiis_vllm" "not azure_entra_id and not certificates and not (tool_calling and not smoketest) and not byok1 and not byok2 and not quota_limits and not data_export" "rhaiis_vllm" "$RHAIIS_PROVIDER_KEY_PATH" "meta-llama/Llama-3.1-70B-Instruct" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    # Bedrock suites — PROVIDER_KEY_PATH carries a discriminator ("iam" or
+    # "iam_role") instead of a credential file path; see
+    # ensure_bedrock_iam_secret() in ols_installer.py.
+    run_suite "bedrock_anthropic" "not azure_entra_id and not certificates and not (tool_calling and not smoketest and not rag) and not byok1 and not byok2 and not quota_limits and not data_export" "bedrock_anthropic" "iam" "anthropic.claude-sonnet-4-6" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "bedrock_deepseek" "not azure_entra_id and not certificates and not (tool_calling and not smoketest and not rag) and not byok1 and not byok2 and not quota_limits and not data_export" "bedrock_deepseek" "iam" "deepseek.v3.2" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "bedrock_anthropic_iam_role" "smoketest" "bedrock_anthropic" "iam_role" "anthropic.claude-sonnet-4-6" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "bedrock_deepseek_iam_role" "smoketest" "bedrock_deepseek" "iam_role" "deepseek.v3.2" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    # smoke tests for RHOAI VLLM-compatible provider
+    run_suite "rhoai_vllm" "smoketest" "rhoai_vllm" "$OPENAI_PROVIDER_KEY_PATH" "gpt-4.1-mini" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    # smoke tests for RHELAI VLLM-compatible provider
+    run_suite "rhelai_vllm" "smoketest" "rhelai_vllm" "$OPENAI_PROVIDER_KEY_PATH" "gpt-4.1-mini" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    run_suite "certificates" "certificates" "openai" "$OPENAI_PROVIDER_KEY_PATH" "gpt-5.4-mini" "$OLS_IMAGE" "default"
+    (( rc = rc || $? ))
+
+    # TODO: Reduce execution time. Sequential execution will take more time. Parallel execution will have cluster claim issue.
+    # Run tool calling - Enable tool_calling
+    run_suite "bedrock_deepseek_tool_calling" "tool_calling" "bedrock_deepseek" "iam" "deepseek.v3.2" "$OLS_IMAGE" "tool_calling"
+    (( rc = rc || $? ))
+    run_suite "azure_openai_tool_calling" "tool_calling" "azure_openai" "$AZUREOPENAI_PROVIDER_KEY_PATH" "gpt-4.1-mini" "$OLS_IMAGE" "tool_calling"
+    (( rc = rc || $? ))
+    run_suite "openai_tool_calling" "tool_calling" "openai" "$OPENAI_PROVIDER_KEY_PATH" "gpt-5.4-mini" "$OLS_IMAGE" "tool_calling"
+    (( rc = rc || $? ))
+    run_suite "watsonx_tool_calling" "tool_calling" "watsonx" "$WATSONX_PROVIDER_KEY_PATH" "ibm/granite-4-h-small" "$OLS_IMAGE" "tool_calling"
+    (( rc = rc || $? ))
+    run_suite "google_vertex_tool_calling" "tool_calling" "google_vertex" "$VERTEX_PROVIDER_KEY_PATH" "gemini-3.1-flash-lite" "$OLS_IMAGE" "tool_calling"
+    (( rc = rc || $? ))
+    run_suite "google_vertex_anthropic_tool_calling" "tool_calling" "google_vertex_anthropic" "$VERTEX_PROVIDER_KEY_PATH" "claude-sonnet-4-6" "$OLS_IMAGE" "tool_calling"
+    (( rc = rc || $? ))
+
+    # BYOK Test cases
+    # Temporarily disabled: watsonx_byok1 endpoint intermittently unreachable, OLS fails readiness
+    # run_suite "watsonx_byok1" "byok1" "watsonx" "$WATSONX_PROVIDER_KEY_PATH" "ibm/granite-4-h-small" "$OLS_IMAGE" "byok1"
+    # (( rc = rc || $? ))
+    # Temporarily disabled: watsonx_byok2 references a retired Konflux rag-content image, OLS pod never reaches ready. Reactivate as part of OLS-4242.
+    # run_suite "watsonx_byok2" "byok2" "watsonx" "$WATSONX_PROVIDER_KEY_PATH" "ibm/granite-4-h-small" "$OLS_IMAGE" "byok2"
+
+    # quota limits tests, independent of provider therefore only testing one
+    run_suite "quota_limits" "quota_limits" "openai" "$OPENAI_PROVIDER_KEY_PATH" "gpt-5.4-mini" "$OLS_IMAGE" "quota"
+    (( rc = rc || $? ))
+
+    # exporter test
+    run_suite "data_export" "data_export" "openai" "$OPENAI_PROVIDER_KEY_PATH" "gpt-5.4-mini" "$OLS_IMAGE" "data_export"
+    (( rc = rc || $? ))
+
+  else
+    # Tests for disconnected environments
+    # smoke tests for RHOAI VLLM-compatible provider
+    # Temporarily disabled: vLLM endpoints unreachable, OLS never becomes ready (503 on /readiness)
+    # run_suite "rhoai_vllm" "smoketest" "rhoai_vllm" "$OPENAI_PROVIDER_KEY_PATH" "gpt-4.1-mini" "$OLS_IMAGE" "default"
+    # (( rc = rc || $? ))
+  
+  cleanup_ols_operator
+  
+  fi
+  set -e
+
+  return $rc
+}
+
+function finish() {
+    if [ "${LOCAL_MODE:-0}" -eq 1 ]; then
+      # When running locally, cleanup the tmp files
+      rm -rf "$ARTIFACT_DIR"
+    fi
+}
+trap finish EXIT
+
+# ARTIFACT_DIR is defined when running in a prow job, content
+# in this location is automatically collected at the end of the test job
+# If ARTIFACT_DIR is not defined, we are running locally on a developer machine
+if [ -z "${ARTIFACT_DIR:-}" ]; then
+    # temp directory for generated resource yamls
+    export ARTIFACT_DIR=$(mktemp -d)
+    # Clean up the tmpdir on exit
+    readonly LOCAL_MODE=1
+fi
+
+run_suites
