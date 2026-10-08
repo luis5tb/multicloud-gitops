@@ -8,3 +8,18 @@ CLUSTERGROUP_LABEL ?= group-one
 .PHONY: import-default-spoke
 import-default-spoke: ## Import the default spoke cluster for this pattern, set VP_SPOKECONFIG and VP_HUBCONFIG env vars
 	@$(ANSIBLE_RUN) -e clustergroup_label=$(CLUSTERGROUP_LABEL) rhvp.cluster_utils.import_spoke_cluster
+
+.PHONY: admin-break-glass-kubeconfig
+admin-break-glass-kubeconfig: ## Materialize a local kubeconfig for the cluster-admin break-glass ServiceAccount (see charts/all/keycloak-oidc/README.md); requires breakGlass.enabled=true on the keycloak-oidc application, already synced
+	@oc get secret admin-break-glass-token -n openshift-config >/dev/null
+	@TOKEN=$$(oc get secret admin-break-glass-token -n openshift-config -o jsonpath='{.data.token}' | base64 -d); \
+	CA_FILE=$$(mktemp); \
+	oc get secret admin-break-glass-token -n openshift-config -o jsonpath='{.data.ca\.crt}' | base64 -d > $$CA_FILE; \
+	SERVER=$$(oc whoami --show-server); \
+	oc --kubeconfig=admin-break-glass.kubeconfig config set-cluster admin-break-glass --server=$$SERVER --certificate-authority=$$CA_FILE --embed-certs=true >/dev/null; \
+	oc --kubeconfig=admin-break-glass.kubeconfig config set-credentials admin-break-glass --token=$$TOKEN >/dev/null; \
+	oc --kubeconfig=admin-break-glass.kubeconfig config set-context admin-break-glass --cluster=admin-break-glass --user=admin-break-glass >/dev/null; \
+	oc --kubeconfig=admin-break-glass.kubeconfig config use-context admin-break-glass >/dev/null; \
+	rm -f $$CA_FILE; \
+	chmod 600 admin-break-glass.kubeconfig
+	@echo "Wrote admin-break-glass.kubeconfig -- move it outside this repo (password manager or offline vault). It is git-ignored, but do not rely on that alone."
