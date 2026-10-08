@@ -1,0 +1,38 @@
+{{- if .Values.breakGlass.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.breakGlass.serviceAccountName }}
+  namespace: openshift-config
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.breakGlass.serviceAccountName }}-cluster-admin
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.breakGlass.serviceAccountName }}
+    namespace: openshift-config
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+---
+# Legacy-style, non-expiring ServiceAccount token: unlike `oc create token`
+# (which produces a short-lived bound token), this survives indefinitely and
+# is what makes it usable as a break-glass credential.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.breakGlass.serviceAccountName }}-token
+  namespace: openshift-config
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/service-account.name: {{ .Values.breakGlass.serviceAccountName }}
+type: kubernetes.io/service-account-token
+{{- end }}

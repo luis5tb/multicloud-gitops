@@ -1,0 +1,69 @@
+{{- if .Values.openshiftOIDC.caBundleSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "keycloak-oidc.fullname" . }}-keycloak-ca-sync
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  schedule: {{ .Values.openshiftOIDC.caBundleSync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 180
+      template:
+        metadata:
+          labels:
+            {{- include "keycloak-oidc.labels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "keycloak-oidc.fullname" . }}-keycloak-ca-sync
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: sync-keycloak-ca
+              image: {{ .Values.openshiftOIDC.caBundleSync.image | quote }}
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "-B", "/opt/app-root/src/sync_keycloak_ca.py"]
+              env:
+                - name: SOURCE_NAMESPACE
+                  value: {{ .Values.openshiftOIDC.caBundleSync.sourceNamespace | quote }}
+                - name: SOURCE_CONFIGMAP
+                  value: {{ .Values.openshiftOIDC.caBundleSync.sourceConfigMap | quote }}
+                - name: SOURCE_KEY
+                  value: {{ .Values.openshiftOIDC.caBundleSync.sourceKey | quote }}
+                - name: TARGET_NAMESPACES
+                  value: {{ list "openshift-config" .Values.keycloak.namespace | uniq | toJson | quote }}
+                - name: TARGET_CONFIGMAP
+                  value: {{ .Values.openshiftOIDC.caBundleSync.targetConfigMapName | quote }}
+                - name: BUNDLE_KEY
+                  value: ca-bundle.crt
+                - name: PYTHONDONTWRITEBYTECODE
+                  value: "1"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                {{- toYaml .Values.openshiftOIDC.caBundleSync.resources | nindent 16 }}
+              volumeMounts:
+                - name: sync-script
+                  mountPath: /opt/app-root/src/sync_keycloak_ca.py
+                  subPath: sync_keycloak_ca.py
+                  readOnly: true
+          volumes:
+            - name: sync-script
+              configMap:
+                name: {{ include "keycloak-oidc.fullname" . }}-keycloak-ca-sync-script
+                defaultMode: 0444
+{{- end }}
