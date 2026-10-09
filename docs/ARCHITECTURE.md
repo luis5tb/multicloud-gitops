@@ -232,6 +232,13 @@ touching adjacent code, re-read the relevant one.
   "Provisioning gate". General rule: before pausing any operator, wait on a
   concrete child resource it must produce, not just the operator's own install
   status.
+- **OLS/MCP pod labels match the chart selectors (confirmed live).**
+  `appServer.podSelectorLabels` and `mcpHardening.podSelectorLabels` select
+  real pods; `ClusterSPIFFEID/ols-app-server` and
+  `NetworkPolicy/openshift-lightspeed-config-app-server` are not silent
+  no-ops. The operator's own app-server NetworkPolicy still OR-allows
+  monitoring, console, and cluster ingress -- this chart's NP cannot narrow
+  that (see `charts/all/openshift-lightspeed-config` README).
 - **Token B `groups` survive Keycloak's standard V2 exchange.** Verified live:
   mint Token A in `acme-agent` (SPIFFE `client_credentials`), exchange in
   `lightspeed-app-server` (RFC 8693, `lightspeed-mcp` SPIFFE assertion) --

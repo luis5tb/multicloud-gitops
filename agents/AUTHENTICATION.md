@@ -620,7 +620,7 @@ oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server -f
 
 # 5. The passthrough hop -- MCP does no authz itself, so any 401/403 here
 #    is really the API server rejecting the forwarded token
-oc logs -n a2a-lightspeed -l app.kubernetes.io/component=mcp-server -f
+oc logs -n a2a-lightspeed -l app=openshift-mcp-server -f
 
 # 6. What the API server currently trusts
 oc get authentication.config.openshift.io cluster -o jsonpath='{.spec.oidcProviders[0].issuer.audiences}'
