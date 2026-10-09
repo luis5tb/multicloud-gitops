@@ -18,11 +18,14 @@ joined on `X-Request-Id` / `request_id`:
 - Pattern apps deployed (namespaces below from `variants/standalone/values-standalone.yaml`)
 
 Optional for richer Praxis cards: raise `logLevel` on the praxis-proxy chart
-(wired to `RUST_LOG`), for example:
+(wired to `RUST_LOG`). The standalone variant already sets a scoped demo
+value in `variants/standalone/values-standalone.yaml`:
 
 ```text
 info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug
 ```
+
+Override there (or clear it) for quieter environments.
 
 ## Quick start
 

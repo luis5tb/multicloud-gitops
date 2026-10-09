@@ -348,12 +348,14 @@ clusterGroup:
         # OLS may take a while to complete a tool-using, multi-turn analysis.
         - name: route.timeout
           value: 22m
-        # Temporarily verbose while actively debugging routing/auth on this
-        # sandbox cluster -- see charts/all/praxis-proxy/values.yaml's
-        # logLevel comment. Dial back (or scope per-crate) once done; this is
-        # not meant to stay at debug indefinitely on a real environment.
+        # Demo / flow-monitor verbosity (RUST_LOG): info globally, debug only
+        # on Praxis routing + JWT identity crates so scripts/monitor.sh can
+        # surface allow/deny without flooding every crate. Chart default is
+        # empty (sparse). For quieter prod, remove this override or set "".
+        # Bare "debug" also works but is much noisier -- see
+        # charts/all/praxis-proxy/values.yaml logLevel comment.
         - name: logLevel
-          value: debug
+          value: info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug
         # identity.keycloak.issuerUrl derives from global.clusterBaseDomain +
         # global.keycloakRealm (https://keycloak.apps.<base>/realms/<realm>);
         # override here only to diverge.
