@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import threading
 import time
 import uuid
@@ -193,9 +194,22 @@ class A2ASettings:
         )
 
     @property
-    def tls_verify(self) -> bool | str:
-        """httpx-compatible verify argument: a CA bundle path, or True."""
-        return self.keycloak_ca_bundle or True
+    def tls_verify(self) -> bool | ssl.SSLContext:
+        """httpx-compatible verify argument for Keycloak HTTPS calls.
+
+        When ``A2A_KEYCLOAK_CA_BUNDLE`` is set, return an SSLContext that
+        trusts the system default CAs *plus* that bundle -- not the bundle
+        alone. httpx's ``verify=<path>`` replaces the default trust store
+        entirely, which breaks Routes whose leaf chains to a public CA
+        (ZeroSSL/Let's Encrypt) when the synced managed-ingress bundle only
+        has intermediates. Same pattern as
+        ``agents/acme_agent/src/acme_agent/auth.py`` ``_tls_context_trusting``.
+        """
+        if not self.keycloak_ca_bundle:
+            return True
+        context = ssl.create_default_context()
+        context.load_verify_locations(cafile=self.keycloak_ca_bundle)
+        return context
 
 
 @dataclass(frozen=True)
