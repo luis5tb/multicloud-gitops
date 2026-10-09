@@ -8,6 +8,7 @@ import os
 import ssl
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,10 @@ from .cluster_context import ClusterIdMissingError, get_cluster_id
 from .config import env_bool
 
 logger = logging.getLogger(__name__)
+
+# Bound by stamp_request_id for the lifetime of an outbound httpx request so
+# Keycloak mint audits can join the later dispatch line on the same id.
+_outbound_request_id: ContextVar[str] = ContextVar("acme_outbound_request_id", default="")
 
 
 def _tls_context_trusting(ca_bundle: str) -> ssl.SSLContext:
@@ -216,17 +221,49 @@ class DownstreamAuth:
                 "client_secret_basic, or client_secret_post"
             )
 
-        response = await self._token_client.post(
-            self.settings.token_url, data=data, auth=auth
-        )
-        response.raise_for_status()
-        payload = response.json()
-        token = payload.get("access_token")
-        if not token:
-            raise RuntimeError("Keycloak token response did not contain access_token")
+        request_id = _outbound_request_id.get() or "-"
+        cluster = get_cluster_id() or ""
+        try:
+            response = await self._token_client.post(
+                self.settings.token_url, data=data, auth=auth
+            )
+            response.raise_for_status()
+            payload = response.json()
+            token = payload.get("access_token")
+            if not token:
+                raise RuntimeError(
+                    "Keycloak token response did not contain access_token"
+                )
+        except httpx.HTTPStatusError as error:
+            logger.info(
+                "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                "action=%s outcome=error status=%s",
+                request_id,
+                cluster,
+                '"mint Keycloak Token A"',
+                error.response.status_code,
+            )
+            raise
+        except Exception:
+            logger.info(
+                "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                "action=%s outcome=error",
+                request_id,
+                cluster,
+                '"mint Keycloak Token A"',
+            )
+            raise
         expires_in = int(payload.get("expires_in", 300))
         self._access_token = token
         self._expires_at = time.monotonic() + max(expires_in, 1)
+        logger.info(
+            "acme_audit request_id=%s actor=acme-agent cluster=%s "
+            "action=%s outcome=ok expires_in=%s",
+            request_id,
+            cluster,
+            '"mint Keycloak Token A"',
+            expires_in,
+        )
         return token
 
     async def bearer_token(self) -> str:
@@ -297,27 +334,34 @@ async def add_cluster_header(request: httpx.Request) -> None:
     request.headers[OLS_CLUSTER_HEADER] = cluster_id
 
 
-async def add_request_id(request: httpx.Request) -> None:
-    """Stamp and log a correlation id on outbound authenticated RPCs.
+async def stamp_request_id(request: httpx.Request) -> None:
+    """Stamp ``X-Request-Id`` on outbound JSON-RPC POSTs (no audit line).
 
-    Registered as a third ``httpx`` request event hook alongside
-    ``DownstreamAuth.add_auth`` and ``add_cluster_header`` (see ``agent.py``).
-    Like ``add_cluster_header`` it only touches JSON-RPC calls (HTTP POST),
-    never the public, unauthenticated agent-card fetch (HTTP GET).
-
-    An existing ``X-Request-Id`` is preserved so an upstream correlation id
-    survives this hop; otherwise one is generated. The *same* value is both
-    set on the header and logged, so this acme-side record and OLS's own
-    per-request audit record (which echoes ``request_id``) join on one id.
-
-    The value never includes any token -- only the correlation id, the target
-    cluster, and the fixed action -- matching this module's logging discipline.
+    Runs *before* ``DownstreamAuth.add_auth`` so a Keycloak Token A mint
+    audit can join the later dispatch line on the same id. Preserves an
+    existing inbound correlation id when present.
     """
 
     if request.method != "POST":
         return
     request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
     request.headers[REQUEST_ID_HEADER] = request_id
+    _outbound_request_id.set(request_id)
+
+
+async def log_dispatch_audit(request: httpx.Request) -> None:
+    """Emit the outbound ``acme_audit`` dispatch line after auth attaches.
+
+    Registered last in the httpx hook chain (see ``agent.py``) so chronological
+    order is: stamp id → mint Token A (if needed) → cluster header → dispatch.
+    """
+
+    if request.method != "POST":
+        return
+    request_id = request.headers.get(REQUEST_ID_HEADER) or _outbound_request_id.get()
+    if not request_id:
+        request_id = uuid.uuid4().hex
+        request.headers[REQUEST_ID_HEADER] = request_id
     logger.info(
         "acme_audit request_id=%s actor=acme-agent cluster=%s "
         "action=%s outcome=sent",
@@ -325,3 +369,15 @@ async def add_request_id(request: httpx.Request) -> None:
         get_cluster_id() or "",
         '"dispatch A2A query to OLS"',
     )
+
+
+async def add_request_id(request: httpx.Request) -> None:
+    """Stamp ``X-Request-Id`` and log the dispatch audit (test/compat helper).
+
+    Production hooks use ``stamp_request_id`` then ``log_dispatch_audit``
+    around auth so mint and dispatch share one id; tests may call this
+    combined helper.
+    """
+
+    await stamp_request_id(request)
+    await log_dispatch_audit(request)

@@ -20,6 +20,8 @@ any downstream RPC) is never invoked at all.
 from __future__ import annotations
 
 import json
+import logging
+import uuid
 from typing import Any
 
 from starlette.responses import JSONResponse
@@ -27,6 +29,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .cluster_context import cluster_id_scope
 from .cluster_registry import ClusterRegistry, ClusterURLError, resolve_cluster_id_from_text
+
+logger = logging.getLogger(__name__)
 
 # Only these JSON-RPC methods start a new remote dispatch for which a target
 # cluster must be (re)validated; task lookups/cancellations for a task that
@@ -106,6 +110,18 @@ class ClusterRoutingMiddleware:
         try:
             return resolve_cluster_id_from_text(self.registry, text)
         except ClusterURLError as error:
+            # Correlation id for grepping (not the JSON-RPC id). No token.
+            audit_id = uuid.uuid4().hex
+            # Quote detail so spaces in the error message do not break
+            # key=value grepping used by scripts/monitor.sh.
+            detail = str(error).replace("\\", "\\\\").replace('"', '\\"')
+            logger.info(
+                "acme_audit request_id=%s actor=acme-agent cluster= "
+                "action=%s outcome=denied detail=\"%s\"",
+                audit_id,
+                '"reject unregistered or missing cluster URL"',
+                detail,
+            )
             return _rpc_rejection(request_id, str(error))
 
 
