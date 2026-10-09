@@ -106,6 +106,8 @@ spec:
               value: {{ $acmeOlsClusters | toJson | quote }}
             - name: A2A_USE_LEGACY
               value: {{ .Values.a2a.useLegacy | quote }}
+            - name: OLS_A2A_MODE
+              value: {{ .Values.a2a.olsMode | quote }}
             - name: A2A_REQUEST_TIMEOUT
               value: {{ .Values.a2a.requestTimeout | quote }}
             - name: A2A_PUBLIC_HOST

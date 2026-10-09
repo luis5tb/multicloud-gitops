@@ -56,8 +56,10 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 - `agents/acme_agent/` -- the ACME agent's Python source;
   `agents/AUTHENTICATION.md` is the authoritative identity-chain + auth
   troubleshooting write-up.
-- `vendor/lightspeed-service/` -- tracked upstream snapshot with a local A2A
-  endpoint; see its `VENDOR.md` before touching it.
+- OLS A2A image source -- external fork
+  [`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a);
+  build/push steps are in the top-level `README.md` Phase 0 (this pattern no
+  longer vendors that tree).
 - `README.md` (deploy walkthrough), `LIGHTSPEED_DESIGN.md` (pre-cluster
   hypothesis doc -- cross-check before trusting), `docs/ARCHITECTURE.md`
   (design + decisions + hard-won lessons).
@@ -75,7 +77,7 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 | Praxis routing / allow-list policy | `charts/all/praxis-proxy/files/{praxis.yaml,policy.yaml}` |
 | OLS LLM provider / MCP introspection | `charts/all/openshift-lightspeed-config/templates/olsconfig.yaml` + `values.yaml` |
 | Custom OLS image or A2A env vars (temporary bridge) | `charts/all/openshift-lightspeed-config`'s `appServerPatch.*` values + `files/patch_appserver.py` |
-| OLS's own A2A endpoint / auth | `vendor/lightspeed-service/ols/app/endpoints/{a2a.py,a2a_auth.py}` -- also update `vendor/lightspeed-service/VENDOR.md`'s "re-apply this fork's additive changes" list |
+| OLS's own A2A endpoint / auth | [`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a) (`ols/app/endpoints/{a2a.py,a2a_auth.py,a2a_executor.py}`); rebuild/push the image and bump `appServerPatch.image.*` in `values-standalone.yaml` |
 | Any cluster-specific value (URLs, trust domain, image tags, namespace scope) | `variants/standalone/values-standalone.yaml` only |
 | New secret | `values-secret.yaml.template`, consumed via ExternalSecret -- never a chart default |
 

@@ -25,6 +25,7 @@ from .auth import (
 )
 from .cluster_registry import ClusterRegistry
 from .config import agent_card_url, remote_agents_from_env
+from .ols_mode import ols_mode_remote_agent_config
 from .routing import ClusterRoutingMiddleware
 from .ui import UI_HTML
 
@@ -62,6 +63,11 @@ USE_LEGACY = os.getenv("A2A_USE_LEGACY", "false").strip().lower() in {
     "on",
 }
 
+# Shared across every downstream RemoteA2aAgent: stamps ols_mode=troubleshooting
+# (or OLS_A2A_MODE) on outbound A2A messages. OLS defaults to ask when the
+# metadata key is absent; this pattern's investigation flow needs troubleshooting.
+_OLS_MODE_CONFIG = ols_mode_remote_agent_config()
+
 remote_agents = [
     RemoteA2aAgent(
         name=remote.name,
@@ -70,6 +76,7 @@ remote_agents = [
         httpx_client=HTTP_CLIENT,
         timeout=AUTH.settings.timeout,
         use_legacy=USE_LEGACY,
+        config=_OLS_MODE_CONFIG,
     )
     for remote in remote_agents_from_env()
 ]
@@ -107,7 +114,7 @@ def _model() -> LiteLlm:
 # also means the final answer is OLS's streamed output delivered directly, not
 # re-emitted by this LLM, so it is never truncated or wrapped in a {"result":...}
 # envelope. We do NOT set mode="task" (that needs ADK's finish_task handshake,
-# which vendor/lightspeed-service's hand-rolled A2A endpoint does not implement);
+# which the OLS A2A endpoint does not implement);
 # the default mode streams events and treats stream end / TASK_STATE_COMPLETED
 # as completion. (A PlanReActPlanner can be added to stream the router's own
 # reasoning too; left out for now to validate sub_agents streaming on its own.)
