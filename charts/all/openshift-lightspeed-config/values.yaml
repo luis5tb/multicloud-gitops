@@ -157,15 +157,12 @@ identity:
     trustDomain: ""
     serviceAccountName: lightspeed-app-server
 
-# UNCONFIRMED GUESS: this chart has no trustworthy source for the actual pod
-# labels the Lightspeed Operator applies to its managed app-server
-# Deployment. The values below are a best-effort guess based on common
-# operator labeling conventions (app.kubernetes.io/* selector labels), not a
-# confirmed fact. Verify with
-# `oc get pods -n <namespace> --show-labels | grep lightspeed` against the
-# actually-installed operator and correct this value -- otherwise
-# templates/networkpolicy.yaml and templates/cluster-spiffe-id.yaml, which
-# both select pods by this map, may silently match nothing.
+# CONFIRMED live against lightspeed-operator-managed pods in a2a-lightspeed
+# (`oc get pods -n a2a-lightspeed --show-labels`): these four labels match
+# the app-server pod and the operator's own NetworkPolicy/ClusterSPIFFEID
+# selectors. Used by templates/networkpolicy.yaml and
+# templates/cluster-spiffe-id.yaml. Re-check after an operator upgrade that
+# changes labeling conventions.
 appServer:
   podSelectorLabels:
     app.kubernetes.io/component: application-server
@@ -187,10 +184,8 @@ appServer:
 # a custom service image and A2A configuration.
 appServerPatch:
   enabled: false
-  # UNCONFIRMED GUESS, same caveat as appServer.podSelectorLabels above --
-  # verify both against `oc get deployment -n <namespace>` and `oc get
-  # deployment <name> -o jsonpath='{.spec.template.spec.containers[*].name}'`
-  # on the installed operator before relying on this.
+  # CONFIRMED live: Deployment/lightspeed-app-server, primary container
+  # lightspeed-service-api (also has lightspeed-to-dataverse-exporter).
   deploymentName: lightspeed-app-server
   containerName: lightspeed-service-api
   # The custom, A2A-enabled OLS image built from
@@ -336,12 +331,10 @@ appServerPatch:
     # utils.OpenShiftMCPServerDeploymentName. Rolled by stamping the operator's
     # own force-reload pod-template annotation (see patch_appserver.py).
     deploymentName: openshift-mcp-server
-    # CONFIRMED from operator source -- the MCP pod labels (note these DIFFER
-    # from appServer.podSelectorLabels above: component/name are
-    # openshift-mcp-server here, and there is an extra bare `app` label).
-    # Reserved for a future label-based NetworkPolicy/discovery path; the
-    # rollout restarts by deploymentName, so this is not load-bearing for
-    # Mode A itself.
+    # CONFIRMED live (and from operator source) -- MCP pod labels differ from
+    # appServer.podSelectorLabels (component/name are openshift-mcp-server,
+    # plus bare `app`). Reserved for a future label-based NetworkPolicy/
+    # discovery path; Mode A rollout restarts by deploymentName.
     podSelectorLabels:
       app: openshift-mcp-server
       app.kubernetes.io/component: openshift-mcp-server

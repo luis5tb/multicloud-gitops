@@ -195,9 +195,8 @@ once, before patching:
 
 - `templates/appserver-patch-rbac.yaml` -- a ServiceAccount/Role/RoleBinding
   scoped to `patch` on exactly the named Deployments
-  (`appServerPatch.deploymentName` -- an unconfirmed-guess name like
-  `appServer.podSelectorLabels` above, verify against `oc get deployment -n
-  <namespace>` -- `appServerPatch.operatorDeploymentName`, and, when
+  (`appServerPatch.deploymentName` -- confirmed live as
+  `lightspeed-app-server` -- `appServerPatch.operatorDeploymentName`, and, when
   `mcpHardening.enabled`, `mcpHardening.deploymentName`), plus `get` on the
   named Subscription and `get` on `clusterserviceversions` (unscoped by name:
   the installed CSV's name carries a version suffix only known at runtime, so
@@ -351,13 +350,11 @@ fighting a problem the operator itself already solves.
   for this chart's `ExternalSecret` (and `lightspeed-agentic-operator`'s) to
   resolve a real credential. Not edited here per this chart's scope.
 - The operator-created `lightspeed-app-server` / `openshift-mcp-server`
-  ServiceAccounts are not created by this chart (operator-managed); the
-  `ClusterSPIFFEID` and `NetworkPolicy` templates reference them/their pods
-  by an unconfirmed guess at name/labels only (see `values.yaml`'s
-  `appServer.podSelectorLabels`), and are disabled or best-effort until that
-  identity work (a separate workstream, `vendor/lightspeed-service` --
-  the *service* source import named in the migration plan, distinct from
-  the untrusted operator checkout discussed above) lands.
+  ServiceAccounts are not created by this chart (operator-managed).
+  `appServer.podSelectorLabels`, `appServerPatch.deploymentName` /
+  `containerName`, and `mcpHardening.podSelectorLabels` are **confirmed
+  live** against lightspeed-operator pods; `ClusterSPIFFEID` and this
+  chart's `NetworkPolicy` do select the real app-server pods.
 - The Keycloak `lightspeed-mcp` client, its SPIFFE federation, and the
   `openshift-mcp` audience/`groups` mappers are `charts/all/keycloak-oidc`'s
   responsibility (Phase 3), not this chart's.
@@ -366,6 +363,11 @@ fighting a problem the operator itself already solves.
   (`stable` channel, Red Hat Operators catalog) per
   `LIGHTSPEED_IMPLEMENTATION_PLAN.md` T2.1's instructions and need
   confirmation against the live cluster's actual catalog before cutover.
-- This chart's `NetworkPolicy` is additive to, and cannot narrow, whatever
-  NetworkPolicy (if any) the operator creates for the app-server pods on its
-  own; this chart did not inspect that policy's contents.
+- This chart's `NetworkPolicy` is additive to, and cannot narrow, the
+  operator's `NetworkPolicy/lightspeed-app-server` for the same pods.
+  Confirmed live: that operator policy allows ingress from
+  openshift-monitoring, openshift-console, and namespaces labeled
+  `network.openshift.io/policy-group=ingress` (cluster ingress). MCP's
+  operator policy (`openshift-mcp-server`) allows any same-namespace pod on
+  8443. Our policy adds an explicit Praxis allow; it is not sole edge
+  lockdown.

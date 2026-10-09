@@ -2,20 +2,19 @@
 # Restricts ingress to the operator-managed Lightspeed app-server pods to
 # same-namespace traffic and the Praxis gateway.
 #
-# The podSelector below (appServer.podSelectorLabels in values.yaml) is an
-# UNCONFIRMED GUESS at the labels the Lightspeed Operator applies to its
-# managed app-server Deployment -- this chart does not control those labels,
-# since that Deployment is reconciled by the operator from the OLSConfig CR,
-# not by this chart, and had no trustworthy source to confirm the real
-# values against (see README.md). Verify against the actually-installed
-# operator (`oc get pods -n <namespace> --show-labels`) and correct
-# values.yaml's appServer.podSelectorLabels if they don't match -- otherwise
-# this policy silently selects zero pods and has no effect.
+# podSelector labels (appServer.podSelectorLabels) are CONFIRMED live against
+# lightspeed-operator app-server pods -- this policy does select the real
+# pods (not a silent no-op). Re-check after operator upgrades that change
+# labeling.
 #
-# Whatever NetworkPolicy, if any, the operator creates for these pods on its
-# own is independent of this one; this chart did not inspect its contents.
+# IMPORTANT: the operator also creates NetworkPolicy/lightspeed-app-server
+# for the same pods, allowing ingress from openshift-monitoring,
+# openshift-console, and pods in namespaces labeled
+# network.openshift.io/policy-group=ingress (cluster ingress controllers).
 # NetworkPolicies targeting the same pods are additive (OR'd), so this
-# policy cannot narrow access an operator-owned policy already grants.
+# chart policy CANNOT narrow those operator-granted paths. Treat this as
+# defence-in-depth that adds an explicit Praxis allow, not as sole edge
+# lockdown.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
