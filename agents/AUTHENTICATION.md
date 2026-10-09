@@ -252,13 +252,15 @@ OLS's query pipeline, so caller metadata cannot substitute an MCP credential
 for the exchanged token.
 
 The optional A2A message metadata field `ols_mode` selects the OLS mode:
-`ask` or `troubleshooting`. It defaults to `troubleshooting` for this
-live-cluster investigation flow. OLS does not use the caller-supplied A2A
-context ID as its conversation ID; each accepted task goes through OLS's
-normal request processing, which creates a fresh conversation ID and applies
-query redaction and quota checks. The shared streaming response wrapper then
-handles conversation/transcript storage, quota consumption, and OLS audit
-events.
+`ask` or `troubleshooting`. The OLS image defaults to `ask` when the key is
+absent; ACME stamps `troubleshooting` on every outbound A2A message (via an
+ADK request interceptor, overridable with `OLS_A2A_MODE`) so this pattern's
+live-cluster investigation flow stays in troubleshooting mode. OLS maps
+caller-supplied A2A `contextId` values to owned OLS conversation IDs (it
+does not reuse the raw context id); each accepted task goes through OLS's
+normal request processing, which applies query redaction and quota checks.
+The shared streaming response wrapper then handles conversation/transcript
+storage, quota consumption, and OLS audit events.
 
 ## Keycloak <-> OpenShift group mapping (pre-provisioned, not per-request)
 

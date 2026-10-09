@@ -26,31 +26,49 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
 
 ### Phase 0 — Before touching the cluster
 
-1. Build and push the two images this pattern builds itself. The vendored,
-   A2A-enabled OpenShift Lightspeed service (`vendor/lightspeed-service/`)
-   is built from its own upstream `Containerfile`; see
-   `vendor/lightspeed-service/VENDOR.md` for the exact build command and its
-   current caveats (the hash-locked `requirements.txt` doesn't build cleanly
-   yet -- build from `pyproject.toml`'s looser constraints in the meantime,
-   or regenerate the lock first). Praxis itself isn't built from this repo --
-   it pulls a pinned upstream image (see its own version caveats below):
+1. Build and push the two images this pattern needs that are not published
+   upstream. Praxis itself isn't built from this repo -- it pulls a pinned
+   upstream image (see its own version caveats below). ACME is built from
+   `agents/acme_agent/` here. The A2A-enabled OpenShift Lightspeed
+   app-server image is built from the external fork
+   [`luis5tb/lightspeed-service`](https://github.com/luis5tb/lightspeed-service)
+   on branch [`a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
+   (tip at time of writing: `25f537a` "Harden A2A server enablement, path,
+   and continuity", which already includes the TLS trust-store extend fix)
+   -- this pattern no longer vendors that tree.
 
     ```bash
     export QUAY_ORG=<your-quay-org>
     podman login quay.io
 
+    # --- ACME (from this repo) ---
     export ACME_TAG=$(git rev-parse --short HEAD)
-    podman build -f agents/acme_agent/Containerfile -t quay.io/${QUAY_ORG}/acme-agent:${ACME_TAG} agents/acme_agent
+    podman build -f agents/acme_agent/Containerfile \
+      -t quay.io/${QUAY_ORG}/acme-agent:${ACME_TAG} agents/acme_agent
     podman push quay.io/${QUAY_ORG}/acme-agent:${ACME_TAG}
 
+    # --- OLS + A2A (from luis5tb/lightspeed-service@a2a) ---
+    # Clone beside this repo (or wherever you prefer); pin a SHA for
+    # reproducibility if you want an immutable image tag.
+    git clone --branch a2a --single-branch \
+      https://github.com/luis5tb/lightspeed-service.git /tmp/lightspeed-service-a2a
+    cd /tmp/lightspeed-service-a2a
     export OLS_TAG=$(git rev-parse --short HEAD)
-    podman build -f vendor/lightspeed-service/Containerfile -t quay.io/${QUAY_ORG}/openshift-lightspeed:${OLS_TAG} vendor/lightspeed-service
+
+    # Prefer UBI base images so the build does not need a RHEL
+    # entitlement (registry.redhat.io/rhel9/python-312 requires one for
+    # `dnf install`). Same Python 3.12 line the Containerfile defaults to.
+    podman build -f Containerfile \
+      --build-arg BUILDER_BASE_IMAGE=registry.access.redhat.com/ubi9/python-312:9.6 \
+      --build-arg RUNTIME_BASE_IMAGE=registry.access.redhat.com/ubi9/python-312-minimal:9.6 \
+      -t quay.io/${QUAY_ORG}/openshift-lightspeed:${OLS_TAG} .
     podman push quay.io/${QUAY_ORG}/openshift-lightspeed:${OLS_TAG}
+    cd -
     ```
 
     The OpenShift Lightspeed Operator picks the app-server image via its own
     `--service-image` startup flag, not an `OLSConfig` field, and has no CRD
-    field for the `A2A_*` environment variables the vendored service needs
+    field for the `A2A_*` environment variables the A2A-enabled image needs
     either. `charts/all/openshift-lightspeed-config`'s `appServerPatch`
     (disabled by default) is a **temporary** bridge for both: it patches the
     operator-managed app-server Deployment directly, after the fact, with
@@ -63,11 +81,13 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     supports a custom service image and A2A configuration.
 
 2. Replace the `acme-agent` application's `image.repository`/`image.tag`
-   overrides in `variants/standalone/values-standalone.yaml` with the image
-   you just pushed. **These are not an empty placeholder** -- they currently
-   point to a specific prior deployment's personal `quay.io` account and a
-   stale tag; do not assume a filled-in-looking value is already correct for
-   your deployment. `praxis-proxy` needs no image edit for
+   **and** `openshift-lightspeed-config`'s `appServerPatch.image.repository`/
+   `appServerPatch.image.tag` overrides in
+   `variants/standalone/values-standalone.yaml` with the images you just
+   pushed. **These are not empty placeholders** -- they currently point to a
+   specific prior deployment's personal `quay.io` account and a stale tag;
+   do not assume a filled-in-looking value is already correct for your
+   deployment. `praxis-proxy` needs no image edit for
    now -- it pins `ghcr.io/praxis-proxy/ai:0.4.1` by digest in
    `charts/all/praxis-proxy/values.yaml`. That image is alpha/prerelease
    upstream software and this integration isn't a Red Hat-supported Praxis
@@ -376,10 +396,11 @@ introspection-enabled OpenShift MCP server). See that chart's
 configures and what remains an open, unresolved MCP-hardening gap, and
 [`LIGHTSPEED_DESIGN.md`](LIGHTSPEED_DESIGN.md)/
 [`LIGHTSPEED_IMPLEMENTATION_PLAN.md`](LIGHTSPEED_IMPLEMENTATION_PLAN.md) for
-the full design and task breakdown. The A2A integration itself lives in a
-vendored, locally patched copy of the upstream service
-([`vendor/lightspeed-service/`](vendor/lightspeed-service/VENDOR.md)), since
-upstream OpenShift Lightspeed doesn't speak A2A.
+the full design and task breakdown. The A2A integration itself lives in the
+external fork
+[`luis5tb/lightspeed-service` branch `a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
+(see Phase 0 for how to build and push that image), since upstream OpenShift
+Lightspeed doesn't speak A2A yet.
 
 OpenShift Lightspeed's A2A endpoint is fronted by the Praxis AI gateway and
 its embedded Praxis Policy Engine, which also routes each request to the

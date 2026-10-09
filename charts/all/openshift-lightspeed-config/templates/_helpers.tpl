@@ -47,7 +47,23 @@ dormant for the generic chart defaults.
 {{- end -}}
 
 {{- define "openshift-lightspeed-config.effectiveRpcUrl" -}}
-{{- if .Values.appServerPatch.a2a.rpcUrl -}}{{ .Values.appServerPatch.a2a.rpcUrl }}{{- else -}}{{ printf "https://openshift-lightspeed.%s" (include "openshift-lightspeed-config.appsDomain" .) }}{{- end -}}
+{{- /* OLS's A2A JSON-RPC lives at POST /a2a (luis5tb/lightspeed-service@a2a); the agent card must advertise that path. */ -}}
+{{- if .Values.appServerPatch.a2a.rpcUrl -}}{{ .Values.appServerPatch.a2a.rpcUrl }}{{- else -}}{{ printf "https://openshift-lightspeed.%s/a2a" (include "openshift-lightspeed-config.appsDomain" .) }}{{- end -}}
+{{- end -}}
+
+{{/*
+Normalize appServerPatch.a2a.enabled across bool and string clustergroup
+overrides ("true"/"false"). Non-empty strings other than an explicit falsey
+value count as enabled -- matching how this chart already treats other
+enable flags set via values-standalone's `value: "true"` form.
+*/}}
+{{- define "openshift-lightspeed-config.a2aEnabled" -}}
+{{- $v := .Values.appServerPatch.a2a.enabled -}}
+{{- if kindIs "bool" $v -}}{{- if $v -}}true{{- else -}}false{{- end -}}
+{{- else -}}
+{{- $s := $v | toString | lower -}}
+{{- if or (eq $s "false") (eq $s "0") (eq $s "no") (eq $s "") -}}false{{- else -}}true{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "openshift-lightspeed-config.effectiveTrustDomain" -}}
@@ -140,6 +156,8 @@ OLSConfig field) already set.
 {{- define "openshift-lightspeed-config.appServerPatchEnvJSON" -}}
 {{- $a2a := .Values.appServerPatch.a2a -}}
 {{- $env := list -}}
+{{- /* A2A routes are gated off by default in the OLS image (a2a.enabled / A2A_ENABLED); this bridge exists to turn them on. */ -}}
+{{- $env = append $env (dict "name" "A2A_ENABLED" "value" (include "openshift-lightspeed-config.a2aEnabled" .)) -}}
 {{- /* keycloakIssuerURL and rpcUrl are derived from global.clusterBaseDomain when not explicitly set (see effective* helpers); both A2A_* vars are required, so always emit them. */ -}}
 {{- $env = append $env (dict "name" "A2A_KEYCLOAK_ISSUER_URL" "value" (include "openshift-lightspeed-config.effectiveKeycloakIssuerURL" .)) -}}
 {{- if $a2a.clusterId -}}
@@ -150,7 +168,7 @@ OLSConfig field) already set.
 {{- $env = append $env (dict "name" "A2A_KEYCLOAK_CA_BUNDLE" "value" $a2a.keycloakCaBundle) -}}
 {{- end -}}
 {{- $env = append $env (dict "name" "A2A_INBOUND_AUDIENCE" "value" $a2a.inboundAudience) -}}
-{{- /* inboundAzp is a list; render the allowed caller(s) comma-joined, no spaces (the contract vendor/lightspeed-service's A2A_INBOUND_AZP parser expects). */ -}}
+{{- /* inboundAzp is a list; render the allowed caller(s) comma-joined, no spaces (the contract the OLS A2A_INBOUND_AZP parser expects). */ -}}
 {{- $env = append $env (dict "name" "A2A_INBOUND_AZP" "value" (join "," $a2a.inboundAzp)) -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_AUDIENCE" "value" $a2a.exchangeAudience) -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_CLIENT_ASSERTION_TYPE" "value" $a2a.exchangeClientAssertionType) -}}

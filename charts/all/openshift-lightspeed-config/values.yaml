@@ -189,17 +189,26 @@ appServerPatch:
   deploymentName: lightspeed-app-server
   containerName: lightspeed-service-api
   # The custom, A2A-enabled OLS image built from
-  # vendor/lightspeed-service/Containerfile (see the top-level README.md
-  # Phase 0). Left empty, this patch only touches env vars, not the image.
+  # luis5tb/lightspeed-service@a2a (see the top-level README.md Phase 0).
+  # Left empty, this patch only touches env vars, not the image.
   image:
     repository: ""
     tag: ""
   a2a:
-    # Required -- vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py's
-    # A2ASettings.from_env() raises A2AConfigurationError without these
-    # three, so the A2A endpoint will not start at all if they're unset.
+    # Mount the A2A agent-card + JSON-RPC routes (POST /a2a). The OLS image
+    # leaves them off by default (a2a.enabled / A2A_ENABLED); this bridge
+    # sets A2A_ENABLED from this flag. Keep true whenever appServerPatch is
+    # enabled for the ACME investigation flow.
+    enabled: true
+    # Required -- ols/app/endpoints/a2a_auth.py's A2ASettings.from_env()
+    # raises A2AConfigurationError without these three, so the A2A endpoint
+    # will not serve requests if they're unset.
     keycloakIssuerURL: ""
     clusterId: ""
+    # Public A2A JSON-RPC URL advertised in the agent card. Empty derives
+    # https://openshift-lightspeed.apps.<base>/a2a from
+    # global.clusterBaseDomain (must include the /a2a path the OLS image
+    # mounts). Override with a full URL only to diverge.
     rpcUrl: ""
     # Optional path to a mounted CA bundle file trusted for TLS to
     # keycloakIssuerURL. Setting this only sets the env var; it does not
@@ -214,7 +223,7 @@ appServerPatch:
     inboundAudience: lightspeed-a2a
     # Allowed inbound caller(s): the Keycloak client IDs (azp) OLS accepts on
     # A2A requests. A LIST, rendered joined-by-comma (no spaces) into the
-    # A2A_INBOUND_AZP env var vendor/lightspeed-service parses -- e.g.
+    # A2A_INBOUND_AZP env var the OLS image parses -- e.g.
     # [acme-agent] -> "acme-agent", [acme-agent, orchestrator] ->
     # "acme-agent,orchestrator". Defaults to a single-item list to preserve
     # the previous single-caller behavior; add entries to allow more callers.

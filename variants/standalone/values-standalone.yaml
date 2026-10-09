@@ -414,11 +414,15 @@ clusterGroup:
         # selects per request, not a per-cluster OLS Service DNS name directly
         # (Praxis routes by the X-OLS-Cluster header, never ACME). It is not set
         # here: an entry with no endpoint derives it from global.clusterBaseDomain
-        # (https://openshift-lightspeed.apps.<base>), the same host praxis-proxy's
-        # route derives. google-adk's RemoteA2aAgent requires https (or loopback)
-        # for the agent card and every RPC url inside it, which the derived https
-        # URL satisfies. A single downstream agent is still a one-item
-        # a2a.remoteAgents list; there is no separate single-agent shorthand.
+        # (https://openshift-lightspeed.apps.<base> -- agent-card origin; the
+        # card then advertises .../a2a for JSON-RPC). google-adk's
+        # RemoteA2aAgent requires https (or loopback) for the agent card and
+        # every RPC url inside it, which the derived https URL satisfies. A
+        # single downstream agent is still a one-item a2a.remoteAgents list;
+        # there is no separate single-agent shorthand.
+        # Outbound OLS mode (metadata.ols_mode); chart default is troubleshooting.
+        - name: a2a.olsMode
+          value: troubleshooting
         - name: a2a.remoteAgents[0].name
           value: openshift_lightspeed
         - name: a2a.remoteAgents[0].description
@@ -487,11 +491,15 @@ clusterGroup:
         # TEMPORARY A2A bridge (see charts/all/openshift-lightspeed-config/
         # README.md's "Temporary A2A bridge" section) -- patches the
         # operator-managed app-server Deployment with the custom OLS image
-        # and the A2A_* env vars vendor/lightspeed-service's A2A endpoint
-        # requires, since OLSConfig has no field for either. Delete this
-        # override block entirely once the Operator/OLSConfig CRD natively
-        # supports a custom service image and A2A configuration.
+        # and the A2A_* env vars the luis5tb/lightspeed-service@a2a image's
+        # A2A endpoint requires, since OLSConfig has no field for either.
+        # Delete this override block entirely once the Operator/OLSConfig CRD
+        # natively supports a custom service image and A2A configuration.
         - name: appServerPatch.enabled
+          value: "true"
+        # Mounts A2A routes (POST /a2a) via A2A_ENABLED=true. Chart default
+        # is already true when appServerPatch is used; kept explicit here.
+        - name: appServerPatch.a2a.enabled
           value: "true"
         # Set these once Phase 0 step 1's podman build/push has actually
         # happened -- empty means this patch only sets the A2A_* env vars
@@ -506,8 +514,9 @@ clusterGroup:
         # appServerPatch.a2a.keycloakIssuerURL derives from
         # global.clusterBaseDomain + global.keycloakRealm, and
         # appServerPatch.a2a.rpcUrl from global.clusterBaseDomain
-        # (https://openshift-lightspeed.apps.<base>) -- the same values
-        # keycloak-oidc/praxis/acme derive; override only to diverge.
+        # (https://openshift-lightspeed.apps.<base>/a2a) -- the same host
+        # keycloak-oidc/praxis/acme derive, plus the /a2a JSON-RPC path the
+        # OLS image mounts; override only to diverge.
         #
         # clusterId must be a KEY of global.olsClusters above (the X-OLS-Cluster
         # routing id this app-server advertises). It is kept explicit -- not
