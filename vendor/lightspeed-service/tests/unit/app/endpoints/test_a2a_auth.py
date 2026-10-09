@@ -11,7 +11,9 @@ installed. Keycloak HTTP calls are faked via a minimal async client double
 from __future__ import annotations
 
 import json
+import ssl
 import time
+from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -503,3 +505,25 @@ class TestAuditRecord:
         )
 
         assert caller.token not in record
+
+
+class TestTlsVerify:
+    def test_empty_bundle_uses_default_trust(self):
+        assert make_settings(keycloak_ca_bundle="").tls_verify is True
+
+    def test_bundle_extends_default_trust_store(self, tmp_path: Path):
+        bundle = tmp_path / "ca-bundle.crt"
+        bundle.write_text("placeholder\n", encoding="utf-8")
+        fake_ctx = MagicMock(spec=ssl.SSLContext)
+
+        with patch(
+            "ols.app.endpoints.a2a_auth.ssl.create_default_context",
+            return_value=fake_ctx,
+        ) as create_ctx:
+            verify = make_settings(keycloak_ca_bundle=str(bundle)).tls_verify
+
+        create_ctx.assert_called_once_with()
+        fake_ctx.load_verify_locations.assert_called_once_with(cafile=str(bundle))
+        assert verify is fake_ctx
+        # Must not be the bare path string (that would replace system trust).
+        assert not isinstance(verify, str)
