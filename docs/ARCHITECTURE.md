@@ -148,10 +148,12 @@ touching adjacent code, re-read the relevant one.
   contain only the leaf's intermediate chain, not the actual trusted root.
   The fix is always: `ctx = ssl.create_default_context(); if bundle:
   ctx.load_verify_locations(cafile=bundle)`. Already fixed in
-  `agents/acme_agent/src/acme_agent/auth.py` and
-  `charts/all/keycloak-oidc/templates/realm-secrets-reconciler-job.yaml`;
-  apply the same pattern to any *new* code that authenticates to a public
-  Route, not to code that only ever talks to the in-cluster API server.
+  `agents/acme_agent/src/acme_agent/auth.py`,
+  `charts/all/keycloak-oidc/templates/realm-secrets-reconciler-job.yaml`,
+  and `vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py`
+  (`A2ASettings.tls_verify`); apply the same pattern to any *new* code that
+  authenticates to a public Route, not to code that only ever talks to the
+  in-cluster API server.
 - **Cluster-id derivation must match exactly, everywhere.** The algorithm
   (`agents/acme_agent/src/acme_agent/cluster_registry.py`'s
   `derive_cluster_id`) is `f"{host}:{port}".replace(".", "-").replace(":",

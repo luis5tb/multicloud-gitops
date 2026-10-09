@@ -207,9 +207,12 @@ Added under `ols/app/endpoints/`:
 - `a2a_auth.py` -- Keycloak token validation (issuer, RS256, audience
   `lightspeed-a2a`, and an `azp` **allow-list**), this pod's SPIFFE JWT-SVID
   fetch, and the RFC 8693 token exchange (client `lightspeed-mcp`, audience
-  `openshift-mcp`, no `client_id` form parameter -- ported from the pattern
-  proven in `agents/rca_agent/rca_agent/identity.py`, adapted to this
-  service's async/FastAPI style). Also owns two cross-cutting concerns:
+  `openshift-mcp`, no `client_id` form parameter -- adapted to this
+  service's async/FastAPI style). When `A2A_KEYCLOAK_CA_BUNDLE` is set,
+  `A2ASettings.tls_verify` returns an SSLContext that *extends* the system
+  trust store (same pattern as ACME's `_tls_context_trusting`), not
+  httpx `verify=<path>` which would replace it. Also owns two cross-cutting
+  concerns:
   - **Inbound `azp` allow-list (`A2A_INBOUND_AZP`).** `A2ASettings.inbound_azp`
     is a `frozenset[str]` parsed from the comma-separated `A2A_INBOUND_AZP`
     env var (split on comma, strip, drop empties; empty/unset ->
