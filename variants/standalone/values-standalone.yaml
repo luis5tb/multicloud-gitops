@@ -400,7 +400,7 @@ clusterGroup:
           # it became "3.425697e+07", which then fails to parse as an image
           # reference -- InvalidImageName). Always quote tags that could be
           # all-digits.
-          value: "7971b535"
+          value: "fcf40d94"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
@@ -510,7 +510,7 @@ clusterGroup:
           # Quote: a git short SHA that happens to be all-digits would otherwise
           # parse as a number and re-serialize in scientific notation, breaking
           # the image reference (AGENTS.md hard-won lesson).
-          value: "5b5ada51"
+          value: "25f537af"
         # appServerPatch.a2a.keycloakIssuerURL derives from
         # global.clusterBaseDomain + global.keycloakRealm, and
         # appServerPatch.a2a.rpcUrl from global.clusterBaseDomain
