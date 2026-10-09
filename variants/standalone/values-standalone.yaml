@@ -25,13 +25,13 @@
 # (the footgun AGENTS.md calls out). To add a second cluster (goal 5), add
 # another entry.
 global:
-  clusterBaseDomain: ocp.gds8q.sandbox2033.opentlc.com
+  clusterBaseDomain: bm-cluster.e2e.bos.redhat.com
   # Keycloak realm the issuer URLs derive from; must equal the keycloak-oidc
   # Application's keycloak.realm override below (default rca).
   keycloakRealm: rca
   olsClusters:
-    api-ocp-gds8q-sandbox2033-opentlc-com-6443:
-      apiURL: https://api.ocp.gds8q.sandbox2033.opentlc.com:6443
+    api-bm-cluster-e2e-bos-redhat-com-6443:
+      apiURL: https://api.bm-cluster.e2e.bos.redhat.com:6443
 
 clusterGroup:
   name: standalone
@@ -524,7 +524,7 @@ clusterGroup:
         # one this app-server serves; the chart validates it against the registry
         # (and that each key matches derive_cluster_id(apiURL)) at render time.
         - name: appServerPatch.a2a.clusterId
-          value: api-ocp-gds8q-sandbox2033-opentlc-com-6443
+          value: api-bm-cluster-e2e-bos-redhat-com-6443
         # Mode A MCP hardening: closes the MCP tokenless confused-deputy gap
         # (LIGHTSPEED_DESIGN.md section 5). The operator-generated OpenShift
         # MCP server ships with require_oauth=false, so a tokenless call falls
