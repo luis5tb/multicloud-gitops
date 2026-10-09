@@ -232,3 +232,11 @@ touching adjacent code, re-read the relevant one.
   "Provisioning gate". General rule: before pausing any operator, wait on a
   concrete child resource it must produce, not just the operator's own install
   status.
+- **Token B `groups` survive Keycloak's standard V2 exchange.** Verified live:
+  mint Token A in `acme-agent` (SPIFFE `client_credentials`), exchange in
+  `lightspeed-app-server` (RFC 8693, `lightspeed-mcp` SPIFFE assertion) --
+  Token B carries `groups: ["acme-agent-rca"]`, `aud: "openshift-mcp"`,
+  `azp: "lightspeed-mcp"`, `sub` unchanged, no `act` claim. Keep the
+  belt-and-suspenders `groups` mappers on both clients; re-verify after
+  realm/mapper changes (see `charts/all/keycloak-oidc/README.md`
+  "End-to-end verification" and `agents/AUTHENTICATION.md` Grant 2).

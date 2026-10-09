@@ -205,21 +205,20 @@ This distinction is the entire mechanism that makes delegation meaningful:
 authority doesn't shift to whoever happens to be carrying the token at the
 moment.
 
-**Does `groups` survive the exchange?** This is the one open question in the
-chain, and why the `groups` protocol mapper is attached to *both*
-`acme-agent` and `lightspeed-mcp` in `charts/all/keycloak-oidc`. Which
-client's mappers apply to a newly-minted token is governed by the client
-authenticating *that specific* request -- for Grant 2, that's `lightspeed-mcp`,
-not acme-agent (see the comment on `lightspeed-mcp`'s `groups` mapper in
-`keycloak-realm-import.yaml` for the full reasoning: a client's
-directly-attached `protocolMappers` are its own automatic "dedicated" client
-scope, always active with no `scope=` parameter needed). So `lightspeed-mcp`'s
-copy is the one that most likely determines whether Token B actually carries
-`groups: ["acme-agent-rca"]` -- **confirm this against a real exchanged
-token** (see "End-to-end verification" in `charts/all/keycloak-oidc/README.md`)
-rather than assuming it; this is the single most consequential unverified
-assumption in the whole flow, since RBAC (`lightspeed-mcp-rbac.yaml`) keys on
-it entirely.
+**Does `groups` survive the exchange?** **Yes -- verified live** (Token A
+minted in `acme-agent` via SPIFFE `client_credentials`, exchanged in
+`lightspeed-app-server` via RFC 8693 with `lightspeed-mcp`'s SPIFFE
+assertion; decoded claims only, never the raw JWT). Token B carried
+`groups: ["acme-agent-rca"]` with `aud: "openshift-mcp"`,
+`azp: "lightspeed-mcp"`, and `sub` unchanged from Token A. The `groups`
+protocol mapper remains attached to *both* `acme-agent` and `lightspeed-mcp`
+in `charts/all/keycloak-oidc` as belt-and-suspenders (which client's mappers
+Keycloak's standard V2 exchange applies is still client-of-the-request
+specific -- for Grant 2 that is `lightspeed-mcp`; see the comment on that
+client's `groups` mapper in `keycloak-realm-import.yaml`). Re-run the
+procedure in "End-to-end verification" in `charts/all/keycloak-oidc/README.md`
+after realm/mapper changes; RBAC (`lightspeed-mcp-rbac.yaml`) still keys on
+this claim entirely.
 
 **No `act` claim.** RFC 8693 defines an `act` (actor) claim for exactly this
 "X's authority, exercised by Y" case. Keycloak's *standard* (V2) token
@@ -388,21 +387,18 @@ whose behalf" story in one column.
    `add_cluster_header` checks the HTTP method itself so the routing header
    never reaches the public, unauthenticated agent-card fetch).
 
-   Real captured shape (illustrative field values; verify `groups` against a
-   live token before relying on it, same caveat as the Grant 2 section
-   above):
+   Real captured shape (live mint from `acme-agent`; hostnames redacted;
+   `groups` confirmed present):
 
    ```json
    {
      "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
-     "sub": "0e844946-0456-475b-9265-e17532b362c9",
+     "sub": "57cf7fc8-6db4-4a3e-bec4-d109386e1133",
      "azp": "acme-agent",
-     "aud": ["lightspeed-a2a", "lightspeed-mcp", "account"],
-     "preferred_username": "service-account-acme-agent",
+     "aud": ["lightspeed-a2a", "lightspeed-mcp"],
      "groups": ["acme-agent-rca"],
      "scope": "email profile",
-     "exp": 1790256558,
-     "iat": 1790256258
+     "typ": "Bearer"
    }
    ```
 
@@ -484,20 +480,19 @@ whose behalf" story in one column.
    ```
 
    No `client_id` here either, same reason as step 3. Real captured shape
-   (`groups` is expected from the `acme-agent-rca` mapper -- **not yet
-   independently re-verified live**; whether Keycloak's standard V2 exchange
-   re-runs the subject's own protocol mappers for the new audience, or only
-   the audience client's, is the thing to confirm):
+   (live RFC 8693 exchange from `lightspeed-app-server`; hostnames redacted;
+   **`groups` confirmed present** -- same `sub` as Token A, `act` absent as
+   expected for Keycloak standard V2 exchange):
 
    ```json
    {
      "iss": "https://keycloak.apps.<cluster-domain>/realms/rca",
-     "sub": "0e844946-0456-475b-9265-e17532b362c9",
-     "aud": ["openshift-mcp"],
+     "sub": "57cf7fc8-6db4-4a3e-bec4-d109386e1133",
+     "aud": "openshift-mcp",
      "azp": "lightspeed-mcp",
-     "preferred_username": "service-account-acme-agent",
      "groups": ["acme-agent-rca"],
-     "exp": 1790256632
+     "scope": "email profile",
+     "typ": "Bearer"
    }
    ```
 
@@ -562,10 +557,9 @@ whose behalf" story in one column.
 
    ```
    claimMappings applied to the step-6 token:
-     username: claim "sub"    -> "keycloak:0e844946-0456-475b-9265-e17532b362c9"
-     groups:   claim "groups" -> ["keycloak:acme-agent-rca"] (expected --
-                                  see the "not yet independently re-verified
-                                  live" note on the step-6 sample above)
+     username: claim "sub"    -> "keycloak:<opaque-sub-from-Token-A>"
+     groups:   claim "groups" -> ["keycloak:acme-agent-rca"]
+                                  (verified live on Token B; see Grant 2)
    ```
 
    `lightspeed-mcp-rbac.yaml`'s `Role`/`RoleBinding` pair grants this mapped
