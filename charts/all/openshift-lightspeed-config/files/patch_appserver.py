@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Temporary bridge: patch the operator-managed app-server Deployment with
 the custom A2A-enabled OLS image and the A2A_* environment variables
-vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py requires, since
+the OLS A2A image's ols/app/endpoints/a2a_auth.py requires, since
 neither is exposed through the OLSConfig CRD today (see this chart's
 README.md, "Temporary A2A bridge" section). Delete this script and its
 Job/RBAC templates entirely once the Operator/OLSConfig CRD natively

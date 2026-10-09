@@ -72,16 +72,14 @@ leftover, not live).
   shapes and a substantial Troubleshooting section -- read it before
   debugging any auth failure in this flow. `agents/README.md` is a short
   index.
-- `vendor/lightspeed-service/` -- a tracked snapshot of upstream
-  `openshift/lightspeed-service`, extended with a hand-rolled A2A endpoint
-  (`ols/app/endpoints/{a2a.py,a2a_auth.py}`) since upstream has **no real
-  A2A support** (the one attempt, PR #2866, was closed unmerged with zero
-  reviews and had no auth/identity story anyway -- don't assume a future
-  upstream version adds this for free). `VENDOR.md` documents the pin,
-  every local deviation from upstream, and every local-build issue found
-  and fixed -- update it when you touch this directory, including when you
-  discover a new build issue (several were found only by actually attempting
-  a local build; Konflux's hermetic CI path never exercises them).
+- OLS A2A app-server image -- built from the external fork
+  [`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
+  (Keycloak validate → SPIFFE → RFC 8693 exchange → OLS pipeline), since
+  upstream OpenShift Lightspeed has **no real A2A support** yet (the one
+  attempt, PR #2866, was closed unmerged with zero reviews and had no
+  auth/identity story -- don't assume a future upstream version adds this
+  for free). Build/push steps live in the top-level `README.md` Phase 0;
+  this pattern no longer vendors that tree.
 - `vendor/praxis-ai/` -- untracked, reference-only checkout of Praxis's
   source, used only while writing APL policy syntax. The deployed
   `praxis-proxy` chart pins a public upstream image; this directory is not
@@ -150,10 +148,11 @@ touching adjacent code, re-read the relevant one.
   ctx.load_verify_locations(cafile=bundle)`. Already fixed in
   `agents/acme_agent/src/acme_agent/auth.py`,
   `charts/all/keycloak-oidc/templates/realm-secrets-reconciler-job.yaml`,
-  and `vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py`
-  (`A2ASettings.tls_verify`); apply the same pattern to any *new* code that
-  authenticates to a public Route, not to code that only ever talks to the
-  in-cluster API server.
+  and the OLS A2A fork's `ols/app/endpoints/a2a_auth.py`
+  (`A2ASettings.tls_verify` on
+  [`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)).
+  Apply the same pattern to any *new* code that authenticates to a public
+  Route, not to code that only ever talks to the in-cluster API server.
 - **Cluster-id derivation must match exactly, everywhere.** The algorithm
   (`agents/acme_agent/src/acme_agent/cluster_registry.py`'s
   `derive_cluster_id`) is `f"{host}:{port}".replace(".", "-").replace(":",
@@ -187,15 +186,15 @@ touching adjacent code, re-read the relevant one.
   import CR never deletes the realm (the import is a one-shot record; realm
   data lives in Keycloak's DB) and the `HasErrors` race fails before
   importing anything, so no user/client/session exists to lose.
-- **Don't trust a hardcoded path against a vendored backend without
-  checking the vendored source.** `praxis-proxy`'s `/health/ready` route
-  was copied from a predecessor chart's backend and silently 404'd against
-  the real `vendor/lightspeed-service` (whose actual route is `GET
-  /readiness`, no prefix) -- undetected until a real backend was finally
-  reachable to test against. If a chart assumes a path/port/label on a
-  vendored or operator-managed component, grep the actual vendored source
-  (or `oc get`/`oc explain` the live cluster) before trusting it, even if a
-  README or comment asserts it confidently.
+- **Don't trust a hardcoded path against an external backend without
+  checking the real source.** `praxis-proxy`'s `/health/ready` route was
+  copied from a predecessor chart's backend and silently 404'd against
+  the real OLS service (whose actual route is `GET /readiness`, no
+  prefix) -- undetected until a real backend was finally reachable to
+  test against. If a chart assumes a path/port/label on an external or
+  operator-managed component, grep the actual source (or `oc get`/`oc
+  explain` the live cluster) before trusting it, even if a README or
+  comment asserts it confidently.
 - **Quote image tags (and any other value) that could be all-digits.** An
   unquoted YAML scalar like `value: 34256970` (a git short SHA that happens
   to contain no letters) parses as a number, not a string, and a large

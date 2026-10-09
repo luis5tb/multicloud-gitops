@@ -33,6 +33,11 @@ a2a:
   publicHost: acme-agent
   publicPort: 8080
   publicProtocol: http
+  # Stamped onto outbound A2A messages as metadata.ols_mode for the OLS
+  # executor (ask | troubleshooting). OLS defaults to ask when absent; this
+  # pattern's investigation flow needs troubleshooting. Override via
+  # OLS_A2A_MODE on the Deployment.
+  olsMode: troubleshooting
 
 # Shared cluster-selection registry (see LIGHTSPEED_DESIGN.md SS7).
 # ACME and Praxis render their allow-lists from this ONE map -- it is not

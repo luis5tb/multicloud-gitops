@@ -172,12 +172,15 @@ other MCP auth settings) natively as supported fields.
 The OLSConfig CRD has no field for a custom app-server image -- the operator
 picks that via its own `--service-image` startup flag, not `OLSConfig` (see
 the top-level `README.md` Phase 0) -- and no field for the `A2A_*`
-environment variables `vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py`
-requires to serve A2A requests at all (`A2A_KEYCLOAK_ISSUER_URL`,
-`A2A_CLUSTER_ID`, `A2A_RPC_URL` are required; it raises
-`A2AConfigurationError` and never starts the A2A endpoint without them).
-Both are properties of the operator-managed app-server Deployment, which
-this chart does not own and which the operator continuously reconciles.
+environment variables the
+[`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
+image's `ols/app/endpoints/a2a_auth.py` requires to serve A2A requests at
+all (`A2A_ENABLED=true` to mount `POST /a2a` and the agent card;
+`A2A_KEYCLOAK_ISSUER_URL`, `A2A_CLUSTER_ID`, `A2A_RPC_URL` — the last must
+end in `/a2a` — are required; it raises `A2AConfigurationError` without
+them). Both are properties of the operator-managed app-server Deployment,
+which this chart does not own and which the operator continuously
+reconciles.
 
 `appServerPatch` (disabled by default) works around this by patching that
 Deployment directly, after the fact. An earlier version of this mechanism
