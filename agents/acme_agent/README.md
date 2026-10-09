@@ -7,34 +7,45 @@ from the same HTTP service.
 
 The exposed `acme_agent` is a local ADK coordinator agent. Its configured
 `RemoteA2aAgent` children are downstream peers, not the public entrypoint. The
-coordinator selects a peer using its description, passes the request to that
-peer, and returns the peer's result without doing domain-specific work itself.
+coordinator validates that the user named an allow-listed cluster API URL,
+selects a peer using its description, transfers to that peer, and lets the
+peer answer the user directly.
 
-Each peer is wrapped in `google.adk.tools.agent_tool.AgentTool` and attached
-via `tools=`, not `sub_agents=`. A bare `RemoteA2aAgent` with no `mode` set
-(the only option our downstream A2A server supports -- see
-`agents/AUTHENTICATION.md`) is, per its own docstring, "a plain
-`transfer_to_agent` target": calling `transfer_to_agent` ends the current
-task immediately once the hand-off is recorded, with no mechanism to wait
-for and return the peer's actual answer in the same request. `AgentTool`
-instead runs the wrapped agent to completion via its own `Runner` and
-returns its result as a normal function-call return value, which is what a
-single HTTP request/response round trip through this coordinator actually
-needs. The trade-off: no streaming and no multi-turn `input_required`
-hand-back -- both would need the peer to implement `RemoteA2aAgent`'s
-`mode="task"` handshake, which requires real task-lifecycle support
-(`finish_task`, intermediate status updates) on the OLS side that does not
-exist today.
+Each peer is attached via `sub_agents=` (not wrapped in `AgentTool`). The
+root LLM delegates with `transfer_to_agent`; ADK's `RemoteA2aAgent` then
+calls the remote with `message/stream` and yields each remote event
+(`TaskStatusUpdate` / `TaskArtifactUpdate` / `Message`) incrementally. As a
+`sub_agent`, those events propagate through this agent's own A2A
+`message/stream` response, so OpenShift Lightspeed's per-iteration progress
+and final answer stream straight to the caller.
+
+`AgentTool` was used here before, but `AgentTool.run_async` buffers the
+sub-agent down to a single return value -- under `message/stream` that emits
+nothing until the entire investigation finishes, starving long runs. We do
+**not** set `mode="task"` (that needs ADK's `finish_task` handshake, which
+`vendor/lightspeed-service`'s hand-rolled A2A endpoint does not implement);
+the default mode streams events and treats stream end /
+`TASK_STATE_COMPLETED` as completion. See `agents/AUTHENTICATION.md` for
+the identity chain on each delegated call.
+
+Before the ADK agent runs at all, `ClusterRoutingMiddleware` extracts the
+cluster API URL from the inbound JSON-RPC message, canonicalizes it against
+the GitOps-managed `global.olsClusters` allow-list, and binds the derived
+id to the request (`X-OLS-Cluster` on outbound POSTs only). Unknown or
+missing URLs are rejected with a JSON-RPC error -- fail closed.
 
 ## Project layout
 
 ```text
 agents/acme_agent/
 ├── src/acme_agent/
-│   ├── agent.py       # Local ADK router, remote sub-agents, and A2A/HTTP app
-│   ├── auth.py        # Keycloak token exchange and ZTO identity handling
-│   ├── config.py      # Environment configuration helpers
-│   └── ui.py          # Small browser client
+│   ├── agent.py            # Local ADK router, remote sub-agents, A2A/HTTP app
+│   ├── auth.py             # Keycloak client_credentials + SPIFFE/ZTO + audit
+│   ├── cluster_context.py  # Per-invocation X-OLS-Cluster ContextVar
+│   ├── cluster_registry.py # Allow-list + cluster-id derivation
+│   ├── config.py           # Environment configuration helpers
+│   ├── routing.py          # ClusterRoutingMiddleware (pre-ADK gate)
+│   └── ui.py               # Small browser client
 ├── Containerfile
 ├── pyproject.toml
 └── tests/
@@ -118,23 +129,31 @@ python -m pytest
 
 ## Authentication for OpenShift
 
+ACME authenticates **as itself** to call OpenShift Lightspeed through Praxis.
+That grant is Keycloak **client_credentials** (Token A). ACME does **not**
+perform the RFC 8693 token exchange -- OLS's A2A endpoint does that later
+(subject_token=Token A → Token B for MCP). See `agents/AUTHENTICATION.md`.
+
 The application supports three downstream authentication modes:
 
 * `none`: send no authentication header; useful only for local development.
 * `static`: read `A2A_BEARER_TOKEN` from the environment.
-* `keycloak`: obtain and cache a JWT from `KEYCLOAK_TOKEN_URL` using the
-  client-credentials grant.
+* `keycloak`: obtain and cache Token A from `KEYCLOAK_TOKEN_URL` using the
+  `client_credentials` grant (SPIFFE JWT-SVID or client secret as the client
+  authentication method).
 
 For the OpenShift deployment, configure `keycloak` and set
 `identity.spiffe.enabled=true` (chart value) so the agent fetches its own
 short-lived JWT-SVID directly from ZTWIM/SPIRE through the Workload API
-(`csi.spiffe.io`) instead of reading a static token file. This is the "ZTO" identity used as the JWT
+(`csi.spiffe.io`) instead of reading a static token file. That SVID is the
 client assertion (`KEYCLOAK_CLIENT_ASSERTION_TYPE`, default
 `urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) when calling
-Keycloak with `KEYCLOAK_CLIENT_AUTH_METHOD=client_assertion_post`. This
-requires a matching `ClusterSPIFFEID` (`identity.clusterSpiffeID.enabled=true`
-with the cluster's trust domain) and a Keycloak client configured for
-federated client authentication against the SPIFFE identity provider (see
+Keycloak with `KEYCLOAK_CLIENT_AUTH_METHOD=client_assertion_post`. With
+SPIFFE assertions, the token form must **omit** `client_id` -- Keycloak
+resolves the client from the assertion's `sub` (a SPIFFE ID). This requires
+a matching `ClusterSPIFFEID` (`identity.clusterSpiffeID.enabled=true` with
+the cluster's trust domain) and a Keycloak client configured for federated
+client authentication against the SPIFFE identity provider (see
 `charts/all/keycloak-oidc`).
 
 A static Secret or plain projected ServiceAccount token
