@@ -17,7 +17,12 @@ from google.adk.models.lite_llm import LiteLlm
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
-from .auth import DownstreamAuth, add_cluster_header, add_request_id
+from .auth import (
+    DownstreamAuth,
+    add_cluster_header,
+    log_dispatch_audit,
+    stamp_request_id,
+)
 from .cluster_registry import ClusterRegistry
 from .config import agent_card_url, remote_agents_from_env
 from .routing import ClusterRoutingMiddleware
@@ -32,14 +37,22 @@ AUTH = DownstreamAuth()
 # closed, never fall back to an unvalidated default.
 CLUSTER_REGISTRY = ClusterRegistry.from_env()
 
-# The request hook list is used for both agent-card discovery and JSON-RPC
-# calls, which is why add_cluster_header (unlike AUTH.add_auth) checks the
-# HTTP method itself: the routing header must never reach the public,
-# unauthenticated agent-card fetch (a GET), only authenticated RPCs (POSTs).
+# Hook order matters for audit joinability: stamp X-Request-Id first so a
+# Keycloak Token A mint can log the same request_id as the later dispatch
+# line; then auth, then the routing header, then the dispatch acme_audit.
+# add_cluster_header / stamp / log only touch POSTs -- never the public
+# unauthenticated agent-card GET.
 HTTP_CLIENT = httpx.AsyncClient(
     timeout=AUTH.settings.timeout,
     verify=AUTH.settings.tls_verify,
-    event_hooks={"request": [AUTH.add_auth, add_cluster_header, add_request_id]},
+    event_hooks={
+        "request": [
+            stamp_request_id,
+            AUTH.add_auth,
+            add_cluster_header,
+            log_dispatch_audit,
+        ]
+    },
 )
 
 USE_LEGACY = os.getenv("A2A_USE_LEGACY", "false").strip().lower() in {

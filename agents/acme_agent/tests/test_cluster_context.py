@@ -8,6 +8,8 @@ from acme_agent.auth import (
     REQUEST_ID_HEADER,
     add_cluster_header,
     add_request_id,
+    log_dispatch_audit,
+    stamp_request_id,
 )
 from acme_agent.cluster_context import (
     ClusterIdMissingError,
@@ -120,6 +122,22 @@ def test_add_request_id_absent_for_get_card_fetch():
 
     request = asyncio.run(run())
     assert REQUEST_ID_HEADER not in request.headers
+
+
+def test_stamp_then_dispatch_share_request_id(caplog):
+    async def run() -> str:
+        with cluster_id_scope("cluster-a"):
+            request = httpx.Request("POST", "https://example.test/rpc")
+            await stamp_request_id(request)
+            stamped = request.headers.get(REQUEST_ID_HEADER)
+            with caplog.at_level("INFO", logger="acme_agent.auth"):
+                await log_dispatch_audit(request)
+        return stamped or ""
+
+    stamped = asyncio.run(run())
+    assert stamped
+    assert stamped in caplog.text
+    assert "dispatch A2A query to OLS" in caplog.text
 
 
 def test_concurrent_tasks_do_not_leak_cluster_id():

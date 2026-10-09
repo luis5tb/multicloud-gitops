@@ -77,6 +77,8 @@ If a selector matches no pods, the script prints a warning and skips that hop.
 
 | Card | Meaning |
 | --- | --- |
+| **TOKEN A MINT** | ACME obtained (or failed to obtain) Token A via Keycloak `client_credentials` (`acme_audit` … `action="mint Keycloak Token A"`) |
+| **CLUSTER ALLOW-LIST REJECT** | `ClusterRoutingMiddleware` denied a missing/unknown cluster URL before ADK or Keycloak ran (`outcome=denied`) |
 | **ACME DISPATCH** | ACME stamped `X-Request-Id` and sent Token A toward Praxis/OLS (`acme_audit` … `outcome=sent`) |
 | **OLS A2A** | OLS validated Token A, performed the RFC 8693 exchange for Token B, and recorded the query (`a2a_audit`; `on_behalf_of` is the Token A `azp`) |
 | **AUTH/EXCHANGE FAILURE** | Inbound JWT reject, cluster header reject, exchange failure, SPIFFE error, etc. |

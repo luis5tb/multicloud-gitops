@@ -93,16 +93,20 @@ def _rejecting_inner_app_and_calls():
 # ---------------------------------------------------------------------------
 
 
-def test_rejects_missing_url_without_invoking_inner_app():
+def test_rejects_missing_url_without_invoking_inner_app(caplog):
     inner_app, calls = _rejecting_inner_app_and_calls()
     app = ClusterRoutingMiddleware(inner_app, _registry())
     body = _message_send_body("1", "please check pods in payments")
 
-    status, payload = asyncio.run(_send_http_request(app, body))
+    with caplog.at_level("INFO", logger="acme_agent.routing"):
+        status, payload = asyncio.run(_send_http_request(app, body))
 
     assert not calls
     assert status == 400
     assert payload["error"]["code"] == -32001
+    assert "acme_audit" in caplog.text
+    assert "outcome=denied" in caplog.text
+    assert "reject unregistered or missing cluster URL" in caplog.text
 
 
 def test_rejects_unknown_url_without_invoking_inner_app():
