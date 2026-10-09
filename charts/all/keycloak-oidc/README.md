@@ -163,60 +163,84 @@ oc auth can-i delete pods \
 ```
 
 **2. That the real exchanged token actually carries the `groups` claim
-(needs a live pod -- this is the part that can't be verified without a
-running deployment).** `groups` mappers exist on both `acme-agent` and
-`lightspeed-mcp` (see the comment in `keycloak-realm-import.yaml`) precisely
-because it isn't verified which client's mappers Keycloak's standard V2
-exchange actually applies to the newly-minted, differently-audienced token.
-Confirm by decoding a real exchanged token's payload -- **never log or print
-the full token, only its decoded claims**:
+(needs a live pod).** `groups` mappers exist on both `acme-agent` and
+`lightspeed-mcp` (see the comment in `keycloak-realm-import.yaml`). **Verified
+live** on this pattern's deployment: Token B carried
+`groups: ["acme-agent-rca"]` with `aud: "openshift-mcp"`, `azp: "lightspeed-mcp"`,
+and `sub` unchanged from Token A (see `agents/AUTHENTICATION.md` Grant 2).
+Re-run after realm/mapper changes by decoding a real exchanged token's
+payload -- **never log or print the full token, only its decoded claims**:
 
 ```bash
-# From inside a running OpenShift Lightspeed app-server pod (has httpx and
-# the spiffe SDK, per vendor/lightspeed-service's own dependencies):
-oc exec -n a2a-lightspeed deploy/lightspeed-app-server -- python3 -c '
+# 1) Mint Token A inside acme-agent (SPIFFE client_credentials; omit client_id).
+# 2) Exchange inside lightspeed-app-server (env names match the appServerPatch
+#    A2A_* vars). Pass Token A only via a one-shot env var; print claims only.
+#
+# Mint (claims + token lines -- keep TOKEN off shared logs):
+oc exec -n acme-agent deploy/acme-agent -- python3 -c '
+import base64, json, os, ssl
+from pathlib import Path
+import httpx
+from spiffe import WorkloadApiClient
+ctx = ssl.create_default_context()
+ca = os.environ.get("A2A_CA_BUNDLE", "").strip()
+if ca and Path(ca).is_file():
+    ctx.load_verify_locations(cafile=ca)
+with WorkloadApiClient(socket_path=os.environ["SPIFFE_ENDPOINT_SOCKET"]) as c:
+    svid = c.fetch_jwt_svid(audience={os.environ["SPIFFE_JWT_AUDIENCE"]})
+assertion = str(getattr(svid, "token", "") or getattr(svid, "jwt_svid", "") or "")
+with httpx.Client(verify=ctx, timeout=30.0) as client:
+    r = client.post(os.environ["KEYCLOAK_TOKEN_URL"], data={
+        "grant_type": "client_credentials",
+        "client_assertion_type": os.environ["KEYCLOAK_CLIENT_ASSERTION_TYPE"],
+        "client_assertion": assertion,
+    })
+    r.raise_for_status()
+    tok = r.json()["access_token"]
+p = tok.split(".")[1] + "=" * (-len(tok.split(".")[1]) % 4)
+print("CLAIMS", json.dumps({k: json.loads(base64.urlsafe_b64decode(p)).get(k)
+    for k in ("iss","aud","sub","azp","groups")}))
+print("TOKEN", tok)
+'
+
+# Exchange (set CALLER_TOKEN_FOR_VERIFICATION to Token A from above; do not commit it):
+oc exec -n a2a-lightspeed deploy/lightspeed-app-server -c lightspeed-service-api -- \
+  env CALLER_TOKEN_FOR_VERIFICATION="$TOKEN_A" python3 -c '
 import base64, json, os
 import httpx
 from spiffe import WorkloadApiClient
-
-# 1. Fetch a caller-shaped token the same way acme-agent does, so this
-#    reproduces a real exchange rather than asserting expected shape.
-#    (Run the equivalent from an acme-agent pod using its own
-#    SPIFFE_JWT_AUDIENCE/client id if you want a fully independent check;
-#    this abbreviated version assumes you already have a caller token.)
-caller_token = os.environ["CALLER_TOKEN_FOR_VERIFICATION"]  # paste one, do not commit it anywhere
-
-with WorkloadApiClient(socket_path=os.environ["SPIFFE_ENDPOINT_SOCKET"]) as c:
-    svid = c.fetch_jwt_svid(audience={os.environ["SPIFFE_JWT_AUDIENCE"]})
-
-resp = httpx.post(
-    os.environ["KEYCLOAK_TOKEN_URL"] or f"{os.environ[\"KEYCLOAK_ISSUER_URL\"]}/protocol/openid-connect/token",
-    data={
+issuer = os.environ["A2A_KEYCLOAK_ISSUER_URL"].rstrip("/")
+socket = os.environ["A2A_SPIFFE_ENDPOINT_SOCKET"]
+aud = os.environ.get("A2A_SPIFFE_JWT_AUDIENCE") or issuer
+with WorkloadApiClient(socket_path=socket) as c:
+    svid = c.fetch_jwt_svid(audience={aud})
+assertion = str(getattr(svid, "token", "") or getattr(svid, "jwt_svid", "") or "")
+with httpx.Client(timeout=30.0) as client:
+    r = client.post(issuer + "/protocol/openid-connect/token", data={
         "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-        "subject_token": caller_token,
+        "subject_token": os.environ["CALLER_TOKEN_FOR_VERIFICATION"],
         "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
         "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
-        "client_assertion_type": os.environ["KEYCLOAK_CLIENT_ASSERTION_TYPE"],
-        "client_assertion": svid.token,
-        "audience": os.environ["KEYCLOAK_TOKEN_EXCHANGE_AUDIENCE"],
-    },
-)
-resp.raise_for_status()
-token = resp.json()["access_token"]
-payload = token.split(".")[1]
-payload += "=" * (-len(payload) % 4)
-claims = json.loads(base64.urlsafe_b64decode(payload))
-print(json.dumps({k: claims.get(k) for k in ("iss", "aud", "sub", "azp", "groups", "act")}, indent=2))
+        "client_assertion_type": os.environ.get(
+            "A2A_EXCHANGE_CLIENT_ASSERTION_TYPE",
+            "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"),
+        "client_assertion": assertion,
+        "audience": os.environ["A2A_EXCHANGE_AUDIENCE"],
+    })
+    r.raise_for_status()
+    tok = r.json()["access_token"]
+p = tok.split(".")[1] + "=" * (-len(tok.split(".")[1]) % 4)
+print(json.dumps({k: json.loads(base64.urlsafe_b64decode(p)).get(k)
+    for k in ("iss","aud","sub","azp","groups","act")}, indent=2))
 '
 ```
 
-Confirm: `iss` is the expected realm, `aud` contains `openshift-mcp`, `sub`
+Confirm: `iss` is the expected realm, `aud` is `openshift-mcp`, `sub`
 matches the caller's (not the Lightspeed app-server's own) subject, `azp` is
-`lightspeed-mcp`, and -- the thing this whole check exists for -- `groups`
-contains `acme-agent-rca`. If it doesn't, the belt-and-suspenders mapper
-placement didn't work and `lightspeed-mcp-rbac.yaml` has nothing to key on;
-see `keycloak-realm-import.yaml`'s comment on the `lightspeed-mcp` client's
-`groups` mapper for what to try next.
+`lightspeed-mcp`, and `groups` contains `acme-agent-rca`. If it doesn't, the
+belt-and-suspenders mapper placement didn't work and `lightspeed-mcp-rbac.yaml`
+has nothing to key on; see `keycloak-realm-import.yaml`'s comment on the
+`lightspeed-mcp` client's `groups` mapper for what to try next.
 
 ## OpenShift Native OIDC
 
