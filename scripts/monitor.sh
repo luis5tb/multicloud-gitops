@@ -153,6 +153,34 @@ parse_line() {
     cluster=$(grep -oP 'cluster=\K[^ ]+' <<<"$line" || true)
     action=$(grep -oP 'action=\K("[^"]*"|[^ ]+)' <<<"$line" || true)
     outcome=$(grep -oP 'outcome=\K[^ ]+' <<<"$line" || true)
+
+    if [[ "$action" == *'mint Keycloak Token A'* ]]; then
+      local st_color="$G" label="TOKEN A MINT"
+      [[ "$outcome" != "ok" ]] && st_color="$R" && label="TOKEN A MINT FAILED"
+      printf "\n${M}┌─ ${label} [${ts}]${N}\n"
+      printf "${M}│${N} ${D}CREATOR : Keycloak client_credentials + SPIFFE assertion${N}\n"
+      printf "${M}│${N} request_id : ${W}${rid}${N}\n"
+      printf "${M}│${N} cluster    : ${cluster}\n"
+      printf "${M}│${N} outcome    : ${st_color}${outcome}${N}\n"
+      if [[ "$outcome" == "ok" ]]; then
+        printf "${M}└─ Token A cached for outbound A2A (never logged)${N}\n"
+      else
+        printf "${M}└─ no Token A — dispatch will fail${N}\n"
+      fi
+      return 0
+    fi
+
+    if [[ "$outcome" == "denied" ]] || [[ "$action" == *'reject unregistered'* ]]; then
+      local detail
+      detail=$(grep -oP 'detail="\K[^"]+' <<<"$line" || true)
+      printf "\n${R}┌─ CLUSTER ALLOW-LIST REJECT [${ts}]${N}\n"
+      printf "${R}│${N} ${D}GATE : ClusterRoutingMiddleware (before ADK / Keycloak)${N}\n"
+      printf "${R}│${N} request_id : ${W}${rid}${N}\n"
+      printf "${R}│${N} detail     : ${detail}\n"
+      printf "${R}└─ no Token A mint, no Praxis/OLS call${N}\n"
+      return 0
+    fi
+
     printf "\n${C}┌─ ACME DISPATCH [${ts}]${N}\n"
     printf "${C}│${N} ${D}CREATOR : Keycloak (Token A, client_credentials + SPIFFE)${N}\n"
     printf "${C}│${N} ${D}NEXT    : Praxis → OLS A2A${N}\n"
