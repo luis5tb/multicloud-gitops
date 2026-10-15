@@ -47,7 +47,7 @@ dormant for the generic chart defaults.
 {{- end -}}
 
 {{- define "openshift-lightspeed-config.effectiveRpcUrl" -}}
-{{- /* OLS's A2A JSON-RPC lives at POST /a2a (luis5tb/lightspeed-service@a2a); the agent card must advertise that path. */ -}}
+{{- /* OLS's a2a-split JSON-RPC lives at POST /a2a; the agent card must advertise that path. */ -}}
 {{- if .Values.appServerPatch.a2a.rpcUrl -}}{{ .Values.appServerPatch.a2a.rpcUrl }}{{- else -}}{{ printf "https://openshift-lightspeed.%s/a2a" (include "openshift-lightspeed-config.appsDomain" .) }}{{- end -}}
 {{- end -}}
 
@@ -59,6 +59,24 @@ enable flags set via values-standalone's `value: "true"` form.
 */}}
 {{- define "openshift-lightspeed-config.a2aEnabled" -}}
 {{- $v := .Values.appServerPatch.a2a.enabled -}}
+{{- if kindIs "bool" $v -}}{{- if $v -}}true{{- else -}}false{{- end -}}
+{{- else -}}
+{{- $s := $v | toString | lower -}}
+{{- if or (eq $s "false") (eq $s "0") (eq $s "no") (eq $s "") -}}false{{- else -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "openshift-lightspeed-config.a2aTokenExchangeEnabled" -}}
+{{- $v := .Values.appServerPatch.a2a.tokenExchangeEnabled -}}
+{{- if kindIs "bool" $v -}}{{- if $v -}}true{{- else -}}false{{- end -}}
+{{- else -}}
+{{- $s := $v | toString | lower -}}
+{{- if or (eq $s "false") (eq $s "0") (eq $s "no") (eq $s "") -}}false{{- else -}}true{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "openshift-lightspeed-config.oidcTrustEnabled" -}}
+{{- $v := .Values.appServerPatch.oidcTrust.enabled -}}
 {{- if kindIs "bool" $v -}}{{- if $v -}}true{{- else -}}false{{- end -}}
 {{- else -}}
 {{- $s := $v | toString | lower -}}
@@ -127,6 +145,10 @@ containers:
         value: {{ .Values.identity.keycloak.caBundleSecret.name | quote }}
       - name: BUNDLE_KEY
         value: {{ .Values.identity.keycloak.caBundleSecret.key | quote }}
+      - name: OIDC_TRUST_ROLLOUT_ENABLED
+        value: {{ if and .Values.appServerPatch.enabled (eq (include "openshift-lightspeed-config.oidcTrustEnabled" .) "true") }}"true"{{ else }}"false"{{ end }}
+      - name: OIDC_TRUST_DEPLOYMENT_NAME
+        value: {{ .Values.appServerPatch.deploymentName | quote }}
       - name: PYTHONDONTWRITEBYTECODE
         value: "1"
     securityContext:
@@ -148,28 +170,26 @@ volumes:
 {{/*
 TEMPORARY A2A bridge -- see values.yaml's appServerPatch comment and
 README.md's "Temporary A2A bridge" section. Builds the CONTAINER_ENV_JSON
-payload merged into the operator-managed app-server Deployment's named
-container; only includes the optional fields when actually set, so leaving
-them blank doesn't override anything the operator (or a future native
-OLSConfig field) already set.
+payload merged into the operator-managed app-server Deployment. Only emits
+env vars consumed by lightspeed-service's a2a-split branch; OIDC inbound auth
+and token-exchange enablement are stored in the OLS YAML config, not app-server
+env vars.
 */}}
 {{- define "openshift-lightspeed-config.appServerPatchEnvJSON" -}}
 {{- $a2a := .Values.appServerPatch.a2a -}}
 {{- $env := list -}}
-{{- /* A2A routes are gated off by default in the OLS image (a2a.enabled / A2A_ENABLED); this bridge exists to turn them on. */ -}}
+{{- /* A2A routes are gated off by default in OLS (a2a.enabled / A2A_ENABLED); this bridge turns them on. */ -}}
 {{- $env = append $env (dict "name" "A2A_ENABLED" "value" (include "openshift-lightspeed-config.a2aEnabled" .)) -}}
-{{- /* keycloakIssuerURL and rpcUrl are derived from global.clusterBaseDomain when not explicitly set (see effective* helpers); both A2A_* vars are required, so always emit them. */ -}}
-{{- $env = append $env (dict "name" "A2A_KEYCLOAK_ISSUER_URL" "value" (include "openshift-lightspeed-config.effectiveKeycloakIssuerURL" .)) -}}
 {{- if $a2a.clusterId -}}
 {{- $env = append $env (dict "name" "A2A_CLUSTER_ID" "value" $a2a.clusterId) -}}
 {{- end -}}
 {{- $env = append $env (dict "name" "A2A_RPC_URL" "value" (include "openshift-lightspeed-config.effectiveRpcUrl" .)) -}}
+{{- if eq (include "openshift-lightspeed-config.a2aTokenExchangeEnabled" .) "true" -}}
+{{- /* Keycloak issuer and SPIFFE inputs are needed only for RFC 8693 exchange. */ -}}
+{{- $env = append $env (dict "name" "A2A_KEYCLOAK_ISSUER_URL" "value" (include "openshift-lightspeed-config.effectiveKeycloakIssuerURL" .)) -}}
 {{- if $a2a.keycloakCaBundle -}}
 {{- $env = append $env (dict "name" "A2A_KEYCLOAK_CA_BUNDLE" "value" $a2a.keycloakCaBundle) -}}
 {{- end -}}
-{{- $env = append $env (dict "name" "A2A_INBOUND_AUDIENCE" "value" $a2a.inboundAudience) -}}
-{{- /* inboundAzp is a list; render the allowed caller(s) comma-joined, no spaces (the contract the OLS A2A_INBOUND_AZP parser expects). */ -}}
-{{- $env = append $env (dict "name" "A2A_INBOUND_AZP" "value" (join "," $a2a.inboundAzp)) -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_AUDIENCE" "value" $a2a.exchangeAudience) -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_CLIENT_ASSERTION_TYPE" "value" $a2a.exchangeClientAssertionType) -}}
 {{- if $a2a.spiffeJwtAudience -}}
@@ -177,6 +197,19 @@ OLSConfig field) already set.
 {{- end -}}
 {{- if $a2a.spiffeEndpointSocket -}}
 {{- $env = append $env (dict "name" "A2A_SPIFFE_ENDPOINT_SOCKET" "value" $a2a.spiffeEndpointSocket) -}}
+{{- end -}}
+{{- if $a2a.spiffeTimeoutSeconds -}}
+{{- $env = append $env (dict "name" "A2A_SPIFFE_TIMEOUT_SECONDS" "value" ($a2a.spiffeTimeoutSeconds | toString)) -}}
+{{- end -}}
+{{- if $a2a.keycloakTimeoutSeconds -}}
+{{- $env = append $env (dict "name" "A2A_KEYCLOAK_TIMEOUT_SECONDS" "value" ($a2a.keycloakTimeoutSeconds | toString)) -}}
+{{- end -}}
+{{- if $a2a.tokenExchangeTimeoutSeconds -}}
+{{- $env = append $env (dict "name" "A2A_TOKEN_EXCHANGE_TIMEOUT_SECONDS" "value" ($a2a.tokenExchangeTimeoutSeconds | toString)) -}}
+{{- end -}}
+{{- if $a2a.keycloakDiscoveryCacheSeconds -}}
+{{- $env = append $env (dict "name" "A2A_KEYCLOAK_DISCOVERY_CACHE_SECONDS" "value" ($a2a.keycloakDiscoveryCacheSeconds | toString)) -}}
+{{- end -}}
 {{- end -}}
 {{- range .Values.appServerPatch.extraEnv -}}
 {{- $env = append $env (dict "name" .name "value" .value) -}}
@@ -221,7 +254,32 @@ containers:
       - name: CONTAINER_ENV_JSON
         value: {{ include "openshift-lightspeed-config.appServerPatchEnvJSON" . | quote }}
       - name: SPIFFE_VOLUME_MOUNT_PATH
-        value: {{ .Values.appServerPatch.spiffeWorkloadApiMountPath | quote }}
+        value: {{ if eq (include "openshift-lightspeed-config.a2aTokenExchangeEnabled" .) "true" }}{{ .Values.appServerPatch.spiffeWorkloadApiMountPath | quote }}{{ else }}""{{ end }}
+      # a2a-split reads token_exchange_enabled from the OLS YAML config; this
+      # Job-only switch drives that exact config field (not an app env var).
+      - name: A2A_TOKEN_EXCHANGE_ENABLED
+        value: {{ include "openshift-lightspeed-config.a2aTokenExchangeEnabled" . | quote }}
+      - name: A2A_CONFIGMAP_NAME
+        value: {{ .Values.appServerPatch.a2a.configMapName | quote }}
+      - name: A2A_CONFIGMAP_KEY
+        value: {{ .Values.appServerPatch.a2a.configMapKey | quote }}
+      # The OLS authentication module is shared with inbound A2A. When A2A is
+      # enabled, configure the OLS YAML with the Keycloak issuer/audience so the
+      # endpoint validates Token A using OIDC rather than K8s service-account auth.
+      - name: A2A_OIDC_AUTH_ENABLED
+        value: {{ include "openshift-lightspeed-config.a2aEnabled" . | quote }}
+      - name: A2A_OIDC_ISSUER_URL
+        value: {{ include "openshift-lightspeed-config.effectiveKeycloakIssuerURL" . | quote }}
+      - name: A2A_OIDC_AUDIENCE
+        value: {{ .Values.appServerPatch.a2a.inboundOidcAudience | quote }}
+      - name: OIDC_CA_TRUST_ENABLED
+        value: {{ include "openshift-lightspeed-config.oidcTrustEnabled" . | quote }}
+      - name: OIDC_CA_SECRET_NAME
+        value: {{ .Values.identity.keycloak.caBundleSecret.name | quote }}
+      - name: OIDC_CA_SECRET_KEY
+        value: {{ .Values.identity.keycloak.caBundleSecret.key | quote }}
+      - name: OIDC_CA_SECRET_MOUNT_PATH
+        value: {{ .Values.appServerPatch.oidcTrust.secretMountPath | quote }}
       - name: POLL_INTERVAL_SECONDS
         value: {{ .Values.appServerPatch.poll.intervalSeconds | quote }}
       - name: POLL_DEADLINE_SECONDS
@@ -242,8 +300,8 @@ containers:
         value: {{ .Values.appServerPatch.operatorReplicas | quote }}
       - name: PROVISION_DEADLINE_SECONDS
         value: {{ .Values.appServerPatch.poll.provisionDeadlineSeconds | quote }}
-      # OLSConfig CR to annotate as the PRIMARY (supported) operator-stop
-      # mechanism -- see values.yaml's appServerPatch operator-stop comment.
+      # OLSConfig CR to annotate as an additional pause request; the script
+      # still requires verified CSV-gated scale-to-zero before patching.
       - name: OLS_CONFIG_NAME
         value: {{ .Values.olsConfigName | quote }}
       # Mode A MCP hardening (see values.yaml appServerPatch.mcpHardening and

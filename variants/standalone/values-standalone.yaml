@@ -475,10 +475,11 @@ clusterGroup:
         # directly. See charts/all/openshift-lightspeed-config/README.md's
         # "MCP hardening" section and LIGHTSPEED_DESIGN.md section 5.
         #
-        # caBundleSync reuses this pattern's established managed-ingress-CA
-        # sync (adapted to a Secret target), RESERVED for a future "Mode B"
-        # (MCP-side JWT validation). Mode A (passthrough) needs no CA, so this
-        # stays enabled only to keep the Secret populated for Mode B.
+        # caBundleSync copies the managed ingress CA into this namespace.
+        # Mode A MCP passthrough does not need it; the optional OIDC trust
+        # bridge below uses it for inbound OIDC issuer discovery/JWKS if the
+        # Keycloak Route is privately signed (Mode B MCP validation remains
+        # future work).
         - name: identity.keycloak.caBundleSync.enabled
           value: "true"
         # Enabled now that appServerPatch actually deploys the A2A-enabled
@@ -490,9 +491,11 @@ clusterGroup:
         # override only to diverge.
         # TEMPORARY A2A bridge (see charts/all/openshift-lightspeed-config/
         # README.md's "Temporary A2A bridge" section) -- patches the
-        # operator-managed app-server Deployment with the custom OLS image
-        # and the A2A_* env vars the luis5tb/lightspeed-service@a2a image's
-        # A2A endpoint requires, since OLSConfig has no field for either.
+        # operator-managed app-server Deployment with the custom OLS image,
+        # A2A_* env vars, and operator-generated config required by
+        # luis5tb/lightspeed-service@a2a-split. Rebuild/push this branch's
+        # image before sync; the tag below is the SOURCE SHA, not proof that
+        # the image already exists in the registry.
         # Delete this override block entirely once the Operator/OLSConfig CRD
         # natively supports a custom service image and A2A configuration.
         - name: appServerPatch.enabled
@@ -501,16 +504,39 @@ clusterGroup:
         # is already true when appServerPatch is used; kept explicit here.
         - name: appServerPatch.a2a.enabled
           value: "true"
+        # a2a-split makes RFC 8693 exchange opt-in (false by default). The
+        # bridge must write a2a.token_exchange_enabled into the operator's
+        # app-server ConfigMap -- an env var alone does not enable it. Without
+        # this, Token A reaches MCP instead of an exchanged Token B.
+        - name: appServerPatch.a2a.tokenExchangeEnabled
+          value: "true"
+        # Operator source names the app-server config ConfigMap "olsconfig"
+        # (key "olsconfig.yaml"); confirm on the installed operator release
+        # with `oc get cm olsconfig -n a2a-lightspeed` before cutover.
+        - name: appServerPatch.a2a.configMapName
+          value: olsconfig
+        # a2a-split reuses the app-server's configured OIDC auth module for
+        # inbound A2A. The bridge updates olsconfig.yaml's module/issuer and
+        # this audience (the one ACME's Token A carries); Praxis remains the
+        # sole azp allow-list, while OLS checks issuer, audience and signature.
+        - name: appServerPatch.a2a.inboundOidcAudience
+          value: lightspeed-a2a
+        # HTTPX's inbound OIDC validation uses certifi, not only the OS trust
+        # store. Mount the Secret synced above under /etc/certs; the a2a-split
+        # runner appends this CA to its public-root SSL_CERT_FILE bundle.
+        # Verify the operator's app-server still supplies the writable
+        # SSL_CERT_FILE under /etc/certs before enabling on another release.
+        - name: appServerPatch.oidcTrust.enabled
+          value: "true"
         # Set these once Phase 0 step 1's podman build/push has actually
-        # happened -- empty means this patch only sets the A2A_* env vars
-        # below, not the image.
+        # happened; don't deploy a stale image from the old a2a branch.
         - name: appServerPatch.image.repository
           value: quay.io/ltomasbo/openshift-lightspeed
         - name: appServerPatch.image.tag
           # Quote: a git short SHA that happens to be all-digits would otherwise
           # parse as a number and re-serialize in scientific notation, breaking
           # the image reference (AGENTS.md hard-won lesson).
-          value: "25f537af"
+          value: "4d85f430"
         # appServerPatch.a2a.keycloakIssuerURL derives from
         # global.clusterBaseDomain + global.keycloakRealm, and
         # appServerPatch.a2a.rpcUrl from global.clusterBaseDomain

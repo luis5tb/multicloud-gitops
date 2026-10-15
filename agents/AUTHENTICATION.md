@@ -112,13 +112,13 @@ sequenceDiagram
     Praxis->>Praxis: Router selects the OLS backend registered<br/>for this X-OLS-Cluster id (files/praxis.yaml) --<br/>missing/unknown id is denied, never a default backend
     Praxis->>OLS: Forward allowed A2A request, original Token A, and X-OLS-Cluster
 
-    Note over OLS: a2a_auth.py (independent validation, defense in depth)
-    OLS->>KC: Validate Token A with cached JWKS
-    OLS->>OLS: Validate Token A (sig, iss, aud=lightspeed-a2a, exp, azp in allow-list)
+    Note over OLS: a2a-split reuses OLS's configured OIDC auth module
+    OLS->>KC: Validate Token A with cached discovery/JWKS
+    OLS->>OLS: Validate Token A (RS256 sig, iss, aud=lightspeed-a2a, exp/iat/sub)
     OLS->>OLS: Check X-OLS-Cluster matches this instance's own configured cluster id
 
-    Note over Praxis,OLS: The public OpenShift Route targets Praxis, not OLS.<br/>An OLS NetworkPolicy allows ingress only from Praxis pods,<br/>so callers cannot bypass the authorization boundary.
-    OLS->>OLS: Fetch own JWT-SVID from ZTWIM/SPIRE<br/>(spiffe://.../ns/openshift-lightspeed/sa/lightspeed-app-server)
+    Note over Praxis,OLS: The public OpenShift Route targets Praxis, not OLS.<br/>The chart adds an ingress allow for Praxis, but the operator's<br/>additive policy also allows same-namespace/console/ingress pods.
+    OLS->>OLS: Fetch own JWT-SVID from ZTWIM/SPIRE<br/>(spiffe://.../ns/a2a-lightspeed/sa/lightspeed-app-server)
 
     OLS->>KC: POST /token (RFC 8693 token exchange)<br/>subject_token=Token A<br/>client_assertion=OLS's own JWT-SVID<br/>requested aud=openshift-mcp
     KC-->>OLS: Token B (MCP-scoped)
@@ -245,6 +245,10 @@ see "Tracing a live request").
 the actual point of the exchange: neither MCP nor the Kubernetes API server
 ever sees the raw caller token -- they only ever see one scoped specifically
 to the `openshift-mcp` audience, and only OLS's A2A endpoint ever sees both.
+This statement assumes `a2a.token_exchange_enabled` is explicitly enabled in
+the `a2a-split` app-server config. That branch defaults it to **false**; without
+the override, OLS forwards Token A to MCP instead, defeating this pattern's
+MCP-scoped-token boundary and likely failing the API server's audience check.
 A client-supplied `MCP-Headers`-style override is structurally impossible,
 not merely rejected: `a2a_executor.py` reads message metadata only for the
 `ols_mode` query-mode selector and always passes `client_headers=None` into
@@ -331,7 +335,7 @@ these breaks the flow -- see that chart's README for the exact rationale.
 
 There is also a sixth, deliberately-not-a-client value:
 `keycloak.lightspeedA2aAudience` (default `lightspeed-a2a`), the audience
-OLS's own inbound `KeycloakTokenValidator` (`a2a_auth.py`) requires. Unlike
+OLS's configured OIDC authentication module requires. Unlike
 `openshift-mcp` above, nothing in Keycloak requires this to correspond to a
 real client -- it's added to acme-agent's token via `oidc-audience-mapper`'s
 `included.custom.audience` (a plain string), not `included.client.audience`.
@@ -420,25 +424,35 @@ whose behalf" story in one column.
    already carry the exchanging client (`lightspeed-mcp`, a real client
    audience this time) as an audience -- both are protocol mappers on the
    `acme-agent` client, see `charts/all/keycloak-oidc`.
-4. **OLS validates the inbound token** (`vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py`,
-   `A2AAuthenticator.authenticate_caller`): every A2A JSON-RPC call requires
-   (a) `KeycloakTokenValidator.validate` -- signature via JWKS, issuer, the
-   `lightspeed-a2a` audience, expiry, and the token's `azp` being one of an
-   **allow-list** (`A2A_INBOUND_AZP`, a comma-separated set, default just
-   `acme-agent`) -- and (b) a valid, allow-listed `X-OLS-Cluster` header
-   matching this instance's own configured cluster id. Either failing returns
-   `401` (invalid/missing token) or `403` (missing/unknown cluster header);
-   the stock REST API
-   (`/v1/*`) is completely unaffected -- it keeps using Kubernetes
-   `TokenReview`/`SubjectAccessReview` via `ols.src.auth.k8s`, a separate
-   trust boundary this A2A path does not touch.
+4. **OLS validates the inbound token** ([`a2a-split`'s
+   `ols/app/endpoints/a2a_auth.py`](https://github.com/luis5tb/lightspeed-service/blob/a2a-split/ols/app/endpoints/a2a_auth.py),
+   `A2AAuthenticator.authenticate_caller`): every A2A JSON-RPC call reuses
+   the OLS authentication module configured in the app-server config. This
+   pattern selects `oidc`, which verifies the RS256 signature via the realm's
+   JWKS, exact issuer, `lightspeed-a2a` audience, and token lifetime/subject.
+   OLS then checks that `X-OLS-Cluster` matches its own cluster id. A missing
+   or invalid token returns `401`, and a missing/mismatched cluster header
+   returns `403`. **Unlike the old `a2a` branch, `a2a-split` has no
+   `A2A_INBOUND_AZP` allow-list in OLS**: Praxis's `claim.azp` policy is the
+   caller allow-list, while OLS independently verifies the JWT and cluster
+   binding. Do not treat the `azp` claim as checked twice. Switching OLS's
+   authentication module to `oidc` also changes authentication of its stock
+   `/v1/*` REST API; it no longer uses the Kubernetes TokenReview/SAR module.
+   The operator's own NetworkPolicy allows more than Praxis (see the OLS chart
+   README); Kubernetes policies are additive, so this chart cannot make
+   Praxis the exclusive *in-cluster* path. Restrict access to that namespace
+   and the existing OLS Service/Route as part of your threat model.
+   OLS's OIDC discovery/JWKS requests use HTTPX's certifi trust by default;
+   `A2A_KEYCLOAK_CA_BUNDLE` applies to the separate token-exchange client,
+   not to inbound validation. For a privately signed issuer, set
+   `SSL_CERT_FILE` to a bundle combining public roots with the ingress CA.
 
    ```
-   Checks run against the step-3 token by KeycloakTokenValidator.validate():
-     iss == A2A_KEYCLOAK_ISSUER_URL   (https://keycloak.../realms/rca)
-     aud == A2A_INBOUND_AUDIENCE      ("lightspeed-a2a")
-     azp in  A2A_INBOUND_AZP          (allow-list, default {"acme-agent"})
-     exp/iat/sub required, signature verified via JWKS
+   Checks run against the step-3 token by OLS's OIDC auth module:
+     iss == configured oidc_issuer_url (https://keycloak.../realms/rca)
+     aud includes configured oidc_audience ("lightspeed-a2a")
+     exp/iat/sub required, RS256 signature verified via JWKS
+     azp allow-list: Praxis only (policy.allowedCallers)
    ```
 
    OLS's own JWT-SVID, fetched independently of the caller token. `aud` is
@@ -447,7 +461,7 @@ whose behalf" story in one column.
 
    ```json
    {
-     "sub": "spiffe://apps.<cluster-domain>/ns/openshift-lightspeed/sa/lightspeed-app-server",
+     "sub": "spiffe://apps.<cluster-domain>/ns/a2a-lightspeed/sa/lightspeed-app-server",
      "aud": ["https://keycloak.apps.<cluster-domain>/realms/rca"],
      "exp": 1732000300
    }
@@ -583,14 +597,12 @@ whose behalf" story in one column.
    SSE streaming of OLS's existing token-by-token LLM output as
    `TaskArtifactUpdateEvent`s, not a single buffered response. Task/
    conversation state is still scoped to `(authenticated caller, cluster id)`
-   (`CallerIdentity.task_scope`, via `InMemoryTaskStore`'s `owner_resolver`
-   hook) and held in-process only -- it does not survive a restart or span
-   replicas, matching this phase's scope: a persistent, multi-replica-safe
-   task store is tracked as later work (see the migration plan's Praxis
-   task-owner routing discussion). Unlike the old hand-rolled dispatcher's
-   `_tasks` dict, the SDK's `InMemoryTaskStore` has no built-in TTL/pruning
-   -- completed tasks accumulate in memory until the process restarts; worth
-   revisiting if sustained A2A traffic ever makes this a real concern. If OLS's
+   (`CallerIdentity.task_scope`) and held in-process only -- it does not
+   survive a restart or span replicas. The `a2a-split` task store limits
+   in-flight tasks to 1,024 and retains the latest 1,024 terminal tasks and
+   1,024 context bindings separately; old task lookups can return not found,
+   and an evicted idle context can start a new conversation. Persistence and
+   multi-replica task routing are still future work. If OLS's
    output needs to be structured (a diagnosis + remediation-proposal
    contract equivalent to the old `AnalysisResult`), that is a still-open
    product question -- see `LIGHTSPEED_IMPLEMENTATION_PLAN.md`'s "AnalysisResult

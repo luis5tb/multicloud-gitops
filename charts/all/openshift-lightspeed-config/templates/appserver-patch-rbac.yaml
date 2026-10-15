@@ -59,6 +59,19 @@ rules:
       - get
       - patch
   {{- end }}
+  {{- if .Values.appServerPatch.a2a.configMapName }}
+  # a2a-split's token_exchange_enabled flag is YAML config, not a service env
+  # var. Grant access only to the explicitly configured app-server OLS config.
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - {{ .Values.appServerPatch.a2a.configMapName | quote }}
+    verbs:
+      - get
+      - patch
+  {{- end }}
   {{- if .Values.appServerPatch.operatorSubscriptionName }}
   - apiGroups:
       - operators.coreos.com
@@ -73,9 +86,8 @@ rules:
   # changes on every operator upgrade, and is only known at runtime via the
   # Subscription's status.installedCSV -- RBAC resourceNames must be static.
   # Only `get` is needed: the CSV is read to wait for phase=Succeeded before
-  # the scale-to-0 fallback. (The operator-stop is now done by annotating the
-  # OLSConfig CR, below -- not the CSV, which an earlier version wrongly
-  # patched.)
+  # the required scale-to-0. The optional OLSConfig annotation below is applied
+  # only after that scale-down is verified; the CSV itself is never patched.
   - apiGroups:
       - operators.coreos.com
     resources:
@@ -88,8 +100,8 @@ rules:
 # OLSConfig is a cluster-scoped singleton (see values.yaml's olsConfigName
 # comment; verify with `oc get crd olsconfigs.ols.openshift.io -o
 # jsonpath='{.spec.scope}'`), so pausing the operator by annotating it needs
-# a ClusterRole, pinned to the single CR by name. This is the PRIMARY,
-# Red Hat-documented operator-stop mechanism (see task 3 / values.yaml).
+# a ClusterRole, pinned to the single CR by name. This grants the optional
+# OLSConfig pause annotation; the Job still verifies CSV-gated scale-to-zero.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

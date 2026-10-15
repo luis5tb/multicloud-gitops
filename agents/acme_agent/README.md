@@ -23,7 +23,7 @@ and final answer stream straight to the caller.
 sub-agent down to a single return value -- under `message/stream` that emits
 nothing until the entire investigation finishes, starving long runs. We do
 **not** set `mode="task"` (that needs ADK's `finish_task` handshake, which
-`vendor/lightspeed-service`'s hand-rolled A2A endpoint does not implement);
+the downstream OpenShift Lightspeed A2A endpoint does not implement);
 the default mode streams events and treats stream end /
 `TASK_STATE_COMPLETED` as completion. See `agents/AUTHENTICATION.md` for
 the identity chain on each delegated call.

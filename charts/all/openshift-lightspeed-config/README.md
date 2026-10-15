@@ -53,10 +53,9 @@ a real deployment.
   the cluster's managed ingress CA bundle (which also signs Keycloak's Route
   certificate) into a Secret in this namespace, following this pattern's
   established CA-sync approach. Unlike the ConfigMap target other charts use,
-  this copy targets a Secret, **reserved for a future "Mode B" MCP hardening**
-  (MCP validating the Keycloak JWT itself, which needs the issuer CA mounted
-  from a Secret -- see "MCP hardening" below). Disabled by default; the Mode A
-  hardening this chart actually applies needs no CA.
+  this copy targets a Secret. Disabled by default; the optional A2A OIDC trust
+  bridge can mount it for private Keycloak Routes. MCP Mode A (passthrough)
+  does not need this CA.
 - `templates/networkpolicy.yaml` -- best-effort ingress restriction for the
   (unconfirmed-label) operator-managed app-server pods to same-namespace
   traffic and the Praxis gateway.
@@ -143,10 +142,10 @@ them); this re-asserts on every ArgoCD sync and is idempotent.
 **Mode B (future, not implemented).** A stricter "Mode B" would additionally
 have MCP validate the Keycloak JWT **itself** (`authorization_url` +
 `oauth_audience` + a mounted `certificate_authority`) before passthrough --
-defence in depth that does not trust the network alone. That needs the
-Keycloak issuer CA mounted into the MCP pod from a Secret, which is exactly
-what the `identity.keycloak.caBundleSync` machinery (disabled by default) is
-reserved to feed. It is documented here as a future option, not built.
+defence in depth that does not trust the network alone. That would need the
+Keycloak issuer CA mounted into the MCP pod from a Secret. The existing
+`identity.keycloak.caBundleSync` Secret is now optionally consumed by the
+app-server's inbound OIDC trust bridge; MCP does not yet mount it.
 
 **NetworkPolicy caveat (unchanged).** The operator's generated MCP
 NetworkPolicy permits any pod in its own namespace; because NetworkPolicies
@@ -171,16 +170,76 @@ other MCP auth settings) natively as supported fields.
 
 The OLSConfig CRD has no field for a custom app-server image -- the operator
 picks that via its own `--service-image` startup flag, not `OLSConfig` (see
-the top-level `README.md` Phase 0) -- and no field for the `A2A_*`
-environment variables the
-[`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
-image's `ols/app/endpoints/a2a_auth.py` requires to serve A2A requests at
-all (`A2A_ENABLED=true` to mount `POST /a2a` and the agent card;
-`A2A_KEYCLOAK_ISSUER_URL`, `A2A_CLUSTER_ID`, `A2A_RPC_URL` — the last must
-end in `/a2a` — are required; it raises `A2AConfigurationError` without
-them). Both are properties of the operator-managed app-server Deployment,
-which this chart does not own and which the operator continuously
-reconciles.
+the top-level `README.md` Phase 0) -- and no field for the A2A configuration
+used by the operator-managed app-server. The current
+[`luis5tb/lightspeed-service@a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)
+branch requires `A2A_ENABLED` to mount `POST /a2a`, plus
+`A2A_CLUSTER_ID`/`A2A_RPC_URL` to build the A2A server and agent card. Inbound
+requests use OLS's configured `k8s` or `oidc` authentication module. The old
+`A2A_INBOUND_AUDIENCE` and `A2A_INBOUND_AZP` variables are not consumed by this
+branch and are intentionally not rendered.
+
+**Token exchange is optional and is not an environment toggle in a2a-split.**
+The service reads `a2a.token_exchange_enabled` from its YAML config; it does
+not read `A2A_TOKEN_EXCHANGE_ENABLED`. It also reuses the configured OLS
+authentication module for inbound A2A, so the bridge explicitly selects OIDC
+and configures its issuer/audience rather than leaving the operator's default
+`k8s` module in place. When
+`appServerPatch.a2a.tokenExchangeEnabled` is true (the chart default, needed
+for this pattern's caller-identity-to-`openshift-mcp` flow), the patch Job
+sets `ols_config.authentication_config.module: oidc`, the Keycloak issuer,
+`inboundOidcAudience` (default `lightspeed-a2a`), and the exchange setting in
+the explicitly named `appServerPatch.a2a.configMapName` / `configMapKey`. Set
+the ConfigMap name to the object mounted by the live app-server's
+`OLS_CONFIG_FILE` and verify the key/operator release before enabling the
+bridge; the default name is deliberately empty because the operator-managed
+ConfigMap name is not chart-owned. The patcher sets those three OIDC fields,
+removes obsolete K8s-only auth fields, and sets `a2a.token_exchange_enabled`,
+preserving all other OLS config (including username/metrics settings), and
+grants the Job `get`/`patch` only on that one ConfigMap. It validates the
+target/config before pausing the operator and restarts the app-server only
+when the config content changes. Keep `configMapName` configured when toggling
+exchange off so the bridge can set `token_exchange_enabled: false` while
+retaining inbound OIDC.
+
+When exchange is turned off, the bridge explicitly deletes its exchange-only
+`A2A_*` environment entries and the SPIFFE CSI volume/mount; strategic-merge
+omission alone would leave these stale on the Deployment.
+
+With token exchange enabled, `A2A_KEYCLOAK_ISSUER_URL` must be HTTPS and the
+SPIFFE workload API must be mounted. The chart renders only current
+`a2a-split` inputs: `A2A_KEYCLOAK_CA_BUNDLE`, `A2A_EXCHANGE_AUDIENCE`,
+`A2A_EXCHANGE_CLIENT_ASSERTION_TYPE`, `A2A_SPIFFE_JWT_AUDIENCE`,
+`A2A_SPIFFE_ENDPOINT_SOCKET`, and its timeout/cache variables. Inbound OIDC
+validation remains independent of RFC 8693 token exchange.
+
+### Optional private-Keycloak-CA trust (`appServerPatch.oidcTrust.enabled`)
+
+Inbound OIDC uses `httpx.AsyncClient(verify=True)`. For a private Keycloak
+Route, opt in with `appServerPatch.oidcTrust.enabled: true` and
+`identity.keycloak.caBundleSync.enabled: true`. The patch mounts the synced
+managed-ingress CA Secret as a sibling under `/etc/certs` and points the app
+back at its operator-provided writable `SSL_CERT_FILE` bundle path. At startup
+the a2a-split runner combines the image's system CA roots with `.crt`/`.pem`
+files in sibling `/etc/certs` directories. This retains public/system trust
+while adding the private CA; certificate material stays in the synced
+Kubernetes Secret, never in Git. The option requires an explicit
+`appServerPatch.image.repository` and `tag` so the runner bundle-building
+behavior is present. Disabling it restores the operator's original
+`SSL_CERT_FILE` and removes the bridge's named Secret mount.
+
+Because the runner builds `SSL_CERT_FILE` only once at process startup, merely
+updating the mounted Secret on ingress-CA rotation is insufficient. When
+`oidcTrust.enabled` is on, the CA sync script compares the Secret contents and,
+only after a create or content change, stamps the app-server pod template with
+a stable SHA-256 of the bundle. The Deployment controller rolls the app-server
+so the runner rebuilds its trust bundle. Re-running with the same CA is a
+no-op. The sync ServiceAccount receives only `get`/`patch` on the named
+`appServerPatch.deploymentName` Deployment for this operation. On a cold install
+the CA sync may run before that Deployment exists; it logs and skips the
+rollout because the Secret is already populated and subsequently created pods
+will read it at startup. A CA change after the app-server exists triggers the
+rollout.
 
 `appServerPatch` (disabled by default) works around this by patching that
 Deployment directly, after the fact. An earlier version of this mechanism
@@ -205,23 +264,15 @@ once, before patching:
   the installed CSV's name carries a version suffix only known at runtime, so
   RBAC `resourceNames` can't pin it). When `mcpHardening.enabled` it also
   grants `get`/`patch` on the MCP `ConfigMap` (`mcpHardening.configMapName`).
+  When `appServerPatch.a2a.configMapName` is set, it separately grants
+  `get`/`patch` on that exact OLS config `ConfigMap`.
   A separate `ClusterRole`/`ClusterRoleBinding` grants `get`/`patch` on the
-  cluster-scoped `OLSConfig` CR (`olsConfigName`), for the primary
-  operator-stop annotation below.
+   cluster-scoped `OLSConfig` CR (`olsConfigName`), for the optional
+   post-stop annotation below.
 - `templates/appserver-patch-job.yaml` -- an ArgoCD `Sync` hook Job that:
-  1. **PRIMARY / supported:** annotates the `OLSConfig` CR (`olsConfigName`, a
-     cluster-scoped singleton) with
-     `appServerPatch.operatorManagementStateAnnotation: Unmanaged`. Per Red
-     Hat's Lightspeed docs this is THE supported way to pause the operator's
-     reconcile, and a CRD investigation confirmed the target is the OLSConfig
-     CR -- **not** the CSV (an earlier version of this chart annotated the CSV,
-     which was wrong: this operator's binary never references the annotation
-     there). This OLSConfig-CR path has **not yet been verified live** on this
-     cluster, which is why the scale-to-0 below is kept as a confirmed
-     fallback.
-  2. **FALLBACK / empirically confirmed:** resolves the installed CSV via
-     `appServerPatch.operatorSubscriptionName`'s `status.installedCSV`, waits
-     for it to reach `status.phase: Succeeded`, then scales
+   1. **Required / empirically confirmed:** resolves the installed CSV via
+      `appServerPatch.operatorSubscriptionName`'s `status.installedCSV`, waits
+      for it to reach `status.phase: Succeeded`, then scales
      `appServerPatch.operatorDeploymentName` to 0 replicas. Confirmed live:
      OLM itself (not the operator) actively re-enforces its CSV-declared
      replica count while a CSV is still mid-install, logged as
@@ -229,35 +280,58 @@ once, before patching:
      scaling to 0 during that window gets immediately scaled back to 1 by OLM,
      not reconciled. Once `Succeeded`, a manual scale-to-0 was separately
      confirmed stable with zero drift-correction from either the operator (not
-     running) or OLM, over several minutes of direct observation -- that's the
-     behavior this waits to reach before scaling down.
+      running) or OLM, over several minutes of direct observation -- that's the
+      behavior this waits to reach before scaling down. It then GETs the
+      operator Deployment until its generation is observed and both `replicas`
+      and `availableReplicas` are zero in two consecutive observations. A
+      missing CSV, failed scale, or unverified stop fails the hook before the
+      OLSConfig annotation or any operator-managed resource patch.
+   2. Only after the verified stop, requests an additional pause by annotating
+      the `OLSConfig` CR (`olsConfigName`, a cluster-scoped singleton) with
+      `appServerPatch.operatorManagementStateAnnotation: Unmanaged`. The target
+      is the OLSConfig CR, not the CSV, but this annotation has not been verified
+      against the target operator release and is not accepted as proof that
+      reconciliation stopped.
   3. **Mode A MCP hardening** (only when `mcpHardening.enabled`, and only after
      the operator is stopped): patches the operator-generated MCP ConfigMap
      TOML (`require_oauth=true`/`skip_jwt_verification=true`/
      `cluster_auth_mode=passthrough`) and rolls the MCP Deployment. See the
      "MCP hardening" section above for the full rationale.
-  4. Only then polls for the app-server Deployment to exist (the operator
+  4. Updates the named OLS config ConfigMap's `a2a.token_exchange_enabled`
+      value when `appServerPatch.a2a.configMapName` is set. The bridge also
+      selects the OIDC inbound auth module and configures its issuer/audience.
+      This is the service-supported configuration mechanism on `a2a-split`; no
+      `A2A_TOKEN_EXCHANGE_ENABLED` variable is added to the app-server. The
+      target/config is checked before pausing the operator, and a stable hash
+      annotation causes an app-server rollout only when config changes.
+  5. Only then polls for the app-server Deployment to exist (the operator
      may not have reconciled `OLSConfig` into it yet on a fresh install) and
      applies a strategic merge patch setting the container's `image` (if
-     `appServerPatch.image.repository`/`tag` are set), merging the `A2A_*`
-     env vars built from `appServerPatch.a2a`/`extraEnv`, and -- when
-     `appServerPatch.spiffeWorkloadApiMountPath` is set (the default) --
-     mounting SPIRE's `csi.spiffe.io` CSI driver volume into the container.
+     `appServerPatch.image.repository`/`tag` are set), merging only
+      `a2a-split`-supported A2A env vars built from
+      `appServerPatch.a2a`/`extraEnv`, adding/removing the SPIRE CSI volume as
+      exchange is enabled/disabled, and -- when
+      `appServerPatch.oidcTrust.enabled` -- mounting the synced Keycloak CA
+      Secret beside the operator-provided bundle `emptyDir` and setting the
+      saved operator `SSL_CERT_FILE` path.
      SPIRE's workload API is a CSI volume every workload declares for
      itself, not something a mutating webhook injects (confirmed by
      checking `charts/all/acme-agent/templates/deployment.yaml`, the only
      other consumer of it in this pattern), and OLSConfig/the operator have
      no field or flag for it either -- without it,
      `a2a_auth.py`'s `SpiffeWorkloadIdentity` fails every RFC 8693 exchange
-     with "ZTWIM/SPIRE did not issue a JWT-SVID" (confirmed live). All of
-     this merges by name, so any other env var, volume, or container the
-     operator set is left alone.
+      with "SPIFFE did not issue a JWT-SVID". All of
+      this merges `env` and pod `volumes` by `name`, and `volumeMounts` by
+      `mountPath`, so any other operator-provided values stay intact. When a
+      bridge mount is disabled, the Job reads its current mount paths and
+      includes those strategic-merge keys in the deletion tombstones; omitting
+      `mountPath` would not identify a `volumeMount` to delete.
 
-  Each operator-stop step is independently gated: the OLSConfig annotation
-  (step 1) is skipped if `olsConfigName` is empty; the scale-to-0 (step 2) is
-  skipped if `operatorDeploymentName` is empty, and its Succeeded-wait is
-  skipped if `operatorSubscriptionName` is empty. With all of them empty the
-  Job falls back to the old patch-only behavior (which will not persist).
+   The best-effort annotation step is skipped if `olsConfigName` is empty, but
+   the verified CSV-Succeeded and scale-to-zero steps are mandatory and happen
+   first. Render fails if
+   `operatorSubscriptionName` or `operatorDeploymentName` is empty; the Job
+   fails closed if the CSV or stopped state cannot be confirmed.
 
   **Provisioning gate (runs before any stop; self-healing).** `Succeeded` means
   the operator is *installed*, not that it has finished reconciling the
@@ -317,15 +391,17 @@ debugging a "stuck" sync or an OLSConfig edit that seems to do nothing:
    preferably, remove the whole `appServerPatch` bridge once the operator
    natively supports a custom service image and A2A config (see below).
 
-### Allowed inbound caller(s) (`appServerPatch.a2a.inboundAzp`)
+### Inbound A2A authentication
 
-`appServerPatch.a2a.inboundAzp` is a **list** of Keycloak client IDs (the
-`azp` claim) OLS accepts on inbound A2A requests. The chart renders it
-joined-by-comma, with no spaces, into the `A2A_INBOUND_AZP` env var
-`vendor/lightspeed-service` parses (e.g. `[acme-agent]` -> `acme-agent`;
-`[acme-agent, orchestrator]` -> `acme-agent,orchestrator`). It defaults to a
-single-item list `[acme-agent]`, preserving the previous single-caller
-behavior; add entries to allow additional callers.
+`a2a-split` authenticates inbound `POST /a2a` requests with the OLS service's
+selected `k8s` or `oidc` authentication module. This bridge selects `oidc` and
+configures its issuer and audience; caller allow-listing remains the Praxis
+policy's responsibility. This chart does not add an
+A2A-specific inbound allow-list, and the old
+`A2A_INBOUND_AUDIENCE` / `A2A_INBOUND_AZP` environment variables are not part
+of this branch's interface. Enabling token exchange changes only how an
+already-validated caller token is exchanged for MCP; it does not weaken inbound
+OIDC validation.
 
 ### Guarded: `appServerPatch.a2a.clusterId` must be a registry key
 
@@ -338,11 +414,34 @@ one map). Keep it derived by the same algorithm the rest of the pattern uses
 (`f"{host}:{port}"` with lowercase host and every `.`/`:` replaced by `-` --
 see AGENTS.md's hard-won lesson on cluster-id derivation).
 
+## Troubleshooting
+
+### Standalone values YAML does not parse
+
+This was caught by running `helm template` with the real
+`variants/standalone/values-standalone.yaml`: an extra-indented OLS override
+list item made the YAML invalid. Earlier chart tests rendered the chart with
+defaults or synthetic chart-only values, so they never parsed the standalone
+clusterGroup file. `tests/chart/test_ols_a2a.py::test_standalone_values_file_parses`
+renders the chart with that actual file as input, and
+`test_standalone_ols_application_overrides_render_enabled_bridge` applies its
+OLS application overrides to catch deployment-only render errors too.
+
+### Ingress CA rotation leaves OIDC trust stale
+
+Static review found that the CA-sync CronJob updated its mounted Secret, but
+`a2a-split` builds the `SSL_CERT_FILE` trust bundle only at process startup.
+The sync now stamps a hash of the current CA on the app-server pod template
+when OIDC trust is enabled, restarting it only when the CA changes. If the
+Secret update succeeds but the rollout fails, the next sync retries the hash
+check even though the Secret already matches. Earlier tests checked the mount
+but not rotation or this partial-failure path.
+
 **This is explicitly temporary.** Delete `appServerPatch` from `values.yaml`,
 `templates/appserver-patch-*.yaml`, and `files/patch_appserver.py` entirely
 once the OpenShift Lightspeed Operator/OLSConfig CRD natively supports a
-custom service image and A2A configuration (i.e. once the A2A changes in
-`vendor/lightspeed-service` are upstreamed and the operator exposes them as
+custom service image and A2A configuration (i.e. once the A2A changes in the
+external lightspeed-service branch are upstreamed and the operator exposes them as
 real CRD fields) -- at that point this whole mechanism becomes dead weight
 fighting a problem the operator itself already solves.
 
