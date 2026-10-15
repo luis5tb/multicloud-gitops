@@ -32,9 +32,9 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
    `agents/acme_agent/` here. The A2A-enabled OpenShift Lightspeed
    app-server image is built from the external fork
    [`luis5tb/lightspeed-service`](https://github.com/luis5tb/lightspeed-service)
-   on branch [`a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
-   (tip at time of writing: `25f537a` "Harden A2A server enablement, path,
-   and continuity", which already includes the TLS trust-store extend fix)
+   on branch [`a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)
+   (tip at time of writing: `4d85f430`, which separates reusable OIDC
+   authentication, A2A transport, and optional token exchange)
    -- this pattern no longer vendors that tree.
 
     ```bash
@@ -47,12 +47,12 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
       -t quay.io/${QUAY_ORG}/acme-agent:${ACME_TAG} agents/acme_agent
     podman push quay.io/${QUAY_ORG}/acme-agent:${ACME_TAG}
 
-    # --- OLS + A2A (from luis5tb/lightspeed-service@a2a) ---
+    # --- OLS + A2A (from luis5tb/lightspeed-service@a2a-split) ---
     # Clone beside this repo (or wherever you prefer); pin a SHA for
     # reproducibility if you want an immutable image tag.
-    git clone --branch a2a --single-branch \
-      https://github.com/luis5tb/lightspeed-service.git /tmp/lightspeed-service-a2a
-    cd /tmp/lightspeed-service-a2a
+    git clone --branch a2a-split --single-branch \
+      https://github.com/luis5tb/lightspeed-service.git /tmp/opencode/lightspeed-service-a2a-split
+    cd /tmp/opencode/lightspeed-service-a2a-split
     export OLS_TAG=$(git rev-parse --short HEAD)
 
     # Prefer UBI base images so the build does not need a RHEL
@@ -72,20 +72,47 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     either. `charts/all/openshift-lightspeed-config`'s `appServerPatch`
     (disabled by default) is a **temporary** bridge for both: it patches the
     operator-managed app-server Deployment directly, after the fact, with
-    this image and the required `A2A_*` settings (`keycloakIssuerURL`,
-    `clusterId`, `rpcUrl`, plus the optional audience/azp overrides) --
+    this image and the required `A2A_*` settings (cluster ID, public RPC URL,
+    and the Keycloak/SPIFFE exchange settings) --
     see that chart's README.md ("Temporary A2A bridge") for how to set it,
     and why it also scales the operator itself to 0 replicas first (a
     periodic re-assert against the operator's own reconcile loop turned out
-    to be a losing fight -- confirmed live). Delete it once the operator/OLSConfig CRD natively
-    supports a custom service image and A2A configuration.
+    to be a losing fight -- confirmed live). Delete it once the operator/
+    OLSConfig CRD natively supports a custom service image and A2A
+    configuration.
+
+    **Important for `a2a-split`:** upstream A2A token exchange is optional
+    and defaults to disabled. This pattern must enable it explicitly alongside
+    OIDC inbound validation; otherwise OLS sends the caller's original token
+    to MCP instead of exchanging it for an `openshift-mcp`-audience token.
+    OLS now uses its configured OIDC authentication module for both A2A and
+    the stock REST API; clients of `/v1/*` that previously used OpenShift
+    ServiceAccount tokens must be retested with OIDC credentials. Praxis
+    continues to enforce the `azp` caller allow-list; OLS no longer has a
+    separate A2A `azp` allow-list. See
+    [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md). The OIDC module
+    validates HTTPS issuer discovery/JWKS with **HTTPX/certifi roots** by
+    default; the exchange-specific
+    `A2A_KEYCLOAK_CA_BUNDLE` does not add trust for inbound OIDC validation.
+    A private Keycloak Route CA requires `SSL_CERT_FILE` to point to a bundle
+    containing **both** public roots and the private CA. Adding it only to
+    the OS trust store is not sufficient for HTTPX's default certifi context.
+    The standalone override enables `appServerPatch.oidcTrust.enabled`: the
+    bridge mounts the synced managed-ingress CA Secret under `/etc/certs`, and
+    the `a2a-split` runner rebuilds its operator-provided `SSL_CERT_FILE`
+    bundle from public roots plus sibling certificates. The patch Job fails
+    before pausing the operator if that writable path is absent on the
+    installed release; verify it before cutover. The CA-sync CronJob restarts
+    the app-server when the synced CA changes so the startup bundle refreshes
+    (see the OLS chart README).
 
 2. Replace the `acme-agent` application's `image.repository`/`image.tag`
    **and** `openshift-lightspeed-config`'s `appServerPatch.image.repository`/
    `appServerPatch.image.tag` overrides in
    `variants/standalone/values-standalone.yaml` with the images you just
-   pushed. **These are not empty placeholders** -- they currently point to a
-   specific prior deployment's personal `quay.io` account and a stale tag;
+   pushed. **These are not empty placeholders** -- they point to a
+   specific prior deployment's personal `quay.io` account, and the OLS tag
+   is the new source SHA, not proof that its image has been published;
    do not assume a filled-in-looking value is already correct for your
    deployment. `praxis-proxy` needs no image edit for
    now -- it pins `ghcr.io/praxis-proxy/ai:0.4.1` by digest in
@@ -156,9 +183,10 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     Lightspeed Operator Subscription, `openshift-lightspeed-config`,
     `keycloak-oidc`, `praxis-proxy`, and `acme-agent` in one shot. The OLS
     app-server's own Route stays disabled (OLS has no Route of its own) and
-    its Service is NetworkPolicy-restricted to same-namespace `praxis-proxy`
-    pods; `praxis-proxy` owns the public Route instead. Everything syncs
-    with placeholder Keycloak URLs and trust domain at first, so
+    `praxis-proxy` owns the public Route instead. The chart adds a Praxis
+    ingress allow to OLS, but the operator's own additive NetworkPolicy
+    allows other in-cluster sources too (see the OLS chart README). Everything
+    syncs with placeholder Keycloak URLs and trust domain at first, so
     `keycloak-oidc`/`openshift-lightspeed-config`/`praxis-proxy`/`acme-agent`
     will be Synced but not functional yet. Expected -- continue to Phase 2.
 
@@ -208,6 +236,11 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
       KEY above that this app-server serves (kept explicit so it stays
       unambiguous with multiple clusters; validated against the registry), plus
       `appServerPatch.image.repository`/`tag` once Phase 0 step 1's image is pushed.
+      Confirm `appServerPatch.a2a.configMapName` names the operator-managed
+      app-server configuration ConfigMap (`olsconfig`, key `olsconfig.yaml`
+      on the inspected operator source): the bridge writes
+      `a2a.token_exchange_enabled: true` there. Verify the mounted object on
+      the installed operator release before enabling the patch.
     - `keycloak-oidc` → `keycloak.spiffeIdentityProvider.bundleEndpoint` (an
       in-cluster Service URL, not domain-derived) and
       `keycloak.lightspeedWorkload.namespace`/`serviceAccount` = confirm these
@@ -258,9 +291,18 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
 10. Verify Praxis is actually enforcing the policy:
 
     ```bash
+    # The operator-managed app-server config should now select OIDC and
+    # enable token exchange; an env var alone cannot enable exchange here.
+    OLS_CONFIG=$(oc get configmap olsconfig -n a2a-lightspeed \
+      -o go-template='{{ index .data "olsconfig.yaml" }}')
+    printf '%s\n' "$OLS_CONFIG" | grep -Eq '^[[:space:]]*module:[[:space:]]*"?oidc"?[[:space:]]*$' &&
+    printf '%s\n' "$OLS_CONFIG" | grep -Eq '^[[:space:]]*oidc_issuer_url:' &&
+    printf '%s\n' "$OLS_CONFIG" | grep -Eq '^[[:space:]]*oidc_audience:[[:space:]]*"?lightspeed-a2a"?[[:space:]]*$' &&
+    printf '%s\n' "$OLS_CONFIG" | grep -Eq '^[[:space:]]*token_exchange_enabled:[[:space:]]*true[[:space:]]*$' ||
+      { echo 'ERROR: OLS OIDC/token exchange config is incomplete'; false; }
     oc get configmap praxis-proxy -n praxis-proxy -o yaml   # rendered policy.yaml/praxis.yaml
     oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy
-    oc get networkpolicy -n a2a-lightspeed -o yaml  # OLS ingress restricted to praxis-proxy pods
+    oc get networkpolicy -n a2a-lightspeed -o yaml  # include the operator's additive allows
 
     # agent-card discovery is intentionally public, no token needed:
     curl -sf https://<praxis route host>/.well-known/agent-card.json
@@ -274,15 +316,13 @@ are functional up to, but not including, the final OpenShift MCP tool call:
 acme-agent's Keycloak token (plus the `X-OLS-Cluster` header naming the
 target cluster) reaches the public Praxis Route, Praxis validates the token
 and its `azp` allow-list, selects the OLS backend the header names, and
-forwards the request unchanged -- OpenShift Lightspeed's A2A endpoint
-independently re-validates it and does the RFC 8693 token exchange for
-OpenShift MCP, and OLS's own Service is unreachable except from Praxis. The
-exchanged token ("Token B") itself mints successfully, but the API server
-does not yet trust it as an identity: it will reject the MCP tool call with
-401 until Phase 3 below is done, since `claimMappings.groups` (what maps
-Token B's `groups` claim to the OpenShift group `lightspeed-mcp-rbac.yaml`
-binds RBAC to) and the `openshift-mcp` audience trust only exist once
-`Authentication/cluster` is actually switched to `type: OIDC`. See
+forwards the request unchanged. OpenShift Lightspeed's A2A endpoint then
+validates the OIDC token and exchanges it for an MCP-scoped token. OLS has no
+separate public Route, but its operator-managed NetworkPolicy permits some
+non-Praxis in-cluster sources. The exchanged token ("Token B") can mint, but
+the API server rejects the final MCP call until Phase 3 switches
+`Authentication/cluster` to `type: OIDC`, adding the `openshift-mcp` audience
+and mapping Token B's `groups` claim to the group RBAC binds to. See
 [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) for the full request
 flow.
 
@@ -398,7 +438,7 @@ configures and what remains an open, unresolved MCP-hardening gap, and
 [`LIGHTSPEED_IMPLEMENTATION_PLAN.md`](LIGHTSPEED_IMPLEMENTATION_PLAN.md) for
 the full design and task breakdown. The A2A integration itself lives in the
 external fork
-[`luis5tb/lightspeed-service` branch `a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
+[`luis5tb/lightspeed-service` branch `a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)
 (see Phase 0 for how to build and push that image), since upstream OpenShift
 Lightspeed doesn't speak A2A yet.
 

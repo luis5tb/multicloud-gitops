@@ -118,16 +118,15 @@ identity:
     # Unlike the ConfigMap target other charts use, this copy writes a
     # Secret instead.
     #
-    # RESERVED FOR A FUTURE "MODE B" (MCP-side JWT validation), disabled by
-    # default. The MCP hardening this chart actually enables is "Mode A"
-    # (appServerPatch.mcpHardening below): require_oauth=true +
-    # skip_jwt_verification=true + cluster_auth_mode=passthrough, where the
-    # OpenShift API server validates the forwarded token, so MCP needs no CA.
-    # "Mode B" would additionally have MCP validate the Keycloak JWT itself
-    # (authorization_url + certificate_authority), which needs the issuer's
-    # CA mounted from a Secret -- that is what this sync would feed. See
-    # LIGHTSPEED_DESIGN.md section 5 and README.md's "MCP hardening" section,
-    # and files/sync_keycloak_ca.py.
+    # Disabled by default. The synced managed-ingress CA is mounted into the
+    # app-server only when appServerPatch.oidcTrust.enabled is true, so the
+    # a2a-split inbound OIDC client can trust a private Keycloak Route while
+    # preserving the system CA roots. When that option is enabled, a changed
+    # Secret triggers a pod-template hash update so the runner rebuilds its
+    # startup-only SSL_CERT_FILE bundle; the rollout is skipped if the
+    # Deployment does not exist yet during initial provisioning. MCP Mode A
+    # (passthrough) does not need a CA. The same Secret may also support a
+    # future MCP Mode B.
     caBundleSecret:
       name: ols-keycloak-ca
       key: ca.crt
@@ -149,7 +148,7 @@ identity:
   # ServiceAccount (lightspeed-app-server) -- this chart does not create that
   # ServiceAccount itself (see T0.9's frozen interface table). Disabled by
   # default because the cluster trust domain is installation-specific. Only
-  # meaningful once the Lightspeed A2A/SPIFFE workstream (vendor/lightspeed-service,
+  # meaningful once the Lightspeed A2A/SPIFFE workstream (external lightspeed-service,
   # separate from this chart) is deployed.
   clusterSpiffeID:
     enabled: false
@@ -173,12 +172,11 @@ appServer:
 # TEMPORARY A2A bridge -- see README.md's "Temporary A2A bridge" section.
 # OLSConfig has no field for a custom app-server image (the operator picks
 # that via its own --service-image startup flag, not OLSConfig -- see the
-# top-level README.md Phase 0) and no field for the A2A_* environment
-# variables vendor/lightspeed-service/ols/app/endpoints/a2a_auth.py requires
-# to serve A2A requests at all. Disabled by default: this patches the
+# top-level README.md Phase 0) and no native OLSConfig field for the A2A
+# image/configuration required by lightspeed-service's a2a-split branch.
+# Disabled by default: this patches the
 # operator-managed app-server Deployment directly, after the fact, via a
-# bootstrap Job plus a re-asserting CronJob (the operator's own reconcile
-# loop can silently overwrite this patch on a later pass). DELETE this
+# bootstrap Job after pausing the operator's reconcile loop. DELETE this
 # entire block, templates/appserver-patch-*.yaml, and
 # files/patch_appserver.py once the Operator/OLSConfig CRD natively supports
 # a custom service image and A2A configuration.
@@ -189,7 +187,7 @@ appServerPatch:
   deploymentName: lightspeed-app-server
   containerName: lightspeed-service-api
   # The custom, A2A-enabled OLS image built from
-  # luis5tb/lightspeed-service@a2a (see the top-level README.md Phase 0).
+  # luis5tb/lightspeed-service@a2a-split (see the top-level README.md Phase 0).
   # Left empty, this patch only touches env vars, not the image.
   image:
     repository: ""
@@ -200,9 +198,28 @@ appServerPatch:
     # sets A2A_ENABLED from this flag. Keep true whenever appServerPatch is
     # enabled for the ACME investigation flow.
     enabled: true
-    # Required -- ols/app/endpoints/a2a_auth.py's A2ASettings.from_env()
-    # raises A2AConfigurationError without these three, so the A2A endpoint
-    # will not serve requests if they're unset.
+    # a2a-split reads token_exchange_enabled from the top-level `a2a` section
+    # of its OLS YAML config; there is no A2A_TOKEN_EXCHANGE_ENABLED service
+    # environment variable. The patch Job sets this field and configures
+    # ols_config.authentication_config for OIDC in the ConfigMap named below.
+    # Keep enabled for the caller-identity -> openshift-mcp RFC 8693 exchange
+    # used by this pattern; set false only when direct caller-token forwarding
+    # is intentionally desired.
+    tokenExchangeEnabled: true
+    # Required whenever A2A is enabled (or tokenExchangeEnabled is true). Set
+    # this to the ConfigMap mounted as the app-server's OLS_CONFIG_FILE; verify
+    # the live Deployment/operator release before enabling the bridge. RBAC is
+    # scoped to this exact ConfigMap.
+    configMapName: ""
+    configMapKey: olsconfig.yaml
+    # OLS's configured OIDC audience for inbound A2A Token A validation. Must
+    # match the Keycloak audience mapper and Praxis policy (lightspeed-a2a in
+    # this pattern). The bridge also sets the configured issuer to the effective
+    # keycloakIssuerURL and module to oidc, preserving other OLS auth settings.
+    inboundOidcAudience: lightspeed-a2a
+    # Required for token exchange; a2a_auth.py validates this HTTPS issuer
+    # before discovery or sending credentials. The endpoint itself requires
+    # clusterId and rpcUrl even when exchange is disabled.
     keycloakIssuerURL: ""
     clusterId: ""
     # Public A2A JSON-RPC URL advertised in the agent card. Empty derives
@@ -215,20 +232,10 @@ appServerPatch:
     # mount a volume into the operator-managed pod, so only set it if the
     # pod's default trust store already has that file at this path.
     keycloakCaBundle: ""
-    # These default to a2a_auth.py's own frozen module constants;
-    # override only if your Keycloak realm's client IDs/audiences actually
-    # differ from this pattern's defaults (charts/all/keycloak-oidc's
-    # lightspeedA2aAudience, acmeClientId, and mcpAudienceClientId
-    # respectively).
-    inboundAudience: lightspeed-a2a
-    # Allowed inbound caller(s): the Keycloak client IDs (azp) OLS accepts on
-    # A2A requests. A LIST, rendered joined-by-comma (no spaces) into the
-    # A2A_INBOUND_AZP env var the OLS image parses -- e.g.
-    # [acme-agent] -> "acme-agent", [acme-agent, orchestrator] ->
-    # "acme-agent,orchestrator". Defaults to a single-item list to preserve
-    # the previous single-caller behavior; add entries to allow more callers.
-    inboundAzp:
-      - acme-agent
+    # Inbound POST /a2a uses the OLS auth module. The bridge selects OIDC and
+    # sets its issuer/audience in olsconfig.yaml; A2A_INBOUND_AUDIENCE and
+    # A2A_INBOUND_AZP are not consumed by a2a-split. It preserves other OLS
+    # auth settings while applying that configuration.
     exchangeAudience: openshift-mcp
     exchangeClientAssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
     # Defaults to keycloakIssuerURL inside a2a_auth.py itself when empty;
@@ -238,58 +245,68 @@ appServerPatch:
     # acme-agent's identity.spiffe.workloadApiSocket uses) -- not
     # cluster-specific, so this default normally doesn't need overriding.
     spiffeEndpointSocket: "unix:///spiffe-workload-api/spire-agent.sock"
-  # Mounts SPIRE's csi.spiffe.io CSI driver volume into the app-server
-  # container so it can fetch its own JWT-SVID for the RFC 8693 token
-  # exchange -- required for the exchange to work at all (a2a_auth.py's
-  # SpiffeWorkloadIdentity raises A2AConfigurationError without a configured
-  # audience, and there is no SPIFFE identity to request one against without
-  # this volume). Unlike env vars, OLSConfig has no field for this and the
-  # operator has no flag for it either, so this chart adds the volume/mount
-  # directly via appServerPatch, the same way it adds the image and A2A_*
-  # env vars -- see values below and the chart's README "Temporary A2A
-  # bridge" section. Mirrors charts/all/acme-agent's
+    # Optional a2a-split exchange controls; defaults below match the service.
+    spiffeTimeoutSeconds: "5"
+    keycloakTimeoutSeconds: "5"
+    tokenExchangeTimeoutSeconds: "10"
+    keycloakDiscoveryCacheSeconds: "300"
+  # Mounts SPIRE's csi.spiffe.io CSI driver volume into the app-server only
+  # when tokenExchangeEnabled is true, so it can fetch a JWT-SVID for RFC 8693.
+  # OLSConfig/the operator expose no field for this volume; the bridge adds it
+  # directly. Mirrors charts/all/acme-agent's
   # identity.spiffe.workloadApiMountPath; keep both in sync if changed.
   spiffeWorkloadApiMountPath: /spiffe-workload-api
   # Escape hatch for any other A2A_* env var this chart doesn't template
   # explicitly above -- each entry is a plain {name, value} pair merged into
   # the container's env by name.
   extraEnv: []
+  # Optional trust for inbound OIDC when Keycloak's Route uses the managed
+  # ingress CA not present in the service image's base trust. Requires the
+  # CA sync above and an a2a-split image (runner.py consumes SSL_CERT_FILE,
+  # combining the system CA bundle with .crt/.pem files under /etc/certs).
+  # The patch mounts the synced CA Secret as a sibling under /etc/certs. The
+  # a2a-split runner combines it with the operator-provided writable SSL_CERT_FILE
+  # emptyDir and system CA roots at startup. CA sync stamps a bundle hash and
+  # rolls this named Deployment only when the Secret contents change, because
+  # the runner builds SSL_CERT_FILE at startup. Disabled by default.
+  oidcTrust:
+    enabled: false
+    secretMountPath: /etc/certs/ols-keycloak-ingress
   # The operator reconciles the app-server Deployment's entire container
   # spec from scratch on every pass -- confirmed live, a patched image and
   # env vars both get silently wiped within minutes, far faster than any
   # periodic re-assert job could outrun. So instead of re-patching forever,
   # the bootstrap Job stops the operator from reconciling at all, once, then
-  # patches. It stops the operator two ways:
+  # patches. It requires a verified scale-to-0 before requesting the optional
+  # OLSConfig annotation pause:
   #
-  #   1. PRIMARY / supported: annotate the OLSConfig CR (olsConfigName, see
-  #      top of this file -- default "cluster") with
-  #      operatorManagementStateAnnotation=Unmanaged. Per Red Hat's docs this
-  #      is THE supported way to pause the Lightspeed Operator's reconcile of
-  #      its managed resources, and a CRD investigation confirmed the target
-  #      is the OLSConfig CR, not the CSV. (An earlier version of this chart
-  #      annotated the CSV instead; that was wrong -- this operator's binary
-  #      never references the annotation on the CSV -- and has been changed.)
-  #      NOTE: the OLSConfig-CR annotation path has NOT yet been verified live
-  #      on this cluster, which is why the scale-to-0 below is kept as a
-  #      confirmed fallback.
-  #   2. FALLBACK / empirically confirmed: scale operatorDeploymentName to 0
+  #   1. REQUIRED / empirically confirmed: resolve the installed CSV via the
+  #      Subscription, wait for phase=Succeeded, then scale
+  #      operatorDeploymentName to 0
   #      replicas. Confirmed live to actually stick, with no drift-correction
   #      observed from OLM over several minutes, once the CSV has reached
   #      Succeeded (OLM re-enforces the CSV replica count only while the CSV
-  #      is still mid-install -- the Job waits for Succeeded first).
+  #      is still mid-install -- the Job waits for Succeeded first). The Job
+  #      GETs Deployment status until its generation is observed with both
+  #      replicas and availableReplicas zero twice; otherwise it fails before
+  #      annotating OLSConfig or editing operator-managed resources.
+  #   2. Best-effort additional pause AFTER verified scale-to-zero: annotate the
+  #      OLSConfig CR (olsConfigName, default "cluster") with
+  #      operatorManagementStateAnnotation=Unmanaged. This annotation is not
+  #      treated as proof of an effective pause; its behavior is unverified on
+  #      this operator release.
   #
   # Resolving the installed CSV (dynamically via operatorSubscriptionName's
-  # status.installedCSV, since the CSV name carries a version suffix) is still
-  # needed to wait for Succeeded before the scale-to-0 fallback. Leaving
-  # operatorDeploymentName empty skips the scale-to-0; leaving olsConfigName
-  # empty skips the annotation. Leaving operatorSubscriptionName empty skips
-  # the Succeeded wait (and falls back to patching the app-server Deployment
-  # only -- the old, losing-fight behavior).
+  # status.installedCSV, since the CSV name carries a version suffix) is needed
+  # to wait for Succeeded before the required scale-to-0. The chart fails to
+  # render if operatorDeploymentName or operatorSubscriptionName is empty;
+  # olsConfigName may be empty because the scale-down remains authoritative.
   operatorSubscriptionName: lightspeed-operator
   operatorDeploymentName: lightspeed-operator-controller-manager
-  # Annotation key set to "Unmanaged" on the OLSConfig CR (primary) to pause
-  # the operator's reconcile. operator.openshift.io/managementState is the
-  # OpenShift convention Red Hat's Lightspeed docs point at for this.
+  # Annotation key set to "Unmanaged" on the OLSConfig CR as an additional
+  # pause request; only the verified scale-to-zero is accepted as proof.
+  # operator.openshift.io/managementState is the convention Red Hat's
+  # Lightspeed docs point at for this.
   operatorManagementStateAnnotation: "operator.openshift.io/managementState"
   # PROVISIONING GATE (self-heal). CSV=Succeeded only means the operator is
   # installed, NOT that it finished reconciling the OLSConfig children. Stopping
@@ -313,7 +330,7 @@ appServerPatch:
   operatorReplicas: 1
   # Job .spec.activeDeadlineSeconds. Must exceed poll.provisionDeadlineSeconds
   # (the provisioning wait) plus the CSV-Succeeded wait and patch retries.
-  jobActiveDeadlineSeconds: 600
+  jobActiveDeadlineSeconds: 900
   # TEMPORARY, Mode A MCP hardening -- see README.md's "MCP hardening"
   # section. The operator-generated OpenShift MCP server ships with
   # require_oauth=false, so a tokenless call falls back to the MCP pod's
