@@ -7,6 +7,35 @@ loud if the anchor is unresolvable, so their old non-empty guards are redundant.
 {{- if not .Values.appServerPatch.a2a.clusterId }}
 {{- fail "appServerPatch.a2a.clusterId must be set when appServerPatch.enabled is true (A2A_CLUSTER_ID)." }}
 {{- end }}
+{{- if or (not .Values.appServerPatch.operatorSubscriptionName) (not .Values.appServerPatch.operatorDeploymentName) }}
+{{- fail "appServerPatch.operatorSubscriptionName and operatorDeploymentName are required: the patch Job must wait for CSV Succeeded and verify the operator is scaled to zero before changing operator-managed resources." }}
+{{- end }}
+{{- if and (or (eq (include "openshift-lightspeed-config.a2aEnabled" .) "true") (eq (include "openshift-lightspeed-config.a2aTokenExchangeEnabled" .) "true")) (not .Values.appServerPatch.a2a.configMapName) }}
+{{- fail "appServerPatch.a2a.configMapName must name the app-server OLS config ConfigMap when A2A or token exchange is enabled; the bridge configures inbound OIDC and a2a.token_exchange_enabled in YAML." }}
+{{- end }}
+{{- if and (eq (include "openshift-lightspeed-config.a2aTokenExchangeEnabled" .) "true") (eq (include "openshift-lightspeed-config.a2aEnabled" .) "false") }}
+{{- fail "appServerPatch.a2a.tokenExchangeEnabled cannot be true when appServerPatch.a2a.enabled is false." }}
+{{- end }}
+{{- if and .Values.appServerPatch.a2a.configMapName (not .Values.appServerPatch.a2a.configMapKey) }}
+{{- fail "appServerPatch.a2a.configMapKey must be set when configMapName is configured." }}
+{{- end }}
+{{- if eq (include "openshift-lightspeed-config.oidcTrustEnabled" .) "true" }}
+{{- if not .Values.appServerPatch.deploymentName }}
+{{- fail "appServerPatch.deploymentName is required when appServerPatch.oidcTrust.enabled so CA rotation can restart the app-server." }}
+{{- end }}
+{{- if not .Values.identity.keycloak.caBundleSync.enabled }}
+{{- fail "appServerPatch.oidcTrust.enabled requires identity.keycloak.caBundleSync.enabled so the managed ingress CA Secret is populated." }}
+{{- end }}
+{{- if or (not .Values.appServerPatch.image.repository) (not .Values.appServerPatch.image.tag) }}
+{{- fail "appServerPatch.oidcTrust.enabled requires appServerPatch.image.repository and tag for the a2a-split runner that builds the SSL_CERT_FILE bundle." }}
+{{- end }}
+{{- if or (not .Values.identity.keycloak.caBundleSecret.name) (not .Values.identity.keycloak.caBundleSecret.key) }}
+{{- fail "appServerPatch.oidcTrust requires a synced CA Secret name and key." }}
+{{- end }}
+{{- if ne (dir .Values.appServerPatch.oidcTrust.secretMountPath) "/etc/certs" }}
+{{- fail "appServerPatch.oidcTrust.secretMountPath must be a direct child of /etc/certs for the a2a-split runner's CA discovery." }}
+{{- end }}
+{{- end }}
 {{- if not (hasKey (.Values.global.olsClusters | default dict) .Values.appServerPatch.a2a.clusterId) }}
 {{- fail (printf "appServerPatch.a2a.clusterId %q must be a KEY of global.olsClusters (the shared cluster-routing registry) -- it is the X-OLS-Cluster routing id this app-server advertises, and Praxis will reject anything not in that one map. Known keys: %v. Mirror the derive_cluster_id algorithm (f\"{host}:{port}\" with lowercase host and every '.'/':' replaced by '-'); see AGENTS.md." .Values.appServerPatch.a2a.clusterId (keys (.Values.global.olsClusters | default dict))) }}
 {{- end }}
@@ -39,9 +68,8 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
 spec:
   backoffLimit: 3
-  # Must comfortably exceed appServerPatch.poll.provisionDeadlineSeconds (the
-  # Job may wait that long for the operator to finish provisioning before it
-  # stops it) plus the CSV-Succeeded wait and the patch retries.
+  # Must exceed the provisioning wait, CSV-Succeeded wait, verified scale-down
+  # wait, and app-server deployment polling budget in appServerPatch.poll.*.
   activeDeadlineSeconds: {{ .Values.appServerPatch.jobActiveDeadlineSeconds }}
   template:
     metadata:

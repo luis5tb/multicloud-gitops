@@ -1,4 +1,7 @@
 {{- if .Values.identity.keycloak.caBundleSync.enabled }}
+{{- if and (eq (include "openshift-lightspeed-config.oidcTrustEnabled" .) "true") (not .Values.appServerPatch.enabled) }}
+{{- fail "appServerPatch.oidcTrust.enabled requires appServerPatch.enabled so the CA bundle is mounted into the app-server." }}
+{{- end }}
 {{- if not .Values.identity.keycloak.caBundleSecret.name }}
 {{- fail "identity.keycloak.caBundleSecret.name is required when caBundleSync.enabled is true" }}
 {{- end }}
@@ -74,6 +77,19 @@ rules:
       - secrets
     verbs:
       - create
+  {{- if and .Values.appServerPatch.enabled (eq (include "openshift-lightspeed-config.oidcTrustEnabled" .) "true") }}
+  # The runner reads and patches only the operator-managed app-server Deployment
+  # to stamp a bundle hash after a CA rotation. Keep access pinned to that name.
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    resourceNames:
+      - {{ .Values.appServerPatch.deploymentName | quote }}
+    verbs:
+      - get
+      - patch
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

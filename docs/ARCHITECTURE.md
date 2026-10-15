@@ -73,7 +73,7 @@ leftover, not live).
   debugging any auth failure in this flow. `agents/README.md` is a short
   index.
 - OLS A2A app-server image -- built from the external fork
-  [`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)
+  [`luis5tb/lightspeed-service@a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)
   (Keycloak validate → SPIFFE → RFC 8693 exchange → OLS pipeline), since
   upstream OpenShift Lightspeed has **no real A2A support** yet (the one
   attempt, PR #2866, was closed unmerged with zero reviews and had no
@@ -89,11 +89,19 @@ leftover, not live).
 
 - **The identity chain is the point.** ACME authenticates to Keycloak as
   itself (SPIFFE JWT-SVID, `client_credentials`), gets "Token A", sends it
-  through Praxis to OLS, and OLS performs an RFC 8693 token exchange
-  (`subject_token=Token A`) to get "Token B" scoped to `openshift-mcp` --
-  Token B's `sub` is unchanged from Token A, so the eventual API server
-  RBAC check is attributed to the original caller. Token A never reaches
-  MCP or the API server; only Token B does. See `agents/AUTHENTICATION.md`.
+  through Praxis to OLS, and OLS (with its OIDC authentication module and
+  optional A2A token exchange explicitly enabled for this pattern) performs
+  an RFC 8693 token exchange (`subject_token=Token A`) to get "Token B"
+  scoped to `openshift-mcp`. Token B's `sub` is unchanged from Token A, so
+  the eventual API server RBAC check is attributed to the original caller.
+  Token A never reaches MCP or the API server; only Token B does. See
+  `agents/AUTHENTICATION.md`.
+- **On `a2a-split`, Praxis is the A2A caller allow-list.** OLS reuses its
+  configured OIDC module to validate the JWT's signature, issuer and audience;
+  it no longer checks a separate `A2A_INBOUND_AZP` allow-list. The same OIDC
+  module also applies to the stock OLS REST API. Keep the Praxis policy and
+  the OLS ingress NetworkPolicy intact; an OIDC-valid token alone is not
+  proof that the caller was admitted by Praxis.
 - **OpenShift Native OIDC (`openshiftOIDC.enabled`) is required, not
   optional**, for the final MCP tool call to work -- `claimMappings.groups`
   (what makes the Keycloak group RBAC binds to exist as an OpenShift group
@@ -109,15 +117,15 @@ leftover, not live).
   every `.`/`:` replaced by `-` (see "Hard-won lessons").
 - **`appServerPatch` (in `openshift-lightspeed-config`) is a deliberate,
   temporary bridge**, not a real feature. Neither a custom app-server image
-  nor the `A2A_*` env vars the vendored service needs have a home in the
-  `OLSConfig` CRD today -- the operator picks the image via its own
-  `--service-image` flag and generates the app-server Deployment's env
-  entirely from its own code. `appServerPatch` polls for that
-  operator-managed Deployment and patches it directly, then re-asserts
-  periodically because the operator's own reconcile loop can revert it.
-  Delete the whole mechanism once the Operator/OLSConfig CRD natively
-  supports this -- don't build more features on top of it as if it were
-  permanent.
+  nor the A2A configuration has a native home in the `OLSConfig` CRD today.
+  The operator picks the image via its own `--service-image` flag and
+  generates the app-server Deployment and ConfigMap. The bridge waits for
+  provisioning and a successful CSV, verifies the operator is stopped at
+  zero replicas, then patches the app-server config, image, environment,
+  and CSI/CA mounts directly. A periodic re-assert cannot outrun the
+  operator's reconciliation. Delete the bridge once the Operator/OLSConfig
+  CRD natively supports the custom image and A2A configuration; don't build
+  more features on top of it as if it were permanent.
 - **Least-privilege RBAC is explicit-namespace by default.**
   `lightspeedRbac.namespaces` (per-namespace Role/RoleBinding) is the
   normal path; `lightspeedRbac.allNamespaces` (cluster-wide
@@ -125,12 +133,19 @@ leftover, not live).
   for sandbox/demo clusters, documented as a real widening of blast radius,
   not a convenience default.
 
-## Hard-won lessons (verified live, not theoretical)
+## Hard-won lessons (live findings and one local render failure)
 
-These were each found by actually deploying this pattern to a real
-OpenShift cluster for the first time -- the design docs didn't anticipate
-them, and nothing short of a live cluster surfaced them. If you're
+The deployment findings below were found on a real OpenShift cluster -- the
+design docs didn't anticipate them, and nothing short of a live cluster
+surfaced them. The local render lesson is labeled separately. If you're
 touching adjacent code, re-read the relevant one.
+
+Local render lesson (not a live-cluster finding): always render the actual
+`variants/standalone/values-standalone.yaml` after editing overrides; an
+extra leading space on an OLS list item broke YAML parsing, while chart-only
+tests using synthetic values could not catch the standalone-file error. Also
+apply the per-application overrides when rendering a chart: merely loading the
+clusterGroup file as Helm values does not enable its Application settings.
 
 - **TLS trust: extend the default store, don't replace it.**
   `ssl.create_default_context(cafile=X)` and httpx's `verify=<path>` both
@@ -150,7 +165,7 @@ touching adjacent code, re-read the relevant one.
   `charts/all/keycloak-oidc/templates/realm-secrets-reconciler-job.yaml`,
   and the OLS A2A fork's `ols/app/endpoints/a2a_auth.py`
   (`A2ASettings.tls_verify` on
-  [`luis5tb/lightspeed-service@a2a`](https://github.com/luis5tb/lightspeed-service/tree/a2a)).
+  [`luis5tb/lightspeed-service@a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)).
   Apply the same pattern to any *new* code that authenticates to a public
   Route, not to code that only ever talks to the in-cluster API server.
 - **Cluster-id derivation must match exactly, everywhere.** The algorithm

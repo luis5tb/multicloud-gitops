@@ -2,13 +2,11 @@
 """Copy OpenShift's managed ingress CA bundle into a Secret in this namespace.
 
 Adapted from this pattern's established CA-sync scripts, which write the
-bundle into a ConfigMap. This copy targets a Secret instead, RESERVED FOR A
-FUTURE "MODE B" MCP hardening (MCP validating the Keycloak JWT itself via
-authorization_url + a mounted certificate_authority), which would read its
-trusted issuer CA from a Secret key -- see the chart README's "MCP
-hardening" section. The MCP hardening this chart actually enables today is
-"Mode A" (cluster_auth_mode=passthrough), which needs no CA, so this sync is
-disabled by default. Writing to a Secret base64-decodes the existing
+bundle into a ConfigMap. This copy targets a Secret for the optional inbound
+OLS OIDC CA trust bridge (`appServerPatch.oidcTrust.enabled`). A future MCP
+"Mode B" hardening could also consume this Secret. Both consumers are
+opt-in; MCP Mode A (cluster_auth_mode=passthrough) needs no CA. Writing to a
+Secret base64-decodes the existing
 Secret's data for comparison and writes the bundle back via stringData (the
 API server base64-encodes stringData into data on write/merge-patch).
 """
@@ -16,11 +14,88 @@ API server base64-encodes stringData into data on write/merge-patch).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import ssl
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
+
+_CA_ROLLOUT_HASH_ANNOTATION = "openshift-lightspeed-config/keycloak-ca-sha256"
+
+
+def _rollout_appserver_if_needed(
+    request,
+    *,
+    enabled: bool,
+    namespace: str,
+    deployment_name: str,
+    bundle: str,
+) -> None:
+    """Restart the app-server once per changed CA bundle when OIDC trust is on."""
+    if not enabled:
+        return
+    if not deployment_name:
+        raise RuntimeError(
+            "OIDC CA trust rollout requires an app-server Deployment name"
+        )
+
+    deployment_path = (
+        f"/apis/apps/v1/namespaces/{namespace}/deployments/{deployment_name}"
+    )
+    status, deployment = request("GET", deployment_path)
+    if status == 404:
+        # On a cold install the CA sync hook can run before the operator has
+        # created the Deployment. The Secret is already populated; a later pod
+        # will read it on startup, so absence here is not a sync failure.
+        print(
+            f"{namespace}/{deployment_name} is not present yet; skipping CA-triggered "
+            "rollout because future pods will read the populated Secret"
+        )
+        return
+    if status != 200:
+        raise RuntimeError(
+            f"Inspecting {namespace}/{deployment_name} for CA rollout failed "
+            f"with HTTP {status}"
+        )
+
+    digest = hashlib.sha256(bundle.encode("utf-8")).hexdigest()
+    pod_annotations = (
+        deployment.get("spec", {})
+        .get("template", {})
+        .get("metadata", {})
+        .get("annotations", {})
+    )
+    if pod_annotations.get(_CA_ROLLOUT_HASH_ANNOTATION) == digest:
+        print(
+            f"{namespace}/{deployment_name} already uses the current CA bundle; "
+            "skipping rollout"
+        )
+        return
+
+    patch = {
+        "spec": {
+            "template": {
+                "metadata": {"annotations": {_CA_ROLLOUT_HASH_ANNOTATION: digest}}
+            }
+        }
+    }
+    status, _ = request(
+        "PATCH",
+        deployment_path,
+        patch,
+        "application/strategic-merge-patch+json",
+    )
+    if status == 404:
+        # The Deployment may disappear between GET and PATCH during bootstrap.
+        print(f"{namespace}/{deployment_name} disappeared before CA rollout; skipping")
+        return
+    if status != 200:
+        raise RuntimeError(
+            f"Triggering CA rollout for {namespace}/{deployment_name} failed "
+            f"with HTTP {status}"
+        )
+    print(f"Rolled out {namespace}/{deployment_name} for updated Keycloak CA bundle")
 
 
 def main() -> None:
@@ -35,6 +110,8 @@ def main() -> None:
     target_namespace = os.environ["TARGET_NAMESPACE"]
     target_name = os.environ["TARGET_SECRET"]
     target_key = os.environ["BUNDLE_KEY"]
+    rollout_enabled = os.environ.get("OIDC_TRUST_ROLLOUT_ENABLED", "false").lower() == "true"
+    rollout_deployment_name = os.environ.get("OIDC_TRUST_DEPLOYMENT_NAME", "").strip()
     api_server = os.environ.get("KUBERNETES_API", "https://kubernetes.default.svc")
 
     # This is an in-cluster API request; do not route it through a configured
@@ -89,6 +166,13 @@ def main() -> None:
         # Another bootstrap/cron run could have created it after our GET.
         if status == 201:
             print(f"Created {target_namespace}/{target_name} from {source_namespace}/{source_name}")
+            _rollout_appserver_if_needed(
+                request,
+                enabled=rollout_enabled,
+                namespace=target_namespace,
+                deployment_name=rollout_deployment_name,
+                bundle=bundle,
+            )
             return
         if status != 409:
             raise RuntimeError(f"Creating {target_namespace}/{target_name} failed with HTTP {status}")
@@ -101,6 +185,15 @@ def main() -> None:
     existing = base64.b64decode(existing_encoded).decode("utf-8") if existing_encoded else None
     if existing == bundle:
         print(f"{target_namespace}/{target_name} already has the current ingress CA bundle")
+        # The previous run may have updated the Secret but failed before
+        # stamping the Deployment. The hash check makes this retry idempotent.
+        _rollout_appserver_if_needed(
+            request,
+            enabled=rollout_enabled,
+            namespace=target_namespace,
+            deployment_name=rollout_deployment_name,
+            bundle=bundle,
+        )
         return
 
     patch = {"stringData": {target_key: bundle}}
@@ -124,6 +217,13 @@ def main() -> None:
     except URLError as error:
         raise RuntimeError(f"Kubernetes API request failed: {error.reason}") from error
     print(f"Updated {target_namespace}/{target_name} from {source_namespace}/{source_name}")
+    _rollout_appserver_if_needed(
+        request,
+        enabled=rollout_enabled,
+        namespace=target_namespace,
+        deployment_name=rollout_deployment_name,
+        bundle=bundle,
+    )
 
 
 if __name__ == "__main__":
