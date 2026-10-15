@@ -1,0 +1,13 @@
+{{- if and .Values.a2a.enabled .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "mas-a2a.fullname" . }}
+  labels:
+    {{- include "mas-a2a.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "mas-a2a.selectorLabels" . | nindent 6 }}
+{{- end }}

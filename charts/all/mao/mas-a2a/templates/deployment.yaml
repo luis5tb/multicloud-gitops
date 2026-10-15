@@ -1,0 +1,426 @@
+{{- if .Values.a2a.enabled }}
+{{- if and (eq (len .Values.a2a.allowedPrincipalsSecretName) 0) (eq (len .Values.a2a.allowedPrincipals) 0) }}
+{{- fail "a2a.allowedPrincipals must contain at least one authorized principal, or set a2a.allowedPrincipalsSecretName" }}
+{{- end }}
+{{- if not .Values.a2a.blueprintId }}
+{{- fail "a2a.blueprintId must name the orchestrator blueprint to expose" }}
+{{- end }}
+{{- if not .Values.a2a.publicBaseUrl }}
+{{- fail "a2a.publicBaseUrl must be the externally reachable Route or gateway URL" }}
+{{- end }}
+{{- if not .Values.mongo.secretName }}
+{{- fail "mongo.secretName must name the shared Mongo connection Secret" }}
+{{- end }}
+{{- if not .Values.redis.secretName }}
+{{- fail "redis.secretName must name the shared Redis connection Secret; A2A and the Temporal worker share channels for HITL" }}
+{{- end }}
+{{- if eq .Values.identity.providerMode "dev" }}
+{{- fail "identity.providerMode=dev is not permitted for an enabled MAS A2A deployment" }}
+{{- else if eq .Values.identity.providerMode "keycloak" }}
+{{- if and .Values.identity.keycloakCaTrust.enabled (not .Values.identity.keycloakVerifySsl) }}
+{{- fail "identity.keycloakCaTrust.enabled requires identity.keycloakVerifySsl=true" }}
+{{- end }}
+{{- if and .Values.identity.keycloakCaTrust.enabled (or (not .Values.identity.keycloakCaTrust.configMapName) (not .Values.identity.keycloakCaTrust.configMapKey)) }}
+{{- fail "identity.keycloakCaTrust.configMapName and configMapKey are required when Keycloak CA trust is enabled" }}
+{{- end }}
+{{- if not (include "mas-a2a.keycloakIssuerUri" .) }}
+{{- fail "identity.keycloakIssuerUri or global.clusterBaseDomain/global.keycloakRealm is required for Keycloak validation" }}
+{{- end }}
+{{- $hasKeycloakAudience := false }}
+{{- $reservedAudiences := concat (list "openshift" "openshift-mcp" "lightspeed-a2a" "lightspeed-mcp" "openshift-cli" "openshift-console") (.Values.identity.forbiddenAudiences | default (list)) | uniq }}
+{{- range $audience := splitList "," (.Values.identity.keycloakAudience | default "") }}
+{{- $trimmedAudience := trim $audience }}
+{{- if $trimmedAudience }}
+{{- $hasKeycloakAudience = true }}
+{{- if has $trimmedAudience $reservedAudiences }}
+{{- fail (printf "identity.keycloakAudience must be dedicated to MAS A2A; %q is a reserved OpenShift/OLS/MCP audience" $trimmedAudience) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not $hasKeycloakAudience }}
+{{- fail "identity.keycloakAudience must contain at least one non-empty audience for Keycloak validation" }}
+{{- end }}
+{{- else if eq .Values.identity.providerMode "prod" }}
+{{- if not .Values.identity.ssoIssuerUri }}
+{{- fail "identity.ssoIssuerUri is required when identity.providerMode=prod" }}
+{{- end }}
+{{- if and (not .Values.identity.ssoAudience) (not .Values.identity.ssoAudienceSecretName) }}
+{{- fail "identity.ssoAudience or identity.ssoAudienceSecretName is required when identity.providerMode=prod" }}
+{{- end }}
+{{- else if ne .Values.identity.providerMode "dev" }}
+{{- fail "identity.providerMode must be prod or keycloak for an enabled MAS A2A deployment" }}
+{{- end }}
+{{- if and .Values.identity.keycloakCaTrust.enabled (ne .Values.identity.providerMode "keycloak") }}
+{{- fail "identity.keycloakCaTrust.enabled requires identity.providerMode=keycloak" }}
+{{- end }}
+{{- if not (hasPrefix "https://" .Values.a2a.publicBaseUrl) }}
+{{- fail "a2a.publicBaseUrl must use HTTPS with a production identity provider" }}
+{{- end }}
+{{- if .Values.route.enabled }}
+{{- if not .Values.route.tls }}
+{{- fail "route.tls must configure secure Route termination and insecureEdgeTerminationPolicy=Redirect" }}
+{{- end }}
+{{- if ne (default "" .Values.route.tls.termination) "edge" }}
+{{- fail "route.tls.termination must be edge: the MAS A2A ASGI backend serves plain HTTP" }}
+{{- end }}
+{{- if ne (default "" .Values.route.tls.insecureEdgeTerminationPolicy) "Redirect" }}
+{{- fail "route.tls.insecureEdgeTerminationPolicy must be Redirect for an enabled direct Route" }}
+{{- end }}
+{{- end }}
+{{- if lt (int .Values.a2a.rateLimitPerMinute) 1 }}
+{{- fail "a2a.rateLimitPerMinute must be at least 1" }}
+{{- end }}
+{{- if lt (int .Values.a2a.maxConcurrentStreams) 1 }}
+{{- fail "a2a.maxConcurrentStreams must be at least 1" }}
+{{- end }}
+{{- if lt (int .Values.a2a.taskRetentionDays) 1 }}
+{{- fail "a2a.taskRetentionDays must be at least one day" }}
+{{- end }}
+{{- if and .Values.route.enabled .Values.a2a.streamingEnabled (le (int .Values.route.timeoutSeconds) (int .Values.a2a.streamMaxDurationSeconds)) }}
+{{- fail "route.timeoutSeconds must exceed a2a.streamMaxDurationSeconds when streaming is enabled" }}
+{{- end }}
+{{- if le (int .Values.a2a.shutdownTimeoutSeconds) (int .Values.a2a.streamMaxDurationSeconds) }}
+{{- fail "a2a.shutdownTimeoutSeconds must exceed a2a.streamMaxDurationSeconds" }}
+{{- end }}
+{{- if le (int .Values.terminationGracePeriodSeconds) (int .Values.a2a.shutdownTimeoutSeconds) }}
+{{- fail "terminationGracePeriodSeconds must exceed a2a.shutdownTimeoutSeconds" }}
+{{- end }}
+{{- if not .Values.image.digest }}
+{{- if not .Values.image.tag }}
+{{- fail "Set a pinned image.tag or image.digest before enabling MAS A2A" }}
+{{- end }}
+{{- if eq (lower .Values.image.tag) "latest" }}
+{{- fail "image.tag=latest is not permitted for an enabled MAS A2A deployment; pin a release tag or digest" }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mas-a2a.fullname" . }}
+  labels:
+    {{- include "mas-a2a.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mas-a2a.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "mas-a2a.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "mas-a2a.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+      initContainers:
+        - name: build-keycloak-ca-bundle
+          image: {{ include "mas-a2a.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python3", "-B", "-c"]
+          args:
+            - |
+              import os, ssl, sys
+              from pathlib import Path
+              output = Path("/var/run/mas-keycloak-trust/ca-bundle.crt")
+              private_ca = Path("/var/run/mas-keycloak-ca/ca-bundle.crt")
+              candidates = [
+                  os.environ.get("PUBLIC_CA_BUNDLE", ""),
+                  ssl.get_default_verify_paths().cafile or "",
+                  "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+                  "/etc/pki/tls/certs/ca-bundle.crt",
+                  "/etc/pki/tls/cert.pem",
+                  "/etc/ssl/certs/ca-certificates.crt",
+                  "/etc/ssl/cert.pem",
+              ]
+              try:
+                  import certifi
+                  candidates.append(certifi.where())
+              except ImportError:
+                  pass
+              public_path = next((Path(p) for p in candidates if p and Path(p).is_file() and Path(p).stat().st_size), None)
+              if public_path is None:
+                  sys.exit("no existing public/system CA bundle found; refusing private-CA-only trust")
+              if not private_ca.is_file() or not private_ca.stat().st_size:
+                  sys.exit("mounted Keycloak CA bundle is missing or empty")
+              public_data = public_path.read_bytes()
+              private_data = private_ca.read_bytes()
+              if b"-----BEGIN CERTIFICATE-----" not in public_data or b"-----BEGIN CERTIFICATE-----" not in private_data:
+                  sys.exit("public or Keycloak CA bundle contains no PEM certificates")
+              context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+              context.load_verify_locations(cafile=str(public_path))
+              context.load_verify_locations(cafile=str(private_ca))
+              if not context.cert_store_stats().get("x509_ca", 0):
+                  sys.exit("CA bundle validation produced no trusted CA certificates")
+              output.write_bytes(public_data.rstrip() + b"\n" + private_data.lstrip())
+          env:
+            - name: PUBLIC_CA_BUNDLE
+              value: {{ .Values.identity.keycloakCaTrust.publicBundlePath | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.identity.keycloakCaTrust.resources | nindent 12 }}
+          volumeMounts:
+            - name: keycloak-ca-trust
+              mountPath: /var/run/mas-keycloak-trust
+            - name: keycloak-ca
+              mountPath: /var/run/mas-keycloak-ca
+              readOnly: true
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: {{ include "mas-a2a.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.a2a.port }}
+              protocol: TCP
+          env:
+            - name: ROLE
+              value: a2a-serve
+            - name: A2A_ENABLED
+              value: "true"
+            - name: A2A_PORT
+              value: {{ .Values.a2a.port | quote }}
+            - name: A2A_AGENT_ID
+              value: {{ .Values.a2a.agentId | default (include "mas-a2a.fullname" .) | quote }}
+            - name: A2A_BLUEPRINT_ID
+              value: {{ required "a2a.blueprintId must name the orchestrator blueprint to expose" .Values.a2a.blueprintId | quote }}
+            - name: A2A_AGENT_NAME
+              value: {{ .Values.a2a.name | quote }}
+            - name: A2A_AGENT_DESCRIPTION
+              value: {{ .Values.a2a.description | quote }}
+            - name: A2A_PUBLIC_BASE_URL
+              value: {{ required "a2a.publicBaseUrl must be the externally reachable Route or gateway URL" .Values.a2a.publicBaseUrl | quote }}
+            - name: A2A_INPUT_FIELD
+              value: {{ .Values.a2a.inputField | quote }}
+            - name: A2A_ALLOWED_PRINCIPALS
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.a2a.allowedPrincipalsSecretName }}
+                  name: {{ .Values.a2a.allowedPrincipalsSecretName | quote }}
+                  {{- else }}
+                  name: {{ include "mas-a2a.fullname" . }}-a2a-auth
+                  {{- end }}
+                  key: A2A_ALLOWED_PRINCIPALS
+            - name: A2A_SKILL_ID
+              value: {{ .Values.a2a.skill.id | quote }}
+            - name: A2A_SKILL_NAME
+              value: {{ .Values.a2a.skill.name | quote }}
+            - name: A2A_SKILL_DESCRIPTION
+              value: {{ .Values.a2a.skill.description | quote }}
+            - name: A2A_SKILL_TAGS
+              value: {{ .Values.a2a.skill.tags | toJson | quote }}
+            - name: A2A_SKILL_EXAMPLES
+              value: {{ .Values.a2a.skill.examples | toJson | quote }}
+            - name: A2A_EXPOSE_SUBAGENT_SKILLS
+              value: {{ .Values.a2a.exposeSubagentSkills | quote }}
+            - name: A2A_TASK_COLL
+              value: {{ .Values.a2a.taskCollection | quote }}
+            - name: A2A_CONTEXT_COLL
+              value: {{ .Values.a2a.contextCollection | quote }}
+            - name: A2A_TASK_RETENTION_DAYS
+              value: {{ .Values.a2a.taskRetentionDays | quote }}
+            - name: A2A_CONTEXT_LOCK_LEASE_SECONDS
+              value: {{ .Values.a2a.contextLockLeaseSeconds | quote }}
+            - name: A2A_STREAMING_ENABLED
+              value: {{ .Values.a2a.streamingEnabled | quote }}
+            - name: A2A_STREAM_MAX_DURATION_SECONDS
+              value: {{ .Values.a2a.streamMaxDurationSeconds | quote }}
+            - name: A2A_STREAM_READ_BLOCK_MS
+              value: {{ .Values.a2a.streamReadBlockMs | quote }}
+            - name: A2A_SHUTDOWN_TIMEOUT_SECONDS
+              value: {{ .Values.a2a.shutdownTimeoutSeconds | quote }}
+            - name: A2A_RATE_LIMIT_PER_MINUTE
+              value: {{ .Values.a2a.rateLimitPerMinute | quote }}
+            - name: A2A_MAX_CONCURRENT_STREAMS
+              value: {{ .Values.a2a.maxConcurrentStreams | quote }}
+            - name: A2A_CLUSTER_LIMITS_ENABLED
+              value: {{ .Values.a2a.clusterLimitsEnabled | quote }}
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.uri
+                  optional: true
+            - name: MONGODB_IP
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.host
+            - name: MONGODB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.port
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.username
+                  optional: true
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.mongo.secretName }}
+                  key: db.password
+                  optional: true
+            - name: MONGODB_TLS
+              value: {{ .Values.mongo.tls | quote }}
+            - name: MONGO_DB
+              value: {{ .Values.mongo.database | quote }}
+            - name: SHARED_STORAGE
+              value: {{ .Values.sharedStorage.mountPath | quote }}
+            - name: REDIS_IP
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.secretName }}
+                  key: db.endpoint
+            - name: REDIS_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.secretName }}
+                  key: db.port
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.secretName }}
+                  key: db.auth_token
+                  optional: true
+            - name: TEMPORAL_IP
+              value: {{ .Values.temporal.host | quote }}
+            - name: TEMPORAL_PORT
+              value: {{ .Values.temporal.port | quote }}
+            - name: TEMPORAL_NAMESPACE
+              value: {{ .Values.temporal.namespace | quote }}
+            - name: IDENTITY_PROVIDER_MODE
+              value: {{ .Values.identity.providerMode | quote }}
+            - name: SSO_ISSUER_URI
+              value: {{ .Values.identity.ssoIssuerUri | quote }}
+            - name: SSO_AUDIENCE
+              {{- if .Values.identity.ssoAudienceSecretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.identity.ssoAudienceSecretName | quote }}
+                  key: SSO_AUDIENCE
+              {{- else }}
+              value: {{ .Values.identity.ssoAudience | quote }}
+              {{- end }}
+            - name: KEYCLOAK_ISSUER_URI
+              value: {{ include "mas-a2a.keycloakIssuerUri" . | quote }}
+            - name: KEYCLOAK_JWKS_URI
+              value: {{ .Values.identity.keycloakJwksUri | quote }}
+            - name: KEYCLOAK_AUDIENCE
+              value: {{ .Values.identity.keycloakAudience | quote }}
+            - name: KEYCLOAK_VERIFY_SSL
+              value: {{ .Values.identity.keycloakVerifySsl | quote }}
+            - name: KEYCLOAK_TIMEOUT
+              value: {{ .Values.identity.keycloakTimeout | quote }}
+            {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+            - name: SSL_CERT_FILE
+              value: /var/run/mas-keycloak-trust/ca-bundle.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /var/run/mas-keycloak-trust/ca-bundle.crt
+            - name: CURL_CA_BUNDLE
+              value: /var/run/mas-keycloak-trust/ca-bundle.crt
+            {{- end }}
+            - name: LANGFUSE_ENABLED
+              value: {{ .Values.langfuse.enabled | quote }}
+            - name: LANGFUSE_BASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.langfuse.secretName }}
+                  key: langfuse.baseurl
+                  optional: true
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.langfuse.secretName }}
+                  key: langfuse.public
+                  optional: true
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.langfuse.secretName }}
+                  key: langfuse.secret
+                  optional: true
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: shared-storage
+              mountPath: {{ .Values.sharedStorage.mountPath }}
+            {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+            - name: keycloak-ca-trust
+              mountPath: /var/run/mas-keycloak-trust
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: shared-storage
+          {{- if .Values.sharedStorage.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.sharedStorage.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+        - name: keycloak-ca
+          configMap:
+            name: {{ .Values.identity.keycloakCaTrust.configMapName | quote }}
+            items:
+              - key: {{ .Values.identity.keycloakCaTrust.configMapKey | quote }}
+                path: ca-bundle.crt
+        - name: keycloak-ca-trust
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

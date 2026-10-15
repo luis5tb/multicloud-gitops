@@ -64,8 +64,10 @@ leftover, not live).
   - `openshift-lightspeed-config` -- the `OLSConfig` CR plus the
     `appServerPatch` bridge (see "Core architecture decisions" below).
   - `acme-agent` -- deploys the agent built from `agents/acme_agent/`.
-  - `mao/*`, `rhoai-config` -- unrelated demo/platform additions bundled
-    into this same branch; not part of the OLS/A2A investigation flow.
+  - `mao/mas-a2a` -- optional, separately authenticated inbound MAS A2A
+    endpoint for a persisted orchestrator blueprint; its Application is
+    registered but the chart renders no resources until explicitly enabled.
+    Other `mao/*` and `rhoai-config` charts serve the demo/platform stack.
 - `agents/acme_agent/` -- the ACME agent's Python source (ADK-based A2A
   client). `agents/AUTHENTICATION.md` is the authoritative, detailed
   write-up of the full per-request identity chain with real captured claim
@@ -102,6 +104,13 @@ leftover, not live).
   module also applies to the stock OLS REST API. Keep the Praxis policy and
   the OLS ingress NetworkPolicy intact; an OIDC-valid token alone is not
   proof that the caller was admitted by Praxis.
+- **Inbound MAS A2A is a separate, dormant trust boundary.** It never routes
+  through ACME/Praxis/OLS or uses OLS's token exchange. Its Keycloak mode
+  validates a dedicated audience and exact subject allow-list, with private
+  Keycloak Route CA trust added to (not substituted for) public roots; its
+  separate public API must be hardened before activation. Do not invent a
+  persisted blueprint ID, caller subjects, or a published image. See the MAO
+  section in `README.md` and `charts/all/mao/mas-a2a/README.md`.
 - **OpenShift Native OIDC (`openshiftOIDC.enabled`) is required, not
   optional**, for the final MCP tool call to work -- `claimMappings.groups`
   (what makes the Keycloak group RBAC binds to exist as an OpenShift group

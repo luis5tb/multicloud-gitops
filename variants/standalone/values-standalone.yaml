@@ -188,11 +188,16 @@ clusterGroup:
           value: rca
         # Bootstrap the managed ingress CA into openshift-config (for the
         # Authentication OIDC provider) and keycloak-system (for the realm
-        # reconciler), then refresh both copies periodically for CA rotation.
+        # reconciler), and mao (for optional MAS Keycloak JWKS trust), then
+        # refresh those copies periodically for CA rotation. The MAS pods
+        # still need identity.keycloakCaTrust.enabled when switched to
+        # Keycloak mode; this override alone does not enable MAS A2A.
         - name: openshiftOIDC.caConfigMapName
           value: keycloak-oidc-ca
         - name: openshiftOIDC.caBundleSync.enabled
           value: "true"
+        - name: openshiftOIDC.caBundleSync.additionalTargetNamespaces[0]
+          value: mao
         - name: realmSecretsReconciler.caBundleConfigMapName
           value: keycloak-oidc-ca
         # Native OIDC is cluster-wide and switches Authentication/cluster's
@@ -606,6 +611,16 @@ clusterGroup:
         # development-only allow-list in sync with the dev authentication mode.
         - name: identity.adminAllowedUsers
           value: '["dev"]'
+    mao-a2a:
+      name: mao-a2a
+      namespace: mao
+      argoProject: hub
+      path: charts/all/mao/mas-a2a
+      # Registered but dormant: the chart's boolean a2a.enabled default is
+      # false and renders no resources. Do not enable until the operator has
+      # a persisted orchestrator blueprint, authorized token subjects, a
+      # verified dedicated audience, and a pinned MAS image. Harden the
+      # separately exposed mao-api first; see the chart's README.
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null

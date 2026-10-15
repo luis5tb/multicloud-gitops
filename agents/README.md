@@ -14,3 +14,9 @@ from the external [`a2a-split` fork](https://github.com/luis5tb/lightspeed-servi
 See [`AUTHENTICATION.md`](./AUTHENTICATION.md) for the full per-request
 authentication flow from the ACME agent's UI through to OpenShift Lightspeed's
 exchanged, MCP-scoped request.
+
+The optional inbound MAS A2A service is a separate, dormant application with
+its own Keycloak audience and exact caller allow-list. Its trust path and HITL
+resume behavior are documented in
+[`AUTHENTICATION.md`](./AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
+and its [chart guide](../charts/all/mao/mas-a2a/README.md).

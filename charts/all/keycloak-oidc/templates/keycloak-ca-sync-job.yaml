@@ -37,7 +37,7 @@ spec:
             - name: SOURCE_KEY
               value: {{ .Values.openshiftOIDC.caBundleSync.sourceKey | quote }}
             - name: TARGET_NAMESPACES
-              value: {{ list "openshift-config" .Values.keycloak.namespace | uniq | toJson | quote }}
+              value: {{ concat (list "openshift-config" .Values.keycloak.namespace) (.Values.openshiftOIDC.caBundleSync.additionalTargetNamespaces | default list) | uniq | toJson | quote }}
             - name: TARGET_CONFIGMAP
               value: {{ .Values.openshiftOIDC.caBundleSync.targetConfigMapName | quote }}
             - name: BUNDLE_KEY

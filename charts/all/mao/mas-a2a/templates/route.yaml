@@ -1,0 +1,25 @@
+{{- if and .Values.a2a.enabled .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "mas-a2a.fullname" . }}
+  labels:
+    {{- include "mas-a2a.labels" . | nindent 4 }}
+  annotations:
+    haproxy.router.openshift.io/timeout: {{ printf "%ss" (toString .Values.route.timeoutSeconds) | quote }}
+spec:
+  {{- if .Values.route.host }}
+  host: {{ .Values.route.host | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "mas-a2a.fullname" . }}
+    weight: 100
+  port:
+    targetPort: http
+  {{- with .Values.route.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  wildcardPolicy: None
+{{- end }}

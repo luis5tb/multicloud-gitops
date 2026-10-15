@@ -1,11 +1,20 @@
 # Matches docker-compose `mas-worker`: same image as mas-api, ROLE=temporal-worker, no ports.
 
+global:
+  # Shared pattern anchors used to derive the Keycloak issuer when the
+  # Keycloak validator is selected. Empty defaults keep the chart generic.
+  clusterBaseDomain: ""
+  localClusterDomain: ""
+  keycloakRealm: ""
+
 fullnameOverride: mas-worker
 
 image:
   registry: ""
   repository: quay.io/redhat-services-prod/mas-tenant/mas-api
   tag: latest
+  # When set, image.digest takes precedence over image.tag.
+  digest: ""
   pullPolicy: Always
 
 imagePullSecrets: []
@@ -47,6 +56,29 @@ identity:
   providerMode: dev
   ssoIssuerUri: "https://sso.stage.redhat.com/auth/realms/redhat-external"
   ssoAudience: ""
+  # The worker initializes the same AppContainer/token validator as the API;
+  # keep these aligned with the API and inbound A2A deployments when using
+  # Keycloak mode.
+  keycloakIssuerUri: ""
+  keycloakJwksUri: ""
+  keycloakAudience: ""
+  keycloakVerifySsl: true
+  keycloakTimeout: 30
+  # Opt in only when the Keycloak Route certificate chains to a private CA
+  # absent from this image's system trust bundle. The ConfigMap is published
+  # by keycloak-oidc's openshiftOIDC.caBundleSync when configured for this ns.
+  keycloakCaTrust:
+    enabled: false
+    configMapName: keycloak-oidc-ca
+    configMapKey: ca-bundle.crt
+    publicBundlePath: ""
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
   adminAllowedUsers: '[]'
 
 langfuse:
