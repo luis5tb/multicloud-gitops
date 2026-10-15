@@ -1,4 +1,4 @@
-# Keycloak/OIDC integration for the ACME agent and OpenShift Lightspeed
+# Keycloak/OIDC integration for ACME, OpenShift Lightspeed, and optional MAS A2A
 
 This companion chart is installed after the validated pattern's `rhbk` chart.
 It imports the `rca` realm, its five clients, a SPIFFE identity provider, and
@@ -11,7 +11,11 @@ The five clients serve distinct purposes and must not be conflated:
 - `keycloak.clientId` (default `openshift-cli`): public client for browser/`oc
   login` OIDC flows (Native OIDC). Cannot authenticate itself. Registered as
   the `cli` OIDC platform client when `openshiftOIDC.enabled` is true. Purely
-  human/CLI cluster access, unrelated to the agent request flow.
+  human/CLI cluster access; its tokens carry the `openshift` audience for the
+  OpenShift API and, through a separate mapper, the distinct `mas-a2a`
+  audience for the optional MAS inbound A2A endpoint. MAS still requires its
+  own exact principal allow-list, so the audience mapper alone does not grant
+  A2A access.
 - `keycloak.lightspeedMcpClientId` (default `lightspeed-mcp`): confidential
   client the OpenShift Lightspeed A2A integration (`vendor/lightspeed-service`)
   uses to exchange a caller's token for one scoped to OpenShift MCP.
@@ -79,6 +83,29 @@ worth knowing when debugging directly against Keycloak:
   inbound check and has nothing to do with the exchange itself. All of this
   is templated already; it's listed here because it is not obvious from
   Keycloak's own error messages if you ever need to debug it directly.
+
+## Dedicated audience for MAS inbound A2A
+
+The `openshift-cli` client also has an `mas-a2a-audience` mapper whose custom
+audience defaults to `keycloak.masA2aAudience` (`mas-a2a`). This is separate
+from `lightspeedA2aAudience` (`lightspeed-a2a`), `mcpAudienceClientId`
+(`openshift-mcp`), and the `openshift` API audience. Configure the MAS A2A
+chart's `identity.keycloakAudience` to the audience actually present in its
+caller's access token. MAS additionally checks the exact validated `sub`
+against `a2a.allowedPrincipals`; this mapper does not grant users access by
+itself.
+
+**Existing-realm caveat:** `KeycloakRealmImport` only applies when the realm
+does not already exist; a later sync does not add this new mapper to an
+existing `openshift-cli` client. Before enabling MAS A2A on an already
+imported realm, inspect a caller token's `iss`, `aud`, and `sub`. If `aud`
+does not contain the configured MAS audience, manually add an Audience
+protocol mapper to the actual token-issuing client in Keycloak's Admin
+Console, with Included Custom Audience set to the same value as
+`keycloak.masA2aAudience` and Access Token Claim enabled. Do not delete/re-import
+a live realm merely to update the mapper. If a different client issues the
+caller token, add the mapper to that client (or an appropriate client scope)
+instead of assuming the default `openshift-cli` mapper applies.
 
 ## Least-privilege MCP RBAC for the mapped acme-agent-rca group
 
@@ -309,20 +336,39 @@ Two things must both be correct, not just the issuer:
    also runs when `openshiftOIDC.enabled` is true even if
    `keycloak.consoleClientSecretVaultKey` is empty.
 
-   When `openshiftOIDC.caBundleSync.enabled` is true, this chart copies the
-   configured source CA bundle (by default
-   `openshift-config-managed/default-ingress-cert`, key `ca-bundle.crt`) into
-   `openshift-config` and `keycloak.namespace`. The first copy is an Argo CD Sync
-   hook that completes before `Authentication/cluster` is applied; a CronJob
-   refreshes both ConfigMaps on the configured schedule so signer CA rotations
-   propagate. Set `openshiftOIDC.caConfigMapName` to the generated ConfigMap name.
+    When `openshiftOIDC.caBundleSync.enabled` is true, this chart copies the
+    configured source CA bundle (by default
+    `openshift-config-managed/default-ingress-cert`, key `ca-bundle.crt`) into
+    `openshift-config` and `keycloak.namespace`. The first copy is an Argo CD Sync
+    hook that completes before `Authentication/cluster` is applied; a CronJob
+    refreshes both ConfigMaps on the configured schedule so signer CA rotations
+    propagate. Set `openshiftOIDC.caConfigMapName` to the generated ConfigMap name.
    Set `realmSecretsReconciler.caBundleConfigMapName` to the same name to mount
    the local copy into the reconciler and keep its TLS verification enabled.
    This assumes the source bundle is the CA that issued the Keycloak route
    certificate; configure the source values if the route uses a different CA.
-   Avoid `realmSecretsReconciler.skipTlsVerify: true` except as a last resort:
-   it disables certificate and hostname verification for that Job, and does
-   not affect the RCA agent or OpenShift's OIDC verification.
+    Avoid `realmSecretsReconciler.skipTlsVerify: true` except as a last resort:
+    it disables certificate and hostname verification for that Job, and does
+    not affect the RCA agent or OpenShift's OIDC verification.
+
+    `caBundleSync.additionalTargetNamespaces` is an opt-in list for other
+    workloads that must trust this same ingress signer. For example, set it to
+    `[mao]` when MAS Keycloak CA trust is enabled; the bootstrap Job and
+    rotation CronJob will publish the same `keycloak-oidc-ca` ConfigMap there,
+    and this chart creates namespace-local Roles (plus the existing source
+    read Role). `get`/`patch` are restricted to the named ConfigMap, but
+    Kubernetes RBAC cannot limit `create` by resource name: the sync account
+    can create **any** ConfigMap in each listed target namespace. Only add
+    namespaces where that bootstrap permission is acceptable. The list
+    defaults empty; no extra namespace receives the bundle or permissions
+    unless explicitly configured.
+    MAS consumes that ConfigMap through a read-only volume and builds a bundle
+    that extends its image's existing trust roots, with TLS verification still
+    enabled. The CronJob refreshes the ConfigMap on its schedule after signer
+    rotation; Kubernetes updates the projected volume, but a running Python
+    process may cache its JWKS client/SSL context, so roll MAS pods after
+    rotation to ensure all requests use the new bundle. This CA path is a
+    deployment prerequisite only and has not been live-validated.
 
 ### Keeping admin access after enabling OIDC
 

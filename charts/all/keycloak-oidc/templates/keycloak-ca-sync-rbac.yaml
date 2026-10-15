@@ -11,7 +11,13 @@
 {{- $fullname := include "keycloak-oidc.fullname" . }}
 {{- $source := .Values.openshiftOIDC.caBundleSync.sourceNamespace }}
 {{- $serviceAccount := printf "%s-keycloak-ca-sync" $fullname }}
-{{- $targetNamespaces := list "openshift-config" .Values.keycloak.namespace | uniq }}
+{{- $additionalTargetNamespaces := .Values.openshiftOIDC.caBundleSync.additionalTargetNamespaces | default list }}
+{{- range $namespace := $additionalTargetNamespaces }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $namespace) }}
+{{- fail (printf "openshiftOIDC.caBundleSync.additionalTargetNamespaces contains invalid namespace %q" $namespace) }}
+{{- end }}
+{{- end }}
+{{- $targetNamespaces := concat (list "openshift-config" .Values.keycloak.namespace) $additionalTargetNamespaces | uniq }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -72,6 +78,8 @@ rules:
     verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
+    # Kubernetes RBAC does not scope create by resourceNames; the bootstrap
+    # permission covers any ConfigMap in this explicitly listed namespace.
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

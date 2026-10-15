@@ -1,4 +1,10 @@
 {{- if .Values.realmImport.enabled }}
+{{- if not .Values.keycloak.masA2aAudience }}
+{{- fail "keycloak.masA2aAudience must be set to a dedicated non-empty audience for the MAS inbound A2A client" }}
+{{- end }}
+{{- if or (eq .Values.keycloak.masA2aAudience "openshift") (eq .Values.keycloak.masA2aAudience .Values.keycloak.lightspeedA2aAudience) (eq .Values.keycloak.masA2aAudience .Values.keycloak.mcpAudienceClientId) }}
+{{- fail "keycloak.masA2aAudience must be distinct from openshift, lightspeedA2aAudience, and mcpAudienceClientId" }}
+{{- end }}
 {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
 {{- /*
 trustDomain is derived from global.clusterBaseDomain (apps.<base>) when not
@@ -87,6 +93,17 @@ spec:
             protocolMapper: oidc-audience-mapper
             config:
               included.custom.audience: openshift
+              access.token.claim: "true"
+          # Distinct resource audience for the separately deployed MAS A2A
+          # endpoint. Do not reuse Lightspeed's lightspeed-a2a audience or
+          # the openshift-mcp API-server audience. Existing realms are not
+          # reconciled after this one-shot import; see the Keycloak chart
+          # README for the manual existing-realm step.
+          - name: mas-a2a-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ .Values.keycloak.masA2aAudience | quote }}
               access.token.claim: "true"
       # Confidential client that exists only as a valid `audience` target for
       # lightspeed-mcp's token exchange below -- it never itself

@@ -26,8 +26,9 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
 
 ### Phase 0 — Before touching the cluster
 
-1. Build and push the two images this pattern needs that are not published
-   upstream. Praxis itself isn't built from this repo -- it pulls a pinned
+1. Build and push the two images the ACME/OLS investigation flow needs that
+   are not published upstream. Praxis itself isn't built from this repo --
+   it pulls a pinned
    upstream image (see its own version caveats below). ACME is built from
    `agents/acme_agent/` here. The A2A-enabled OpenShift Lightspeed
    app-server image is built from the external fork
@@ -452,16 +453,17 @@ for deployment, policy, and upstream maturity details.
 
 ## MAO Configuration
 
-The standalone variant deploys the MAO runtime from
+The standalone variant registers the MAO runtime from
 [`uie-mas-hosted`](https://gitlab.cee.redhat.com/ai_tools/uie-mas-hosted) into
-the `mao` namespace. It is split into five Argo CD applications so the
-components can be upgraded independently:
+the `mao` namespace. It is split into six Argo CD applications (one dormant)
+so the components can be upgraded independently:
 
 - MongoDB, with persistent storage
 - Redis, for event streaming and HITL overrides
 - Temporal, for workflow execution
 - `mas-worker`, the Temporal worker
 - `mas-api`, exposed through an OpenShift Route
+- `mas-a2a`, registered without any resources until explicitly enabled
 
 The chart values are copied under
 [`charts/all/mao`](charts/all/mao).
@@ -552,3 +554,70 @@ Enable MongoDB TLS only when MongoDB is deployed with matching certificates
 and server-side TLS configuration. Adjust the MongoDB storage class, image
 references, API/worker replicas, and Route settings through the component
 values as needed.
+
+### Optional inbound MAS A2A (registered, not active)
+
+`mao-a2a` points to [`charts/all/mao/mas-a2a`](charts/all/mao/mas-a2a), but
+the chart's `a2a.enabled: false` default renders **no resources**. No
+orchestrator blueprint ID, authorized Keycloak subject, caller token, or
+published image has been supplied for activation. Do not turn it on simply
+because its Argo CD Application appears Synced. The source is
+`uie-mas-hosted` branch `a2a-inbound-support` (inspected at `30ef32d`);
+`ROLE=a2a-serve` runs in the same MAS image as API and worker. Build/push
+that source to your approved registry, then pin the **same new immutable
+image revision** for all three; the existing API/worker `latest` defaults
+are not evidence that inbound A2A support is present. The
+[`mas-a2a` chart guide](charts/all/mao/mas-a2a/README.md) has build commands,
+activation values, and the full verification checklist.
+
+Before changing `a2a.enabled` to true in
+`variants/standalone/values-standalone.yaml`:
+
+1. **Harden the separately routed API.** `mao-api` currently has a public
+   Route, permissive `identity.providerMode: dev`, and a synthetic `dev`
+   admin allow-list. Configure Keycloak (or a production SSO provider),
+   verify the API's **own** issuer/audience in a real token, and replace
+   `identity.adminAllowedUsers` with real authorized API usernames. If the
+   worker uses Keycloak mode, configure its issuer and non-empty audience
+   too. The A2A subject allow-list cannot protect the existing API Route.
+2. Save an actual **orchestrator** blueprint using the authenticated API,
+   verify the returned `blueprint_id` resolves, and set that ID as
+   `a2a.blueprintId`. The upstream `blueprint_a2a_agent.yml` is an outbound
+   client-node fixture, **not** a publishable inbound blueprint.
+3. Check a caller access token's `iss`, `aud`, and `sub` without recording
+   the token. Set `identity.keycloakAudience` to the dedicated MAS audience
+   actually present in `aud` (`keycloak.masA2aAudience` defaults to
+   `mas-a2a`) and `a2a.allowedPrincipals` to exact authorized token
+    subjects, or reference an existing Secret with those principals. The
+    chart rejects known OpenShift/OLS/MCP audiences even for an allow-listed
+    subject; add any customized equivalents to `identity.forbiddenAudiences`.
+    The default Keycloak realm import adds an audience mapper to `openshift-cli`
+   only on first import; an **existing realm will not reconcile it**. If
+   missing, add an Audience mapper to the actual token-issuing client or an
+   appropriate client scope in Keycloak; do not delete/re-import a live realm.
+    If the Keycloak Route uses a private ingress CA, also verify the MAS
+    Keycloak-mode pods can validate its HTTPS JWKS endpoint with a bundle
+    containing both public roots and that CA; do not turn off TLS verification.
+    The standalone `keycloak-oidc` application copies the managed-ingress CA
+    into `mao/keycloak-oidc-ca`. When switching API/worker to Keycloak mode
+    and enabling MAS A2A, set `identity.keycloakCaTrust.enabled: true` on
+    each relevant application. The same-image init container builds the
+    combined bundle and fails if either input is absent. Confirm the source
+    CA signs the actual Keycloak Route and that the pod can write its
+    `emptyDir` (set an allowed `podSecurityContext.fsGroup` if needed).
+    Rotation updates the ConfigMap but not the already-built bundle: restart
+    affected MAS pods after a CA change.
+4. Set an HTTPS `a2a.publicBaseUrl` for a gateway, or enable the chart's
+   direct edge-TLS Route with HTTP redirect. Install only after MongoDB,
+   Redis, the Temporal worker, and the persisted blueprint are ready.
+
+The Agent Card and health probes are public; JSON-RPC requires a valid bearer
+token and an exact allow-listed principal. In a non-production environment,
+check invalid/missing tokens (401), a valid non-allow-listed subject (403),
+task ownership, streaming, and approval/resume. A human approval pauses a
+task at non-terminal `INPUT_REQUIRED`: reply with the **same `task_id`** and
+a **new `message_id`**, then reattach/subscribe to its stream. Polling alone
+may continue to report `INPUT_REQUIRED` until a live event arrives or the
+approval gate times out. See the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
+and the source checkout's `docs/a2a-inbound-verification.md`. No image or
+cluster rollout has been performed as part of this preparation.

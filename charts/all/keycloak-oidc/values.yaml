@@ -174,6 +174,11 @@ keycloak:
   # requirement that it name a real client). Must match the Lightspeed A2A
   # integration's own configured inbound audience exactly.
   lightspeedA2aAudience: lightspeed-a2a
+  # Separate audience for the MAS inbound A2A endpoint. This is added only to
+  # the openshift-cli client tokens; MAS must validate this audience in
+  # addition to its exact caller-subject allow-list. It is deliberately not
+  # the Lightspeed A2A or OpenShift MCP audience.
+  masA2aAudience: mas-a2a
 
 openshiftOIDC:
   enabled: false
@@ -216,6 +221,10 @@ openshiftOIDC:
     sourceConfigMap: default-ingress-cert
     sourceKey: ca-bundle.crt
     targetConfigMapName: keycloak-oidc-ca
+    # Additional namespace-local copies of the same bundle. Leave empty unless
+    # another workload (for example MAO) needs to trust the managed-ingress CA.
+    # Each namespace receives a Role scoped to targetConfigMapName.
+    additionalTargetNamespaces: []
     schedule: "*/5 * * * *"
     image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
     resources:

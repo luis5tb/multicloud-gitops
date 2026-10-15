@@ -1,3 +1,26 @@
+{{- if eq .Values.identity.providerMode "keycloak" }}
+{{- if not (include "mas-api.keycloakIssuerUri" .) }}
+{{- fail "identity.keycloakIssuerUri or global.clusterBaseDomain/global.keycloakRealm is required when identity.providerMode=keycloak" }}
+{{- end }}
+{{- $hasKeycloakAudience := false }}
+{{- range $audience := splitList "," (.Values.identity.keycloakAudience | default "") }}
+{{- if trim $audience }}{{- $hasKeycloakAudience = true }}{{- end }}
+{{- end }}
+{{- if not $hasKeycloakAudience }}
+{{- fail "identity.keycloakAudience must contain at least one non-empty audience when identity.providerMode=keycloak" }}
+{{- end }}
+{{- end }}
+{{- if .Values.identity.keycloakCaTrust.enabled }}
+{{- if ne .Values.identity.providerMode "keycloak" }}
+{{- fail "identity.keycloakCaTrust.enabled requires identity.providerMode=keycloak" }}
+{{- end }}
+{{- if not .Values.identity.keycloakVerifySsl }}
+{{- fail "identity.keycloakCaTrust.enabled requires identity.keycloakVerifySsl=true" }}
+{{- end }}
+{{- if or (not .Values.identity.keycloakCaTrust.configMapName) (not .Values.identity.keycloakCaTrust.configMapKey) }}
+{{- fail "identity.keycloakCaTrust.configMapName and configMapKey are required when Keycloak CA trust is enabled" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,6 +52,67 @@ spec:
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+      initContainers:
+        - name: build-keycloak-ca-bundle
+          image: {{ include "mas-api.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python3", "-B", "-c"]
+          args:
+            - |
+              import os, ssl, sys
+              from pathlib import Path
+              output = Path("/var/run/mas-keycloak-trust/ca-bundle.crt")
+              private_ca = Path("/var/run/mas-keycloak-ca/ca-bundle.crt")
+              candidates = [
+                  os.environ.get("PUBLIC_CA_BUNDLE", ""),
+                  ssl.get_default_verify_paths().cafile or "",
+                  "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+                  "/etc/pki/tls/certs/ca-bundle.crt",
+                  "/etc/pki/tls/cert.pem",
+                  "/etc/ssl/certs/ca-certificates.crt",
+                  "/etc/ssl/cert.pem",
+              ]
+              try:
+                  import certifi
+                  candidates.append(certifi.where())
+              except ImportError:
+                  pass
+              public_path = next((Path(p) for p in candidates if p and Path(p).is_file() and Path(p).stat().st_size), None)
+              if public_path is None:
+                  sys.exit("no existing public/system CA bundle found; refusing private-CA-only trust")
+              if not private_ca.is_file() or not private_ca.stat().st_size:
+                  sys.exit("mounted Keycloak CA bundle is missing or empty")
+              public_data = public_path.read_bytes()
+              private_data = private_ca.read_bytes()
+              if b"-----BEGIN CERTIFICATE-----" not in public_data or b"-----BEGIN CERTIFICATE-----" not in private_data:
+                  sys.exit("public or Keycloak CA bundle contains no PEM certificates")
+              context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+              context.load_verify_locations(cafile=str(public_path))
+              context.load_verify_locations(cafile=str(private_ca))
+              if not context.cert_store_stats().get("x509_ca", 0):
+                  sys.exit("CA bundle validation produced no trusted CA certificates")
+              output.write_bytes(public_data.rstrip() + b"\n" + private_data.lstrip())
+          env:
+            - name: PUBLIC_CA_BUNDLE
+              value: {{ .Values.identity.keycloakCaTrust.publicBundlePath | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.identity.keycloakCaTrust.resources | nindent 12 }}
+          volumeMounts:
+            - name: keycloak-ca-trust
+              mountPath: /var/run/mas-keycloak-trust
+            - name: keycloak-ca
+              mountPath: /var/run/mas-keycloak-ca
+              readOnly: true
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -115,6 +199,24 @@ spec:
               value: {{ .Values.identity.ssoIssuerUri | quote }}
             - name: SSO_AUDIENCE
               value: {{ .Values.identity.ssoAudience | quote }}
+            - name: KEYCLOAK_ISSUER_URI
+              value: {{ include "mas-api.keycloakIssuerUri" . | quote }}
+            - name: KEYCLOAK_JWKS_URI
+              value: {{ .Values.identity.keycloakJwksUri | quote }}
+            - name: KEYCLOAK_AUDIENCE
+              value: {{ .Values.identity.keycloakAudience | quote }}
+            - name: KEYCLOAK_VERIFY_SSL
+              value: {{ .Values.identity.keycloakVerifySsl | quote }}
+            - name: KEYCLOAK_TIMEOUT
+              value: {{ .Values.identity.keycloakTimeout | quote }}
+            {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+            - name: SSL_CERT_FILE
+              value: /var/run/mas-keycloak-trust/ca-bundle.crt
+            - name: REQUESTS_CA_BUNDLE
+              value: /var/run/mas-keycloak-trust/ca-bundle.crt
+            - name: CURL_CA_BUNDLE
+              value: /var/run/mas-keycloak-trust/ca-bundle.crt
+            {{- end }}
             - name: ADMIN_ALLOWED_USERS
               value: {{ .Values.identity.adminAllowedUsers | quote }}
             - name: LANGFUSE_ENABLED
@@ -156,6 +258,11 @@ spec:
           volumeMounts:
             - name: shared-storage
               mountPath: {{ .Values.sharedStorage.mountPath }}
+            {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+            - name: keycloak-ca-trust
+              mountPath: /var/run/mas-keycloak-trust
+              readOnly: true
+            {{- end }}
       volumes:
         - name: shared-storage
           {{- if .Values.sharedStorage.existingClaim }}
@@ -164,6 +271,16 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+        - name: keycloak-ca
+          configMap:
+            name: {{ .Values.identity.keycloakCaTrust.configMapName | quote }}
+            items:
+              - key: {{ .Values.identity.keycloakCaTrust.configMapKey | quote }}
+                path: ca-bundle.crt
+        - name: keycloak-ca-trust
+          emptyDir: {}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

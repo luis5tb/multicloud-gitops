@@ -1,0 +1,191 @@
+# A2A is deliberately dormant until a blueprint and its caller allow-list are
+# supplied in the deployment-specific values layer.
+
+global:
+  # Shared pattern anchors. Empty defaults keep this chart portable; when
+  # identity.providerMode=keycloak, the issuer can be derived from the same
+  # anchors used by charts/all/keycloak-oidc.
+  clusterBaseDomain: ""
+  localClusterDomain: ""
+  keycloakRealm: ""
+
+fullnameOverride: ""
+nameOverride: ""
+
+image:
+  registry: ""
+  # Set repository and a non-latest tag or digest in the deployment values.
+  # The A2A server uses the same image built from uie-mas-hosted as API/worker.
+  repository: ""
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+replicaCount: 1
+terminationGracePeriodSeconds: 360
+
+# Optional PodDisruptionBudget for multi-replica rollouts.
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  automount: false
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8003
+
+a2a:
+  # Explicit opt-in. With false, this chart renders no Kubernetes resources
+  # and can be added to the pattern before the operator has selected a
+  # blueprint or authorized caller subjects.
+  enabled: false
+  port: 8003
+  agentId: ""
+  blueprintId: ""
+  name: MAO Orchestrator
+  description: ""
+  # Must be the externally reachable base URL, without /a2a/jsonrpc.
+  # Set this to the Route host or the 3scale gateway URL.
+  publicBaseUrl: ""
+  inputField: user_prompt
+  # Written into a chart-managed Secret (not a plain Deployment env value).
+  allowedPrincipals: []
+  # Optional existing Secret with key A2A_ALLOWED_PRINCIPALS (JSON array).
+  # When set, chart-managed principal secret generation is skipped.
+  allowedPrincipalsSecretName: ""
+  rateLimitPerMinute: 100
+  maxConcurrentStreams: 10
+  # Prefer Redis-backed cluster-wide rate/stream limits when Redis is reachable.
+  clusterLimitsEnabled: true
+  skill:
+    id: orchestrate
+    name: Orchestrate a request
+    description: Submit a request to the configured orchestrator.
+    tags: [orchestration]
+    examples: []
+  exposeSubagentSkills: false
+  taskCollection: a2a_tasks
+  contextCollection: a2a_contexts
+  # Terminal A2A records and their idempotency keys are retained for this
+  # many days. MAS session records are managed independently.
+  taskRetentionDays: 30
+  contextLockLeaseSeconds: 120
+  streamingEnabled: true
+  streamMaxDurationSeconds: 300
+  streamReadBlockMs: 5000
+  shutdownTimeoutSeconds: 330
+
+mongo:
+  secretName: mao-secret-mongo
+  # Matches the in-pattern Mongo chart, which serves plaintext in-cluster by
+  # default. Set true only when the Mongo deployment is configured for TLS.
+  tls: "false"
+  database: unifaidb
+
+redis:
+  secretName: mao-secret-redis
+
+temporal:
+  host: temporal
+  port: "7233"
+  namespace: default
+
+identity:
+  # Use the Keycloak/OIDC validator by default when explicitly enabling A2A.
+  # The Keycloak issuer derives from the shared cluster/realm anchors when no
+  # chart-specific override is supplied. Audience is intentionally empty and
+  # must be supplied before activation.
+  providerMode: keycloak
+  ssoIssuerUri: ""
+  ssoAudience: ""
+  # Optional existing Secret with key SSO_AUDIENCE. When set, overrides
+  # identity.ssoAudience on the Deployment.
+  ssoAudienceSecretName: ""
+  keycloakIssuerUri: ""
+  keycloakJwksUri: ""
+  keycloakAudience: ""
+  # Additional audience names reserved by this operator/environment. The
+  # chart always blocks known OpenShift/OLS/MCP audiences as well.
+  forbiddenAudiences: []
+  keycloakVerifySsl: true
+  keycloakTimeout: 30
+  # Optional trust extension for a privately signed Keycloak Route. The
+  # keycloak-oidc chart must sync this ConfigMap into the MAS namespace.
+  keycloakCaTrust:
+    enabled: false
+    configMapName: keycloak-oidc-ca
+    configMapKey: ca-bundle.crt
+    # Empty means discover the image's configured/system CA bundle.
+    publicBundlePath: ""
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+langfuse:
+  enabled: "false"
+  secretName: mao-secret-langfuse
+
+sharedStorage:
+  mountPath: /app/shared
+  existingClaim: ""
+
+# OpenShift direct Route. For 3scale, disable the Route and set publicBaseUrl
+# to the gateway's public base URL.
+route:
+  enabled: false
+  host: ""
+  timeoutSeconds: 360
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 60
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 6
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
