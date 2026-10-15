@@ -333,12 +333,13 @@ these breaks the flow -- see that chart's README for the exact rationale.
 | `lightspeed-mcp` | confidential | OpenShift Lightspeed's A2A endpoint | RFC 8693 token exchange: takes the caller's token as `subject_token`, authenticates itself with its own SPIFFE JWT-SVID, and requests a token scoped to the `openshift-mcp` audience. |
 | `openshift-mcp` | confidential | (never authenticates) | Exists only so `lightspeed-mcp`'s exchange has a real `client_id` to name as its `audience` -- Keycloak's standard token exchange requires that parameter to be an actual client. |
 
-There is also a sixth, deliberately-not-a-client value:
-`keycloak.lightspeedA2aAudience` (default `lightspeed-a2a`), the audience
-OLS's configured OIDC authentication module requires. Unlike
-`openshift-mcp` above, nothing in Keycloak requires this to correspond to a
-real client -- it's added to acme-agent's token via `oidc-audience-mapper`'s
-`included.custom.audience` (a plain string), not `included.client.audience`.
+The five clients are distinct from custom **audience values**:
+`keycloak.lightspeedA2aAudience` (default `lightspeed-a2a`) is what OLS's
+OIDC module requires in ACME's token. It is added through an
+`oidc-audience-mapper` with `included.custom.audience`, not a real client
+like `openshift-mcp`. The optional MAS A2A service has its own separate
+custom audience (`keycloak.masA2aAudience`, default `mas-a2a`); it is not
+another Keycloak client or part of the OLS token exchange.
 
 `acme-agent` and `lightspeed-mcp` authenticate via Keycloak's federated
 client authentication feature against the `spiffe` identity provider this
@@ -657,6 +658,61 @@ the same id (neither line ever contains a token):
 oc logs -n acme-agent    -l app.kubernetes.io/name=acme-agent | grep "acme_audit" | grep "<request_id>"
 oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server | grep "a2a_audit" | grep "<request_id>"
 ```
+
+## Separate trust boundary: inbound MAS A2A
+
+The optional `mao-a2a` Application is registered but its chart defaults to
+`a2a.enabled: false`, rendering no resources. Once deliberately activated,
+MAS A2A runs as a separate `uie-mas-hosted` service, not through the
+HCC-facing Flask API, Praxis, ACME, or OLS. It does **not** use ACME's
+SPIFFE grant or OLS's RFC 8693 token exchange: its caller sends a bearer
+token directly to the A2A JSON-RPC endpoint. The Agent Card
+(`/.well-known/agent-card.json`) and health probes are public.
+
+In Keycloak mode, MAS validates the JWT signature against Keycloak JWKS and
+checks the configured issuer, lifetime, and audience. The chart refuses an
+enabled Keycloak deployment without a non-empty
+`identity.keycloakAudience`. MAS then checks the validated `user_id` (if
+present) or `sub` **exactly** against `a2a.allowedPrincipals` (or the
+configured Secret containing that list); it does not authorize by groups.
+A Keycloak user's subject is usually an opaque `sub`, not their email or
+username. A missing/invalid token returns 401; a valid token from a
+non-allow-listed principal returns 403. Task reads and mutations are scoped
+to that principal. JWKS retrieval uses verified HTTPS; a private Keycloak
+Route CA must be trusted by the MAS pod alongside the default public roots,
+not by setting `keycloakVerifySsl: false`. The standalone variant copies the
+managed-ingress CA into `mao/keycloak-oidc-ca`; set the MAS charts'
+`identity.keycloakCaTrust.enabled` only in Keycloak mode. Their init
+containers build `SSL_CERT_FILE` from public/system roots plus that CA. CA
+rotation requires a MAS pod rollout to rebuild the bundle; verify the target
+Route certificate on a live cluster before relying on it.
+
+The Keycloak chart's `mas-a2a-audience` mapper adds a distinct custom
+audience (default `mas-a2a`) to `openshift-cli` access tokens on **first
+realm import only**. It is neither `lightspeed-a2a` nor the
+`openshift-mcp`/`openshift` API audience. The A2A chart's configured audience
+must match the caller's actual token. It refuses known OpenShift/OLS/MCP
+audiences; add customized equivalents to `identity.forbiddenAudiences`.
+For an existing realm, inspect a test
+token's decoded `iss`, `aud`, and `sub`/`user_id` claims (never log the token);
+if the audience is absent, add an Audience mapper to the **actual
+token-issuing client** or an appropriate client scope. A GitOps sync does not
+retroactively update `KeycloakRealmImport`. Separately, the public MAS API
+still needs its own production identity mode, API-specific audience, and real
+admin usernames; the A2A allow-list does not secure that Route.
+
+MAS uses MongoDB for A2A task/context records and a Redis channel shared
+with its Temporal worker for streaming and human-in-the-loop decisions.
+`INPUT_REQUIRED` is a non-terminal task state. Reply to the **same
+`task_id`** using a **new `message_id`**: a structured decision `DataPart`
+supports `approve`, `reject`, `modify`, or `redirect`; plain text supports
+leading `approve`/`yes` or `reject`/`no`/`deny` only. Reattach/subscribe to
+the active task stream after replying so the next worker event clears the
+pending state. `GetTask` polling alone may keep reporting `INPUT_REQUIRED`
+until that reattachment or the approval gate's timeout. See the
+[`mas-a2a` chart guide](../charts/all/mao/mas-a2a/README.md) and upstream
+`uie-mas-hosted/docs/a2a-inbound.md` for the protocol details. None of this
+has been validated on a live deployment of this Pattern.
 
 ## Troubleshooting (bugs actually hit building this)
 

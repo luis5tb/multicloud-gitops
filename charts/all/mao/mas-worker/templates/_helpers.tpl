@@ -65,10 +65,26 @@ Create the name of the service account to use
 MAS worker container image
 */}}
 {{- define "mas-worker.image" -}}
-{{- $tag := .Values.image.tag | default .Chart.AppVersion }}
-{{- if .Values.image.registry }}
-{{- printf "%s/%s:%s" .Values.image.registry .Values.image.repository $tag }}
+{{- $base := .Values.image.repository -}}
+{{- if .Values.image.registry -}}
+{{- $base = printf "%s/%s" .Values.image.registry .Values.image.repository -}}
+{{- end -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" $base .Values.image.digest -}}
 {{- else }}
-{{- printf "%s:%s" .Values.image.repository $tag }}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
+{{- printf "%s:%s" $base $tag -}}
 {{- end }}
 {{- end }}
+
+{{- define "mas-worker.keycloakIssuerUri" -}}
+{{- if .Values.identity.keycloakIssuerUri -}}
+{{- .Values.identity.keycloakIssuerUri -}}
+{{- else -}}
+{{- $base := .Values.global.clusterBaseDomain | default (trimPrefix "apps." (.Values.global.localClusterDomain | default "")) -}}
+{{- $realm := .Values.global.keycloakRealm -}}
+{{- if and $base $realm -}}
+{{- printf "https://keycloak.apps.%s/realms/%s" $base $realm -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

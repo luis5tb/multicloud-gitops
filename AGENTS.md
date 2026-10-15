@@ -46,8 +46,8 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 
 - `charts/all/<name>/` -- one Helm chart per ArgoCD Application
   (`keycloak-oidc`, `praxis-proxy`, `openshift-lightspeed-config`,
-  `acme-agent`, plus unrelated `mao/*`/`rhoai-config`). Each has its own
-  `README.md`.
+  `acme-agent`, optional `mao/mas-a2a`, plus other `mao/*`/`rhoai-config`).
+  Each has its own `README.md`; MAS A2A is registered but dormant by default.
 - `variants/standalone/values-standalone.yaml` -- the **only** place
   cluster-specific values belong (URLs, trust domain, image tags, the
   `global.olsClusters` registry, RBAC scope).
@@ -78,6 +78,7 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 | OLS LLM provider / MCP introspection | `charts/all/openshift-lightspeed-config/templates/olsconfig.yaml` + `values.yaml` |
 | Custom OLS image, A2A env/config or token exchange (temporary bridge) | `charts/all/openshift-lightspeed-config`'s `appServerPatch.*` values + `files/patch_appserver.py` |
 | OLS's own A2A endpoint / auth | [`luis5tb/lightspeed-service@a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split) (`ols/app/endpoints/{a2a.py,a2a_auth.py,a2a_executor.py}`); rebuild/push the image and bump `appServerPatch.image.*` in `values-standalone.yaml` |
+| MAS inbound A2A blueprint, caller allow-list, Keycloak auth, HITL | `charts/all/mao/mas-a2a/` and its README; activate only after hardening `mao/mas-api` and pinning the API/worker/A2A image together |
 | Any cluster-specific value (URLs, trust domain, image tags, namespace scope) | `variants/standalone/values-standalone.yaml` only |
 | New secret | `values-secret.yaml.template`, consumed via ExternalSecret -- never a chart default |
 
