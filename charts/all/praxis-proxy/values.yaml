@@ -210,3 +210,33 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
+# Static agent card configuration for multi-cluster routing.
+# When enabled, Praxis returns its own agent card (with Praxis as the rpc_url)
+# instead of proxying /.well-known/agent-card.json to the first cluster.
+# This ensures MAS and other A2A clients send requests to Praxis, which then
+# routes to the correct OLS backend based on X-OLS-Cluster header.
+#
+# The defaults below match OLS's typical agent card. Override in
+# variants/standalone/values-standalone.yaml for multi-cluster deployments.
+agentCard:
+  enabled: false
+  # Agent name (shown to clients). Defaults to match OLS.
+  name: "OpenShift Lightspeed"
+  # Agent description
+  description: "AI assistant for investigating and troubleshooting OpenShift clusters"
+  # Praxis's own RPC URL (must point to Praxis, not OLS).
+  # This is the key field: it ensures clients call Praxis, not OLS directly.
+  # Empty derives https://openshift-lightspeed.apps.<clusterBaseDomain>/a2a
+  rpcUrl: ""
+  # Agent version
+  version: "1.0.0"
+  # Agent skills - capabilities exposed to orchestrators.
+  # Defaults match OLS's investigation and diagnostic capabilities.
+  skills:
+    - name: "investigate"
+      description: "Investigate OpenShift cluster issues using kubectl and cluster APIs"
+      tags: ["investigation", "troubleshooting", "kubernetes"]
+    - name: "diagnose"
+      description: "Diagnose pod failures, resource issues, and configuration problems"
+      tags: ["diagnostics", "debugging"]
