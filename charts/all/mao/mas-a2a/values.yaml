@@ -125,6 +125,20 @@ identity:
   forbiddenAudiences: []
   keycloakVerifySsl: true
   keycloakTimeout: 30
+  # Multi-issuer OIDC: accept tokens from multiple configured issuers (Red Hat
+  # SSO production, Red Hat SSO stage, local Keycloak). When oidcIssuers is set,
+  # providerMode is ignored and tokens from any configured issuer are accepted.
+  # Each entry requires issuer_url, jwks_url, and audience. The local Keycloak
+  # issuer is NOT appended automatically; include it explicitly when desired.
+  # Example:
+  #   oidcIssuers:
+  #     - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
+  #       jwks_url: https://sso.redhat.com/.../certs
+  #       audience: openshift-lightspeed
+  #       username_claim: preferred_username  # optional
+  oidcIssuers: []
+  oidcVerifySsl: true
+  oidcTimeout: 30
   # Optional trust extension for a privately signed Keycloak Route. The
   # keycloak-oidc chart must sync this ConfigMap into the MAS namespace.
   keycloakCaTrust:
