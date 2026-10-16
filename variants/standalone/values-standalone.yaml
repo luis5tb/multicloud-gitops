@@ -411,6 +411,16 @@ clusterGroup:
           value: praxis-keycloak-ca
         - name: policy.caBundleSync.enabled
           value: "true"
+        # Static agent card for multi-cluster routing: Praxis serves its own
+        # agent card (with Praxis's endpoint as rpc_url) instead of proxying
+        # to the first OLS cluster. This ensures MAS and other A2A clients
+        # call Praxis (which routes based on X-OLS-Cluster header) instead
+        # of bypassing Praxis by calling OLS directly.
+        - name: agentCard.enabled
+          value: "true"
+        # agentCard.name, description, skills inherit OLS defaults from
+        # charts/all/praxis-proxy/values.yaml; override only to diverge.
+        # agentCard.rpcUrl auto-derives from global.clusterBaseDomain.
         # Accept Red Hat SSO production and stage tokens in addition to the
         # local Keycloak issuer (which the chart appends automatically). These
         # audience values follow MULTI_OIDC_CONFIGURATION.md; verify them

@@ -28,16 +28,23 @@ filter_chains:
           # routes always outrank the header-matched path_prefix routes
           # below regardless of declaration order (Core router: "exact path
           # outranks a prefix"), so these two are safe to list first.
-          #
-          # KNOWN GAP for a *second* registered cluster: the registry has no
-          # "primary"/display concept, so there is no principled way yet to
-          # pick which OLS instance answers an unauthenticated, cluster-
-          # neutral card/health request. This chart picks the lexically
-          # first registry key ("{{ $primaryId }}" today). Revisit this
-          # before registering a second olsClusters entry -- see
-          # LIGHTSPEED_DESIGN.md SS7 ("Multi-cluster session safety").
+          {{- if .Values.agentCard.enabled }}
+          # Static agent card: Praxis serves its own agent card with Praxis
+          # as the rpc_url, ensuring MAS and other clients send A2A requests
+          # to Praxis (which routes based on X-OLS-Cluster) instead of
+          # bypassing Praxis by using the first cluster's OLS Route directly.
+          - path: /.well-known/agent-card.json
+            cluster: static-agent-card
+          {{- else }}
+          # Dynamic agent card (single-cluster): proxy to first OLS cluster.
+          # KNOWN GAP for multi-cluster: the registry has no "primary"/display
+          # concept, so there is no principled way to pick which OLS instance
+          # answers an unauthenticated, cluster-neutral card request. This
+          # picks the lexically first registry key ("{{ $primaryId }}").
+          # For multi-cluster, enable agentCard.enabled instead.
           - path: /.well-known/agent-card.json
             cluster: ols-{{ $primaryId }}
+          {{- end }}
           - path: /readiness
             cluster: ols-{{ $primaryId }}
           {{- range $id, $cfg := .Values.global.olsClusters }}
@@ -67,6 +74,13 @@ filter_chains:
 
       - filter: load_balancer
         clusters:
+          {{- if .Values.agentCard.enabled }}
+          # Static file cluster for the agent card ConfigMap
+          - name: static-agent-card
+            static_files:
+              root: /etc/praxis/agent-card
+              index: agent-card.json
+          {{- end }}
           {{- range $id, $cfg := .Values.global.olsClusters }}
           - name: ols-{{ $id }}
             endpoints:
