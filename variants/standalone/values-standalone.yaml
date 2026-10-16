@@ -214,7 +214,7 @@ clusterGroup:
         # ExternalOIDCControllerDegraded (this has happened -- recovery
         # command is in that README too).
         - name: openshiftOIDC.enabled
-          value: "true"
+          value: "false"
         # openshiftOIDC.issuerURL and openshiftOIDC.consoleRoute are no longer
         # set here: both derive from global.clusterBaseDomain at the top of this
         # file (https://keycloak.apps.<base>/realms/<realm> and
@@ -471,17 +471,20 @@ clusterGroup:
           value: ca-bundle.crt
         - name: auth.caBundleSync.enabled
           value: "true"
-        # Praxis's public Route is this downstream agent's endpoint -- its
-        # single stable public hostname, fronting whichever OLS backend it
-        # selects per request, not a per-cluster OLS Service DNS name directly
-        # (Praxis routes by the X-OLS-Cluster header, never ACME). It is not set
-        # here: an entry with no endpoint derives it from global.clusterBaseDomain
-        # (https://openshift-lightspeed.apps.<base> -- agent-card origin; the
-        # card then advertises .../a2a for JSON-RPC). google-adk's
-        # RemoteA2aAgent requires https (or loopback) for the agent card and
-        # every RPC url inside it, which the derived https URL satisfies. A
-        # single downstream agent is still a one-item a2a.remoteAgents list;
-        # there is no separate single-agent shorthand.
+        # PHASE 1: Route to Praxis (default)
+        # Praxis's public Route is the downstream agent endpoint. An entry with
+        # no endpoint derives it from global.clusterBaseDomain:
+        # https://openshift-lightspeed.apps.<base>
+        # This routes ACME → Praxis → OLS
+
+        # PHASE 3: Route to MAS A2A (uncomment after Phase 2)
+        # After MAS A2A is enabled, uncomment this to route ACME → MAS A2A → OLS
+        # - name: a2a.remoteAgents[0].name
+        #   value: mas-orchestrator
+        # - name: a2a.remoteAgents[0].description
+        #   value: "MAS A2A Orchestrator for OpenShift Lightspeed"
+        # - name: a2a.remoteAgents[0].endpoint
+        #   value: "https://mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
         # Outbound OLS mode (metadata.ols_mode); chart default is troubleshooting.
         - name: a2a.olsMode
           value: troubleshooting
@@ -676,7 +679,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "7e9d13923903"
+          value: "ed7c8360fb90"
     mao-api:
       name: mao-api
       namespace: mao
@@ -686,7 +689,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "7e9d13923903"
+          value: "ed7c8360fb90"
         # DevTokenValidator supplies the synthetic username "dev". Keep this
         # development-only allow-list in sync with the dev authentication mode.
         # Replace it and switch the API to Keycloak mode before exposing MAS A2A.
@@ -701,17 +704,55 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "7e9d13923903"
-        - name: identity.providerMode
-          value: keycloak
-        - name: identity.keycloakAudience
+          value: "ed7c8360fb90"
+        # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
+        # - name: a2a.enabled
+        #   value: "true"
+        # - name: a2a.blueprintId
+        #   value: "<replace-with-blueprint-id-from-phase-2>"
+        # - name: a2a.publicBaseUrl
+        #   value: "https://mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
+        # - name: a2a.allowedPrincipals
+        #   value: '["<replace-with-acme-agent-sub-from-phase-2>"]'
+        # - name: route.enabled
+        #   value: "true"
+        # - name: route.host
+        #   value: "mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
+
+        # Multi-issuer OIDC: accept tokens from Red Hat SSO and Keycloak
+        # Keycloak is NOT auto-appended; include it explicitly
+        - name: identity.oidcIssuers[0].issuer_url
+          value: https://sso.redhat.com/auth/realms/redhat-external
+        - name: identity.oidcIssuers[0].jwks_url
+          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        - name: identity.oidcIssuers[0].audience
+          value: openshift-lightspeed
+        - name: identity.oidcIssuers[0].username_claim
+          value: preferred_username
+        - name: identity.oidcIssuers[1].issuer_url
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external
+        - name: identity.oidcIssuers[1].jwks_url
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        - name: identity.oidcIssuers[1].audience
+          value: openshift-lightspeed
+        - name: identity.oidcIssuers[1].username_claim
+          value: preferred_username
+        - name: identity.oidcIssuers[2].issuer_url
+          value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca
+        - name: identity.oidcIssuers[2].jwks_url
+          value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca/protocol/openid-connect/certs
+        - name: identity.oidcIssuers[2].audience
           value: mas-a2a
+        - name: identity.oidcIssuers[2].username_claim
+          value: preferred_username
+        - name: identity.oidcVerifySsl
+          value: "true"
+        - name: identity.oidcTimeout
+          value: "30"
         - name: identity.keycloakCaTrust.enabled
           value: "true"
-      # Still dormant until a persisted orchestrator blueprint, authorized
-      # token subjects, the public cluster URL, and secure mao-api settings
-      # have been confirmed. Then set a2a.enabled=true and the required A2A
-      # fields; see charts/all/mao/mas-a2a/README.md.
+      # PHASE 1: Dormant by default (a2a.enabled=false)
+      # See README.md "Phase 2: Enable MAS A2A Routing" for activation steps
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null
