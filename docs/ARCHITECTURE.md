@@ -160,6 +160,13 @@ Local render lesson: Praxis multi-OIDC output is YAML nested inside a ConfigMap
 string. Helm whitespace trimming once joined the last external JWKS URL to the
 local issuer item; parse `data.policy.yaml` itself, not only the outer Helm YAML.
 
+Live Praxis startup finding: enabling the static agent card originally rendered
+`static_files` as a `load_balancer.clusters[]` field. The pinned
+`ghcr.io/praxis-proxy/ai:0.4.1` image embeds Core 0.7.0, whose strict cluster
+schema rejects that field and crash-loops the pod. The chart now serves the card
+with Core's `static_response` filter after the policy filter; keep discovery
+public through the explicit policy route and do not model files as LB clusters.
+
 - **TLS trust: extend the default store, don't replace it.**
   `ssl.create_default_context(cafile=X)` and httpx's `verify=<path>` both
   *replace* the system's default trust store with only `X`. That's correct
