@@ -451,3 +451,24 @@ containerSecurityContext:
   capabilities:
     drop:
       - ALL
+
+# Optional OpenShift Route to expose OLS app-server externally. This is needed
+# for multi-cluster deployments where Praxis (running in a hub cluster) needs
+# to route to OLS instances in remote clusters via their public Routes.
+# For same-cluster deployments, Praxis can use the internal Service.
+route:
+  enabled: false
+  # Empty derives ols-api.apps.<clusterBaseDomain>
+  host: ""
+  # Service name the Route targets (operator-managed)
+  serviceName: lightspeed-app-server
+  # Target port (operator creates HTTPS Service)
+  targetPort: https
+  tls:
+    # reencrypt: Route terminates TLS, then re-encrypts to backend
+    termination: reencrypt
+    # Destination CA is the service-ca that signed the backend cert
+    # Leave empty to use the default service-ca bundle
+    destinationCA: ""
+    insecureEdgeTerminationPolicy: Redirect
+  syncWave: "10"

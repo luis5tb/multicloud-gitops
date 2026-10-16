@@ -1,0 +1,29 @@
+{{- if .Values.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "openshift-lightspeed-config.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshift-lightspeed-config.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: {{ .Values.route.syncWave | quote }}
+spec:
+  host: {{ .Values.route.host | default (printf "ols-api.%s" (include "openshift-lightspeed-config.appsDomain" .)) }}
+  to:
+    kind: Service
+    name: {{ .Values.route.serviceName | default "lightspeed-app-server" }}
+    weight: 100
+  port:
+    targetPort: {{ .Values.route.targetPort | default "https" }}
+  tls:
+    termination: {{ .Values.route.tls.termination | default "reencrypt" }}
+    {{- if eq (.Values.route.tls.termination | default "reencrypt") "reencrypt" }}
+    # Operator-managed app-server Service uses HTTPS; reencrypt validates
+    # the backend certificate using the service-ca
+    destinationCACertificate: |
+{{ .Values.route.tls.destinationCA | default "" | nindent 6 }}
+    {{- end }}
+    insecureEdgeTerminationPolicy: {{ .Values.route.tls.insecureEdgeTerminationPolicy | default "Redirect" }}
+  wildcardPolicy: None
+{{- end }}
