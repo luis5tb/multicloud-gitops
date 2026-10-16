@@ -807,19 +807,40 @@ application overrides:
 **Do not enable A2A while the existing `mas-api` Route accepts development-mode
 authentication.** The API is independently reachable with a public Route.
 
-1. Switch the API to Keycloak authentication mode and configure a dedicated
-   API audience (distinct from the A2A audience):
+**The `mao-api` application is now pre-configured with Keycloak authentication**
+in `variants/standalone/values-standalone.yaml`. You only need to add authorized
+admin users.
+
+1. Get Keycloak user subject IDs for authorized administrators:
+
+   ```bash
+   # Get user IDs from Keycloak
+   oc exec -n keycloak-system deploy/keycloak -- \
+     /opt/keycloak/bin/kcadm.sh config credentials \
+     --server http://localhost:8080 \
+     --realm master \
+     --user admin \
+     --password $(oc get secret keycloak-initial-admin -n keycloak-system -o jsonpath='{.data.password}' | base64 -d)
+   
+   oc exec -n keycloak-system deploy/keycloak -- \
+     /opt/keycloak/bin/kcadm.sh get users -r rca --fields id,username
+   
+   # Or from Keycloak Admin Console:
+   # Navigate to: Keycloak → Realm 'rca' → Users → select user → copy ID (UUID)
+   ```
+
+2. Update `variants/standalone/values-standalone.yaml` with authorized user IDs:
 
    ```yaml
    - name: mao-api
      overrides:
-       - name: identity.providerMode
-         value: keycloak
-       - name: identity.keycloakAudience
-         value: "<your-mas-api-audience>"  # e.g., "mas-api"
+       # ... existing overrides ...
        - name: identity.adminAllowedUsers
-         value: '["<keycloak-username-1>", "<keycloak-username-2>"]'
+         value: '["a1b2c3d4-e5f6-...", "g7h8i9j0-k1l2-..."]'  # Replace with actual user IDs
    ```
+
+   **Important:** Use Keycloak user subject IDs (UUIDs from the `sub` claim),
+   not usernames. The validator checks the token's `sub` claim against this list.
 
 2. If switching the worker to Keycloak mode as well, configure its audience:
 
