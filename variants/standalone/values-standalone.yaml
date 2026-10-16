@@ -220,7 +220,7 @@ clusterGroup:
         # ExternalOIDCControllerDegraded (this has happened -- recovery
         # command is in that README too).
         - name: openshiftOIDC.enabled
-          value: "false"
+          value: "true"
         # openshiftOIDC.issuerURL and openshiftOIDC.consoleRoute are no longer
         # set here: both derive from global.clusterBaseDomain at the top of this
         # file (https://keycloak.apps.<base>/realms/<realm> and
@@ -700,7 +700,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "ed7c8360fb90"
+          value: "3de31dbf26c2"
     mao-api:
       name: mao-api
       namespace: mao
@@ -710,7 +710,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "ed7c8360fb90"
+          value: "3de31dbf26c2"
         # Keycloak authentication for MAS API admin endpoints
         - name: identity.providerMode
           value: keycloak
@@ -743,7 +743,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "ed7c8360fb90"
+          value: "3de31dbf26c2"
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
         # - name: a2a.enabled
         #   value: "true"
