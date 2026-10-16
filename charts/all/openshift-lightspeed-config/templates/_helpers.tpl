@@ -272,6 +272,13 @@ containers:
         value: {{ include "openshift-lightspeed-config.effectiveKeycloakIssuerURL" . | quote }}
       - name: A2A_OIDC_AUDIENCE
         value: {{ .Values.appServerPatch.a2a.inboundOidcAudience | quote }}
+      {{- if .Values.appServerPatch.a2a.oidcIssuers }}
+      # Multi-issuer OIDC: JSON array of issuer configs. When set, OLS validates
+      # tokens from ANY of these issuers (single-issuer A2A_OIDC_ISSUER_URL ignored).
+      # Also include the local Keycloak issuer automatically.
+      - name: A2A_OIDC_ISSUERS_JSON
+        value: {{ mustAppend .Values.appServerPatch.a2a.oidcIssuers (dict "issuer_url" (include "openshift-lightspeed-config.effectiveKeycloakIssuerURL" .) "audience" .Values.appServerPatch.a2a.inboundOidcAudience "username_claim" "preferred_username") | toJson | quote }}
+      {{- end }}
       - name: OIDC_CA_TRUST_ENABLED
         value: {{ include "openshift-lightspeed-config.oidcTrustEnabled" . | quote }}
       - name: OIDC_CA_SECRET_NAME
