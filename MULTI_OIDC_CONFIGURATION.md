@@ -84,7 +84,40 @@ openshift-lightspeed-config:
 
 **Note:** The local Keycloak issuer is automatically appended to this list.
 
-### 3. Configure Keycloak to Trust External Issuers (REQUIRED for token exchange)
+### 3. Configure MAS A2A for Multi-Issuer (Optional)
+
+MAS A2A can accept tokens from multiple issuers directly, without requiring token exchange. When `identity.oidcIssuers` is set, MAS validates tokens from any configured issuer.
+
+In `variants/standalone/values-standalone.yaml`, under the `mao-a2a` application:
+
+```yaml
+mao-a2a:
+  identity:
+    # Multi-issuer OIDC: accept tokens from Red Hat SSO prod, stage, and Keycloak
+    # When oidcIssuers is set, providerMode is ignored
+    oidcIssuers:
+      - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
+        jwks_url: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+        username_claim: preferred_username
+      - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
+        jwks_url: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+        username_claim: preferred_username
+      # IMPORTANT: Keycloak is NOT auto-appended; include it explicitly
+      - issuer_url: https://keycloak.apps.<cluster>/realms/rca
+        jwks_url: https://keycloak.apps.<cluster>/realms/rca/protocol/openid-connect/certs
+        audience: mas-a2a
+        username_claim: preferred_username
+    oidcVerifySsl: true
+    oidcTimeout: 30
+```
+
+**Note:** Unlike Praxis and OLS, MAS A2A does **not** automatically append the local Keycloak issuer. If you want to accept Keycloak tokens, add it explicitly to `oidcIssuers`.
+
+**Building the image:** Multi-issuer support requires code changes in the `uie-mas-hosted` repository (see "MAS A2A Code Changes" section below). Build and push a custom image, then set the tag in the values above.
+
+### 4. Configure Keycloak to Trust External Issuers (REQUIRED for token exchange)
 
 **This is critical**: When OLS exchanges a Red Hat SSO token for a Keycloak token (RFC 8693), Keycloak must validate the incoming `subject_token`. Without this configuration, token exchange will fail with "unknown issuer".
 
@@ -244,8 +277,42 @@ The multi-issuer configuration is passed to the patch Job via:
 
 - **`A2A_KEYCLOAK_ISSUER_URL`**: Always points to the local Keycloak (for token exchange)
 
+## MAS A2A Code Changes
+
+To enable multi-issuer OIDC support in MAS A2A, apply these changes to the `uie-mas-hosted` repository (branch `a2a-inbound-support`):
+
+### New Files
+- `adapters/outbound/auth/multi_issuer_validator.py` - Multi-issuer token validator
+- `tests/unit/adapters/test_multi_issuer_validator.py` - Unit tests
+
+### Modified Files
+
+**`config/app_config.py`** - Add multi-issuer configuration fields:
+```python
+# Multi-issuer OIDC mode
+multi_issuer_oidc_issuers_json: str = ""
+multi_issuer_oidc_verify_ssl: bool = True
+multi_issuer_oidc_timeout: int = 30
+```
+
+**`bootstrap/container.py`** - Update `_build_token_validator()` to check for multi-issuer mode before single-issuer modes (see the implementation in the uie-mas-hosted repository).
+
+After making these changes:
+```bash
+cd /home/ltomasbo/git_repos/uie-mas-hosted
+podman build -t quay.io/ltomasbo/mas-api:$(git rev-parse --short HEAD) .
+podman push quay.io/ltomasbo/mas-api:$(git rev-parse --short HEAD)
+```
+
+Update the image tag in `variants/standalone/values-standalone.yaml`:
+```yaml
+- name: image.tag
+  value: "<git-short-sha-with-multi-issuer>"
+```
+
 ## Limitations
 
 - **One-shot realm import**: Adding `externalOidcProviders` after the realm already exists requires manual configuration in Keycloak Admin Console or a realm re-import
 - **Token exchange direction**: Only external → Keycloak exchange is supported (not Keycloak → external)
 - **No `act` claim**: Standard Keycloak V2 token exchange doesn't populate RFC 8693 `act` (actor) claim; audit trail is in logs only
+- **MAS A2A custom image**: Multi-issuer support for MAS A2A requires a custom-built image from the `uie-mas-hosted` repository with the changes described above
