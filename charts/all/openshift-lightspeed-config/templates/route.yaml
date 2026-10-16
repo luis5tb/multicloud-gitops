@@ -21,8 +21,10 @@ spec:
     {{- if eq (.Values.route.tls.termination | default "reencrypt") "reencrypt" }}
     # Operator-managed app-server Service uses HTTPS; reencrypt validates
     # the backend certificate using the service-ca
+{{ if .Values.route.tls.destinationCA }}
     destinationCACertificate: |
-{{ .Values.route.tls.destinationCA | default "" | nindent 6 }}
+{{ .Values.route.tls.destinationCA | nindent 6 }}
+{{ end }}
     {{- end }}
     insecureEdgeTerminationPolicy: {{ .Values.route.tls.insecureEdgeTerminationPolicy | default "Redirect" }}
   wildcardPolicy: None
