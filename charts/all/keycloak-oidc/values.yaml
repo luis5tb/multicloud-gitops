@@ -190,11 +190,15 @@ keycloak:
   # requirement that it name a real client). Must match the Lightspeed A2A
   # integration's own configured inbound audience exactly.
   lightspeedA2aAudience: lightspeed-a2a
-  # Separate audience for the MAS inbound A2A endpoint. This is added only to
-  # the openshift-cli client tokens; MAS must validate this audience in
+  # Separate audience for the MAS inbound A2A endpoint. It is added to
+  # openshift-cli and acme-agent client tokens; MAS validates this audience in
   # addition to its exact caller-subject allow-list. It is deliberately not
   # the Lightspeed A2A or OpenShift MCP audience.
   masA2aAudience: mas-a2a
+  # Dedicated audience for the separately exposed MAS management API. The
+  # openshift-cli client mapper below lets authorized human administrators
+  # mint tokens for the MAS API without reusing the inbound A2A audience.
+  masApiAudience: mas-api
 
 openshiftOIDC:
   enabled: false
