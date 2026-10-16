@@ -457,7 +457,7 @@ Save the blueprint via MAS API:
 
 ```bash
 # Get MAS API URL
-export MAS_API_URL="https://$(oc get route mao-api -n mao -o jsonpath='{.spec.host}')"
+export MAS_API_URL="https://$(oc get route mas-api -n mao -o jsonpath='{.spec.host}')"
 
 # In dev mode, MAS accepts any token; otherwise get a Keycloak admin token
 export MAS_TOKEN="any-token-in-dev-mode"
