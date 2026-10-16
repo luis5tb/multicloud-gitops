@@ -704,11 +704,13 @@ clusterGroup:
         # WARNING: Do not use in production - no authentication security!
         - name: identity.providerMode
           value: dev
-        # In dev mode, these settings are ignored but kept for reference:
+        # In dev mode, all authenticated requests get user_id="dev"
+        # Add "dev" to adminAllowedUsers so it can access resources
+        - name: identity.adminAllowedUsers
+          value: '["dev"]'
+        # These settings are not used in dev mode but kept for reference:
         # - name: identity.keycloakAudience
         #   value: mas-api
-        # - name: identity.adminAllowedUsers
-        #   value: '[]'
         # - name: identity.keycloakCaTrust.enabled
         #   value: "true"
     mao-a2a:
