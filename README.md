@@ -440,6 +440,14 @@ nodes:
       bearer_token: ""
 ```
 
+**Important:** When `agentCard.enabled: true` (enabled by default in
+`values-standalone.yaml` for multi-cluster deployments), Praxis serves a static
+agent card with Praxis's own endpoint as `rpc_url`. This ensures MAS A2A routes
+through Praxis for actual calls (allowing `X-OLS-Cluster` header routing) instead
+of bypassing Praxis by calling OLS directly. If you disable the static agent card,
+the blueprint's `agent_card` URL will fetch the first OLS cluster's card, causing
+MAS to bypass Praxis routing.
+
 Save the blueprint via MAS API:
 
 ```bash

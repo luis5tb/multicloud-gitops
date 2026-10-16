@@ -64,6 +64,39 @@ fine for the single currently-registered cluster but needs a real decision
 before a second `olsClusters` entry is registered -- see
 `LIGHTSPEED_DESIGN.md` SS7 ("Multi-cluster session safety").
 
+## Static agent card for multi-cluster routing
+
+When `agentCard.enabled` is `true`, Praxis serves its own static agent card
+(rendered from `values.yaml` defaults or explicit overrides) instead of
+proxying `/.well-known/agent-card.json` to the first cluster's OLS. The
+static card's critical field is `rpc_url`: it points to Praxis's own public
+endpoint (auto-derived from `global.clusterBaseDomain` as
+`https://openshift-lightspeed.apps.<base>/a2a` when not explicitly set),
+ensuring A2A clients (like MAS orchestrator) call Praxis with the
+`X-OLS-Cluster` header instead of bypassing Praxis by calling an OLS cluster's
+Route directly.
+
+**Why this matters:** The A2A SDK (`client.py`) uses the agent card's
+`rpc_url` for all actual calls, not the `base_url` initially provided. If
+Praxis proxied to the first OLS cluster's agent card, MAS would receive that
+cluster's OLS Route as the `rpc_url` and send every subsequent request there,
+bypassing Praxis's multi-cluster routing logic entirely.
+
+**Configuration:**
+- `agentCard.enabled: true` activates the feature.
+- `agentCard.name`, `description`, `version`, and `skills` default to match
+  OLS's typical agent card; override only to diverge from those defaults.
+- `agentCard.rpcUrl` auto-derives from `global.clusterBaseDomain`; override
+  only for a non-standard Praxis Route hostname.
+- The chart creates a ConfigMap (`praxis-proxy-agent-card`) with the JSON
+  agent card, mounts it at `/etc/praxis/agent-card` in the proxy pod, and
+  configures a `static_files` cluster in `praxis.yaml` to serve it.
+
+**When to enable:** For single-cluster deployments, leave this disabled -- the
+dynamic proxy to OLS works fine. Enable it when adding a second `olsClusters`
+entry or when deploying MAS orchestrator that needs to route to multiple
+clusters via the `X-OLS-Cluster` header.
+
 ## Upstream TLS trust
 
 The operator-managed `lightspeed-app-server` Service is HTTPS-only. This
