@@ -863,6 +863,10 @@ admin users.
 The A2A service publishes one MAS orchestrator blueprint. You must create this
 blueprint through the authenticated MAS API **before** enabling A2A.
 
+**For multi-cluster routing:** See [Multi-cluster routing with dynamic headers](#multi-cluster-routing-with-dynamic-headers)
+below for an orchestrator blueprint that routes to different OLS backends based
+on the user's prompt (requires Praxis static agent card and OLS external Routes).
+
 1. Use the MAS API's `POST /api/blueprints/blueprint.save` endpoint to save
    an orchestrator blueprint:
 
@@ -1191,3 +1195,57 @@ See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasb
 for client examples and the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
 for the full authentication flow. The [`mas-a2a` chart guide](charts/all/mao/mas-a2a/README.md)
 has deployment details and the full verification checklist.
+
+### Multi-cluster routing with dynamic headers
+
+**When to use:** After completing Phase 4 Step 2 (creating a blueprint), optionally
+use this multi-cluster orchestrator blueprint instead of a simple pass-through
+blueprint if you have multiple OLS clusters registered in `global.olsClusters`.
+
+**Prerequisites:**
+- Praxis static agent card enabled (`agentCard.enabled: true` - already configured in values-standalone.yaml)
+- OLS external Routes configured for each cluster (completed in Phase 1)
+- Multiple clusters registered in `global.olsClusters` with different IDs
+- MAS image with dynamic headers support (uie-mas-hosted commit 3de31db or later)
+
+**MAS orchestrator + Praxis routing** enables investigating multiple OpenShift
+clusters through a single interface. The orchestrator analyzes the user's question
+to determine which cluster they're asking about, then dynamically routes to the
+correct OLS backend via Praxis's X-OLS-Cluster header.
+
+**How it works:**
+
+1. **User**: "What pods are failing in cluster-a?"
+2. **Orchestrator**: Parses prompt → extracts cluster ID → delegates with headers
+3. **Praxis**: Receives X-OLS-Cluster header → routes to cluster-a OLS
+4. **OLS cluster-a**: Investigates → responds
+5. **Orchestrator**: Synthesizes final answer
+
+**Blueprint configuration:**
+
+The orchestrator uses the `delegate_task` tool's `data` parameter to pass routing
+headers:
+
+```yaml
+delegate_task(
+  dst_uid="praxis_investigator",
+  content="What pods are failing?",
+  work_item_id="investigate",
+  data={"headers": {"X-OLS-Cluster": "api-ocp-cluster-a-com-6443"}}
+)
+```
+
+**Example blueprint:** See [`docs/blueprint-multi-cluster-routing.yaml`](docs/blueprint-multi-cluster-routing.yaml)
+for a complete multi-cluster orchestrator that:
+- Identifies cluster from user prompt
+- Delegates to Praxis with X-OLS-Cluster header
+- Falls back to asking user which cluster if ambiguous
+
+**Requirements:**
+- Praxis static agent card enabled (`agentCard.enabled: true` in values-standalone.yaml)
+- OLS external Routes configured for each cluster (see Phase 1)
+- MAS image with dynamic headers support (commit 3de31db or later in uie-mas-hosted)
+
+**uie-mas-hosted changes:** The `a2a_agent_node` now reads `task.data["headers"]`
+and applies them via `a2a_provider.update_headers()` before sending requests,
+enabling per-task header injection without static blueprint configuration.
