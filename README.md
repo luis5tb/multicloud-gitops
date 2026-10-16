@@ -404,6 +404,162 @@ short version:
 
     restores the internal OAuth server immediately.
 
+### Phase 4 (Optional) — Enable MAS A2A Routing
+
+By default, ACME routes through Praxis → OLS. To route through MAS A2A instead
+(ACME → MAS A2A → OLS), follow these steps:
+
+**Step 1: Obtain ACME Agent's Token Subject**
+
+ACME authenticates with Keycloak using its service account. Get the `sub` claim:
+
+```bash
+# Method 1: From Keycloak Admin Console
+# Navigate to: Keycloak → Realm 'rca' → Users
+# Search for: "service-account-acme-agent"
+# Copy the user's ID (UUID) - this is the sub claim
+
+# Method 2: From ACME logs (if ACME has made at least one request)
+oc logs -n acme-agent deployment/acme-agent | grep acme_audit | jq -r .token_a_subject | head -1
+```
+
+**Step 2: Create MAS Blueprint**
+
+Create an orchestrator blueprint that routes to OLS A2A. Save this as `ols-routing-blueprint.yaml`:
+
+```yaml
+# MAS Blueprint that calls OLS through Praxis
+nodes:
+  - id: ols_investigator
+    type: a2a_agent_node
+    config:
+      # Call OLS through Praxis (recommended - includes policy enforcement)
+      base_url: "https://openshift-lightspeed.apps.<your-cluster>/a2a"
+      agent_card: "https://openshift-lightspeed.apps.<your-cluster>/.well-known/agent-card.json"
+      # Empty bearer_token means passthrough: MAS forwards caller's token to OLS
+      bearer_token: ""
+```
+
+Save the blueprint via MAS API:
+
+```bash
+# Get MAS API URL
+export MAS_API_URL="https://$(oc get route mao-api -n mao -o jsonpath='{.spec.host}')"
+
+# In dev mode, MAS accepts any token; otherwise get a Keycloak admin token
+export MAS_TOKEN="any-token-in-dev-mode"
+
+# Save the blueprint
+BLUEPRINT_YAML=$(cat ols-routing-blueprint.yaml)
+BLUEPRINT_ID=$(curl -s -X POST "${MAS_API_URL}/api/blueprints/blueprint.save" \
+  -H "Authorization: Bearer ${MAS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d "{\"blueprintRaw\": $(echo "$BLUEPRINT_YAML" | jq -Rs .)}" \
+  | jq -r '.blueprint_id')
+
+echo "Blueprint ID: $BLUEPRINT_ID"
+
+# Verify blueprint saved
+curl -s "${MAS_API_URL}/api/blueprints/available.blueprints.resolved.get?blueprintId=${BLUEPRINT_ID}" \
+  -H "Authorization: Bearer ${MAS_TOKEN}" | jq .
+```
+
+**Step 3: Enable MAS A2A**
+
+In `variants/standalone/values-standalone.yaml`, under the `mao-a2a` application,
+uncomment the PHASE 2 overrides and fill in the values:
+
+```yaml
+mao-a2a:
+  overrides:
+    # ... existing config ...
+    
+    # PHASE 2: Enable MAS A2A (uncomment and fill in)
+    - name: a2a.enabled
+      value: "true"
+    - name: a2a.blueprintId
+      value: "<blueprint-id-from-step-2>"  # Replace with $BLUEPRINT_ID
+    - name: a2a.publicBaseUrl
+      value: "https://mas-a2a.apps.<your-cluster>"  # Replace with your cluster domain
+    - name: a2a.allowedPrincipals
+      value: '["<acme-sub-from-step-1>"]'  # Replace with ACME's sub claim
+    - name: route.enabled
+      value: "true"
+    - name: route.host
+      value: "mas-a2a.apps.<your-cluster>"  # Replace with your cluster domain
+```
+
+Commit and push the changes. Wait for ArgoCD to sync the `mao-a2a` application.
+
+**Step 4: Verify MAS A2A**
+
+```bash
+# Check MAS A2A pod is running
+oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
+
+# Test agent card endpoint
+MAS_A2A_URL="https://$(oc get route mas-a2a -n mao -o jsonpath='{.spec.host}')"
+curl "${MAS_A2A_URL}/.well-known/agent-card.json" | jq .
+```
+
+**Step 5: Route ACME to MAS A2A**
+
+In `variants/standalone/values-standalone.yaml`, under the `acme-agent` application,
+uncomment the PHASE 3 override:
+
+```yaml
+acme-agent:
+  overrides:
+    # ... existing config ...
+    
+    # PHASE 3: Route to MAS A2A (uncomment)
+    - name: a2a.remoteAgents[0].name
+      value: mas-orchestrator
+    - name: a2a.remoteAgents[0].description
+      value: "MAS A2A Orchestrator for OpenShift Lightspeed"
+    - name: a2a.remoteAgents[0].endpoint
+      value: "https://mas-a2a.apps.<your-cluster>"  # Replace with your cluster domain
+```
+
+Commit and push. Wait for ArgoCD to sync the `acme-agent` application.
+
+**Step 6: Verify the Full Path**
+
+Send a test request:
+
+```bash
+ACME_URL="https://$(oc get route acme-agent -n acme-agent -o jsonpath='{.spec.host}')"
+curl -X POST "${ACME_URL}/a2a/jsonrpc" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "agent/sendMessage",
+    "params": {
+      "task": {"user_prompt": "test"},
+      "message": {"content": "list pods in namespace default"}
+    },
+    "id": 1
+  }'
+```
+
+Check logs at each hop:
+
+```bash
+# ACME → MAS A2A
+oc logs -n acme-agent deployment/acme-agent | grep acme_audit | tail -5
+
+# MAS A2A → OLS
+oc logs -n mao deployment/mas-a2a | grep -E "validate|principal" | tail -10
+
+# OLS → MCP
+oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server | grep a2a_audit | tail -5
+```
+
+**To Revert to Praxis:**
+
+Comment out the ACME `a2a.remoteAgents` override. ACME will fall back to
+deriving the endpoint from `global.clusterBaseDomain`, which points to Praxis.
+
 ## Accessing Argo CD
 
 With `global.singleArgoCD: true` (this pattern's default), the hub Argo CD
