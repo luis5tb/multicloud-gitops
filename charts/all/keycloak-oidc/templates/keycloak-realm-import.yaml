@@ -321,4 +321,30 @@ spec:
           issuer: {{ printf "spiffe://%s" (include "keycloak-oidc.effectiveTrustDomain" .) | quote }}
           bundleEndpoint: {{ .Values.keycloak.spiffeIdentityProvider.bundleEndpoint | quote }}
     {{- end }}
+    {{- if .Values.keycloak.externalOidcProviders }}
+    {{- /* External OIDC providers trusted for token exchange. Keycloak validates
+    tokens from these issuers when they are used as subject_token in RFC 8693
+    token exchange. These are oidc identity providers, not spiffe providers. */}}
+    {{- range .Values.keycloak.externalOidcProviders }}
+      - alias: {{ .alias | quote }}
+        providerId: oidc
+        enabled: true
+        {{- if .displayName }}
+        displayName: {{ .displayName | quote }}
+        {{- end }}
+        config:
+          issuer: {{ .issuerUrl | quote }}
+          jwksUrl: {{ .jwksUrl | quote }}
+          validateSignature: "true"
+          useJwksUrl: "true"
+          # Allow this provider's tokens to be used in token exchange
+          {{- if hasKey . "allowTokenExchange" }}
+          {{- if .allowTokenExchange }}
+          tokenExchangeEnabled: "true"
+          {{- end }}
+          {{- else }}
+          tokenExchangeEnabled: "true"
+          {{- end }}
+    {{- end }}
+    {{- end }}
 {{- end }}
