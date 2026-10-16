@@ -1,0 +1,121 @@
+description: |
+  Multi-cluster OpenShift investigation routing via Praxis proxy.
+
+  The orchestrator analyzes the user's question to determine which cluster
+  they're asking about, then delegates to Praxis with the X-OLS-Cluster header
+  to route to the correct OLS backend.
+
+name: Multi-Cluster Investigation Orchestrator
+
+# ----------------------------
+# LLM Definitions
+# ----------------------------
+llms:
+  - rid: orchestrator_llm_rid
+    name: orchestrator_llm
+    type: openai
+    config:
+      type: openai
+      model_name: gpt-4
+      api_key: ${OPENAI_API_KEY}
+
+# ----------------------------
+# Nodes
+# ----------------------------
+nodes:
+  - rid: user_question_node_rid
+    name: User Question Node
+    type: user_question_node
+    config:
+      type: user_question_node
+
+  - rid: final_answer_node_rid
+    name: Final Answer Node
+    type: final_answer_node
+    config:
+      type: final_answer_node
+
+  - rid: orchestrator_rid
+    name: Multi-Cluster Orchestrator
+    type: orchestrator_node
+    config:
+      type: orchestrator_node
+      llm: orchestrator_llm_rid
+      system_message: |
+        You are a multi-cluster OpenShift investigation orchestrator.
+
+        Your job is to:
+        1. Analyze the user's question to determine which OpenShift cluster they're asking about
+        2. Extract the cluster identifier from the question
+        3. Delegate to the investigation agent with the correct cluster routing header
+
+        CLUSTER IDENTIFICATION:
+        - Users may mention cluster names like "cluster-a", "production", "staging", etc.
+        - The cluster ID format is: api-<hostname>-<port> (e.g., "api-ocp-example-com-6443")
+        - Available clusters and their IDs are provided in your available nodes
+
+        DELEGATION PROCESS:
+        When delegating to the investigation agent, you MUST:
+        1. Use the delegate_task tool
+        2. Set the "data" parameter with headers: {"headers": {"X-OLS-Cluster": "<cluster-id>"}}
+        3. The cluster ID must match one of the registered cluster IDs
+
+        EXAMPLE:
+        User: "What pods are failing in cluster-a?"
+        Your action:
+        - Identify cluster: cluster-a → cluster ID: api-ocp-cluster-a-com-6443
+        - Delegate: delegate_task(dst_uid="praxis_investigator",
+                                  content="What pods are failing?",
+                                  work_item_id="investigate_cluster_a",
+                                  data={"headers": {"X-OLS-Cluster": "api-ocp-cluster-a-com-6443"}})
+
+        If the user doesn't specify a cluster:
+        - Ask them which cluster they want to investigate
+        - List the available clusters
+
+        IMPORTANT: Always include the headers in the data parameter when delegating!
+
+  - rid: praxis_investigator_rid
+    name: Praxis Investigation Agent
+    type: a2a_agent_node
+    config:
+      type: a2a_agent_node
+      # Praxis proxy endpoint (routes to multiple OLS backends based on X-OLS-Cluster header)
+      base_url: https://openshift-lightspeed.apps.ocp.example.com/a2a
+      # Token passthrough: empty means MAS forwards the caller's token
+      bearer_token:
+      # Agent card will be fetched from Praxis (static card with Praxis endpoint)
+      agent_card:
+      verify_ssl: true
+
+# ----------------------------
+# Plan Steps
+# ----------------------------
+plan:
+  - uid: user_input
+    node: user_question_node_rid
+    meta:
+      display_name: User Question
+      description: The user asks about an OpenShift cluster
+
+  - uid: orchestrate
+    after: user_input
+    node: orchestrator_rid
+    exit_condition: router_direct
+    branches:
+      investigate: investigate
+      finalize: finalize
+
+  - uid: investigate
+    node: praxis_investigator_rid
+    meta:
+      display_name: Cluster Investigation
+      description: |
+        Investigate the specified cluster via Praxis routing
+
+  - uid: finalize
+    after: investigate
+    node: final_answer_node_rid
+    meta:
+      display_name: Final Answer
+      description: Provide the final answer based on cluster investigation
