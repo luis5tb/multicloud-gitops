@@ -415,13 +415,18 @@ ACME authenticates with Keycloak using its service account. Get the `sub` claim:
 
 ```bash
 # Method 1: From Keycloak Admin Console
-# Navigate to: Keycloak → Realm 'rca' → Users
-# Search for: "service-account-acme-agent"
-# Copy the user's ID (UUID) - this is the sub claim
+# Navigate to: Realm 'rca' → Groups → 'acme-agent-rca' → Members
+# Open 'service-account-acme-agent' and copy its ID (UUID).
+# The chart adds this service-account user to the acme-agent-rca group.
+# An empty roles list is expected; no roles need to be assigned.
 
 # Method 2: From ACME logs (if ACME has made at least one request)
 oc logs -n acme-agent deployment/acme-agent | grep acme_audit | jq -r .token_a_subject | head -1
 ```
+
+Use the member's user ID as the `sub` in `a2a.allowedPrincipals`—not the
+username or the group's ID. If `keycloak.acmeGroupName` is overridden, use that
+configured group instead of `acme-agent-rca`.
 
 **Step 2: Create MAS Blueprint**
 
