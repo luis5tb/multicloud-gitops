@@ -107,6 +107,14 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     the app-server when the synced CA changes so the startup bundle refreshes
     (see the OLS chart README).
 
+    **Multi-OIDC Support:** To accept tokens from multiple OIDC issuers (e.g.,
+    Red Hat SSO production, Red Hat SSO stage, and the local Keycloak), see
+    [`MULTI_OIDC_CONFIGURATION.md`](MULTI_OIDC_CONFIGURATION.md) for detailed
+    configuration instructions. This configures Praxis, OLS, and Keycloak to
+    validate tokens from multiple trusted issuers while still performing token
+    exchange through the local Keycloak instance. Example configuration is in
+    [`MULTI_OIDC_EXAMPLE.yaml`](MULTI_OIDC_EXAMPLE.yaml).
+
 2. Replace the `acme-agent` application's `image.repository`/`image.tag`
    **and** `openshift-lightspeed-config`'s `appServerPatch.image.repository`/
    `appServerPatch.image.tag` overrides in
@@ -561,63 +569,294 @@ values as needed.
 the chart's `a2a.enabled: false` default renders **no resources**. No
 orchestrator blueprint ID, authorized Keycloak subject, caller token, or
 published image has been supplied for activation. Do not turn it on simply
-because its Argo CD Application appears Synced. The source is
-`uie-mas-hosted` branch `a2a-inbound-support` (inspected at `30ef32d`);
-`ROLE=a2a-serve` runs in the same MAS image as API and worker. Build/push
-that source to your approved registry, then pin the **same new immutable
-image revision** for all three; the existing API/worker `latest` defaults
-are not evidence that inbound A2A support is present. The
-[`mas-a2a` chart guide](charts/all/mao/mas-a2a/README.md) has build commands,
-activation values, and the full verification checklist.
+because its Argo CD Application appears Synced.
 
-Before changing `a2a.enabled` to true in
-`variants/standalone/values-standalone.yaml`:
+**IMPORTANT:** The A2A functionality requires a custom-built MAS image from
+the `a2a-inbound-support` branch. The existing `mas-api` and `mas-worker`
+`latest` defaults do NOT contain A2A support. Follow the build and
+configuration steps below before enabling.
 
-1. **Harden the separately routed API.** `mao-api` currently has a public
-   Route, permissive `identity.providerMode: dev`, and a synthetic `dev`
-   admin allow-list. Configure Keycloak (or a production SSO provider),
-   verify the API's **own** issuer/audience in a real token, and replace
-   `identity.adminAllowedUsers` with real authorized API usernames. If the
-   worker uses Keycloak mode, configure its issuer and non-empty audience
-   too. The A2A subject allow-list cannot protect the existing API Route.
-2. Save an actual **orchestrator** blueprint using the authenticated API,
-   verify the returned `blueprint_id` resolves, and set that ID as
-   `a2a.blueprintId`. The upstream `blueprint_a2a_agent.yml` is an outbound
-   client-node fixture, **not** a publishable inbound blueprint.
-3. Check a caller access token's `iss`, `aud`, and `sub` without recording
-   the token. Set `identity.keycloakAudience` to the dedicated MAS audience
-   actually present in `aud` (`keycloak.masA2aAudience` defaults to
-   `mas-a2a`) and `a2a.allowedPrincipals` to exact authorized token
-    subjects, or reference an existing Secret with those principals. The
-    chart rejects known OpenShift/OLS/MCP audiences even for an allow-listed
-    subject; add any customized equivalents to `identity.forbiddenAudiences`.
-    The default Keycloak realm import adds an audience mapper to `openshift-cli`
-   only on first import; an **existing realm will not reconcile it**. If
-   missing, add an Audience mapper to the actual token-issuing client or an
-   appropriate client scope in Keycloak; do not delete/re-import a live realm.
-    If the Keycloak Route uses a private ingress CA, also verify the MAS
-    Keycloak-mode pods can validate its HTTPS JWKS endpoint with a bundle
-    containing both public roots and that CA; do not turn off TLS verification.
-    The standalone `keycloak-oidc` application copies the managed-ingress CA
-    into `mao/keycloak-oidc-ca`. When switching API/worker to Keycloak mode
-    and enabling MAS A2A, set `identity.keycloakCaTrust.enabled: true` on
-    each relevant application. The same-image init container builds the
-    combined bundle and fails if either input is absent. Confirm the source
-    CA signs the actual Keycloak Route and that the pod can write its
-    `emptyDir` (set an allowed `podSecurityContext.fsGroup` if needed).
-    Rotation updates the ConfigMap but not the already-built bundle: restart
-    affected MAS pods after a CA change.
-4. Set an HTTPS `a2a.publicBaseUrl` for a gateway, or enable the chart's
-   direct edge-TLS Route with HTTP redirect. Install only after MongoDB,
-   Redis, the Temporal worker, and the persisted blueprint are ready.
+#### Step 0 — Build the A2A-enabled MAS image
 
-The Agent Card and health probes are public; JSON-RPC requires a valid bearer
-token and an exact allow-listed principal. In a non-production environment,
-check invalid/missing tokens (401), a valid non-allow-listed subject (403),
-task ownership, streaming, and approval/resume. A human approval pauses a
-task at non-terminal `INPUT_REQUIRED`: reply with the **same `task_id`** and
-a **new `message_id`**, then reattach/subscribe to its stream. Polling alone
-may continue to report `INPUT_REQUIRED` until a live event arrives or the
-approval gate times out. See the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
-and the source checkout's `docs/a2a-inbound-verification.md`. No image or
-cluster rollout has been performed as part of this preparation.
+The A2A runtime (`ROLE=a2a-serve`) is built into the same container image as
+the MAS API and worker. Build from the
+[`ltomasbo/uie-mas-hosted`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted)
+repository on branch `a2a-inbound-support`:
+
+```bash
+export QUAY_ORG=<your-quay-org>
+podman login quay.io
+
+# Clone the A2A-enabled source
+git clone --branch a2a-inbound-support --single-branch \
+  git@gitlab.cee.redhat.com:ltomasbo/uie-mas-hosted.git /tmp/uie-mas-hosted
+cd /tmp/uie-mas-hosted
+
+# Tag with the source commit for reproducibility
+export MAS_TAG=$(git rev-parse --short=12 HEAD)
+
+# Build the unified image (contains API, worker, and A2A roles)
+podman build -f Dockerfile -t quay.io/${QUAY_ORG}/mas-api:${MAS_TAG} .
+podman push quay.io/${QUAY_ORG}/mas-api:${MAS_TAG}
+```
+
+This single image supports all three roles (`ROLE=serve` for API,
+`ROLE=temporal-worker` for worker, `ROLE=a2a-serve` for A2A) via the
+entrypoint. You **must** use the same image tag across all three deployments
+(`mas-api`, `mas-worker`, `mas-a2a`) to ensure compatible code and
+dependencies.
+
+After building, update `variants/standalone/values-standalone.yaml` with the
+new image coordinates in the `mao-api`, `mao-worker`, and `mao-a2a`
+application overrides:
+
+```yaml
+  - name: mao-api
+    overrides:
+      - name: image.repository
+        value: quay.io/<your-org>/mas-api
+      - name: image.tag
+        value: <MAS_TAG>
+      # ... other API overrides
+
+  - name: mao-worker
+    overrides:
+      - name: image.repository
+        value: quay.io/<your-org>/mas-api
+      - name: image.tag
+        value: <MAS_TAG>
+      # ... other worker overrides
+
+  - name: mao-a2a
+    overrides:
+      - name: a2a.enabled
+        value: "true"
+      - name: image.repository
+        value: quay.io/<your-org>/mas-api
+      - name: image.tag
+        value: <MAS_TAG>
+      # ... A2A configuration (see below)
+```
+
+#### Step 1 — Harden the MAS API before enabling A2A
+
+**Do not enable A2A while the existing `mas-api` Route accepts development-mode
+authentication.** The API is independently reachable with a public Route.
+
+1. Switch the API to Keycloak authentication mode and configure a dedicated
+   API audience (distinct from the A2A audience):
+
+   ```yaml
+   - name: mao-api
+     overrides:
+       - name: identity.providerMode
+         value: keycloak
+       - name: identity.keycloakAudience
+         value: "<your-mas-api-audience>"  # e.g., "mas-api"
+       - name: identity.adminAllowedUsers
+         value: '["<keycloak-username-1>", "<keycloak-username-2>"]'
+   ```
+
+2. If switching the worker to Keycloak mode as well, configure its audience:
+
+   ```yaml
+   - name: mao-worker
+     overrides:
+       - name: identity.providerMode
+         value: keycloak
+       - name: identity.keycloakAudience
+         value: "<your-mas-worker-audience>"
+   ```
+
+3. Verify a real token from your Keycloak issuer contains the configured
+   audience before deploying. The issuer URL is derived from
+   `global.clusterBaseDomain` and `global.keycloakRealm` unless explicitly
+   overridden with `identity.keycloakIssuerUri`.
+
+#### Step 2 — Create and persist an orchestrator blueprint
+
+The A2A service publishes one MAS orchestrator blueprint. You must create this
+blueprint through the authenticated MAS API **before** enabling A2A.
+
+1. Use the MAS API's `POST /api/blueprints/blueprint.save` endpoint to save
+   an orchestrator blueprint:
+
+   ```bash
+   export MAO_API="https://$(oc get route mas-api -n mao -o jsonpath='{.spec.host}')"
+   export KEYCLOAK_TOKEN="<your-keycloak-token>"
+
+   BLUEPRINT_ID=$(curl -ksS -X POST "$MAO_API/api/blueprints/blueprint.save" \
+     -H "Authorization: Bearer $KEYCLOAK_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "blueprintRaw": "<your-orchestrator-blueprint-yaml-or-json>"
+     }' | jq -r '.blueprint_id')
+
+   echo "Blueprint ID: $BLUEPRINT_ID"
+   ```
+
+2. Verify the blueprint resolves:
+
+   ```bash
+   curl -ksS -H "Authorization: Bearer $KEYCLOAK_TOKEN" \
+     "$MAO_API/api/blueprints/available.blueprints.resolved.get?blueprintId=$BLUEPRINT_ID"
+   ```
+
+3. **Do not use** `uie-mas-hosted/run/fixtures/blueprint_a2a_agent.yml` as the
+   inbound blueprint — it is an outbound A2A client-node fixture, not a
+   publishable orchestrator.
+
+#### Step 3 — Configure A2A authentication and authorization
+
+MAS A2A uses **Keycloak token validation** with a dedicated audience and
+principal allow-list.
+
+##### How authentication works
+
+1. **Token validation**: The A2A service validates bearer tokens against the
+   Keycloak issuer's JWKS endpoint. It checks:
+   - Token signature (via JWKS)
+   - Expiration (`exp` claim)
+   - Audience (`aud` claim must contain the configured `identity.keycloakAudience`)
+   - Issuer (`iss` claim must match `identity.keycloakIssuerUri`)
+
+2. **Principal authorization**: After validation, the token's `sub` (subject)
+   claim is checked against `a2a.allowedPrincipals`. Only exact matches are
+   authorized. The `sub` claim is typically an opaque Keycloak user ID, **not**
+   a username or email.
+
+3. **Forbidden audiences**: The chart rejects tokens with OpenShift/OLS/MCP
+   reserved audiences (`openshift`, `openshift-mcp`, `lightspeed-a2a`,
+   `lightspeed-mcp`, `openshift-cli`, `openshift-console`) even if the subject
+   is allow-listed. MAS A2A requires its own dedicated audience (default:
+   `mas-a2a` per `keycloak.masA2aAudience` in the realm import).
+
+##### Configuration steps
+
+1. Obtain a test token from a caller that will use the A2A service. Decode the
+   token (e.g., at jwt.io) and note its `iss`, `aud`, and `sub` claims.
+   **Never log or commit the actual token.**
+
+2. Configure the A2A application with the validated values:
+
+   ```yaml
+   - name: mao-a2a
+     overrides:
+       - name: a2a.enabled
+         value: "true"
+       - name: a2a.blueprintId
+         value: "<BLUEPRINT_ID>"
+       - name: a2a.publicBaseUrl
+         value: "https://mas-a2a-mao.apps.<cluster-domain>"
+       - name: a2a.allowedPrincipals
+         value: '["<validated-keycloak-sub-1>", "<validated-keycloak-sub-2>"]'
+       - name: identity.providerMode
+         value: keycloak
+       - name: identity.keycloakAudience
+         value: "mas-a2a"  # Must match the audience in caller tokens
+       - name: image.repository
+         value: quay.io/<your-org>/mas-api
+       - name: image.tag
+         value: <MAS_TAG>
+   ```
+
+3. **Keycloak audience mapper**: The default Keycloak realm import
+   (`charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml`) adds a
+   `mas-a2a-audience` mapper to the `openshift-cli` client on first import.
+   **An existing realm will not reconcile this mapper.** If the mapper is
+   missing:
+
+   - Log into the Keycloak Admin Console
+   - Navigate to the `openshift-cli` client (or the client your callers use)
+   - Add an **Audience** protocol mapper:
+     - Mapper Type: **Audience**
+     - Included Custom Audience: `mas-a2a` (or your configured audience)
+     - Add to Access Token: **ON**
+
+   Do not delete/re-import a live realm just to add the mapper.
+
+4. **Private Keycloak CA (optional)**: If the Keycloak Route uses a private
+   ingress CA, configure CA trust:
+
+   ```yaml
+   - name: mao-a2a
+     overrides:
+       - name: identity.keycloakCaTrust.enabled
+         value: "true"
+   ```
+
+   The `keycloak-oidc` application must have published the CA ConfigMap in the
+   `mao` namespace via `openshiftOIDC.caBundleSync.enabled: true` and
+   `openshiftOIDC.caBundleSync.additionalTargetNamespaces: [mao]`. Apply the
+   same setting to `mao-api` and `mao-worker` when switching them to Keycloak
+   mode.
+
+#### Step 4 — Deploy and verify
+
+1. Ensure MongoDB, Redis, Temporal, and the Temporal worker are ready:
+
+   ```bash
+   oc get pods -n mao | grep -E 'mongo|redis|temporal|mas-worker'
+   ```
+
+2. Commit and sync the changes:
+
+   ```bash
+   git add variants/standalone/values-standalone.yaml
+   git commit -m "Enable MAS A2A with hardened authentication"
+   git push origin <your-branch>
+   make argo-healthcheck
+   ```
+
+3. Verify the A2A deployment:
+
+   ```bash
+   oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
+   oc logs -n mao -l app.kubernetes.io/name=mas-a2a
+   ```
+
+4. Test the Agent Card (public, no auth required):
+
+   ```bash
+   export A2A_HOST=$(oc get route mas-a2a -n mao -o jsonpath='{.spec.host}')
+   curl -ksS "https://$A2A_HOST/.well-known/agent-card.json" | jq
+   ```
+
+5. Test authorization boundaries:
+
+   ```bash
+   # Unauthenticated request (expect 401)
+   curl -ksS -o /dev/null -w '%{http_code}\n' "https://$A2A_HOST/a2a/jsonrpc"
+
+   # Valid token, non-allow-listed subject (expect 403)
+   curl -ksS -o /dev/null -w '%{http_code}\n' \
+     -H "Authorization: Bearer <token-with-wrong-subject>" \
+     "https://$A2A_HOST/a2a/jsonrpc"
+
+   # Valid token, allow-listed subject (expect 200 or valid JSON-RPC response)
+   curl -ksS -H "Authorization: Bearer <valid-token>" \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","method":"tasks.list","params":{},"id":1}' \
+     "https://$A2A_HOST/a2a/jsonrpc"
+   ```
+
+#### Human-in-the-loop (HITL) approvals
+
+When an orchestrator node requires human approval for a tool call, the task
+state becomes `TASK_STATE_INPUT_REQUIRED` (non-terminal). To resume:
+
+1. Send a follow-up A2A message with the **same `task_id`** and a **new
+   `message_id`**.
+2. Include a decision as either:
+   - **Structured**: `{"decision": "approve"|"reject"|"modify"|"redirect",
+     "feedback": "...", "modifiedArgs": {...}}`
+   - **Plain text**: Leading keyword `approve`/`yes` to approve,
+     `reject`/`no`/`deny` to reject, with the rest as feedback.
+3. Reattach/subscribe to the task's stream to observe the next event and clear
+   `INPUT_REQUIRED`. Polling alone may continue showing `INPUT_REQUIRED` until
+   a stream attachment observes a progress event.
+
+See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted/-/blob/a2a-inbound-support/docs/a2a-inbound.md)
+for client examples and the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
+for the full authentication flow. The [`mas-a2a` chart guide](charts/all/mao/mas-a2a/README.md)
+has deployment details and the full verification checklist.

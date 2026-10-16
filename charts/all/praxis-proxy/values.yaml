@@ -116,6 +116,20 @@ identity:
     # the custom inbound audience ACME's token carries and OpenShift
     # Lightspeed's own A2A validator independently checks again downstream.
     audience: lightspeed-a2a
+  # Multi-issuer OIDC configuration for validating tokens from multiple trusted
+  # identity providers. When oidcIssuers is non-empty, Praxis validates tokens
+  # from ANY of the listed issuers (the list keycloak entry above is ignored).
+  # Each issuer entry needs issuer URL, JWKS URL, and the expected audience.
+  # Leave empty to use single-issuer mode (identity.keycloak above).
+  oidcIssuers: []
+    # - name: red-hat-sso-prod
+    #   issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
+    #   jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+    #   audience: openshift-lightspeed
+    # - name: red-hat-sso-stage
+    #   issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
+    #   jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+    #   audience: openshift-lightspeed
 
 policy:
   allowedCallers:

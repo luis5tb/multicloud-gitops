@@ -216,7 +216,22 @@ appServerPatch:
     # match the Keycloak audience mapper and Praxis policy (lightspeed-a2a in
     # this pattern). The bridge also sets the configured issuer to the effective
     # keycloakIssuerURL and module to oidc, preserving other OLS auth settings.
+    # DEPRECATED in multi-issuer mode: use oidcIssuers below instead.
     inboundOidcAudience: lightspeed-a2a
+    # Multi-issuer OIDC configuration for validating tokens from multiple trusted
+    # identity providers. When non-empty, OLS validates tokens from ANY of these
+    # issuers (single-issuer keycloakIssuerURL + inboundOidcAudience are ignored).
+    # Each issuer needs issuer_url and audience; username_claim and jwks_cache_seconds
+    # are optional. Empty means single-issuer mode (keycloakIssuerURL above).
+    oidcIssuers: []
+      # - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
+      #   audience: openshift-lightspeed
+      #   username_claim: preferred_username  # optional, defaults to preferred_username
+      #   jwks_cache_seconds: 300  # optional, defaults to 300
+      # - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
+      #   audience: openshift-lightspeed
+      # - issuer_url: https://keycloak.apps.<cluster>/realms/rca  # derived when empty
+      #   audience: lightspeed-a2a
     # Required for token exchange; a2a_auth.py validates this HTTPS issuer
     # before discovery or sending credentials. The endpoint itself requires
     # clusterId and rpcUrl even when exchange is disabled.

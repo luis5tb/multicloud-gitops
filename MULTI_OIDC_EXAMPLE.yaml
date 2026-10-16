@@ -1,0 +1,126 @@
+# Multi-OIDC Configuration Example
+# Add these sections to variants/standalone/values-standalone.yaml to enable multi-OIDC support
+
+# =============================================================================
+# 1. PRAXIS PROXY - Multi-Issuer Token Validation (Optional)
+# =============================================================================
+# Add this under the praxis-proxy application overrides
+# When oidcIssuers is set, Praxis validates tokens from ALL listed issuers
+# plus the local Keycloak (automatically included).
+# Leave empty to skip Praxis validation and let OLS handle everything.
+
+praxis-proxy:
+  identity:
+    # Multi-issuer OIDC configuration
+    oidcIssuers:
+      - name: red-hat-sso-prod
+        issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+      - name: red-hat-sso-stage
+        issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+
+# =============================================================================
+# 2. OPENSHIFT LIGHTSPEED CONFIG - OLS Multi-Issuer Validation
+# =============================================================================
+# Add this under the openshift-lightspeed-config application overrides
+# OLS will validate tokens from ALL listed issuers plus local Keycloak
+# (automatically appended)
+
+openshift-lightspeed-config:
+  appServerPatch:
+    # ... existing config ...
+    a2a:
+      # ... existing a2a config ...
+
+      # Multi-issuer OIDC configuration for OLS
+      # The local Keycloak issuer is automatically appended to this list
+      oidcIssuers:
+        - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
+          audience: openshift-lightspeed
+          username_claim: preferred_username  # or 'email' - check your SSO config
+          jwks_cache_seconds: 300
+        - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
+          audience: openshift-lightspeed
+          username_claim: preferred_username
+          jwks_cache_seconds: 300
+
+# =============================================================================
+# 3. KEYCLOAK-OIDC - Trust External Issuers for Token Exchange
+# =============================================================================
+# Add this under the keycloak-oidc application overrides
+# Keycloak needs to trust these external issuers to accept their tokens
+# as subject_token in RFC 8693 token exchange
+
+keycloak-oidc:
+  keycloak:
+    # ... existing keycloak config ...
+
+    # External OIDC providers that Keycloak trusts for token exchange
+    externalOidcProviders:
+      - alias: red-hat-sso-prod
+        displayName: "Red Hat SSO Production"
+        issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        allowTokenExchange: true
+      - alias: red-hat-sso-stage
+        displayName: "Red Hat SSO Stage"
+        issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        allowTokenExchange: true
+
+# =============================================================================
+# IMPORTANT NOTES
+# =============================================================================
+#
+# 1. **Audience Consistency**: The 'audience' field MUST be consistent across:
+#    - The actual token from Red Hat SSO (aud claim)
+#    - Praxis oidcIssuers[].audience
+#    - OLS oidcIssuers[].audience
+#    Use 'openshift-lightspeed' or configure your SSO to issue the correct audience
+#
+# 2. **Issuer URLs**: Must match EXACTLY as they appear in the token's 'iss' claim
+#    - Include the full path including /auth/realms/<realm-name>
+#    - No trailing slashes
+#
+# 3. **JWKS URLs**: Must be the OIDC certs endpoint
+#    - Usually: <issuer-url>/protocol/openid-connect/certs
+#
+# 4. **Username Claim**: Depends on how your SSO is configured
+#    - Common options: 'preferred_username', 'email', 'sub'
+#    - Check a decoded token from your SSO to verify
+#
+# 5. **One-Shot Realm Import**: If you're adding externalOidcProviders to an
+#    existing realm, you'll need to either:
+#    - Delete and recreate the realm (data loss!)
+#    - Manually configure in Keycloak Admin Console
+#    - Use Keycloak Admin REST API to add the identity providers
+#
+# 6. **Token Exchange Direction**: This configuration supports:
+#    External SSO → Keycloak exchange (for MCP tokens)
+#    It does NOT support Keycloak → External SSO exchange
+#
+# 7. **Testing**: Before deploying to production:
+#    - Obtain a test token from Red Hat SSO
+#    - Decode it and verify: iss, aud, azp claims
+#    - Test the OLS A2A endpoint with that token
+#    - Check all logs: Praxis, OLS, Keycloak, MCP, API server
+
+# =============================================================================
+# REAL-WORLD EXAMPLE FOR RED HAT SSO
+# =============================================================================
+#
+# If using actual Red Hat SSO endpoints, replace the URLs above with:
+#
+# Production:
+#   issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
+#   jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+#
+# Stage:
+#   issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
+#   jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+#
+# Verify the actual realm name with your Red Hat SSO administrator.
+# Common realm names: redhat-external, EmployeeIDP, etc.

@@ -1,0 +1,238 @@
+# Multi-OIDC Configuration Guide
+
+This guide explains how to configure the Validated Pattern to support tokens from multiple OIDC issuers (Red Hat SSO Production, Red Hat SSO Stage, and the local Keycloak).
+
+## Architecture Overview
+
+```
+┌─────────────────┐
+│  ACME Agent     │  Token from Red Hat SSO/Stage/Keycloak
+│  (or other)     │
+└────────┬────────┘
+         │ Token A (from any issuer)
+         ▼
+┌─────────────────┐
+│  Praxis Proxy   │  Validates token against multiple trusted issuers
+└────────┬────────┘
+         │ Forwards Token A
+         ▼
+┌─────────────────┐
+│  OLS Agent      │  1. Validates Token A (multi-issuer OIDC)
+│  (a2a-split)    │  2. Exchanges Token A → Token B (via Keycloak)
+└────────┬────────┘
+         │ Token B (always from Keycloak, scoped to openshift-mcp)
+         ▼
+┌─────────────────┐
+│  OpenShift MCP  │  Forwards Token B to API server
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  API Server     │  Validates Token B, applies RBAC
+└─────────────────┘
+```
+
+### Key Points
+
+1. **OLS validates** tokens from multiple issuers (Red Hat SSO prod, Red Hat SSO stage, Keycloak)
+2. **Token exchange happens ONLY against Keycloak** (the local instance deployed by the pattern)
+3. **Keycloak trusts** the external issuers via Identity Provider configuration
+4. **Praxis validates** tokens from all configured issuers (optional - can be disabled to let OLS handle all validation)
+
+## Configuration Steps
+
+### 1. Configure Praxis for Multi-Issuer (Optional)
+
+In `variants/standalone/values-standalone.yaml`, under the `praxis-proxy` application overrides:
+
+```yaml
+praxis-proxy:
+  identity:
+    # Multi-issuer configuration for Praxis
+    oidcIssuers:
+      - name: red-hat-sso-prod
+        issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+      - name: red-hat-sso-stage
+        issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+```
+
+**Note:** When `oidcIssuers` is set, the local Keycloak issuer is automatically included. If you want Praxis to skip validation and let OLS handle everything, leave `oidcIssuers` empty.
+
+### 2. Configure OLS for Multi-Issuer
+
+In `variants/standalone/values-standalone.yaml`, under the `openshift-lightspeed-config` application:
+
+```yaml
+openshift-lightspeed-config:
+  appServerPatch:
+    a2a:
+      # Multi-issuer OIDC configuration
+      oidcIssuers:
+        - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
+          audience: openshift-lightspeed
+          username_claim: preferred_username  # or 'email' depending on SSO config
+          jwks_cache_seconds: 300
+        - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
+          audience: openshift-lightspeed
+          username_claim: preferred_username
+          jwks_cache_seconds: 300
+```
+
+**Note:** The local Keycloak issuer is automatically appended to this list.
+
+### 3. Configure Keycloak to Trust External Issuers
+
+In `variants/standalone/values-standalone.yaml`, under the `keycloak-oidc` application:
+
+```yaml
+keycloak-oidc:
+  keycloak:
+    # External OIDC providers that Keycloak trusts for token exchange
+    externalOidcProviders:
+      - alias: red-hat-sso-prod
+        displayName: "Red Hat SSO Production"
+        issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        allowTokenExchange: true
+      - alias: red-hat-sso-stage
+        displayName: "Red Hat SSO Stage"
+        issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
+        jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        allowTokenExchange: true
+```
+
+This configuration tells Keycloak to:
+- Trust tokens from these external issuers
+- Allow them to be used as `subject_token` in RFC 8693 token exchange
+- Validate their signatures using the provided JWKS URLs
+
+## How It Works
+
+### Token Validation Flow
+
+1. **User obtains token from Red Hat SSO** (production or stage)
+2. **User calls OLS A2A endpoint** with `Authorization: Bearer <sso-token>`
+3. **Praxis validates token** (if `oidcIssuers` configured) against all trusted issuers
+4. **OLS validates token** using multi-issuer OIDC configuration
+5. **OLS performs token exchange:**
+   ```
+   POST https://keycloak.../realms/rca/protocol/openid-connect/token
+   grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+   subject_token=<sso-token>
+   client_assertion=<ols-spiffe-jwt-svid>
+   audience=openshift-mcp
+   ```
+6. **Keycloak validates the subject_token**:
+   - Checks it against configured `externalOidcProviders`
+   - Verifies signature using the external issuer's JWKS
+   - Issues Token B with `sub` from the SSO token, `azp=lightspeed-mcp`
+7. **OLS uses Token B** to call OpenShift MCP
+8. **API server validates Token B** and applies RBAC
+
+### Important Notes
+
+- **The `audience` field**: All external tokens must have `audience: openshift-lightspeed` (or whatever you configure). This must match across:
+  - Praxis `oidcIssuers[].audience`
+  - OLS `oidcIssuers[].audience`
+  - The actual token from Red Hat SSO
+
+- **Token exchange always goes through Keycloak**: Even though OLS validates tokens from multiple issuers, the RFC 8693 exchange always happens against the local Keycloak instance (`A2A_KEYCLOAK_ISSUER_URL`).
+
+- **Keycloak must trust the external issuer**: This is configured via `externalOidcProviders` in the Keycloak realm.
+
+## Testing
+
+1. **Obtain a token from Red Hat SSO**:
+   ```bash
+   TOKEN=$(curl -X POST "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token" \
+     -d "client_id=<your-client>" \
+     -d "client_secret=<your-secret>" \
+     -d "grant_type=client_credentials" \
+     | jq -r '.access_token')
+   ```
+
+2. **Decode and verify the token**:
+   ```bash
+   echo $TOKEN | cut -d. -f2 | base64 -d | jq .
+   # Verify: iss, aud, azp
+   ```
+
+3. **Call OLS A2A endpoint**:
+   ```bash
+   curl -X POST "https://openshift-lightspeed.apps.<cluster>/a2a" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "X-OLS-Cluster: <cluster-id>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "jsonrpc": "2.0",
+       "method": "agent/sendMessage",
+       "params": {
+         "task": {...},
+         "message": {...}
+       },
+       "id": 1
+     }'
+   ```
+
+4. **Check logs**:
+   ```bash
+   # OLS validation and exchange
+   oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server | grep a2a_audit
+
+   # Praxis policy validation
+   oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy | grep jwt
+   ```
+
+## Troubleshooting
+
+### OLS rejects token with "Invalid issuer"
+- Verify `oidcIssuers` includes the issuer URL exactly as it appears in the token's `iss` claim
+- Check OLS logs for the actual issuer it received
+
+### Keycloak token exchange fails with 401
+- Verify the external issuer is in `externalOidcProviders`
+- Check Keycloak Admin Console → Identity Providers to see if they were created
+- Verify `allowTokenExchange: true` is set
+
+### Praxis denies request
+- If using `oidcIssuers` in Praxis config, verify the issuer URL and audience match the token
+- Check Praxis logs for policy evaluation details
+- Verify `claim.azp` is in `policy.allowedCallers`
+
+### MCP/API server rejects token
+- This is Token B, not the original SSO token
+- Verify the `groups` claim survived the exchange (should be `keycloak:acme-agent-rca`)
+- Check `oc auth can-i get pods --as-group=keycloak:acme-agent-rca -n <namespace>`
+
+## Reference: Environment Variables (OLS patch_appserver.py)
+
+The multi-issuer configuration is passed to the patch Job via:
+
+- **`A2A_OIDC_ISSUERS_JSON`**: JSON array of issuer configs (when multi-issuer mode is enabled)
+  ```json
+  [
+    {
+      "issuer_url": "https://sso.redhat.com/auth/realms/redhat-external",
+      "audience": "openshift-lightspeed",
+      "username_claim": "preferred_username",
+      "jwks_cache_seconds": 300
+    },
+    {
+      "issuer_url": "https://keycloak.apps.<cluster>/realms/rca",
+      "audience": "lightspeed-a2a",
+      "username_claim": "preferred_username"
+    }
+  ]
+  ```
+
+- **`A2A_KEYCLOAK_ISSUER_URL`**: Always points to the local Keycloak (for token exchange)
+
+## Limitations
+
+- **One-shot realm import**: Adding `externalOidcProviders` after the realm already exists requires manual configuration in Keycloak Admin Console or a realm re-import
+- **Token exchange direction**: Only external → Keycloak exchange is supported (not Keycloak → external)
+- **No `act` claim**: Standard Keycloak V2 token exchange doesn't populate RFC 8693 `act` (actor) claim; audit trail is in logs only

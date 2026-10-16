@@ -129,6 +129,22 @@ keycloak:
     # SPIRE's OIDC discovery provider JWKS endpoint, e.g.
     # https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
     bundleEndpoint: ""
+  # External OIDC identity providers that Keycloak trusts for token exchange.
+  # When a token from one of these issuers is used as the subject_token in an
+  # RFC 8693 token exchange, Keycloak will accept it. Each entry needs alias,
+  # issuerUrl (OIDC issuer), and jwksUrl (JWKS endpoint).
+  externalOidcProviders: []
+    # - alias: red-hat-sso-prod
+    #   displayName: Red Hat SSO Production
+    #   issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
+    #   jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+    #   # Optional: enable token exchange from this provider (default: true)
+    #   allowTokenExchange: true
+    # - alias: red-hat-sso-stage
+    #   displayName: Red Hat SSO Stage
+    #   issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
+    #   jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+    #   allowTokenExchange: true
   # Confidential client that exists only so lightspeed-mcp's RFC 8693 token
   # exchange has a real client_id to request as its `audience` parameter --
   # Keycloak's standard (V2) token exchange requires the audience parameter

@@ -75,6 +75,7 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 | MCP investigation RBAC scope | `charts/all/keycloak-oidc/templates/lightspeed-mcp-rbac.yaml`, set via `lightspeedRbac.*` overrides in `values-standalone.yaml` |
 | OpenShift Native OIDC resource | `charts/all/keycloak-oidc/templates/openshift-authentication.yaml` |
 | Praxis routing / allow-list policy | `charts/all/praxis-proxy/files/{praxis.yaml,policy.yaml}` |
+| **Multi-OIDC configuration (accept tokens from multiple issuers)** | **See [`MULTI_OIDC_CONFIGURATION.md`](MULTI_OIDC_CONFIGURATION.md) for complete guide; example in [`MULTI_OIDC_EXAMPLE.yaml`](MULTI_OIDC_EXAMPLE.yaml)** |
 | OLS LLM provider / MCP introspection | `charts/all/openshift-lightspeed-config/templates/olsconfig.yaml` + `values.yaml` |
 | Custom OLS image, A2A env/config or token exchange (temporary bridge) | `charts/all/openshift-lightspeed-config`'s `appServerPatch.*` values + `files/patch_appserver.py` |
 | OLS's own A2A endpoint / auth | [`luis5tb/lightspeed-service@a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split) (`ols/app/endpoints/{a2a.py,a2a_auth.py,a2a_executor.py}`); rebuild/push the image and bump `appServerPatch.image.*` in `values-standalone.yaml` |

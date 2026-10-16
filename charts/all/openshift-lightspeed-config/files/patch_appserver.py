@@ -774,24 +774,132 @@ def _child_indent(lines: list[str], start: int, end: int, default: str) -> str:
     return min(indents, key=len) if indents else default
 
 
+def _validate_https_url(url: str, name: str) -> None:
+    """Validate that a URL is HTTPS and well-formed."""
+    try:
+        parsed = urlsplit(url)
+        parsed.port  # triggers ValueError if port is malformed
+    except ValueError as error:
+        raise ValueError(f"{name} must be a valid HTTPS URL") from error
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{name} must be a valid HTTPS URL")
+
+
+def _set_oidc_multi_issuer_authentication(text: str, issuers: list[dict]) -> str:
+    """Select OIDC for inbound A2A and configure multiple trusted issuers in OLS YAML.
+
+    Each issuer dict must have: issuer_url, audience, and optionally username_claim
+    and jwks_cache_seconds.
+    """
+    if not issuers:
+        raise ValueError("OLS OIDC issuers list must contain at least one issuer")
+
+    # Validate all issuers
+    for i, issuer in enumerate(issuers):
+        if not issuer.get("issuer_url") or not issuer.get("audience"):
+            raise ValueError(f"Issuer {i}: issuer_url and audience are required")
+        _validate_https_url(issuer["issuer_url"], f"Issuer {i} URL")
+
+    lines = text.splitlines()
+    if any(line.strip() == "---" for line in lines):
+        raise ValueError("OLS config must be a single YAML document")
+    ols_block = _mapping_block(lines, "ols_config", "", 0, len(lines))
+    if ols_block is None:
+        raise ValueError("OLS config is missing the top-level ols_config: mapping")
+    ols_header, ols_end = ols_block
+    auth_indent = _child_indent(lines, ols_header + 1, ols_end, "  ")
+    auth_block = _mapping_block(
+        lines, "authentication_config", auth_indent, ols_header + 1, ols_end
+    )
+
+    # Build the oidc_issuers YAML array
+    field_indent = auth_indent + "  "
+    issuer_indent = field_indent + "  "
+    issuer_field_indent = issuer_indent + "  "
+
+    oidc_issuers_lines = [f"{field_indent}oidc_issuers:"]
+    for issuer in issuers:
+        oidc_issuers_lines.append(f"{issuer_indent}- issuer_url: {json.dumps(issuer['issuer_url'])}")
+        oidc_issuers_lines.append(f"{issuer_field_indent}audience: {json.dumps(issuer['audience'])}")
+        username_claim = issuer.get("username_claim", "preferred_username")
+        oidc_issuers_lines.append(f"{issuer_field_indent}username_claim: {json.dumps(username_claim)}")
+        jwks_cache = issuer.get("jwks_cache_seconds", 300)
+        oidc_issuers_lines.append(f"{issuer_field_indent}jwks_cache_seconds: {jwks_cache}")
+
+    if auth_block is None:
+        inserted = [f"{auth_indent}authentication_config:", f"{field_indent}module: \"oidc\""] + oidc_issuers_lines
+        lines[ols_end:ols_end] = inserted
+    else:
+        auth_header, auth_end = auth_block
+        field_indent = _child_indent(lines, auth_header + 1, auth_end, auth_indent + "  ")
+
+        # Remove old single-issuer fields and k8s-only options
+        remove_indices: list[int] = []
+        remove_keys = [
+            "oidc_issuer_url", "oidc_audience", "oidc_username_claim", "oidc_jwks_cache_seconds",
+            "oidc_issuers",  # Remove existing multi-issuer config to replace it
+            "k8s_cluster_api", "k8s_ca_cert_path", "skip_tls_verification"
+        ]
+        for key in remove_keys:
+            # Handle both simple fields and block-style fields like oidc_issuers
+            field_prefix = f"{field_indent}{key}:"
+            for index in range(auth_header + 1, auth_end):
+                if lines[index].startswith(field_prefix):
+                    remove_indices.append(index)
+                    # For block-style entries like oidc_issuers, also remove child lines
+                    if key == "oidc_issuers":
+                        child_start = index + 1
+                        while child_start < auth_end:
+                            child_line = lines[child_start]
+                            if not child_line.strip() or child_line.lstrip().startswith("#"):
+                                child_start += 1
+                                continue
+                            child_indent_len = len(child_line) - len(child_line.lstrip(" "))
+                            if child_indent_len <= len(field_indent):
+                                break
+                            remove_indices.append(child_start)
+                            child_start += 1
+
+        for index in sorted(set(remove_indices), reverse=True):
+            del lines[index]
+        auth_end -= len(remove_indices)
+
+        # Set module to oidc
+        module_prefix = f"{field_indent}module:"
+        module_matches = [
+            index for index in range(auth_header + 1, auth_end)
+            if lines[index].startswith(module_prefix)
+        ]
+        if module_matches:
+            lines[module_matches[0]] = f"{field_indent}module: \"oidc\""
+        else:
+            lines.insert(auth_end, f"{field_indent}module: \"oidc\"")
+            auth_end += 1
+
+        # Add oidc_issuers configuration
+        lines[auth_end:auth_end] = oidc_issuers_lines
+
+    result = "\n".join(lines)
+    if text.endswith("\n"):
+        result += "\n"
+    return result
+
+
 def _set_oidc_authentication(text: str, issuer_url: str, audience: str) -> str:
-    """Select OIDC for inbound A2A and set its issuer and audience in OLS YAML."""
+    """Select OIDC for inbound A2A and set its issuer and audience in OLS YAML.
+
+    DEPRECATED: Use _set_oidc_multi_issuer_authentication for multi-issuer support.
+    """
     if not issuer_url or not audience:
         raise ValueError("OLS OIDC issuer and audience must both be configured")
-    try:
-        parsed_issuer = urlsplit(issuer_url)
-        parsed_issuer.port
-    except ValueError as error:
-        raise ValueError("OLS OIDC issuer must be a valid HTTPS URL") from error
-    if (
-        parsed_issuer.scheme != "https"
-        or not parsed_issuer.hostname
-        or parsed_issuer.username is not None
-        or parsed_issuer.password is not None
-        or parsed_issuer.query
-        or parsed_issuer.fragment
-    ):
-        raise ValueError("OLS OIDC issuer must be a valid HTTPS URL")
+    _validate_https_url(issuer_url, "OLS OIDC issuer")
 
     lines = text.splitlines()
     if any(line.strip() == "---" for line in lines):
@@ -836,11 +944,8 @@ def _set_oidc_authentication(text: str, issuer_url: str, audience: str) -> str:
                 lines[matches[0]] = replacement
             else:
                 additions.append(replacement)
-        # Remove k8s-only options after switching the shared auth module to
-        # OIDC. In particular, k8s_ca_cert_path is a Pydantic FilePath and an
-        # obsolete/unmounted path could otherwise make service config loading
-        # fail even though OIDC does not use it.
-        for key in ("k8s_cluster_api", "k8s_ca_cert_path", "skip_tls_verification"):
+        # Remove k8s-only options and oidc_issuers after switching to single-issuer OIDC
+        for key in ("k8s_cluster_api", "k8s_ca_cert_path", "skip_tls_verification", "oidc_issuers"):
             field_prefix = f"{field_indent}{key}:"
             matches = [
                 index
@@ -903,10 +1008,29 @@ def _configure_a2a_service_config(
         )
 
     updated = config_text
+    # Support both multi-issuer and single-issuer OIDC configuration.
+    # Multi-issuer mode: A2A_OIDC_ISSUERS_JSON holds a JSON array of issuer configs.
+    # Single-issuer mode: A2A_OIDC_ISSUER_URL and A2A_OIDC_AUDIENCE (legacy).
+    oidc_issuers_json = os.environ.get("A2A_OIDC_ISSUERS_JSON", "").strip()
     oidc_issuer_url = os.environ.get("A2A_OIDC_ISSUER_URL", "").strip()
     oidc_audience = os.environ.get("A2A_OIDC_AUDIENCE", "").strip()
+
     if oidc_auth_enabled:
-        updated = _set_oidc_authentication(updated, oidc_issuer_url, oidc_audience)
+        if oidc_issuers_json:
+            # Multi-issuer mode
+            try:
+                oidc_issuers = json.loads(oidc_issuers_json)
+                if not isinstance(oidc_issuers, list):
+                    raise ValueError("A2A_OIDC_ISSUERS_JSON must be a JSON array")
+            except (json.JSONDecodeError, ValueError) as error:
+                raise RuntimeError(
+                    f"A2A_OIDC_ISSUERS_JSON is invalid: {error}"
+                ) from error
+            updated = _set_oidc_multi_issuer_authentication(updated, oidc_issuers)
+        else:
+            # Single-issuer mode (legacy)
+            updated = _set_oidc_authentication(updated, oidc_issuer_url, oidc_audience)
+
     updated = _set_a2a_token_exchange_enabled(updated, exchange_enabled)
     if updated != config_text and configmap.get("immutable") is True:
         raise RuntimeError(
@@ -927,8 +1051,9 @@ def _configure_a2a_service_config(
                 f"Could not patch A2A OLS config ConfigMap {namespace}/{configmap_name} "
                 f"(HTTP {status})"
         )
+        mode = "multi-issuer" if oidc_issuers_json else "single-issuer"
         print(
-            f"Configured OLS OIDC inbound auth (enabled={str(oidc_auth_enabled).lower()}) "
+            f"Configured OLS OIDC inbound auth ({mode}, enabled={str(oidc_auth_enabled).lower()}) "
             f"and a2a.token_exchange_enabled={str(exchange_enabled).lower()} in "
             f"ConfigMap {namespace}/{configmap_name} key {configmap_key}"
         )
