@@ -72,13 +72,45 @@ keycloak-oidc:
         allowTokenExchange: true
 
 # =============================================================================
+# 4. MAS A2A - Multi-Issuer Token Validation (Optional)
+# =============================================================================
+# Add this under the mao-a2a application overrides
+# Unlike Praxis/OLS, MAS A2A does NOT auto-append the local Keycloak issuer.
+# When oidcIssuers is set, providerMode is ignored.
+# REQUIRES: Custom-built MAS image with multi-issuer support from uie-mas-hosted
+
+mao-a2a:
+  # ... existing a2a config (enabled, blueprintId, allowedPrincipals) ...
+
+  identity:
+    # Multi-issuer OIDC configuration
+    # Keycloak is NOT auto-appended - include it explicitly if needed
+    oidcIssuers:
+      - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
+        jwks_url: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+        username_claim: preferred_username
+      - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
+        jwks_url: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        audience: openshift-lightspeed
+        username_claim: preferred_username
+      # IMPORTANT: Include Keycloak explicitly if you want to accept Keycloak tokens
+      - issuer_url: https://keycloak.apps.<your-cluster>/realms/rca
+        jwks_url: https://keycloak.apps.<your-cluster>/realms/rca/protocol/openid-connect/certs
+        audience: mas-a2a
+        username_claim: preferred_username
+    oidcVerifySsl: true
+    oidcTimeout: 30
+
+# =============================================================================
 # IMPORTANT NOTES
 # =============================================================================
 #
 # 1. **Audience Consistency**: The 'audience' field MUST be consistent across:
 #    - The actual token from Red Hat SSO (aud claim)
-#    - Praxis oidcIssuers[].audience
+#    - Praxis oidcIssuers[].audience (if Praxis validation is enabled)
 #    - OLS oidcIssuers[].audience
+#    - MAS A2A oidcIssuers[].audience (if MAS A2A is used)
 #    Use 'openshift-lightspeed' or configure your SSO to issue the correct audience
 #
 # 2. **Issuer URLs**: Must match EXACTLY as they appear in the token's 'iss' claim
@@ -106,7 +138,14 @@ keycloak-oidc:
 #    - Obtain a test token from Red Hat SSO
 #    - Decode it and verify: iss, aud, azp claims
 #    - Test the OLS A2A endpoint with that token
-#    - Check all logs: Praxis, OLS, Keycloak, MCP, API server
+#    - If using MAS A2A, test its endpoint as well
+#    - Check all logs: Praxis, OLS, Keycloak, MCP, API server, MAS A2A
+#
+# 8. **MAS A2A Multi-Issuer Support**:
+#    - Requires custom-built image from uie-mas-hosted with multi-issuer code
+#    - Unlike Praxis/OLS, Keycloak issuer is NOT auto-appended - add it explicitly
+#    - Tokens are validated directly; no token exchange happens at MAS A2A
+#    - Principal authorization still applies: token's sub must be in allowedPrincipals
 
 # =============================================================================
 # REAL-WORLD EXAMPLE FOR RED HAT SSO

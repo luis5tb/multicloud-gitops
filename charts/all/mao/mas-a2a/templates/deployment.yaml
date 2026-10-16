@@ -14,7 +14,41 @@
 {{- if not .Values.redis.secretName }}
 {{- fail "redis.secretName must name the shared Redis connection Secret; A2A and the Temporal worker share channels for HITL" }}
 {{- end }}
-{{- if eq .Values.identity.providerMode "dev" }}
+{{- /* Multi-issuer OIDC mode takes precedence over providerMode */ -}}
+{{- if .Values.identity.oidcIssuers }}
+{{- if not (kindIs "slice" .Values.identity.oidcIssuers) }}
+{{- fail "identity.oidcIssuers must be a list/array" }}
+{{- end }}
+{{- if lt (len .Values.identity.oidcIssuers) 1 }}
+{{- fail "identity.oidcIssuers must contain at least one issuer configuration" }}
+{{- end }}
+{{- $reservedAudiences := concat (list "openshift" "openshift-mcp" "lightspeed-a2a" "lightspeed-mcp" "openshift-cli" "openshift-console") (.Values.identity.forbiddenAudiences | default (list)) | uniq }}
+{{- range $idx, $issuer := .Values.identity.oidcIssuers }}
+{{- if not $issuer.issuer_url }}
+{{- fail (printf "identity.oidcIssuers[%d] missing required field: issuer_url" $idx) }}
+{{- end }}
+{{- if not $issuer.jwks_url }}
+{{- fail (printf "identity.oidcIssuers[%d] missing required field: jwks_url" $idx) }}
+{{- end }}
+{{- if not $issuer.audience }}
+{{- fail (printf "identity.oidcIssuers[%d] missing required field: audience" $idx) }}
+{{- end }}
+{{- $audienceList := list }}
+{{- if kindIs "string" $issuer.audience }}
+{{- $audienceList = splitList "," $issuer.audience }}
+{{- else if kindIs "slice" $issuer.audience }}
+{{- $audienceList = $issuer.audience }}
+{{- else }}
+{{- fail (printf "identity.oidcIssuers[%d].audience must be a string or list" $idx) }}
+{{- end }}
+{{- range $audience := $audienceList }}
+{{- $trimmed := trim $audience }}
+{{- if has $trimmed $reservedAudiences }}
+{{- fail (printf "identity.oidcIssuers[%d].audience contains reserved audience %q" $idx $trimmed) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- else if eq .Values.identity.providerMode "dev" }}
 {{- fail "identity.providerMode=dev is not permitted for an enabled MAS A2A deployment" }}
 {{- else if eq .Values.identity.providerMode "keycloak" }}
 {{- if and .Values.identity.keycloakCaTrust.enabled (not .Values.identity.keycloakVerifySsl) }}
@@ -318,6 +352,14 @@ spec:
               value: {{ .Values.temporal.port | quote }}
             - name: TEMPORAL_NAMESPACE
               value: {{ .Values.temporal.namespace | quote }}
+            {{- if .Values.identity.oidcIssuers }}
+            - name: MULTI_ISSUER_OIDC_ISSUERS_JSON
+              value: {{ .Values.identity.oidcIssuers | toJson | quote }}
+            - name: MULTI_ISSUER_OIDC_VERIFY_SSL
+              value: {{ .Values.identity.oidcVerifySsl | quote }}
+            - name: MULTI_ISSUER_OIDC_TIMEOUT
+              value: {{ .Values.identity.oidcTimeout | quote }}
+            {{- end }}
             - name: IDENTITY_PROVIDER_MODE
               value: {{ .Values.identity.providerMode | quote }}
             - name: SSO_ISSUER_URI
