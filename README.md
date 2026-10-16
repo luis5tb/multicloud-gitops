@@ -708,8 +708,17 @@ blueprint through the authenticated MAS API **before** enabling A2A.
 
 #### Step 3 — Configure A2A authentication and authorization
 
-MAS A2A uses **Keycloak token validation** with a dedicated audience and
-principal allow-list.
+MAS A2A uses **Keycloak token validation with passthrough** to downstream
+agents. The authenticated token is retained and passed through to a2a_agent_node
+instances in the orchestrator blueprint, enabling the full authentication chain:
+
+```
+ACME (SPIFFE) → MAS (passthrough) → Praxis → OLS (SPIFFE + RFC 8693) → MCP → API
+```
+
+**MAS does not need its own SPIFFE workload identity or Keycloak client
+registration.** It acts as a transparent orchestrator, validating the inbound
+token and passing it through to downstream services.
 
 ##### How authentication works
 
@@ -725,19 +734,39 @@ principal allow-list.
    authorized. The `sub` claim is typically an opaque Keycloak user ID, **not**
    a username or email.
 
-3. **Forbidden audiences**: The chart rejects tokens with OpenShift/OLS/MCP
-   reserved audiences (`openshift`, `openshift-mcp`, `lightspeed-a2a`,
-   `lightspeed-mcp`, `openshift-cli`, `openshift-console`) even if the subject
-   is allow-listed. MAS A2A requires its own dedicated audience (default:
-   `mas-a2a` per `keycloak.masA2aAudience` in the realm import).
+3. **Token passthrough**: After validation, MAS **retains the bearer token**
+   and passes it through to the MAS session execution context as
+   `RunContext.credentials`. When an `a2a_agent_node` in the orchestrator
+   blueprint has an empty `bearer_token` field, it automatically uses the
+   context token for outbound calls (this is already implemented in the
+   `a2a_agent_node_factory`).
+
+4. **Multi-audience support**: ACME (or any caller) can request a **single
+   token with multiple audiences** from Keycloak. Each downstream service
+   validates against its own expected audience from the array. This allows one
+   token to work for MAS, OLS, Ask Red Hat, and other agents without separate
+   token requests.
 
 ##### Configuration steps
 
-1. Obtain a test token from a caller that will use the A2A service. Decode the
+1. **Choose an audience strategy:**
+
+   **Option A: Share the OLS audience** (recommended for simplicity)
+   - MAS validates `lightspeed-a2a` (same as OLS)
+   - ACME requests one token: `scope=openid lightspeed-a2a`
+   - Token works for both MAS inbound and OLS outbound (via passthrough)
+   - No changes to `acme-agent` Keycloak client needed
+
+   **Option B: Separate MAS audience** (for stronger isolation)
+   - MAS validates `mas-a2a`, OLS validates `lightspeed-a2a`
+   - ACME requests **multi-audience token**: `scope=openid mas-a2a lightspeed-a2a`
+   - Requires adding `mas-a2a-audience` mapper to `acme-agent` in Keycloak
+
+2. Obtain a test token from a caller that will use the A2A service. Decode the
    token (e.g., at jwt.io) and note its `iss`, `aud`, and `sub` claims.
    **Never log or commit the actual token.**
 
-2. Configure the A2A application with the validated values:
+3. Configure the A2A application with the validated values:
 
    ```yaml
    - name: mao-a2a
@@ -753,29 +782,44 @@ principal allow-list.
        - name: identity.providerMode
          value: keycloak
        - name: identity.keycloakAudience
-         value: "mas-a2a"  # Must match the audience in caller tokens
+         value: "lightspeed-a2a"  # Option A: shared audience
+         # OR value: "mas-a2a"     # Option B: separate audience
        - name: image.repository
          value: quay.io/<your-org>/mas-api
        - name: image.tag
          value: <MAS_TAG>
    ```
 
-3. **Keycloak audience mapper**: The default Keycloak realm import
-   (`charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml`) adds a
-   `mas-a2a-audience` mapper to the `openshift-cli` client on first import.
-   **An existing realm will not reconcile this mapper.** If the mapper is
-   missing:
+4. **Keycloak audience mapper** (only for Option B - separate audience):
 
-   - Log into the Keycloak Admin Console
-   - Navigate to the `openshift-cli` client (or the client your callers use)
+   If using a separate `mas-a2a` audience, add the mapper to `acme-agent` in
+   `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml`:
+
+   ```yaml
+   - clientId: acme-agent
+     protocolMappers:
+       # Existing mappers...
+       - name: mas-a2a-audience
+         protocol: openid-connect
+         protocolMapper: oidc-audience-mapper
+         config:
+           included.custom.audience: "mas-a2a"
+           access.token.claim: "true"
+   ```
+
+   For an existing realm, add the mapper in the Keycloak Admin Console:
+   - Navigate to the `acme-agent` client (or the client your callers use)
    - Add an **Audience** protocol mapper:
      - Mapper Type: **Audience**
-     - Included Custom Audience: `mas-a2a` (or your configured audience)
+     - Included Custom Audience: `mas-a2a`
      - Add to Access Token: **ON**
 
-   Do not delete/re-import a live realm just to add the mapper.
+   ACME will then request multiple audiences: `scope=openid mas-a2a lightspeed-a2a`
 
-4. **Private Keycloak CA (optional)**: If the Keycloak Route uses a private
+   **Option A (shared audience) requires no Keycloak changes** — the existing
+   `lightspeed-a2a-audience` mapper on `acme-agent` is sufficient.
+
+5. **Private Keycloak CA (optional)**: If the Keycloak Route uses a private
    ingress CA, configure CA trust:
 
    ```yaml
@@ -790,6 +834,34 @@ principal allow-list.
    `openshiftOIDC.caBundleSync.additionalTargetNamespaces: [mao]`. Apply the
    same setting to `mao-api` and `mao-worker` when switching them to Keycloak
    mode.
+
+6. **Orchestrator blueprint configuration**: Create a blueprint with
+   `a2a_agent_node` instances that use **empty `bearer_token`** for passthrough:
+
+   ```yaml
+   nodes:
+     - rid: ols_agent_rid
+       name: OpenShift Lightspeed Agent
+       type: a2a_agent_node
+       config:
+         type: a2a_agent_node
+         base_url: https://praxis-proxy-praxis-proxy.apps.<cluster-domain>/
+         bearer_token: ""  # Empty = use inbound context token
+         verify_ssl: true
+   
+   plan:
+     - uid: user_input
+       node: user_question_node_rid
+     - uid: call_ols
+       after: user_input
+       node: ols_agent_rid
+     - uid: finalize
+       after: call_ols
+       node: final_answer_node_rid
+   ```
+
+   Save this blueprint via the MAS API and use its returned `blueprint_id` in
+   Step 2.
 
 #### Step 4 — Deploy and verify
 
@@ -840,6 +912,24 @@ principal allow-list.
      "https://$A2A_HOST/a2a/jsonrpc"
    ```
 
+#### What's NOT needed (passthrough design)
+
+Because MAS uses **token passthrough** rather than acting as an independent
+workload identity:
+
+- ❌ **No SPIFFE for MAS** — MAS doesn't fetch its own JWT-SVID
+- ❌ **No Keycloak client for MAS** — MAS is not registered in
+  `keycloak-realm-import.yaml`
+- ❌ **No Praxis policy changes** — Praxis still validates `azp=acme-agent`, not
+  `mas-orchestrator`
+- ❌ **No RBAC changes** — OpenShift RBAC still binds to
+  `Group:keycloak:acme-agent-rca`
+- ✅ **MAS validates and passes through** — The same token ACME fetched reaches
+  OLS unchanged
+
+From Praxis/OLS/MCP's perspective, MAS is invisible — they only see ACME's
+token.
+
 #### Human-in-the-loop (HITL) approvals
 
 When an orchestrator node requires human approval for a tool call, the task
@@ -855,6 +945,62 @@ state becomes `TASK_STATE_INPUT_REQUIRED` (non-terminal). To resume:
 3. Reattach/subscribe to the task's stream to observe the next event and clear
    `INPUT_REQUIRED`. Polling alone may continue showing `INPUT_REQUIRED` until
    a stream attachment observes a progress event.
+
+#### Verification and testing
+
+After deployment, test the passthrough flow:
+
+```bash
+# 1. Verify MAS A2A is running
+oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
+export A2A_HOST=$(oc get route mas-a2a -n mao -o jsonpath='{.spec.host}')
+
+# 2. Test agent card (public, no auth)
+curl -ksS "https://$A2A_HOST/.well-known/agent-card.json" | jq
+
+# 3. Get a multi-audience token from ACME's perspective
+# (This would normally happen inside ACME's code)
+# For manual testing, use acme-agent's service account:
+oc exec -n acme-agent deploy/acme-agent -- \
+  python3 -c "
+import os
+from acme_agent.auth import get_keycloak_token
+token = get_keycloak_token(
+    scope='openid lightspeed-a2a mas-a2a',  # Multi-audience!
+)
+print(token)
+" > /tmp/acme-token.txt
+
+export ACME_TOKEN=$(cat /tmp/acme-token.txt)
+
+# 4. Decode and verify token has both audiences
+echo $ACME_TOKEN | cut -d. -f2 | base64 -d 2>/dev/null | jq '.aud'
+# Should show: ["lightspeed-a2a", "mas-a2a"]
+
+# 5. Test MAS A2A with the token
+curl -ksS -H "Authorization: Bearer $ACME_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "messages.send",
+    "params": {
+      "message": {
+        "role": "user",
+        "messageId": "'$(uuidgen)'",
+        "parts": [{"text": "What pods are running in namespace openshift-operators?"}]
+      }
+    },
+    "id": 1
+  }' \
+  "https://$A2A_HOST/a2a/jsonrpc" | jq
+
+# 6. Verify token passthrough: check Praxis/OLS logs
+oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy --tail=50 | grep azp
+# Should show: azp=acme-agent (not mas-orchestrator!)
+
+oc logs -n a2a-lightspeed -l app=lightspeed-app-server --tail=50 | grep a2a_audit
+# Should show: on_behalf_of=acme-agent
+```
 
 See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted/-/blob/a2a-inbound-support/docs/a2a-inbound.md)
 for client examples and the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)

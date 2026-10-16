@@ -79,6 +79,8 @@ selected.
 
 ## Sequence
 
+### Direct flow: ACME → Praxis → OLS (no MAS)
+
 ```mermaid
 sequenceDiagram
     participant User as Browser (UI)
@@ -136,6 +138,76 @@ sequenceDiagram
     Praxis-->>Acme: Forward response
     Acme-->>User: Rendered response in UI
 ```
+
+### Orchestrated flow: ACME → MAS → Praxis → OLS (token passthrough)
+
+When MAS A2A is enabled, ACME can delegate to a MAS orchestrator blueprint
+that calls OLS (and potentially other agents). MAS **validates and passes
+through** ACME's token — it never fetches its own credentials.
+
+```mermaid
+sequenceDiagram
+    participant User as Browser (UI)
+    participant Acme as acme-agent
+    participant LLM as LiteLLM proxy
+    participant KC as Keycloak (rca realm)
+    participant MAS as MAS A2A orchestrator
+    participant Praxis as praxis-proxy
+    participant OLS as OpenShift Lightspeed
+    participant MCP as OpenShift MCP
+    participant API as OpenShift API server
+
+    User->>Acme: POST / (A2A message: "Ask MAS to investigate the cluster")
+    
+    Acme->>LLM: chat completion (Authorization: Bearer LITELLM_API_KEY)
+    LLM-->>Acme: tool-call decision: route to mas_orchestrator
+    
+    Note over Acme: Fetch SPIFFE JWT-SVID and get Keycloak token<br/>with multi-audience if needed
+    Acme->>Acme: Fetch JWT-SVID from ZTWIM/SPIRE
+    Acme->>KC: POST /token<br/>grant_type=client_credentials<br/>client_assertion=JWT-SVID<br/>scope=openid lightspeed-a2a mas-a2a
+    KC-->>Acme: Token A (aud=["lightspeed-a2a", "mas-a2a"]<br/>azp=acme-agent, sub=<acme-sa>, groups=acme-agent-rca)
+    
+    Acme->>MAS: POST /a2a/jsonrpc (messages.send)<br/>Authorization: Bearer Token A
+    
+    Note over MAS: Validate Token A (signature, issuer, expiry, audience)<br/>Check sub against allowedPrincipals<br/>Store credentials in RunContext
+    MAS->>KC: GET /.well-known/openid-configuration + JWKS
+    MAS->>MAS: Validate Token A:<br/>- aud contains "lightspeed-a2a" or "mas-a2a"<br/>- sub in allowedPrincipals<br/>- Store as RunContext.credentials
+    
+    Note over MAS: Start orchestrator workflow (blueprint execution)
+    MAS->>MAS: Build a2a_agent_node with bearer_token=""<br/>→ Factory reads RunContext.auth_token (Token A)
+    
+    Note over MAS: MAS does NOT fetch its own token —<br/>it passes through ACME's Token A
+    MAS->>Praxis: POST / (A2A to OLS)<br/>Authorization: Bearer Token A (passthrough!)<br/>X-OLS-Cluster: <cluster-id>
+    
+    Note over Praxis: Praxis sees azp=acme-agent, NOT mas-orchestrator<br/>Policy unchanged: allowedCallers=[acme-agent]
+    Praxis->>KC: Validate Token A with JWKS
+    Praxis->>Praxis: Check azp=acme-agent (allowed)<br/>Route to OLS backend
+    Praxis->>OLS: Forward Token A, X-OLS-Cluster
+    
+    Note over OLS: OLS performs RFC 8693 token exchange<br/>(same as direct flow)
+    OLS->>KC: Validate Token A
+    OLS->>OLS: Fetch own JWT-SVID
+    OLS->>KC: POST /token (RFC 8693)<br/>subject_token=Token A<br/>client_assertion=OLS JWT-SVID<br/>audience=openshift-mcp
+    KC-->>OLS: Token B (sub=<acme-sa>, azp=lightspeed-mcp,<br/>aud=openshift-mcp, groups=acme-agent-rca)
+    
+    OLS->>MCP: tool call, Authorization: Bearer Token B
+    MCP->>API: Kubernetes API request, Token B
+    API->>API: Validate Token B, RBAC against<br/>Group:keycloak:acme-agent-rca
+    API-->>MCP: response
+    MCP-->>OLS: tool result
+    
+    OLS-->>Praxis: A2A response
+    Praxis-->>MAS: Forward response
+    MAS-->>Acme: Orchestrator result
+    Acme-->>User: Final answer
+```
+
+**Key points:**
+- MAS validates Token A but **does not exchange it**
+- MAS passes Token A through to `a2a_agent_node` via `RunContext.credentials`
+- Praxis/OLS/MCP see `azp=acme-agent`, never `mas-orchestrator`
+- No changes to Praxis policy, OLS config, or RBAC needed
+- MAS is **invisible** to the authentication chain
 
 ## RFC 8693 token exchange, step by step
 
@@ -659,15 +731,49 @@ oc logs -n acme-agent    -l app.kubernetes.io/name=acme-agent | grep "acme_audit
 oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server | grep "a2a_audit" | grep "<request_id>"
 ```
 
-## Separate trust boundary: inbound MAS A2A
+## Separate trust boundary: inbound MAS A2A (with token passthrough)
 
 The optional `mao-a2a` Application is registered but its chart defaults to
 `a2a.enabled: false`, rendering no resources. Once deliberately activated,
 MAS A2A runs as a separate `uie-mas-hosted` service, not through the
-HCC-facing Flask API, Praxis, ACME, or OLS. It does **not** use ACME's
-SPIFFE grant or OLS's RFC 8693 token exchange: its caller sends a bearer
-token directly to the A2A JSON-RPC endpoint. The Agent Card
-(`/.well-known/agent-card.json`) and health probes are public.
+HCC-facing Flask API, Praxis, ACME, or OLS.
+
+### Passthrough authentication design
+
+MAS A2A **validates and retains** the inbound bearer token, then **passes it
+through** to downstream A2A agents in the orchestrator blueprint. It does
+**not** use its own SPIFFE grant or act as an independent workload identity.
+
+**Flow example: ACME → MAS → OLS**
+
+1. ACME fetches a JWT-SVID (SPIFFE), calls Keycloak with
+   `grant_type=client_credentials + client_assertion`, gets Token A with
+   `aud=["lightspeed-a2a", "mas-a2a"]` (or just `["lightspeed-a2a"]` for
+   shared-audience mode).
+
+2. ACME calls MAS A2A with `Authorization: Bearer <Token A>`.
+
+3. MAS validates Token A (signature, issuer, expiry, audience, principal
+   allow-list), then **stores it in `RunContext.credentials`**.
+
+4. MAS starts orchestrator workflow, which includes an `a2a_agent_node` with
+   `bearer_token: ""` (empty).
+
+5. The `a2a_agent_node_factory` detects empty `bearer_token`, reads
+   `build_ctx.execution_ctx.auth_token` (Token A from step 3), and uses it
+   for the outbound call to Praxis/OLS.
+
+6. Praxis validates Token A (sees `azp=acme-agent`), routes to OLS.
+
+7. OLS validates Token A, fetches its own JWT-SVID, exchanges Token A for
+   Token B (RFC 8693), calls MCP with Token B.
+
+**From Praxis/OLS/MCP's perspective, MAS is invisible** — they only see
+ACME's token (Token A), with `azp=acme-agent` and `sub=<acme-sa>`. The
+existing Praxis policy (`allowedCallers: [acme-agent]`) and RBAC
+(`Group:keycloak:acme-agent-rca`) remain unchanged.
+
+### Authentication validation
 
 In Keycloak mode, MAS validates the JWT signature against Keycloak JWKS and
 checks the configured issuer, lifetime, and audience. The chart refuses an
@@ -678,28 +784,41 @@ configured Secret containing that list); it does not authorize by groups.
 A Keycloak user's subject is usually an opaque `sub`, not their email or
 username. A missing/invalid token returns 401; a valid token from a
 non-allow-listed principal returns 403. Task reads and mutations are scoped
-to that principal. JWKS retrieval uses verified HTTPS; a private Keycloak
-Route CA must be trusted by the MAS pod alongside the default public roots,
-not by setting `keycloakVerifySsl: false`. The standalone variant copies the
+to that principal.
+
+### Audience configuration
+
+**Option A (recommended): Share the OLS audience**
+- MAS validates `lightspeed-a2a` (same as OLS)
+- ACME requests one token: `scope=openid lightspeed-a2a`
+- No Keycloak changes needed — existing `lightspeed-a2a-audience` mapper on
+  `acme-agent` is sufficient
+
+**Option B: Separate MAS audience**
+- MAS validates `mas-a2a`, OLS validates `lightspeed-a2a`
+- ACME requests multi-audience: `scope=openid mas-a2a lightspeed-a2a`
+- Requires adding `mas-a2a-audience` mapper to `acme-agent` in Keycloak
+
+The A2A chart's configured `identity.keycloakAudience` must match the
+caller's token. It refuses known OpenShift/OLS/MCP reserved audiences
+(`openshift`, `openshift-mcp`, `lightspeed-mcp`, `openshift-cli`,
+`openshift-console`) when they appear as the **sole** MAS audience; add
+customized equivalents to `identity.forbiddenAudiences`. Multi-audience
+tokens containing a reserved audience **plus** the configured MAS audience
+are accepted (e.g., `aud=["mas-a2a", "lightspeed-a2a"]`).
+
+JWKS retrieval uses verified HTTPS; a private Keycloak Route CA must be
+trusted by the MAS pod alongside the default public roots, not by setting
+`keycloakVerifySsl: false`. The standalone variant copies the
 managed-ingress CA into `mao/keycloak-oidc-ca`; set the MAS charts'
 `identity.keycloakCaTrust.enabled` only in Keycloak mode. Their init
 containers build `SSL_CERT_FILE` from public/system roots plus that CA. CA
 rotation requires a MAS pod rollout to rebuild the bundle; verify the target
 Route certificate on a live cluster before relying on it.
 
-The Keycloak chart's `mas-a2a-audience` mapper adds a distinct custom
-audience (default `mas-a2a`) to `openshift-cli` access tokens on **first
-realm import only**. It is neither `lightspeed-a2a` nor the
-`openshift-mcp`/`openshift` API audience. The A2A chart's configured audience
-must match the caller's actual token. It refuses known OpenShift/OLS/MCP
-audiences; add customized equivalents to `identity.forbiddenAudiences`.
-For an existing realm, inspect a test
-token's decoded `iss`, `aud`, and `sub`/`user_id` claims (never log the token);
-if the audience is absent, add an Audience mapper to the **actual
-token-issuing client** or an appropriate client scope. A GitOps sync does not
-retroactively update `KeycloakRealmImport`. Separately, the public MAS API
-still needs its own production identity mode, API-specific audience, and real
-admin usernames; the A2A allow-list does not secure that Route.
+Separately, the public MAS API still needs its own production identity mode,
+API-specific audience, and real admin usernames; the A2A allow-list does not
+secure that Route.
 
 MAS uses MongoDB for A2A task/context records and a Redis channel shared
 with its Temporal worker for streaming and human-in-the-loop decisions.
