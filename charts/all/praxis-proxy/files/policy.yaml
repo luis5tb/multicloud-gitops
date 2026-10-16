@@ -37,8 +37,8 @@ plugins:
       header: Authorization
       trusted_issuers:
         {{- if .Values.identity.oidcIssuers }}
-        {{- /* Multi-issuer mode: validate tokens from any configured issuer */ -}}
-        {{- range .Values.identity.oidcIssuers }}
+        {{/* Multi-issuer mode: validate tokens from any configured issuer */}}
+        {{ range .Values.identity.oidcIssuers }}
         - issuer: {{ .issuerUrl | quote }}
           audiences:
             - {{ .audience | quote }}
@@ -47,8 +47,8 @@ plugins:
           decoding_key:
             kind: jwks_url
             url: {{ .jwksUrl | quote }}
-        {{- end }}
-        {{- /* Also include the local Keycloak for backward compatibility */ -}}
+        {{ end }}
+        {{/* Also include the local Keycloak for backward compatibility */}}
         - issuer: "{{ trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .) }}"
           audiences:
             - {{ .Values.identity.keycloak.audience | quote }}
@@ -57,8 +57,8 @@ plugins:
           decoding_key:
             kind: jwks_url
             url: "{{ printf "%s/protocol/openid-connect/certs" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) }}"
-        {{- else }}
-        {{- /* Single-issuer mode: only validate tokens from local Keycloak */ -}}
+        {{ else }}
+        {{/* Single-issuer mode: only validate tokens from local Keycloak */}}
         - issuer: "{{ trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .) }}"
           audiences:
             - {{ .Values.identity.keycloak.audience | quote }}
@@ -67,7 +67,7 @@ plugins:
           decoding_key:
             kind: jwks_url
             url: "{{ printf "%s/protocol/openid-connect/certs" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) }}"
-        {{- end }}
+        {{ end }}
       claim_mapper: keycloak
 
 routes:
