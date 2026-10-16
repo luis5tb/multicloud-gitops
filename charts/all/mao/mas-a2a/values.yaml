@@ -1,5 +1,10 @@
 # A2A is deliberately dormant until a blueprint and its caller allow-list are
 # supplied in the deployment-specific values layer.
+#
+# CRITICAL: This chart requires a custom-built MAS image from
+# https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted branch a2a-inbound-support.
+# The image must be built, pushed, and pinned in deployment values before enabling.
+# See the top-level README.md "Optional inbound MAS A2A" section for build/config steps.
 
 global:
   # Shared pattern anchors. Empty defaults keep this chart portable; when
