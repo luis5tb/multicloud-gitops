@@ -211,9 +211,9 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# Static agent card configuration for multi-cluster routing.
+# Static agent card configuration for MAS and multi-cluster routing.
 # When enabled, Praxis returns its own agent card (with Praxis as the rpc_url)
-# instead of proxying /.well-known/agent-card.json to the first cluster.
+# through the static_response filter instead of proxying /.well-known/agent-card.json to the first cluster.
 # This ensures MAS and other A2A clients send requests to Praxis, which then
 # routes to the correct OLS backend based on X-OLS-Cluster header.
 #

@@ -21,6 +21,23 @@ filter_chains:
         require_protocol_metadata: false
         init_timeout_secs: 30
 
+      {{- if .Values.agentCard.enabled }}
+      # Core 0.7.0 (embedded in the pinned ai:0.4.1 image) has no static-files
+      # load-balancer cluster. Serve the discovery card with the built-in
+      # static_response filter instead; the preceding policy explicitly allows
+      # this public path.
+      - filter: static_response
+        conditions:
+          - when:
+              path: /.well-known/agent-card.json
+              methods: [GET]
+        status: 200
+        headers:
+          - name: Content-Type
+            value: application/json
+        body: {{ dict "name" .Values.agentCard.name "description" .Values.agentCard.description "version" .Values.agentCard.version "rpc_url" (.Values.agentCard.rpcUrl | default (printf "https://openshift-lightspeed.%s/a2a" (include "praxis-proxy.appsDomain" .))) "skills" (.Values.agentCard.skills | default (list (dict "name" "investigate" "description" "Investigate OpenShift cluster issues and answer questions" "tags" (list "investigation" "troubleshooting")))) | toJson | quote }}
+      {{- end }}
+
       - filter: router
         routes:
           # The A2A discovery document and readiness probe are public (see
@@ -28,14 +45,7 @@ filter_chains:
           # routes always outrank the header-matched path_prefix routes
           # below regardless of declaration order (Core router: "exact path
           # outranks a prefix"), so these two are safe to list first.
-          {{- if .Values.agentCard.enabled }}
-          # Static agent card: Praxis serves its own agent card with Praxis
-          # as the rpc_url, ensuring MAS and other clients send A2A requests
-          # to Praxis (which routes based on X-OLS-Cluster) instead of
-          # bypassing Praxis by using the first cluster's OLS Route directly.
-          - path: /.well-known/agent-card.json
-            cluster: static-agent-card
-          {{- else }}
+          {{- if not .Values.agentCard.enabled }}
           # Dynamic agent card (single-cluster): proxy to first OLS cluster.
           # KNOWN GAP for multi-cluster: the registry has no "primary"/display
           # concept, so there is no principled way to pick which OLS instance
@@ -74,13 +84,6 @@ filter_chains:
 
       - filter: load_balancer
         clusters:
-          {{- if .Values.agentCard.enabled }}
-          # Static file cluster for the agent card ConfigMap
-          - name: static-agent-card
-            static_files:
-              root: /etc/praxis/agent-card
-              index: agent-card.json
-          {{- end }}
           {{- range $id, $cfg := .Values.global.olsClusters }}
           - name: ols-{{ $id }}
             endpoints:

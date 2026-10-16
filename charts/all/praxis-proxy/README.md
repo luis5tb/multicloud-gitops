@@ -67,14 +67,15 @@ before a second `olsClusters` entry is registered -- see
 ## Static agent card for multi-cluster routing
 
 When `agentCard.enabled` is `true`, Praxis serves its own static agent card
-(rendered from `values.yaml` defaults or explicit overrides) instead of
-proxying `/.well-known/agent-card.json` to the first cluster's OLS. The
-static card's critical field is `rpc_url`: it points to Praxis's own public
-endpoint (auto-derived from `global.clusterBaseDomain` as
+(rendered from `values.yaml` defaults or explicit overrides) through the
+`static_response` filter instead of proxying `/.well-known/agent-card.json` to
+the first cluster's OLS. The card's critical field is `rpc_url`: it points to
+Praxis's own public endpoint (auto-derived from `global.clusterBaseDomain` as
 `https://openshift-lightspeed.apps.<base>/a2a` when not explicitly set),
-ensuring A2A clients (like MAS orchestrator) call Praxis with the
-`X-OLS-Cluster` header instead of bypassing Praxis by calling an OLS cluster's
-Route directly.
+ensuring A2A clients (like the MAS orchestrator) call Praxis with the
+`X-OLS-Cluster` header instead of bypassing Praxis by calling an OLS Route
+directly. The filter runs after the policy filter, whose explicit public-path
+rule allows agent-card discovery without a bearer token.
 
 **Why this matters:** The A2A SDK (`client.py`) uses the agent card's
 `rpc_url` for all actual calls, not the `base_url` initially provided. If
@@ -88,14 +89,25 @@ bypassing Praxis's multi-cluster routing logic entirely.
   OLS's typical agent card; override only to diverge from those defaults.
 - `agentCard.rpcUrl` auto-derives from `global.clusterBaseDomain`; override
   only for a non-standard Praxis Route hostname.
-- The chart creates a ConfigMap (`praxis-proxy-agent-card`) with the JSON
-  agent card, mounts it at `/etc/praxis/agent-card` in the proxy pod, and
-  configures a `static_files` cluster in `praxis.yaml` to serve it.
+- The chart renders the card JSON into a conditional `static_response` filter
+  in `praxis.yaml`; it does not need a filesystem mount or a load-balancer
+  cluster for the card. This is compatible with the pinned
+  `ghcr.io/praxis-proxy/ai:0.4.1` image, whose embedded Praxis Core 0.7.0
+  rejects `static_files` as an unknown load-balancer cluster field.
 
 **When to enable:** For single-cluster deployments, leave this disabled -- the
 dynamic proxy to OLS works fine. Enable it when adding a second `olsClusters`
 entry or when deploying MAS orchestrator that needs to route to multiple
 clusters via the `X-OLS-Cluster` header.
+
+### Static card configuration failure
+
+If the Praxis pod fails configuration loading with an error that `static_files`
+is an unknown field in an inline load-balancer cluster, the config is using an
+unsupported cluster type. The pinned AI 0.4.1 image embeds Core 0.7.0, whose
+strict cluster schema does not support that field. Keep static card serving on
+the built-in `static_response` filter as rendered by this chart; do not model
+files as load-balancer clusters.
 
 ## Upstream TLS trust
 

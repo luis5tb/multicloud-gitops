@@ -93,11 +93,6 @@ spec:
             - name: config
               mountPath: /etc/praxis/config
               readOnly: true
-            {{- if .Values.agentCard.enabled }}
-            - name: agent-card
-              mountPath: /etc/praxis/agent-card
-              readOnly: true
-            {{- end }}
             {{- if .Values.policy.caBundleConfigMap.name }}
             - name: policy-ca-bundle
               mountPath: /etc/praxis/ca-bundle
@@ -113,12 +108,6 @@ spec:
           configMap:
             name: {{ include "praxis-proxy.fullname" . }}
             defaultMode: 0444
-        {{- if .Values.agentCard.enabled }}
-        - name: agent-card
-          configMap:
-            name: {{ include "praxis-proxy.fullname" . }}-agent-card
-            defaultMode: 0444
-        {{- end }}
         {{- if .Values.policy.caBundleConfigMap.name }}
         - name: policy-ca-bundle
           configMap:
