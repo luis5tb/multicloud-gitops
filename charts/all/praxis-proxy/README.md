@@ -128,6 +128,14 @@ rotation (unlike `policy.caBundleSync`'s CronJob+checksum pattern) -- a known,
 accepted gap for this pass given OpenShift's service-ca rotates far less
 often than the ingress CA that mechanism targets.
 
+If a cluster entry points at an external OLS Route but this chart still trusts
+the service-ca bundle, expect an upstream TLS failure such as
+`invalid peer certificate: UnknownIssuer`: the Route certificate is signed by
+the cluster ingress CA, not the service-ca. For same-cluster OLS, leave
+`upstreamHost`/`upstreamPort`/`upstreamSNI` unset so Praxis uses the internal
+HTTPS Service and service-ca. For a remote cluster, configure a trusted CA
+bundle for that Route rather than disabling certificate verification.
+
 ## Policy behavior
 
 `files/policy.yaml` is rendered into the chart ConfigMap and loaded by the
