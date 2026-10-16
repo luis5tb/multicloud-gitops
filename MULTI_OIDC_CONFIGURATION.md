@@ -84,14 +84,19 @@ openshift-lightspeed-config:
 
 **Note:** The local Keycloak issuer is automatically appended to this list.
 
-### 3. Configure Keycloak to Trust External Issuers
+### 3. Configure Keycloak to Trust External Issuers (REQUIRED for token exchange)
+
+**This is critical**: When OLS exchanges a Red Hat SSO token for a Keycloak token (RFC 8693), Keycloak must validate the incoming `subject_token`. Without this configuration, token exchange will fail with "unknown issuer".
 
 In `variants/standalone/values-standalone.yaml`, under the `keycloak-oidc` application:
 
 ```yaml
 keycloak-oidc:
   keycloak:
-    # External OIDC providers that Keycloak trusts for token exchange
+    # External OIDC providers that Keycloak trusts for token exchange.
+    # When OLS calls Keycloak's token endpoint with a Red Hat SSO token as
+    # subject_token, Keycloak validates it against these providers before
+    # issuing Token B.
     externalOidcProviders:
       - alias: red-hat-sso-prod
         displayName: "Red Hat SSO Production"
@@ -106,9 +111,11 @@ keycloak-oidc:
 ```
 
 This configuration tells Keycloak to:
-- Trust tokens from these external issuers
-- Allow them to be used as `subject_token` in RFC 8693 token exchange
+- Trust tokens from these external issuers **when used as subject_token in RFC 8693 token exchange**
 - Validate their signatures using the provided JWKS URLs
+- Allow the exchange to proceed (issue Token B with Keycloak as issuer)
+
+**Note**: This is separate from browser-based "Login with Red Hat SSO" federation. This configuration is purely for validating externally-issued tokens during programmatic token exchange.
 
 ## How It Works
 
@@ -193,10 +200,16 @@ This configuration tells Keycloak to:
 - Verify `oidcIssuers` includes the issuer URL exactly as it appears in the token's `iss` claim
 - Check OLS logs for the actual issuer it received
 
-### Keycloak token exchange fails with 401
-- Verify the external issuer is in `externalOidcProviders`
+### Keycloak token exchange fails with 401 or "Invalid token issuer"
+- **Most common cause**: `keycloak.externalOidcProviders` not configured in `values-standalone.yaml`
+- Verify the external issuer is in `externalOidcProviders` (see step 3 above)
 - Check Keycloak Admin Console → Identity Providers to see if they were created
-- Verify `allowTokenExchange: true` is set
+  - Should see "red-hat-sso-prod" and "red-hat-sso-stage" providers
+- Verify `allowTokenExchange: true` is set for each provider
+- Check OLS logs for the actual exchange error:
+  ```bash
+  oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server | grep token_exchange
+  ```
 
 ### Praxis denies request
 - If using `oidcIssuers` in Praxis config, verify the issuer URL and audience match the token

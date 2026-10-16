@@ -156,6 +156,10 @@ tests using synthetic values could not catch the standalone-file error. Also
 apply the per-application overrides when rendering a chart: merely loading the
 clusterGroup file as Helm values does not enable its Application settings.
 
+Local render lesson: Praxis multi-OIDC output is YAML nested inside a ConfigMap
+string. Helm whitespace trimming once joined the last external JWKS URL to the
+local issuer item; parse `data.policy.yaml` itself, not only the outer Helm YAML.
+
 - **TLS trust: extend the default store, don't replace it.**
   `ssl.create_default_context(cafile=X)` and httpx's `verify=<path>` both
   *replace* the system's default trust store with only `X`. That's correct

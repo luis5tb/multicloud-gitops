@@ -92,6 +92,16 @@ configured audience. `policy.allowedCallers` defaults to the explicit
 allow-list `[acme-agent]`; an absent identity, a different client, or a
 policy/JWKS failure does not reach any OLS backend.
 
+For multi-issuer validation, set `identity.oidcIssuers` with each external
+issuer URL, JWKS URL, and expected token audience. The chart also appends the
+local Keycloak issuer using `identity.keycloak.audience`. This changes token
+validation only: the `claim.azp` check against `policy.allowedCallers` still
+applies to every issuer and must be updated separately if additional clients
+should be authorized. Because `policy.yaml` is embedded as a string inside a
+ConfigMap, validate the rendered inner YAML too; the chart regression test
+`tests/chart/test_praxis_multi_oidc.py` parses that value and checks all trusted
+issuers.
+
 **Header routing and the `role: user` workaround (read this before touching
 the allow-list predicate).** This chart's identity/jwt plugin is configured
 `role: user` and compares `claim.azp`, even though it is authenticating an
@@ -303,6 +313,12 @@ This also caught and fixed a real defect in the inherited policy document
 reached the backend exactly like an allow-listed one): see "Header routing
 and the `role: user` workaround" above for the two separate root causes and
 their fixes.
+
+Rendering `identity.oidcIssuers` with two external entries exposed a Helm
+whitespace-trimming bug that joined the final external JWKS URL and the local
+Keycloak list item onto one line, making the embedded policy invalid YAML.
+No prior test parsed the rendered `ConfigMap.data.policy.yaml`; the new chart
+test does so to keep this from recurring.
 
 ## Upstream maturity and pinning
 
