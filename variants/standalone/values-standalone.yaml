@@ -707,29 +707,17 @@ clusterGroup:
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
           value: "3de31dbf26c2"
-        # Keycloak authentication for MAS API admin endpoints
+        # DEV MODE: Accept any token without validation (for testing/blueprint setup)
+        # WARNING: Do not use in production - no authentication security!
         - name: identity.providerMode
-          value: keycloak
-        # Keycloak audience for MAS API (distinct from mas-a2a audience).
-        # The keycloak-oidc chart configures the mas-api-audience mapper on
-        # the openshift-cli client to issue tokens with this audience.
-        - name: identity.keycloakAudience
-          value: mas-api
-        # identity.keycloakIssuerUri derives from global.clusterBaseDomain +
-        # global.keycloakRealm; override only to diverge from that derivation.
-        # Admin allow-list: replace with actual Keycloak user subject IDs (UUIDs)
-        # from the rca realm. Get these from:
-        #   oc exec -n keycloak-system deploy/keycloak -- \
-        #     /opt/keycloak/bin/kcadm.sh get users -r rca --fields id,username
-        # Or from the Keycloak Admin Console → Users → select user → copy ID.
-        # Example: '["a1b2c3d4-...", "e5f6g7h8-..."]'
-        - name: identity.adminAllowedUsers
-          value: '[]'  # Empty = no admin access; replace with real user subs
-        # Trust the Keycloak CA bundle synced by keycloak-oidc's caBundleSync
-        # (configured above to sync to mao namespace). Required when the
-        # Keycloak Route certificate chains to a private CA.
-        - name: identity.keycloakCaTrust.enabled
-          value: "true"
+          value: dev
+        # In dev mode, these settings are ignored but kept for reference:
+        # - name: identity.keycloakAudience
+        #   value: mas-api
+        # - name: identity.adminAllowedUsers
+        #   value: '[]'
+        # - name: identity.keycloakCaTrust.enabled
+        #   value: "true"
     mao-a2a:
       name: mao-a2a
       namespace: mao
