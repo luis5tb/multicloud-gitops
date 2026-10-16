@@ -86,18 +86,31 @@ worth knowing when debugging directly against Keycloak:
 
 ## Dedicated audience for MAS inbound A2A
 
-The `openshift-cli` client also has an `mas-a2a-audience` mapper whose custom
-audience defaults to `keycloak.masA2aAudience` (`mas-a2a`). This is separate
-from `lightspeedA2aAudience` (`lightspeed-a2a`), `mcpAudienceClientId`
+The `openshift-cli` and `acme-agent` clients have an `mas-a2a-audience` mapper
+whose custom audience defaults to `keycloak.masA2aAudience` (`mas-a2a`). The
+ACME mapper lets the same client-credentials token pass MAS A2A validation and
+then be forwarded to Praxis/OLS, which independently validate the
+`lightspeed-a2a` audience. This is separate from
+`lightspeedA2aAudience` (`lightspeed-a2a`), `mcpAudienceClientId`
 (`openshift-mcp`), and the `openshift` API audience. Configure the MAS A2A
-chart's `identity.keycloakAudience` to the audience actually present in its
-caller's access token. MAS additionally checks the exact validated `sub`
-against `a2a.allowedPrincipals`; this mapper does not grant users access by
-itself.
+chart's `identity.keycloakAudience` to the audience present in its caller's
+access token. MAS additionally checks the exact validated `sub` against
+`a2a.allowedPrincipals`; the mapper does not grant access by itself.
+
+## Dedicated audience for the public MAS API
+
+The `openshift-cli` client also has a `mas-api-audience` mapper, defaulting to
+`keycloak.masApiAudience` (`mas-api`). The separately exposed `mao-api` chart
+should validate this audience in Keycloak mode and restrict administrative
+operations with its exact `identity.adminAllowedUsers` allow-list. Do not reuse
+`mas-a2a` for the API. On an already-imported realm, add an Audience protocol
+mapper to the actual human administrator token-issuing client, with Included
+Custom Audience `mas-api` and Access Token Claim enabled; the realm import does
+not reconcile existing clients after the initial import.
 
 **Existing-realm caveat:** `KeycloakRealmImport` only applies when the realm
-does not already exist; a later sync does not add this new mapper to an
-existing `openshift-cli` client. Before enabling MAS A2A on an already
+does not already exist; a later sync does not add this mapper to existing
+`openshift-cli` or `acme-agent` clients. Before enabling MAS A2A on an already
 imported realm, inspect a caller token's `iss`, `aud`, and `sub`. If `aud`
 does not contain the configured MAS audience, manually add an Audience
 protocol mapper to the actual token-issuing client in Keycloak's Admin
@@ -105,7 +118,7 @@ Console, with Included Custom Audience set to the same value as
 `keycloak.masA2aAudience` and Access Token Claim enabled. Do not delete/re-import
 a live realm merely to update the mapper. If a different client issues the
 caller token, add the mapper to that client (or an appropriate client scope)
-instead of assuming the default `openshift-cli` mapper applies.
+instead of assuming either default mapper applies.
 
 ## Least-privilege MCP RBAC for the mapped acme-agent-rca group
 
