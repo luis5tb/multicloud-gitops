@@ -167,6 +167,12 @@ schema rejects that field and crash-loops the pod. The chart now serves the card
 with Core's `static_response` filter after the policy filter; keep discovery
 public through the explicit policy route and do not model files as LB clusters.
 
+Live Praxis TLS finding: a same-cluster `global.olsClusters` entry was pointed
+at the OLS public Route while Praxis trusted only the cluster service-ca; the
+Route's ingress-CA certificate failed verification (`UnknownIssuer`) on the
+readiness request. Use the internal OLS Service for same-cluster routing; remote
+Routes require their own trusted ingress CA bundle (never turn verification off).
+
 - **TLS trust: extend the default store, don't replace it.**
   `ssl.create_default_context(cafile=X)` and httpx's `verify=<path>` both
   *replace* the system's default trust store with only `X`. That's correct

@@ -67,3 +67,13 @@ def test_static_agent_card_uses_response_filter_not_lb_cluster() -> None:
         and "static_files" not in cluster
         for cluster in load_balancer["clusters"]
     )
+
+    ols_cluster = next(
+        cluster
+        for cluster in load_balancer["clusters"]
+        if cluster["name"].startswith("ols-")
+    )
+    assert ols_cluster["endpoints"] == [
+        "lightspeed-app-server.a2a-lightspeed.svc.cluster.local:8443"
+    ]
+    assert ols_cluster["tls"]["sni"] == "lightspeed-app-server.a2a-lightspeed.svc"

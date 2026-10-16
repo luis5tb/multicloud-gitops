@@ -32,12 +32,10 @@ global:
   olsClusters:
     api-ocp-phkl2-sandbox315-opentlc-com-6443:
       apiURL: https://api.ocp.phkl2.sandbox315.opentlc.com:6443
-      # Multi-cluster: Praxis routes to OLS via external Route (not internal Service)
-      # For same-cluster: these can be omitted to use upstreamDefaults (internal Service)
-      # For multi-cluster: set these to the external Route of the remote OLS instance
-      upstreamHost: ols-api.apps.ocp.phkl2.sandbox315.opentlc.com
-      upstreamPort: 443
-      upstreamSNI: ols-api.apps.ocp.phkl2.sandbox315.opentlc.com
+      # This is the local OLS cluster, so Praxis uses the in-cluster HTTPS
+      # Service and the injected service-ca bundle. For a remote OLS cluster,
+      # set upstreamHost/Port/SNI to its Route and configure trust for that
+      # Route's ingress CA separately.
 
 clusterGroup:
   name: standalone
@@ -658,11 +656,9 @@ clusterGroup:
         # require_oauth natively via OLSConfig.
         - name: appServerPatch.mcpHardening.enabled
           value: "true"
-        # External Route for OLS A2A endpoint (needed for multi-cluster)
-        # Praxis routes to this external URL when upstreamHost is set in olsClusters
-        - name: route.enabled
-          value: "true"
-        # Route host derives from global.clusterBaseDomain: ols-api.apps.<base>
+        # Keep the OLS app-server Route disabled for this same-cluster setup;
+        # Praxis reaches it through the internal Service. Enable a Route only
+        # when a remote cluster needs to reach this OLS instance.
     mao-mongo:
       name: mao-mongo
       namespace: mao
