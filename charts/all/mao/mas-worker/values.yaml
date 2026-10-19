@@ -9,6 +9,11 @@ global:
 
 fullnameOverride: mas-worker
 
+# Python log level for the worker process (LOG_LEVEL env). INFO by default;
+# set to DEBUG via values-standalone to capture the orchestrator's planning
+# LLM request/response when diagnosing delegation/empty-answer issues.
+logLevel: INFO
+
 image:
   registry: ""
   repository: quay.io/redhat-services-prod/mas-tenant/mas-api

@@ -231,7 +231,13 @@ nodes:
       # inventory, the resolved blueprint's llms catalog stays empty, and the
       # session build fails with "unknown llms ref '<rid>'".
       llm: "\$ref:${LLM_RID}"
-      system_message: "You are a multi-cluster OpenShift router. Delegate to investigation agent with headers {\"X-OLS-Cluster\": \"${CLUSTER_ID}\"}. Analyze results and decide if you need more info (investigate) or can finalize."
+      # Strong, mandatory-delegation wording: the orchestrator's built-in
+      # behavior prompt tells it to NOT delegate on assumptions and to just ask
+      # clarifying questions when a request looks vague -- which made the small
+      # model finish in one planning cycle with an empty answer, never calling
+      # the investigation agent. This message overrides that for the cluster
+      # use case: it MUST delegate to the OLS investigator before finalizing.
+      system_message: "You are a multi-cluster OpenShift investigation router. Your ONLY job is to delegate investigation work to the OLS investigation agent and then relay its findings. For ANY request about an OpenShift cluster (status, health, pods, events, errors, resources, troubleshooting, or general OpenShift questions), you MUST delegate to the investigation agent. Never answer from your own knowledge, and never finalize before the investigation agent has responded at least once. When you delegate, always include headers {\"X-OLS-Cluster\": \"${CLUSTER_ID}\"} so the investigation targets the correct cluster. After the investigation agent responds, review its findings and either delegate a focused follow-up (investigate) if more detail is needed, or finalize with a complete answer based strictly on what the investigation agent returned. Do NOT treat the request as vague and do NOT stop to ask the user clarifying questions unless the message names no cluster topic at all; otherwise proceed directly to delegation."
 
   - rid: ${A2A_RID}
     name: OLS Investigator
