@@ -731,7 +731,7 @@ clusterGroup:
         - name: a2a.publicBaseUrl
           value: "https://mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
         - name: a2a.allowedPrincipals
-          value: '["dev"]'  # TODO: Replace with actual ACME principal sub
+          value: '["spiffe://apps.ocp.phkl2.sandbox315.opentlc.com/ns/acme-agent/sa/acme-agent"]'
         - name: route.enabled
           value: "true"
         # - name: route.host
