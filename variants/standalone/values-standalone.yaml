@@ -690,6 +690,8 @@ clusterGroup:
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
           value: "ff98ae71b39f"
+        - name: image.pullPolicy
+          value: Always
     mao-api:
       name: mao-api
       namespace: mao
@@ -700,6 +702,8 @@ clusterGroup:
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
           value: "ff98ae71b39f"
+        - name: image.pullPolicy
+          value: Always
         # DEV MODE: Accept any token without validation (for testing/blueprint setup)
         # WARNING: Do not use in production - no authentication security!
         - name: identity.providerMode
@@ -723,6 +727,8 @@ clusterGroup:
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
           value: "ff98ae71b39f"
+        - name: image.pullPolicy
+          value: Always
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
         - name: a2a.enabled
           value: "true"
