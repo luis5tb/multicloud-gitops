@@ -493,19 +493,21 @@ clusterGroup:
 
         # PHASE 3: Route to MAS A2A (uncomment after Phase 2)
         # After MAS A2A is enabled, uncomment this to route ACME → MAS A2A → OLS
-        # - name: a2a.remoteAgents[0].name
-        #   value: mas-orchestrator
-        # - name: a2a.remoteAgents[0].description
-        #   value: "MAS A2A Orchestrator for OpenShift Lightspeed"
-        # - name: a2a.remoteAgents[0].endpoint
-        #   value: "https://mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
+        # Must be a valid Python identifier (ADK RemoteA2aAgent): use
+        # underscores, not hyphens.
+        - name: a2a.remoteAgents[0].name
+          value: mas_orchestrator
+        - name: a2a.remoteAgents[0].description
+          value: "MAS A2A Orchestrator for OpenShift Lightspeed"
+        - name: a2a.remoteAgents[0].endpoint
+          value: "https://mao-a2a-mas-a2a-mao.apps.ocp.phkl2.sandbox315.opentlc.com"
         # Outbound OLS mode (metadata.ols_mode); chart default is troubleshooting.
         - name: a2a.olsMode
           value: troubleshooting
-        - name: a2a.remoteAgents[0].name
-          value: openshift_lightspeed
-        - name: a2a.remoteAgents[0].description
-          value: Answers OpenShift questions and investigates cluster incidents using OpenShift Lightspeed grounded against the live cluster via its OpenShift MCP tools.
+        #- name: a2a.remoteAgents[0].name
+        #  value: openshift_lightspeed
+        #- name: a2a.remoteAgents[0].description
+        #  value: Answers OpenShift questions and investigates cluster incidents using OpenShift Lightspeed grounded against the live cluster via its OpenShift MCP tools.
         # No ACME-specific olsClusters override here: the chart now reads
         # the single shared `global.olsClusters` registry declared at the
         # top of this file directly (see charts/all/acme-agent/values.yaml
