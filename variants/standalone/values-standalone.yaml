@@ -746,8 +746,11 @@ clusterGroup:
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
         - name: a2a.publicBaseUrl
           value: "https://mao-a2a-mas-a2a-mao.apps.ocp.phkl2.sandbox315.opentlc.com"
-        - name: a2a.allowedPrincipals
-          value: '["spiffe://apps.ocp.phkl2.sandbox315.opentlc.com/ns/acme-agent/sa/acme-agent"]'
+        # Must be a real list: the chart applies toJson so the app can JSON-decode
+        # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
+        # JSON string) so the clusterGroup override builds an actual YAML list.
+        - name: a2a.allowedPrincipals[0]
+          value: "spiffe://apps.ocp.phkl2.sandbox315.opentlc.com/ns/acme-agent/sa/acme-agent"
         - name: route.enabled
           value: "true"
         # - name: route.host
