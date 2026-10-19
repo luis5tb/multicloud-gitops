@@ -19,30 +19,26 @@ from starlette.routing import Route
 
 from .auth import (
     DownstreamAuth,
-    add_cluster_header,
     log_dispatch_audit,
     stamp_request_id,
 )
-from .cluster_registry import ClusterRegistry
 from .config import agent_card_url, remote_agents_from_env
 from .ols_mode import ols_mode_remote_agent_config
-from .routing import ClusterRoutingMiddleware
 from .ui import UI_HTML
 
 
 AUTH = DownstreamAuth()
 
-# The GitOps-managed allow-list of {id: apiURL} this ACME instance may route
-# to. An empty registry (e.g. before the chart's olsClusters value is
-# configured) means every cluster URL is rejected as unregistered -- fail
-# closed, never fall back to an unvalidated default.
-CLUSTER_REGISTRY = ClusterRegistry.from_env()
-
 # Hook order matters for audit joinability: stamp X-Request-Id first so a
 # Keycloak Token A mint can log the same request_id as the later dispatch
-# line; then auth, then the routing header, then the dispatch acme_audit.
-# add_cluster_header / stamp / log only touch POSTs -- never the public
-# unauthenticated agent-card GET.
+# line; then auth, then the dispatch acme_audit. stamp / log only touch
+# POSTs -- never the public unauthenticated agent-card GET.
+#
+# ACME no longer attaches X-OLS-Cluster. Cluster selection has moved
+# downstream to the MAS A2A orchestrator, which validates the target cluster
+# and sets X-OLS-Cluster on its own outbound call to Praxis. ACME just
+# authenticates (Token A) and forwards the user's request verbatim, so the
+# add_cluster_header hook is intentionally not registered here.
 HTTP_CLIENT = httpx.AsyncClient(
     timeout=AUTH.settings.timeout,
     verify=AUTH.settings.tls_verify,
@@ -50,7 +46,6 @@ HTTP_CLIENT = httpx.AsyncClient(
         "request": [
             stamp_request_id,
             AUTH.add_auth,
-            add_cluster_header,
             log_dispatch_audit,
         ]
     },
@@ -99,8 +94,8 @@ def _model() -> LiteLlm:
 
 # This local ADK agent is the public entrypoint and router. The RemoteA2aAgent
 # instances above are attached as sub_agents (NOT wrapped as AgentTool): the
-# root LLM validates the target cluster URL, then delegates via
-# transfer_to_agent to the downstream agent. ADK's RemoteA2aAgent calls the
+# root LLM delegates via transfer_to_agent to the downstream agent (the MAS
+# A2A orchestrator now owns target-cluster selection). ADK's RemoteA2aAgent calls the
 # remote with message/stream and yields each remote event (TaskStatusUpdate /
 # TaskArtifactUpdate / Message) incrementally; as a sub_agent those events
 # propagate through THIS agent's own A2A message/stream response, so OpenShift
@@ -126,30 +121,18 @@ root_agent = Agent(
         "A2A agents."
     ),
     instruction=(
-        "You are the ACME A2A entrypoint and router. Every request you "
-        "delegate is ultimately answered by OpenShift Lightspeed against one "
-        "specific OpenShift cluster, so you must first know exactly which "
-        "cluster that is.\n\n"
-        "Before delegating, require the user to state the target OpenShift "
-        "cluster's API URL explicitly (for example "
-        "https://api.example.com:6443). If the message does not contain "
-        "exactly one explicit cluster API URL -- it is missing, or the "
-        "message mentions more than one candidate URL -- do not delegate. "
-        "Instead, ask a single, direct clarifying question naming what you "
-        "need (the exact OpenShift API URL) and stop there.\n\n"
-        "Never guess, assume, or silently reuse a cluster URL from earlier "
-        "in the conversation, and never infer a target cluster from a "
-        "resource name, namespace, project, or any other hint in the "
-        "request -- a resource name is not a cluster identifier. If the "
-        "user's URL looks malformed or is not one of the clusters you are "
-        "configured to reach, say so and ask for the correct one rather "
-        "than attempting delegation anyway; the final authorization of "
-        "that URL happens server-side, not by your judgment.\n\n"
-        "Once the request contains exactly one explicit, well-formed cluster "
-        "API URL, delegate the request to the appropriate downstream agent by "
-        "transferring to it, preserving the user's full request verbatim "
-        "(including that URL) without rewriting or dropping details. The "
-        "downstream agent answers the user directly -- do not restate, "
+        "You are the ACME A2A entrypoint and router. Delegate every request "
+        "to the appropriate configured downstream agent by transferring to "
+        "it, preserving the user's full request verbatim -- including any "
+        "OpenShift cluster API URL the user stated -- without rewriting, "
+        "summarizing, reordering, or dropping details.\n\n"
+        "You do NOT select, validate, or ask for the target OpenShift "
+        "cluster: the downstream MAS A2A orchestrator owns cluster selection "
+        "and enforcement. Do not reject a request for a missing cluster URL "
+        "and do not add, guess, or infer one yourself -- just pass the "
+        "user's message through unchanged and let the downstream agent handle "
+        "it.\n\n"
+        "The downstream agent answers the user directly -- do not restate, "
         "summarize, wrap, or add commentary to its response, and do not answer "
         "from your own knowledge. If no configured downstream agent is "
         "suitable, explain that the request cannot be routed."
@@ -191,9 +174,11 @@ _adk_app.routes.extend(
     ]
 )
 
-# Wraps the ADK app, not replaces it: GET requests (card discovery, the UI,
-# healthz) pass straight through untouched. Every POST (JSON-RPC) is
-# inspected for a message/send|stream dispatch; see routing.py for why a
-# rejection here never reaches the ADK app/root agent at all.
-a2a_app = ClusterRoutingMiddleware(_adk_app, CLUSTER_REGISTRY)
+# ACME no longer gates inbound requests on a target-cluster URL: that
+# enforcement moved to the MAS A2A orchestrator, which validates the cluster
+# and sets X-OLS-Cluster on its downstream call to Praxis. The ADK app is
+# therefore served directly. The cluster-routing middleware (routing.py) and
+# registry (cluster_registry.py) are retained for the direct
+# ACME -> Praxis -> OLS path but intentionally not wired in here.
+a2a_app = _adk_app
 
