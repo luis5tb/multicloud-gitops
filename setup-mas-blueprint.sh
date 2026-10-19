@@ -224,7 +224,13 @@ nodes:
     type: orchestrator_node
     config:
       type: orchestrator_node
-      llm: "${LLM_RID}"
+      # Must be an EXTERNAL ref ("\$ref:<rid>"), not a bare RID. MAS's
+      # BlueprintResolver only walks refs prefixed with "\$ref:" (see
+      # mas/core/ref/models.py is_external_ref + walker.external_rids); a bare
+      # RID is treated as an inline/local ref, so the LLM is never pulled from
+      # inventory, the resolved blueprint's llms catalog stays empty, and the
+      # session build fails with "unknown llms ref '<rid>'".
+      llm: "\$ref:${LLM_RID}"
       system_message: "You are a multi-cluster OpenShift router. Delegate to investigation agent with headers {\"X-OLS-Cluster\": \"${CLUSTER_ID}\"}. Analyze results and decide if you need more info (investigate) or can finalize."
 
   - rid: ${A2A_RID}
