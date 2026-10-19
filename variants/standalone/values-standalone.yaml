@@ -731,44 +731,42 @@ clusterGroup:
         - name: a2a.publicBaseUrl
           value: "https://mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
         - name: a2a.allowedPrincipals
-          value: '["dev"]'
+          value: '["dev"]'  # TODO: Replace with actual ACME principal sub
         - name: route.enabled
           value: "true"
-        - name: identity.providerMode
-          value: dev
         # - name: route.host
         #   value: "mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
 
         # Multi-issuer OIDC: accept tokens from Red Hat SSO and Keycloak
         # Keycloak is NOT auto-appended; include it explicitly
-        #- name: identity.oidcIssuers[0].issuer_url
-        #  value: https://sso.redhat.com/auth/realms/redhat-external
-        #- name: identity.oidcIssuers[0].jwks_url
-        #  value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        #- name: identity.oidcIssuers[0].audience
-        #  value: openshift-lightspeed
-        #- name: identity.oidcIssuers[0].username_claim
-        #  value: preferred_username
-        #- name: identity.oidcIssuers[1].issuer_url
-        #  value: https://sso.stage.redhat.com/auth/realms/redhat-external
-        #- name: identity.oidcIssuers[1].jwks_url
-        #  value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        #- name: identity.oidcIssuers[1].audience
-        #  value: openshift-lightspeed
-        #- name: identity.oidcIssuers[1].username_claim
-        #  value: preferred_username
-        #- name: identity.oidcIssuers[2].issuer_url
-        #  value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca
-        #- name: identity.oidcIssuers[2].jwks_url
-        #  value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca/protocol/openid-connect/certs
-        #- name: identity.oidcIssuers[2].audience
-        #  value: mas-a2a
-        #- name: identity.oidcIssuers[2].username_claim
-        #  value: preferred_username
-        #- name: identity.oidcVerifySsl
-        #  value: "true"
-        #- name: identity.oidcTimeout
-        #  value: "30"
+        - name: identity.oidcIssuers[0].issuer_url
+          value: https://sso.redhat.com/auth/realms/redhat-external
+        - name: identity.oidcIssuers[0].jwks_url
+          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        - name: identity.oidcIssuers[0].audience
+          value: openshift-lightspeed
+        - name: identity.oidcIssuers[0].username_claim
+          value: preferred_username
+        - name: identity.oidcIssuers[1].issuer_url
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external
+        - name: identity.oidcIssuers[1].jwks_url
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        - name: identity.oidcIssuers[1].audience
+          value: openshift-lightspeed
+        - name: identity.oidcIssuers[1].username_claim
+          value: preferred_username
+        - name: identity.oidcIssuers[2].issuer_url
+          value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca
+        - name: identity.oidcIssuers[2].jwks_url
+          value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca/protocol/openid-connect/certs
+        - name: identity.oidcIssuers[2].audience
+          value: mas-a2a
+        - name: identity.oidcIssuers[2].username_claim
+          value: preferred_username
+        - name: identity.oidcVerifySsl
+          value: "true"
+        - name: identity.oidcTimeout
+          value: "30"
         - name: identity.keycloakCaTrust.enabled
           value: "true"
       # PHASE 1: Dormant by default (a2a.enabled=false)
