@@ -744,8 +744,19 @@ clusterGroup:
         # Must be a real list: the chart applies toJson so the app can JSON-decode
         # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
         # JSON string) so the clusterGroup override builds an actual YAML list.
+        #
+        # This is the Keycloak access token's `sub`, NOT acme-agent's SPIFFE ID.
+        # MAS checks credentials.user_id (claims["user_id"] or claims["sub"])
+        # against this list. For a client_credentials grant, `sub` is the
+        # acme-agent client's Keycloak service-account user id (an opaque UUID) --
+        # the SPIFFE ID only exists in the client_assertion used to authenticate
+        # TO Keycloak, never in the resulting access token. Obtain it via the
+        # Keycloak Admin API: GET /admin/realms/rca/clients?clientId=acme-agent
+        # then GET .../clients/<uuid>/service-account-user -> .id. NOTE: this id
+        # is realm-import-specific and changes if the service account is
+        # recreated; re-fetch after a realm re-import.
         - name: a2a.allowedPrincipals[0]
-          value: "spiffe://apps.ocp.phkl2.sandbox315.opentlc.com/ns/acme-agent/sa/acme-agent"
+          value: "5d5bb0ee-7433-403d-8c6f-3788dc119ad7"
         - name: route.enabled
           value: "true"
         # - name: route.host
