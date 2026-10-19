@@ -26,10 +26,27 @@ filter_chains:
       # load-balancer cluster. Serve the discovery card with the built-in
       # static_response filter instead; the preceding policy explicitly allows
       # this public path.
+      #
+      # MAS A2A validation expects agent card at {base_url}/.well-known/agent-card.json.
+      # When base_url includes /a2a, it looks for /a2a/.well-known/agent-card.json.
+      # Create TWO static_response filter instances (each with one condition) so
+      # Praxis serves the same card at both paths - multiple when: conditions in
+      # one filter may require ALL to match (AND), not ANY (OR).
       - filter: static_response
         conditions:
           - when:
               path: /.well-known/agent-card.json
+              methods: [GET]
+        status: 200
+        headers:
+          - name: Content-Type
+            value: application/json
+        body: {{ dict "name" .Values.agentCard.name "description" .Values.agentCard.description "version" .Values.agentCard.version "rpc_url" (.Values.agentCard.rpcUrl | default (printf "https://openshift-lightspeed.%s/a2a" (include "praxis-proxy.appsDomain" .))) "skills" (.Values.agentCard.skills | default (list (dict "name" "investigate" "description" "Investigate OpenShift cluster issues and answer questions" "tags" (list "investigation" "troubleshooting")))) | toJson | quote }}
+
+      - filter: static_response
+        conditions:
+          - when:
+              path: /a2a/.well-known/agent-card.json
               methods: [GET]
         status: 200
         headers:

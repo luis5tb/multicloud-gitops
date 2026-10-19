@@ -83,6 +83,16 @@ routes:
       pre_invocation:
         - "allow"
 
+  # MAS A2A validation expects agent card at {base_url}/.well-known/agent-card.json
+  # If base_url is https://.../a2a, it looks for /a2a/.well-known/agent-card.json
+  # Serve the same agent card at this path to support MAS validation
+  - http:
+      path: /a2a/.well-known/agent-card.json
+      method: GET
+    authorization:
+      pre_invocation:
+        - "allow"
+
   # Readiness is routed through to the backend OLS instance the router
   # selects for this path (see files/praxis.yaml) so the proxy is not marked
   # ready while the application, Keycloak, or the workload identity socket is
