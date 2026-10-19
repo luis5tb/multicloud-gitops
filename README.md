@@ -479,27 +479,61 @@ back after investigation to gather more information before finalizing the answer
 **Step 3: Enable MAS A2A**
 
 In `variants/standalone/values-standalone.yaml`, under the `mao-a2a` application,
-uncomment the PHASE 2 overrides and fill in the values:
+uncomment the PHASE 2 overrides and fill in the values.
+
+**For production (with multi-issuer OIDC authentication):**
 
 ```yaml
 mao-a2a:
   overrides:
     # ... existing config ...
     
-    # PHASE 2: Enable MAS A2A (uncomment and fill in)
+    # PHASE 2: Enable MAS A2A
     - name: a2a.enabled
       value: "true"
     - name: a2a.blueprintId
-      value: "<blueprint-id-from-step-2>"  # Replace with $BLUEPRINT_ID
+      value: "<blueprint-id-from-step-2>"  # Replace with $BLUEPRINT_ID from script
     - name: a2a.publicBaseUrl
-      value: "https://mas-a2a.apps.<your-cluster>"  # Replace with your cluster domain
+      value: "https://mas-a2a-mao.apps.<your-cluster>"  # Replace with your cluster domain
     - name: a2a.allowedPrincipals
-      value: '["<acme-sub-from-step-1>"]'  # Replace with ACME's sub claim
+      value: '["<acme-principal-sub>"]'  # Replace with ACME agent's 'sub' claim from Red Hat SSO
     - name: route.enabled
       value: "true"
-    - name: route.host
-      value: "mas-a2a.apps.<your-cluster>"  # Replace with your cluster domain
+    # route.host is optional - auto-derives from global.clusterBaseDomain
+    
+    # Multi-issuer OIDC (already configured in values-standalone.yaml)
+    - name: identity.oidcIssuers[0].issuer_url
+      value: https://sso.redhat.com/auth/realms/redhat-external
+    # ... (rest of oidcIssuers configuration)
 ```
+
+**For dev/testing (simplified mode, no real authentication):**
+
+```yaml
+mao-a2a:
+  overrides:
+    # ... existing config ...
+    
+    # PHASE 2: Enable MAS A2A (DEV MODE)
+    - name: a2a.enabled
+      value: "true"
+    - name: a2a.blueprintId
+      value: "<blueprint-id-from-step-2>"
+    - name: a2a.publicBaseUrl
+      value: "https://mas-a2a-mao.apps.<your-cluster>"
+    - name: a2a.allowedPrincipals
+      value: '["dev"]'  # Accept any token with username "dev"
+    - name: identity.providerMode
+      value: dev  # Bypass OIDC validation for testing
+    - name: route.enabled
+      value: "true"
+```
+
+**Notes:**
+- `route.host` is **optional** and derives from `global.clusterBaseDomain` if not set
+- `identity.oidcIssuers` (production) and `identity.providerMode: dev` (testing) are **mutually exclusive**
+- The default `values-standalone.yaml` uses multi-issuer OIDC for production readiness
+- For initial testing, dev mode is simpler but provides no real authentication
 
 Commit and push the changes. Wait for ArgoCD to sync the `mao-a2a` application.
 
