@@ -430,52 +430,51 @@ configured group instead of `acme-agent-rca`.
 
 **Step 2: Create MAS Blueprint**
 
-Create an orchestrator blueprint that routes to OLS A2A. Save this as `ols-routing-blueprint.yaml`:
+Use the `setup-mas-blueprint.sh` script to register inventory resources and create
+a multi-cluster blueprint. The script handles:
 
-```yaml
-# MAS Blueprint that calls OLS through Praxis
-nodes:
-  - id: ols_investigator
-    type: a2a_agent_node
-    config:
-      # Call OLS through Praxis (recommended - includes policy enforcement)
-      base_url: "https://openshift-lightspeed.apps.<your-cluster>/a2a"
-      agent_card: "https://openshift-lightspeed.apps.<your-cluster>/.well-known/agent-card.json"
-      # Empty bearer_token means passthrough: MAS forwards caller's token to OLS
-      bearer_token: ""
+1. Registering LLM resource for orchestration
+2. Registering Orchestrator Node (references LLM, contains routing logic)
+3. Registering A2A Agent Node (OLS through Praxis)
+4. Creating blueprint with orchestrator feedback loop
+5. Saving blueprint and outputting the ID
+
+**For multi-cluster with orchestration:**
+
+```bash
+# Set LiteLLM credentials (or OPENAI_API_KEY for direct OpenAI)
+export LITELLM_API_KEY="your-litellm-api-key"
+export LITELLM_API_BASE="https://maas-rhdp.apps.maas.redhatworkshops.io/v1"
+export LITELLM_MODEL="gpt-oss-20b"
+
+# Run the script
+./setup-mas-blueprint.sh multi-cluster
 ```
+
+**For simple single-cluster (no orchestrator):**
+
+```bash
+./setup-mas-blueprint.sh simple
+```
+
+The script will output the `BLUEPRINT_ID` at the end. Save this for Step 3.
 
 **Important:** When `agentCard.enabled: true` (enabled by default in
 `values-standalone.yaml` for multi-cluster deployments), Praxis serves a static
 agent card with Praxis's own endpoint as `rpc_url`. This ensures MAS A2A routes
 through Praxis for actual calls (allowing `X-OLS-Cluster` header routing) instead
-of bypassing Praxis by calling OLS directly. If you disable the static agent card,
-the blueprint's `agent_card` URL will fetch the first OLS cluster's card, causing
-MAS to bypass Praxis routing.
+of bypassing Praxis by calling OLS directly.
 
-Save the blueprint via MAS API:
+**Blueprint Architecture:**
 
-```bash
-# Get MAS API URL
-export MAS_API_URL="https://$(oc get route mas-api -n mao -o jsonpath='{.spec.host}')"
+The multi-cluster blueprint creates an orchestrator-based workflow:
+- **User Question** → **Orchestrator** (analyzes question, decides routing)
+- **Orchestrator** → **OLS Agent** (investigates cluster) → back to **Orchestrator**
+- **Orchestrator** decides: loop for more info OR finalize answer
+- **Orchestrator** → **Final Answer**
 
-# In dev mode, MAS accepts any token; otherwise get a Keycloak admin token
-export MAS_TOKEN="any-token-in-dev-mode"
-
-# Save the blueprint
-BLUEPRINT_YAML=$(cat ols-routing-blueprint.yaml)
-BLUEPRINT_ID=$(curl -s -X POST "${MAS_API_URL}/api/blueprints/blueprint.save" \
-  -H "Authorization: Bearer ${MAS_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "{\"blueprintRaw\": $(echo "$BLUEPRINT_YAML" | jq -Rs .)}" \
-  | jq -r '.blueprint_id')
-
-echo "Blueprint ID: $BLUEPRINT_ID"
-
-# Verify blueprint saved
-curl -s "${MAS_API_URL}/api/blueprints/available.blueprints.resolved.get?blueprintId=${BLUEPRINT_ID}" \
-  -H "Authorization: Bearer ${MAS_TOKEN}" | jq .
-```
+The orchestrator uses the registered LLM to make routing decisions and can loop
+back after investigation to gather more information before finalizing the answer.
 
 **Step 3: Enable MAS A2A**
 
