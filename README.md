@@ -559,12 +559,17 @@ acme-agent:
     # ... existing config ...
     
     # PHASE 3: Route to MAS A2A (uncomment)
+    # name must be a valid Python identifier (underscores, not hyphens)
     - name: a2a.remoteAgents[0].name
-      value: mas-orchestrator
+      value: mas_orchestrator
     - name: a2a.remoteAgents[0].description
       value: "MAS A2A Orchestrator for OpenShift Lightspeed"
     - name: a2a.remoteAgents[0].endpoint
-      value: "https://mas-a2a.apps.<your-cluster>"  # Replace with your cluster domain
+      # Must equal the MAS A2A base URL from Step 4 (MAS_A2A_URL), which is the
+      # same value as mao-a2a's a2a.publicBaseUrl. With route.host unset, the
+      # generated host is mao-a2a-mas-a2a-<namespace>.apps.<cluster>, NOT
+      # mas-a2a.apps.<cluster>.
+      value: "https://mao-a2a-mas-a2a-mao.apps.<your-cluster>"
 ```
 
 Commit and push. Wait for ArgoCD to sync the `acme-agent` application.
