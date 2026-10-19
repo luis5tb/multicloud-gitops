@@ -694,6 +694,11 @@ clusterGroup:
           value: "045a89807a77"
         - name: image.pullPolicy
           value: Always
+        # DEBUG temporarily to capture the orchestrator's planning LLM
+        # request/response while diagnosing why it finalizes without
+        # delegating to the OLS investigator. Revert to INFO once resolved.
+        - name: logLevel
+          value: DEBUG
     mao-api:
       name: mao-api
       namespace: mao
@@ -735,7 +740,7 @@ clusterGroup:
         - name: a2a.enabled
           value: "true"
         - name: a2a.blueprintId
-          value: "57d1db86-29fa-4bda-ab47-6158f91975a4"
+          value: "368ff950-3ff7-40e3-9690-3d16e73341cc"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
