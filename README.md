@@ -544,7 +544,7 @@ Commit and push the changes. Wait for ArgoCD to sync the `mao-a2a` application.
 oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
 
 # Test agent card endpoint
-MAS_A2A_URL="https://$(oc get route mas-a2a -n mao -o jsonpath='{.spec.host}')"
+MAS_A2A_URL="https://$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')"
 curl "${MAS_A2A_URL}/.well-known/agent-card.json" | jq .
 ```
 
@@ -1117,7 +1117,7 @@ token and passing it through to downstream services.
 4. Test the Agent Card (public, no auth required):
 
    ```bash
-   export A2A_HOST=$(oc get route mas-a2a -n mao -o jsonpath='{.spec.host}')
+   export A2A_HOST=$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')
    curl -ksS "https://$A2A_HOST/.well-known/agent-card.json" | jq
    ```
 
@@ -1180,7 +1180,7 @@ After deployment, test the passthrough flow:
 ```bash
 # 1. Verify MAS A2A is running
 oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
-export A2A_HOST=$(oc get route mas-a2a -n mao -o jsonpath='{.spec.host}')
+export A2A_HOST=$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')
 
 # 2. Test agent card (public, no auth)
 curl -ksS "https://$A2A_HOST/.well-known/agent-card.json" | jq
