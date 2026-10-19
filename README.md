@@ -578,20 +578,30 @@ Commit and push. Wait for ArgoCD to sync the `acme-agent` application.
 
 Send a test request:
 
+ACME's A2A JSON-RPC endpoint is the root path `/` (served by Google ADK's
+`to_a2a`), not `/a2a/jsonrpc`. Use the A2A `message/send` method. ACME refuses
+to delegate unless the message contains exactly one explicit cluster API URL,
+so include it in the text:
+
 ```bash
 ACME_URL="https://$(oc get route acme-agent -n acme-agent -o jsonpath='{.spec.host}')"
-curl -X POST "${ACME_URL}/a2a/jsonrpc" \
+curl -X POST "${ACME_URL}/" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "agent/sendMessage",
+    "id": 1,
+    "method": "message/send",
     "params": {
-      "task": {"user_prompt": "test"},
-      "message": {"content": "list pods in namespace default"}
-    },
-    "id": 1
+      "message": {
+        "messageId": "test-1",
+        "role": "user",
+        "parts": [{"kind": "text", "text": "For cluster https://api.example.com:6443, list pods in namespace default"}]
+      }
+    }
   }'
 ```
+
+The agent card itself is at `${ACME_URL}/.well-known/agent-card.json`.
 
 Check logs at each hop:
 
