@@ -742,7 +742,7 @@ clusterGroup:
         - name: a2a.enabled
           value: "true"
         - name: a2a.blueprintId
-          value: "2546ea6c-e62d-4f1d-a9c6-5b3dc2d19d43"
+          value: "57d1db86-29fa-4bda-ab47-6158f91975a4"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
