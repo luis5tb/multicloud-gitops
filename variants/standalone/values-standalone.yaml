@@ -698,7 +698,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "334ea5439770"
+          value: "a80e09316564"
         - name: image.pullPolicy
           value: Always
         # DEBUG temporarily to capture the orchestrator's planning LLM
@@ -723,7 +723,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "334ea5439770"
+          value: "a80e09316564"
         - name: image.pullPolicy
           value: Always
         # DEV MODE: Accept any token without validation (for testing/blueprint setup)
@@ -748,7 +748,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          value: "334ea5439770"
+          value: "a80e09316564"
         - name: image.pullPolicy
           value: Always
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
