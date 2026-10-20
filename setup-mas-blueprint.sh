@@ -146,6 +146,32 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
       | jq -r '.resources[]? | select(.name == "Multi-Cluster Router") | .rid' | head -1)
   fi
   echo "   ✅ Orchestrator RID: $ORCH_RID"
+
+  # 1b2. Register Router Condition (router_direct) as an inventory resource so
+  # the blueprint can reference it via $ref -- exactly like the LLM and nodes.
+  # An inline condition declared only in the blueprint (a bare local rid) is not
+  # resolved into the runtime graph the orchestrator routes through; it must be
+  # an external ref to a saved conditions resource.
+  echo ""
+  echo "1b2. Registering Router Condition..."
+  COND_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
+    -H "Authorization: Bearer ${MAS_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "category": "conditions",
+      "type": "router_direct",
+      "name": "Multi-Cluster Orchestrator Router",
+      "config": {
+        "type": "router_direct"
+      }
+    }')
+  COND_RID=$(echo "$COND_RESPONSE" | jq -r '.rid // empty')
+  if [ -z "$COND_RID" ]; then
+    COND_RID=$(curl -s "${MAS_API_URL}/api/resources/resources.list?category=conditions" \
+      -H "Authorization: Bearer ${MAS_TOKEN}" \
+      | jq -r '.resources[]? | select(.name == "Multi-Cluster Orchestrator Router") | .rid' | head -1)
+  fi
+  echo "   ✅ Router Condition RID: $COND_RID"
 fi
 
 # 1c. Register A2A Agent Node
@@ -238,8 +264,11 @@ description: Multi-cluster OpenShift investigation with intelligent routing and 
 name: Multi-Cluster OLS Investigation Blueprint
 
 conditions:
-  - rid: router_condition
-    name: Orchestrator Router
+  # External ref to the saved router_direct condition (registered in step 1b2),
+  # so the resolver pulls it from inventory into the runtime graph. The plan's
+  # exit_condition below references the same rid.
+  - rid: "\$ref:${COND_RID}"
+    name: Multi-Cluster Orchestrator Router
     type: router_direct
     config:
       type: router_direct
@@ -295,7 +324,7 @@ plan:
       - start
       - investigate
     node: ${ORCH_RID}
-    exit_condition: router_condition
+    exit_condition: ${COND_RID}
     branches:
       investigate: investigate
       finalize: finalize
