@@ -11,6 +11,7 @@ listeners:
 filter_chains:
   - name: authorization-and-routing
     filters:
+      {{- if .Values.policy.enabled }}
       - filter: policy
         config_path: /etc/praxis/config/policy.yaml
         # This is separate from insecure_options below: it permits the policy
@@ -20,6 +21,7 @@ filter_chains:
         # requests, so it intentionally has no protocol-classifier requirement.
         require_protocol_metadata: false
         init_timeout_secs: 30
+      {{- end }}
 
       {{- if .Values.agentCard.enabled }}
       # Core 0.7.0 (embedded in the pinned ai:0.4.1 image) has no static-files
