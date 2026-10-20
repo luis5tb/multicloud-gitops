@@ -192,6 +192,13 @@ env vars.
 {{- end -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_AUDIENCE" "value" $a2a.exchangeAudience) -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_CLIENT_ASSERTION_TYPE" "value" $a2a.exchangeClientAssertionType) -}}
+{{- if $a2a.exchangeSubjectIssuerMapJson -}}
+{{- /* JSON object mapping an EXTERNAL caller-token issuer URL to the Keycloak
+       identity-provider alias that brokers it. Required for exchanging external
+       SSO tokens: a2a_auth.py sends subject_issuer so Keycloak validates the
+       token via that IdP instead of as a realm-native token. */ -}}
+{{- $env = append $env (dict "name" "A2A_EXCHANGE_SUBJECT_ISSUER_MAP" "value" $a2a.exchangeSubjectIssuerMapJson) -}}
+{{- end -}}
 {{- if $a2a.spiffeJwtAudience -}}
 {{- $env = append $env (dict "name" "A2A_SPIFFE_JWT_AUDIENCE" "value" $a2a.spiffeJwtAudience) -}}
 {{- end -}}
