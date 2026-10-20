@@ -524,8 +524,16 @@ mao-a2a:
       value: "<blueprint-id-from-step-2>"  # Replace with $BLUEPRINT_ID from script
     - name: a2a.publicBaseUrl
       value: "https://mas-a2a-mao.apps.<your-cluster>"  # Replace with your cluster domain
-    - name: a2a.allowedPrincipals
-      value: '["<acme-principal-sub>"]'  # Replace with ACME agent's 'sub' claim from Red Hat SSO
+    # Use the indexed key (not a JSON-string value): the chart applies toJson,
+    # so a '["..."]' string would double-encode. The value is ACME's Keycloak
+    # service-account 'sub' (an opaque UUID), NOT its SPIFFE ID -- the SPIFFE ID
+    # only exists in the client_assertion used to authenticate TO Keycloak, never
+    # in the resulting access token. Get it from the Keycloak Admin API: the
+    # acme-agent client's service-account-user id
+    # (GET /admin/realms/<realm>/clients?clientId=acme-agent then
+    # .../clients/<uuid>/service-account-user -> .id).
+    - name: a2a.allowedPrincipals[0]
+      value: "<acme-keycloak-service-account-sub>"
     - name: route.enabled
       value: "true"
     # route.host is optional - auto-derives from global.clusterBaseDomain
@@ -550,8 +558,10 @@ mao-a2a:
       value: "<blueprint-id-from-step-2>"
     - name: a2a.publicBaseUrl
       value: "https://mas-a2a-mao.apps.<your-cluster>"
-    - name: a2a.allowedPrincipals
-      value: '["dev"]'  # Accept any token with username "dev"
+    # Indexed key (not a JSON string) so the chart builds a real list. In dev
+    # mode the validator maps any token to user_id "dev".
+    - name: a2a.allowedPrincipals[0]
+      value: "dev"
     - name: identity.providerMode
       value: dev  # Bypass OIDC validation for testing
     - name: route.enabled
@@ -1048,8 +1058,12 @@ token and passing it through to downstream services.
          value: "<BLUEPRINT_ID>"
        - name: a2a.publicBaseUrl
          value: "https://mas-a2a-mao.apps.<cluster-domain>"
-       - name: a2a.allowedPrincipals
-         value: '["<validated-keycloak-sub-1>", "<validated-keycloak-sub-2>"]'
+       # Indexed keys (not a JSON string) so the chart builds a real list.
+       # Each value is a validated Keycloak service-account 'sub' (opaque UUID).
+       - name: a2a.allowedPrincipals[0]
+         value: "<validated-keycloak-sub-1>"
+       - name: a2a.allowedPrincipals[1]
+         value: "<validated-keycloak-sub-2>"
        - name: identity.providerMode
          value: keycloak
        - name: identity.keycloakAudience
