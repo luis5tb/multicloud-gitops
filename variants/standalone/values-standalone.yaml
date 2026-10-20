@@ -398,6 +398,19 @@ clusterGroup:
         # identity.keycloak.issuerUrl derives from global.clusterBaseDomain +
         # global.keycloakRealm (https://keycloak.apps.<base>/realms/<realm>);
         # override here only to diverge.
+        # Run Praxis as a pure router/load-balancer: skip the policy filter
+        # (no caller JWT verification, no azp allow-list). OpenShift Lightspeed
+        # is the validating boundary -- its multi-issuer inbound OIDC validates
+        # the caller token (Keycloak + Red Hat SSO prod/stage) and its Keycloak
+        # RFC 8693 exchange re-validates it. This is also required so the UI's
+        # own Red Hat SSO token (azp != acme-agent) can reach OLS, which the
+        # azp allow-list would otherwise block; and it avoids Praxis's Rust
+        # client failing to fetch the external SSO JWKS over IPv6 on this
+        # IPv4-egress cluster. See agents/AUTHENTICATION.md. The identity.* and
+        # policy.* settings below are inert while disabled (kept for easy
+        # re-enable). Disabling policy also skips the enforcementTest Job.
+        - name: policy.enabled
+          value: "false"
         # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide
         # private IdP egress switch. Its only configured callout is this
         # static Keycloak JWKS URL; do not add user-controlled URLs here.

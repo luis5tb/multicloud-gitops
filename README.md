@@ -89,9 +89,13 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     OLS now uses its configured OIDC authentication module for both A2A and
     the stock REST API; clients of `/v1/*` that previously used OpenShift
     ServiceAccount tokens must be retested with OIDC credentials. Praxis
-    continues to enforce the `azp` caller allow-list; OLS no longer has a
-    separate A2A `azp` allow-list. See
-    [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md). The OIDC module
+    enforces the `azp` caller allow-list **only when `policy.enabled: true`**;
+    the `standalone` variant sets `policy.enabled: false`, so Praxis is a pure
+    router and **OLS is the validating boundary** — its multi-issuer inbound
+    OIDC (local Keycloak **plus** Red Hat SSO prod/stage via
+    `appServerPatch.a2a.oidcIssuers`) validates the caller, then the Keycloak
+    exchange re-validates. OLS has no separate A2A `azp` allow-list. See
+    [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) ("Praxis policy mode"). The OIDC module
     validates HTTPS issuer discovery/JWKS with **HTTPX/certifi roots** by
     default; the exchange-specific
     `A2A_KEYCLOAK_CA_BUNDLE` does not add trust for inbound OIDC validation.
@@ -284,9 +288,12 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     token-exchange wiring for `openshift-mcp`, are fully declarative in
     `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml` -- no
     manual Admin Console step is required. `praxis-proxy` needs no client
-    registration either -- it authorizes callers by validating their bearer
-    JWT against Keycloak's JWKS and checking the `azp` claim against
-    `policy.allowedCallers`, never acting as a Keycloak client itself.
+    registration either -- when `policy.enabled: true` it authorizes callers by
+    validating their bearer JWT against Keycloak's JWKS and checking the `azp`
+    claim against `policy.allowedCallers`, never acting as a Keycloak client
+    itself. (The `standalone` variant sets `policy.enabled: false` and runs
+    Praxis router-only, delegating caller validation to OLS's multi-issuer
+    inbound OIDC -- see [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md).)
 
 9. Commit, push, and re-sync:
 
@@ -320,12 +327,22 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     curl -s -o /dev/null -w '%{http_code}\n' https://<praxis route host>/  # expect 401/403
     ```
 
+    > **Router-only mode:** the `standalone` variant sets `policy.enabled: false`
+    > for `praxis-proxy`, so Praxis does **no** token verification and **no**
+    > `azp` allow-list — it is a pure router keyed on `X-OLS-Cluster`. In that
+    > mode the last check above returns the routed backend's response (often a
+    > `200`/app error), **not** a `401/403`, because OLS — not Praxis — is the
+    > validating boundary. Leave `policy.enabled: true` if you want Praxis to
+    > enforce the caller allow-list. See
+    > [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) ("Praxis policy mode").
+
 At this point `openshift-lightspeed-config`, `praxis-proxy`, and `acme-agent`
 are functional up to, but not including, the final OpenShift MCP tool call:
 acme-agent's Keycloak token (plus the `X-OLS-Cluster` header naming the
 target cluster) reaches the public Praxis Route, Praxis validates the token
-and its `azp` allow-list, selects the OLS backend the header names, and
-forwards the request unchanged. OpenShift Lightspeed's A2A endpoint then
+and its `azp` allow-list (when `policy.enabled: true`; the standalone variant
+runs router-only and lets OLS validate instead), selects the OLS backend the
+header names, and forwards the request unchanged. OpenShift Lightspeed's A2A endpoint then
 validates the OIDC token and exchanges it for an MCP-scoped token. OLS has no
 separate public Route, but its operator-managed NetworkPolicy permits some
 non-Praxis in-cluster sources. The exchanged token ("Token B") can mint, but
