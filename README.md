@@ -441,15 +441,44 @@ a multi-cluster blueprint. The script handles:
 
 **For multi-cluster with orchestration:**
 
+The orchestrator LLM must emit well-formed OpenAI tool calls, because it
+delegates to the OLS agent via the `plan_and_delegate` tool. Two providers are
+supported via `LLM_PROVIDER`:
+
+*Recommended — Gemini on Vertex* (`LLM_PROVIDER=vertex`). Uses MAS's
+`google_genai` element in Vertex mode with the **same** Gemini-on-Vertex ADC
+credentials OLS uses. Enable `vertexCreds.enabled` on the `mao-worker`
+application first (already set in `values-standalone.yaml`): an ExternalSecret
+syncs the shared Vault ADC JSON (`secret/data/global/llm-creds-vertex`) into the
+`mao` namespace and the worker mounts it as `GOOGLE_APPLICATION_CREDENTIALS`. No
+API key is needed.
+
 ```bash
-# Set LiteLLM credentials (or OPENAI_API_KEY for direct OpenAI)
+export LLM_PROVIDER=vertex
+# Optional overrides (defaults shown):
+export VERTEX_PROJECT=redhat-marketplace-dev
+export VERTEX_LOCATION=global
+export VERTEX_MODEL=gemini-3.8-flash
+
+./setup-mas-blueprint.sh multi-cluster
+```
+
+*Alternative — OpenAI/LiteLLM* (`LLM_PROVIDER=openai`, the default):
+
+```bash
 export LITELLM_API_KEY="your-litellm-api-key"
 export LITELLM_API_BASE="https://maas-rhdp.apps.maas.redhatworkshops.io/v1"
 export LITELLM_MODEL="gpt-oss-20b"
 
-# Run the script
 ./setup-mas-blueprint.sh multi-cluster
 ```
+
+> **Caveat:** gpt-oss models served over this MaaS return their tool calls in
+> the "harmony" channel format, and the endpoint does not translate the
+> arguments into OpenAI `tool_calls.arguments`. The orchestrator then sees empty
+> tool-call arguments ("A new plan requires a summary and at least one item")
+> and never delegates. Use the Vertex provider unless your gpt-oss endpoint is
+> configured with a harmony/tool-call parser.
 
 **For simple single-cluster (no orchestrator):**
 
