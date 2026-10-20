@@ -439,10 +439,14 @@ clusterGroup:
         # agentCard.name, description, skills inherit OLS defaults from
         # charts/all/praxis-proxy/values.yaml; override only to diverge.
         # agentCard.rpcUrl auto-derives from global.clusterBaseDomain.
-        # Accept Red Hat SSO production and stage tokens in addition to the
-        # local Keycloak issuer (which the chart appends automatically). These
-        # audience values follow MULTI_OIDC_CONFIGURATION.md; verify them
-        # against the actual tokens before relying on the external issuers.
+        # NOTE: inert while policy.enabled=false (Praxis runs router-only in
+        # standalone; see the policy.enabled override above). Kept for an easy
+        # re-enable. Accept Red Hat SSO production and stage tokens in addition
+        # to the local Keycloak issuer (which the chart appends automatically).
+        # SSO audience is api.ask_red_hat -- verified from a real sso.stage
+        # token whose aud array is
+        # ["cloud-services","api.graphql","api.ask_red_hat","api.console"];
+        # api.ask_red_hat is the narrowest value that fits the assistant use case.
         - name: identity.oidcIssuers[0].name
           value: red-hat-sso-prod
         - name: identity.oidcIssuers[0].issuerUrl
@@ -450,7 +454,7 @@ clusterGroup:
         - name: identity.oidcIssuers[0].jwksUrl
           value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: identity.oidcIssuers[0].audience
-          value: openshift-lightspeed
+          value: api.ask_red_hat
         - name: identity.oidcIssuers[1].name
           value: red-hat-sso-stage
         - name: identity.oidcIssuers[1].issuerUrl
@@ -458,7 +462,7 @@ clusterGroup:
         - name: identity.oidcIssuers[1].jwksUrl
           value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: identity.oidcIssuers[1].audience
-          value: openshift-lightspeed
+          value: api.ask_red_hat
         # Upstream selection is no longer a single fixed host/port: Praxis
         # now routes per request to one of the backends registered under the
         # top-level global.olsClusters map (added above), matched by an
@@ -610,18 +614,21 @@ clusterGroup:
         - name: appServerPatch.a2a.configMapName
           value: olsconfig
         # a2a-split reuses the app-server's configured OIDC auth module for
-        # inbound A2A. The bridge updates olsconfig.yaml's module/issuer and
-        # this audience (the one ACME's Token A carries); Praxis remains the
-        # sole azp allow-list, while OLS checks issuer, audience and signature.
+        # inbound A2A. Praxis runs router-only (policy.enabled=false), so OLS is
+        # the sole validating boundary: it checks issuer, audience and signature
+        # per issuer, then performs the Keycloak RFC 8693 exchange. This is the
+        # Keycloak-issuer audience (the one ACME's Keycloak Token A carries).
         - name: appServerPatch.a2a.inboundOidcAudience
           value: lightspeed-a2a
-        # OLS validates these external issuers as well as the local Keycloak
-        # issuer, which the chart appends using inboundOidcAudience above.
-        # Confirm audience/claim names against real tokens before cutover.
+        # OLS validates these external SSO issuers as well as the local Keycloak
+        # issuer, which the chart appends using inboundOidcAudience above
+        # (keycloak -> lightspeed-a2a). SSO prod/stage audience is api.ask_red_hat,
+        # verified from a real sso.stage token (aud array includes it); the
+        # Keycloak path keeps lightspeed-a2a. Each issuer validates its own token.
         - name: appServerPatch.a2a.oidcIssuers[0].issuer_url
           value: https://sso.redhat.com/auth/realms/redhat-external
         - name: appServerPatch.a2a.oidcIssuers[0].audience
-          value: openshift-lightspeed
+          value: api.ask_red_hat
         - name: appServerPatch.a2a.oidcIssuers[0].username_claim
           value: preferred_username
         - name: appServerPatch.a2a.oidcIssuers[0].jwks_cache_seconds
@@ -629,7 +636,7 @@ clusterGroup:
         - name: appServerPatch.a2a.oidcIssuers[1].issuer_url
           value: https://sso.stage.redhat.com/auth/realms/redhat-external
         - name: appServerPatch.a2a.oidcIssuers[1].audience
-          value: openshift-lightspeed
+          value: api.ask_red_hat
         - name: appServerPatch.a2a.oidcIssuers[1].username_claim
           value: preferred_username
         - name: appServerPatch.a2a.oidcIssuers[1].jwks_cache_seconds
@@ -802,7 +809,7 @@ clusterGroup:
         - name: identity.oidcIssuers[0].jwks_url
           value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: identity.oidcIssuers[0].audience
-          value: openshift-lightspeed
+          value: api.ask_red_hat
         - name: identity.oidcIssuers[0].username_claim
           value: preferred_username
         - name: identity.oidcIssuers[1].issuer_url
@@ -810,7 +817,7 @@ clusterGroup:
         - name: identity.oidcIssuers[1].jwks_url
           value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: identity.oidcIssuers[1].audience
-          value: openshift-lightspeed
+          value: api.ask_red_hat
         - name: identity.oidcIssuers[1].username_claim
           value: preferred_username
         - name: identity.oidcIssuers[2].issuer_url
