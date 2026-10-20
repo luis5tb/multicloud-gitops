@@ -706,6 +706,14 @@ clusterGroup:
         # delegating to the OLS investigator. Revert to INFO once resolved.
         - name: logLevel
           value: DEBUG
+        # Sync the shared Gemini-on-Vertex ADC creds (same Vault key OLS uses)
+        # into the mao namespace and mount them, so the orchestrator can run on
+        # a google_genai (Vertex) LLM resource. Gemini returns proper
+        # OpenAI-style tool_calls; gpt-oss over the MaaS returns harmony tool
+        # calls that break plan building. Register the LLM with
+        # `LLM_PROVIDER=vertex ./setup-mas-blueprint.sh multi-cluster`.
+        - name: vertexCreds.enabled
+          value: "true"
     mao-api:
       name: mao-api
       namespace: mao

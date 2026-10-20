@@ -90,6 +90,35 @@ langfuse:
   enabled: "false"
   secretName: mao-secret-langfuse
 
+# ExternalSecrets store used to sync Vault-backed secrets. Mirrors the
+# openshift-lightspeed-config chart so the worker can reuse the same
+# Gemini-on-Vertex ADC credentials.
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+# Optional Google Vertex AI credentials for a google_genai orchestrator LLM
+# resource. Gemini on Vertex returns proper OpenAI-style tool_calls, unlike the
+# gpt-oss "harmony" format whose tool-call arguments do not survive the MaaS
+# endpoint's translation. When enabled, an ExternalSecret syncs the SAME Vault
+# ADC JSON the OLS chart uses (secret/data/global/llm-creds-vertex), and it is
+# mounted so google-genai's Vertex client picks it up via
+# GOOGLE_APPLICATION_CREDENTIALS. Only the worker runs the orchestrator LLM, so
+# only this chart needs the credentials.
+vertexCreds:
+  enabled: false
+  # Secret created in this namespace by the ExternalSecret below.
+  secretName: mao-llm-creds-vertex
+  # Key inside the secret holding the ADC JSON; also the mounted filename.
+  credentialKey: apitoken
+  # Vault location of the shared Gemini-on-Vertex ADC JSON (identical to the
+  # openshift-lightspeed-config chart's llm.vertex.vaultKey/vaultProperty).
+  vaultKey: secret/data/global/llm-creds-vertex
+  vaultProperty: credentials
+  # Mount dir; GOOGLE_APPLICATION_CREDENTIALS is set to <mountPath>/<credentialKey>.
+  mountPath: /var/run/mas-vertex-creds
+
 sharedStorage:
   mountPath: /app/shared
   existingClaim: ""

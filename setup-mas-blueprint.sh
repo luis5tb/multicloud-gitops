@@ -22,6 +22,19 @@ export MAS_TOKEN="${MAS_TOKEN:-dev-token}"
 CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-ocp.phkl2.sandbox315.opentlc.com}"
 CLUSTER_ID="api-$(echo $CLUSTER_DOMAIN | sed 's/\./-/g')-6443"
 
+# Orchestrator LLM provider: "openai" (LiteLLM/MaaS, needs LITELLM_API_KEY) or
+# "vertex" (Gemini on Vertex via the google_genai element). Vertex is
+# recommended: gpt-oss served over the MaaS returns "harmony" tool calls whose
+# arguments do not survive the endpoint's OpenAI translation, so the
+# orchestrator can never build a plan (empty plan / unterminated-string errors).
+# Gemini returns proper OpenAI-style tool_calls. Vertex uses the ADC creds
+# mounted into the worker (charts/all/mao/mas-worker vertexCreds -> the same
+# Vault key OLS uses), so no api_key is needed here.
+LLM_PROVIDER="${LLM_PROVIDER:-openai}"
+VERTEX_PROJECT="${VERTEX_PROJECT:-redhat-marketplace-dev}"
+VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
+VERTEX_MODEL="${VERTEX_MODEL:-gemini-3.8-flash}"
+
 BLUEPRINT_TYPE="${1:-simple}"
 
 echo "========================================="
@@ -53,40 +66,59 @@ echo ""
 
 if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
 
-  # Check LLM credentials
-  if [ -z "$LITELLM_API_KEY" ]; then
-    echo "❌ Error: LITELLM_API_KEY required for multi-cluster"
-    exit 1
+  # 1a. Register LLM (Vertex/Gemini or OpenAI/LiteLLM)
+  if [ "$LLM_PROVIDER" == "vertex" ]; then
+    LLM_NAME="Multi-Cluster Orchestrator LLM (Vertex)"
+    echo "1a. Registering Vertex google_genai LLM: ${VERTEX_MODEL} (project=${VERTEX_PROJECT}, location=${VERTEX_LOCATION})..."
+    # api_key is ignored in Vertex mode (google-genai Client(vertexai=true)
+    # authenticates via ADC/GOOGLE_APPLICATION_CREDENTIALS mounted in the
+    # worker). vertexai/project/location go through the passthrough "extra".
+    LLM_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
+      -H "Authorization: Bearer ${MAS_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "category": "llms",
+        "type": "google_genai",
+        "name": "'"${LLM_NAME}"'",
+        "config": {
+          "type": "google_genai",
+          "model_name": "'"${VERTEX_MODEL}"'",
+          "api_key": "unused-vertex-adc",
+          "temperature": 0.7,
+          "extra": {"vertexai": true, "project": "'"${VERTEX_PROJECT}"'", "location": "'"${VERTEX_LOCATION}"'"}
+        }
+      }')
+  else
+    if [ -z "$LITELLM_API_KEY" ]; then
+      echo "❌ Error: LITELLM_API_KEY required for LLM_PROVIDER=openai"
+      exit 1
+    fi
+    LLM_NAME="Multi-Cluster Orchestrator LLM"
+    LLM_MODEL="${LITELLM_MODEL:-gpt-oss-20b}"
+    LLM_BASE_URL="${LITELLM_API_BASE:-https://maas-rhdp.apps.maas.redhatworkshops.io/v1}"
+    echo "1a. Registering OpenAI/LiteLLM LLM: ${LLM_MODEL}..."
+    LLM_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
+      -H "Authorization: Bearer ${MAS_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "category": "llms",
+        "type": "openai",
+        "name": "'"${LLM_NAME}"'",
+        "config": {
+          "type": "openai",
+          "model_name": "'"${LLM_MODEL}"'",
+          "api_key": "'"${LITELLM_API_KEY}"'",
+          "base_url": "'"${LLM_BASE_URL}"'",
+          "temperature": 0.7
+        }
+      }')
   fi
-
-  LLM_TYPE="openai"
-  LLM_MODEL="${LITELLM_MODEL:-gpt-oss-20b}"
-  LLM_API_KEY="$LITELLM_API_KEY"
-  LLM_BASE_URL="${LITELLM_API_BASE:-https://maas-rhdp.apps.maas.redhatworkshops.io/v1}"
-
-  # 1a. Register LLM
-  echo "1a. Registering LLM..."
-  LLM_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
-    -H "Authorization: Bearer ${MAS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "category": "llms",
-      "type": "'"${LLM_TYPE}"'",
-      "name": "Multi-Cluster Orchestrator LLM",
-      "config": {
-        "type": "'"${LLM_TYPE}"'",
-        "model_name": "'"${LLM_MODEL}"'",
-        "api_key": "'"${LLM_API_KEY}"'",
-        "base_url": "'"${LLM_BASE_URL}"'",
-        "temperature": 0.7
-      }
-    }')
 
   LLM_RID=$(echo "$LLM_RESPONSE" | jq -r '.rid // empty')
   if [ -z "$LLM_RID" ]; then
     LLM_RID=$(curl -s "${MAS_API_URL}/api/resources/resources.list?category=llms" \
       -H "Authorization: Bearer ${MAS_TOKEN}" \
-      | jq -r '.resources[]? | select(.name == "Multi-Cluster Orchestrator LLM") | .rid' | head -1)
+      | jq -r '.resources[]? | select(.name == "'"${LLM_NAME}"'") | .rid' | head -1)
   fi
   echo "   ✅ LLM RID: $LLM_RID"
 

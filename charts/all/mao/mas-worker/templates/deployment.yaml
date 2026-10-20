@@ -127,6 +127,12 @@ spec:
               value: temporal-worker
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | quote }}
+            {{- if .Values.vertexCreds.enabled }}
+            # google-genai's Vertex client (vertexai=true) authenticates via
+            # Application Default Credentials read from this file.
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: {{ printf "%s/%s" .Values.vertexCreds.mountPath .Values.vertexCreds.credentialKey | quote }}
+            {{- end }}
             - name: WORKER_THREADS
               value: {{ .Values.worker.threads | quote }}
             - name: MONGODB_URI
@@ -251,6 +257,11 @@ spec:
               mountPath: /var/run/mas-keycloak-trust
               readOnly: true
             {{- end }}
+            {{- if .Values.vertexCreds.enabled }}
+            - name: vertex-creds
+              mountPath: {{ .Values.vertexCreds.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: shared-storage
           {{- if .Values.sharedStorage.existingClaim }}
@@ -268,6 +279,14 @@ spec:
                 path: ca-bundle.crt
         - name: keycloak-ca-trust
           emptyDir: {}
+        {{- end }}
+        {{- if .Values.vertexCreds.enabled }}
+        - name: vertex-creds
+          secret:
+            secretName: {{ .Values.vertexCreds.secretName }}
+            items:
+              - key: {{ .Values.vertexCreds.credentialKey }}
+                path: {{ .Values.vertexCreds.credentialKey }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
