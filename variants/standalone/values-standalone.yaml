@@ -608,9 +608,16 @@ clusterGroup:
         # a2a_auth.py sends subject_issuer so Keycloak validates the external
         # token via that IdP instead of failing "subject_token validation
         # failure". Keycloak-native tokens (acme-agent) are not listed and
-        # exchange unchanged.
-        - name: appServerPatch.a2a.exchangeSubjectIssuerMapJson
-          value: '{"https://sso.redhat.com/auth/realms/redhat-external":"red-hat-sso-prod","https://sso.stage.redhat.com/auth/realms/redhat-external":"red-hat-sso-stage"}'
+        # exchange unchanged. Indexed-list form (not a JSON string): a JSON
+        # object value would be mis-parsed by Helm --set into a list.
+        - name: appServerPatch.a2a.exchangeSubjectIssuers[0].issuer
+          value: https://sso.redhat.com/auth/realms/redhat-external
+        - name: appServerPatch.a2a.exchangeSubjectIssuers[0].alias
+          value: red-hat-sso-prod
+        - name: appServerPatch.a2a.exchangeSubjectIssuers[1].issuer
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external
+        - name: appServerPatch.a2a.exchangeSubjectIssuers[1].alias
+          value: red-hat-sso-stage
         # Operator source names the app-server config ConfigMap "olsconfig"
         # (key "olsconfig.yaml"); confirm on the installed operator release
         # with `oc get cm olsconfig -n a2a-lightspeed` before cutover.

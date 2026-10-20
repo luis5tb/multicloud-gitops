@@ -192,12 +192,18 @@ env vars.
 {{- end -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_AUDIENCE" "value" $a2a.exchangeAudience) -}}
 {{- $env = append $env (dict "name" "A2A_EXCHANGE_CLIENT_ASSERTION_TYPE" "value" $a2a.exchangeClientAssertionType) -}}
-{{- if $a2a.exchangeSubjectIssuerMapJson -}}
-{{- /* JSON object mapping an EXTERNAL caller-token issuer URL to the Keycloak
-       identity-provider alias that brokers it. Required for exchanging external
-       SSO tokens: a2a_auth.py sends subject_issuer so Keycloak validates the
-       token via that IdP instead of as a realm-native token. */ -}}
-{{- $env = append $env (dict "name" "A2A_EXCHANGE_SUBJECT_ISSUER_MAP" "value" $a2a.exchangeSubjectIssuerMapJson) -}}
+{{- if $a2a.exchangeSubjectIssuers -}}
+{{- /* Build the EXTERNAL caller-token issuer-URL -> Keycloak IdP-alias map from
+       a list of {issuer, alias} entries (indexed keys, so clusterGroup overrides
+       never contain JSON braces/commas, which Helm --set would mis-parse into a
+       list). a2a_auth.py reads this JSON object as A2A_EXCHANGE_SUBJECT_ISSUER_MAP
+       and sends subject_issuer so Keycloak validates the external token via that
+       IdP instead of as a realm-native token. The env value must be a string. */ -}}
+{{- $sim := dict -}}
+{{- range $a2a.exchangeSubjectIssuers -}}
+{{- $_ := set $sim .issuer .alias -}}
+{{- end -}}
+{{- $env = append $env (dict "name" "A2A_EXCHANGE_SUBJECT_ISSUER_MAP" "value" (toJson $sim)) -}}
 {{- end -}}
 {{- if $a2a.spiffeJwtAudience -}}
 {{- $env = append $env (dict "name" "A2A_SPIFFE_JWT_AUDIENCE" "value" $a2a.spiffeJwtAudience) -}}
