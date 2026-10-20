@@ -132,6 +132,15 @@ identity:
     #   audience: openshift-lightspeed
 
 policy:
+  # When true (default), Praxis runs its policy filter: it validates the caller
+  # JWT (trusted issuers/JWKS) and enforces the `allowedCallers` azp allow-list
+  # before routing. Set false to run Praxis as a pure router/load-balancer (no
+  # token verification, no azp gate) -- only do this when a downstream boundary
+  # validates the token instead (e.g. OpenShift Lightspeed's own multi-issuer
+  # inbound OIDC + its Keycloak token exchange). Disabling this also skips the
+  # enforcementTest Job (it asserts Praxis DENIES, which cannot hold when the
+  # policy filter is off). See the chart README and agents/AUTHENTICATION.md.
+  enabled: true
   allowedCallers:
     - acme-agent
   # Allow-list enforcement check (PostSync hook Job). Guards against a silent

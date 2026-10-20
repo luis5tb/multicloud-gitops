@@ -209,6 +209,52 @@ sequenceDiagram
 - No changes to Praxis policy, OLS config, or RBAC needed
 - MAS is **invisible** to the authentication chain
 
+## Praxis policy mode (standalone: router-only)
+
+Praxis has two modes, selected by `policy.enabled` (default `true`) in
+`charts/all/praxis-proxy`:
+
+- **`policy.enabled: true` (default, chart-generic):** Praxis runs its `policy`
+  filter — it validates the caller JWT against the configured trusted
+  issuers/JWKS **and** enforces the `claim.azp == acme-agent` allow-list
+  (`policy.allowedCallers`) before routing. This is the mode every mermaid
+  sequence and troubleshooting entry in this document describes.
+
+- **`policy.enabled: false` (what the `standalone` variant sets):** the `policy`
+  filter is skipped entirely (`charts/all/praxis-proxy/files/praxis.yaml` wraps
+  the `- filter: policy` block in `{{- if .Values.policy.enabled }}`, and the
+  `enforcement-check-job` PostSync check is skipped too). Praxis becomes a
+  **pure router/load-balancer**: it does **no** caller JWT verification and
+  enforces **no** `azp` allow-list; it only matches the `X-OLS-Cluster` header
+  to a backend (the `static_response` agent-card and `load_balancer` filters
+  remain). **OpenShift Lightspeed is then the validating boundary** — its
+  multi-issuer inbound OIDC (local Keycloak **plus** Red Hat SSO prod/stage,
+  each with its own JWKS and audience; see `appServerPatch.a2a.oidcIssuers`)
+  validates the caller token, and the RFC 8693 Keycloak exchange re-validates it
+  before any MCP call.
+
+**Why standalone runs router-only.** Two concrete reasons:
+1. The UI presents its **own** Red Hat SSO (stage) token, whose `azp` is **not**
+   `acme-agent`. Praxis's `azp == acme-agent` allow-list would reject it even if
+   everything else were fine, so letting the UI's own token reach OLS requires
+   dropping that gate at Praxis.
+2. The pinned Praxis image's Rust HTTP client resolves the external SSO hosts to
+   **IPv6** and does not fall back to IPv4; this cluster has IPv4-only egress, so
+   Praxis's own JWKS fetch for `sso.redhat.com`/`sso.stage.redhat.com` fails
+   (`ConnectNoRoute` / `Network unreachable`). OLS (Python/HTTPX, which does
+   IPv4 happy-eyeballs fallback) and Keycloak (which caches external-IdP keys)
+   do not hit this, so moving external-issuer validation to them sidesteps it.
+
+**Security tradeoff (state it plainly).** With the policy filter off, Praxis no
+longer enforces any caller allow-list, and OLS does **not** re-check `azp`. The
+effective gate becomes "a validly-signed token whose issuer/audience OLS trusts,
+from anyone who can reach the public Route." The meaningful constraint is the
+**per-issuer audience** — `openshift-lightspeed` for the Red Hat SSO issuers and
+`lightspeed-a2a` for the local Keycloak issuer — so keep those audiences tight
+and specific. If you need a caller allow-list back (e.g. a non-sandbox
+deployment with IPv6 egress, or where the caller always presents a Keycloak
+token), leave `policy.enabled: true`.
+
 ## RFC 8693 token exchange, step by step
 
 This is the piece that actually implements "on behalf of X" delegation, and
@@ -505,10 +551,16 @@ whose behalf" story in one column.
    JWKS, exact issuer, `lightspeed-a2a` audience, and token lifetime/subject.
    OLS then checks that `X-OLS-Cluster` matches its own cluster id. A missing
    or invalid token returns `401`, and a missing/mismatched cluster header
-   returns `403`. **Unlike the old `a2a` branch, `a2a-split` has no
+   returns `403`. OLS validates inbound tokens against its configured
+   issuer(s): in this pattern OLS is **multi-issuer** (local Keycloak **plus**
+   Red Hat SSO prod/stage — see `appServerPatch.a2a.oidcIssuers` and the
+   "Praxis policy mode" section above), each with its own JWKS and audience.
+   **Unlike the old `a2a` branch, `a2a-split` has no
    `A2A_INBOUND_AZP` allow-list in OLS**: Praxis's `claim.azp` policy is the
-   caller allow-list, while OLS independently verifies the JWT and cluster
-   binding. Do not treat the `azp` claim as checked twice. Switching OLS's
+   caller allow-list **when `policy.enabled: true`** (the standalone variant
+   sets `policy.enabled: false`, so OLS's issuer+audience check is the gate —
+   see the router-only section above), while OLS independently verifies the JWT
+   and cluster binding. Do not treat the `azp` claim as checked twice. Switching OLS's
    authentication module to `oidc` also changes authentication of its stock
    `/v1/*` REST API; it no longer uses the Kubernetes TokenReview/SAR module.
    The operator's own NetworkPolicy allows more than Praxis (see the OLS chart
@@ -525,7 +577,8 @@ whose behalf" story in one column.
      iss == configured oidc_issuer_url (https://keycloak.../realms/rca)
      aud includes configured oidc_audience ("lightspeed-a2a")
      exp/iat/sub required, RS256 signature verified via JWKS
-     azp allow-list: Praxis only (policy.allowedCallers)
+     azp allow-list: Praxis only (policy.allowedCallers), and only when
+       praxis policy.enabled=true; standalone disables it (router-only)
    ```
 
    OLS's own JWT-SVID, fetched independently of the caller token. `aud` is

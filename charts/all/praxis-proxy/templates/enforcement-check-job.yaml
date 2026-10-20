@@ -1,4 +1,4 @@
-{{- if .Values.policy.enforcementTest.enabled }}
+{{- if and .Values.policy.enabled .Values.policy.enforcementTest.enabled }}
 {{- $et := .Values.policy.enforcementTest }}
 apiVersion: v1
 kind: ConfigMap
