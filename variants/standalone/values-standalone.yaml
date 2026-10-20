@@ -608,6 +608,16 @@ clusterGroup:
         # this, Token A reaches MCP instead of an exchanged Token B.
         - name: appServerPatch.a2a.tokenExchangeEnabled
           value: "true"
+        # Broker EXTERNAL caller tokens (UI's Red Hat SSO prod/stage) through
+        # their Keycloak identity provider during the RFC 8693 exchange: map the
+        # token issuer URL to the IdP alias (must match keycloak-oidc's
+        # externalOidcProviders[*].alias: red-hat-sso-prod / red-hat-sso-stage).
+        # a2a_auth.py sends subject_issuer so Keycloak validates the external
+        # token via that IdP instead of failing "subject_token validation
+        # failure". Keycloak-native tokens (acme-agent) are not listed and
+        # exchange unchanged.
+        - name: appServerPatch.a2a.exchangeSubjectIssuerMapJson
+          value: '{"https://sso.redhat.com/auth/realms/redhat-external":"red-hat-sso-prod","https://sso.stage.redhat.com/auth/realms/redhat-external":"red-hat-sso-stage"}'
         # Operator source names the app-server config ConfigMap "olsconfig"
         # (key "olsconfig.yaml"); confirm on the installed operator release
         # with `oc get cm olsconfig -n a2a-lightspeed` before cutover.
