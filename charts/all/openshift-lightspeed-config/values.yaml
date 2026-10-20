@@ -253,14 +253,16 @@ appServerPatch:
     # auth settings while applying that configuration.
     exchangeAudience: openshift-mcp
     exchangeClientAssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
-    # JSON object mapping an EXTERNAL caller-token issuer URL to the Keycloak
-    # identity-provider alias that brokers it (must match the IdP alias created
-    # by the keycloak-oidc chart's externalOidcProviders[*].alias). When a
-    # caller token's iss matches, a2a_auth.py adds subject_issuer to the RFC 8693
-    # exchange so Keycloak validates the external token via that IdP. Empty =
-    # native-only exchange (Keycloak-realm tokens), the default. Example:
-    # '{"https://sso.redhat.com/auth/realms/redhat-external":"red-hat-sso-prod"}'
-    exchangeSubjectIssuerMapJson: ""
+    # Maps EXTERNAL caller-token issuers to the Keycloak identity-provider alias
+    # that brokers each one (alias must match keycloak-oidc's
+    # externalOidcProviders[*].alias). The chart serializes this list into the
+    # A2A_EXCHANGE_SUBJECT_ISSUER_MAP JSON object env var; when a caller token's
+    # iss matches, a2a_auth.py adds subject_issuer to the RFC 8693 exchange so
+    # Keycloak validates the external token via that IdP. Empty = native-only
+    # exchange (Keycloak-realm tokens), the default. A list (not a JSON string)
+    # so clusterGroup overrides use indexed keys and avoid Helm --set brace/comma
+    # mis-parsing. Each entry: {issuer: <token iss URL>, alias: <IdP alias>}.
+    exchangeSubjectIssuers: []
     # Defaults to keycloakIssuerURL inside a2a_auth.py itself when empty;
     # only set this if the SPIFFE JWT-SVID assertion audience must differ.
     spiffeJwtAudience: ""
