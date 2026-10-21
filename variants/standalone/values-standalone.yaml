@@ -522,7 +522,7 @@ clusterGroup:
         - name: a2a.remoteAgents[0].description
           value: "MAS A2A Orchestrator for OpenShift Lightspeed"
         - name: a2a.remoteAgents[0].endpoint
-          value: "https://mao-a2a-mas-a2a-mao.apps.ocp.phkl2.sandbox315.opentlc.com"
+          value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
         # Outbound OLS mode (metadata.ols_mode); chart default is troubleshooting.
         - name: a2a.olsMode
           value: troubleshooting
@@ -794,15 +794,15 @@ clusterGroup:
         - name: image.pullPolicy
           value: Always
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
-        #- name: a2a.enabled
-        #  value: "true"
-        #- name: a2a.blueprintId
-        #  value: ""
+        - name: a2a.enabled
+          value: "true"
+        - name: a2a.blueprintId
+          value: "7f2c9570-fbb8-49b3-b516-711403a247fe"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
         - name: a2a.publicBaseUrl
-          value: "https://mao-a2a-mas-a2a-mao.apps.ocp.phkl2.sandbox315.opentlc.com"
+          value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
         # Must be a real list: the chart applies toJson so the app can JSON-decode
         # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
         # JSON string) so the clusterGroup override builds an actual YAML list.
@@ -822,7 +822,7 @@ clusterGroup:
         - name: route.enabled
           value: "true"
         # - name: route.host
-        #   value: "mas-a2a.apps.ocp.phkl2.sandbox315.opentlc.com"
+        #   value: "mas-a2a.apps.bm-cluster.e2e.bos.redhat.com"
 
         # Multi-issuer OIDC: accept tokens from Red Hat SSO and Keycloak
         # Keycloak is NOT auto-appended; include it explicitly
@@ -843,9 +843,9 @@ clusterGroup:
         - name: identity.oidcIssuers[1].username_claim
           value: preferred_username
         - name: identity.oidcIssuers[2].issuer_url
-          value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca
+          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
         - name: identity.oidcIssuers[2].jwks_url
-          value: https://keycloak.apps.ocp.phkl2.sandbox315.opentlc.com/realms/rca/protocol/openid-connect/certs
+          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca/protocol/openid-connect/certs
         - name: identity.oidcIssuers[2].audience
           value: mas-a2a
         - name: identity.oidcIssuers[2].username_claim
