@@ -787,8 +787,8 @@ clusterGroup:
         - name: image.pullPolicy
           value: Always
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
-        - name: a2a.enabled
-          value: "true"
+        #- name: a2a.enabled
+        #  value: "true"
         #- name: a2a.blueprintId
         #  value: ""
         # Must match the route host OpenShift generates for this Service.
