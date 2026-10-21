@@ -192,8 +192,18 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   and the OLS A2A fork's `ols/app/endpoints/a2a_auth.py`
   (`A2ASettings.tls_verify` on
   [`luis5tb/lightspeed-service@a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)).
-  Apply the same pattern to any *new* code that authenticates to a public
-  Route, not to code that only ever talks to the in-cluster API server.
+   Apply the same pattern to any *new* code that authenticates to a public
+   Route, not to code that only ever talks to the in-cluster API server.
+- **MAS outbound A2A discovery also needs ingress-CA trust.** A workflow failed
+  while MAS fetched the OLS/Praxis Agent Card from the cluster Route with
+  `CERTIFICATE_VERIFY_FAILED` (`self-signed certificate in certificate chain`).
+  The managed ingress CA was already synced to namespace `mao`, but API/worker
+  pods in `providerMode=dev` did not mount it because CA trust was coupled to
+  Keycloak identity mode. Enable the combined public-plus-ingress CA bundle on
+  each MAS caller (API/worker, and A2A if it makes outbound calls); do not
+  disable TLS verification. The local setup script's CA setting does not
+  configure trust inside the pods. Praxis's service-ca bundle for its internal
+  OLS upstream is a separate TLS hop and does not fix MAS-to-Route trust.
 - **Cluster-id derivation must match exactly, everywhere.** The algorithm
   (`agents/acme_agent/src/acme_agent/cluster_registry.py`'s
   `derive_cluster_id`) is `f"{host}:{port}".replace(".", "-").replace(":",

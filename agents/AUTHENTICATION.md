@@ -860,14 +860,16 @@ customized equivalents to `identity.forbiddenAudiences`. Multi-audience
 tokens containing a reserved audience **plus** the configured MAS audience
 are accepted (e.g., `aud=["mas-a2a", "lightspeed-a2a"]`).
 
-JWKS retrieval uses verified HTTPS; a private Keycloak Route CA must be
-trusted by the MAS pod alongside the default public roots, not by setting
-`keycloakVerifySsl: false`. The standalone variant copies the
-managed-ingress CA into `mao/keycloak-oidc-ca`; set the MAS charts'
-`identity.keycloakCaTrust.enabled` only in Keycloak mode. Their init
-containers build `SSL_CERT_FILE` from public/system roots plus that CA. CA
-rotation requires a MAS pod rollout to rebuild the bundle; verify the target
-Route certificate on a live cluster before relying on it.
+JWKS retrieval and outbound A2A calls use verified HTTPS. A private Route CA
+must be trusted by each MAS component making the request, alongside the
+default public roots, not by disabling TLS verification. This includes
+`mas-api`/`mas-worker` when they resolve or call A2A nodes and `mas-a2a` when it
+does so. The standalone variant copies the managed-ingress CA into
+`mao/keycloak-oidc-ca`; set the MAS charts' `identity.keycloakCaTrust.enabled`
+to mount and append that CA even when the API/worker identity provider is
+`dev`. Their init containers build `SSL_CERT_FILE` from public/system roots
+plus that CA. CA rotation requires a MAS pod rollout to rebuild the bundle;
+verify the target Route certificate on a live cluster before relying on it.
 
 Separately, the public MAS API still needs its own production identity mode,
 API-specific audience, and real admin usernames; the A2A allow-list does not

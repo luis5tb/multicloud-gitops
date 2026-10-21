@@ -1,26 +1,75 @@
 #!/bin/bash
-# MAS Multi-Cluster Blueprint Setup Script
+# MAS A2A Blueprint Setup Script
 #
 # Correct Architecture:
 # 1. Register LLM resource → get LLM_RID
 # 2. Register Orchestrator Node (referencing LLM_RID) → get ORCHESTRATOR_RID
-# 3. Register A2A Agent Node → get A2A_RID
+# 3. Register A2A Agent Node(s) → get their RIDs
 # 4. Create blueprint where node.rid = inventory resource RID (no config needed)
 #
 # Usage:
 #   export LITELLM_API_KEY="your-key"
 #   export LITELLM_API_BASE="https://maas-rhdp.apps.maas.redhatworkshops.io/v1"
 #   export LITELLM_MODEL="gpt-oss-20b"
-#   ./create-mas-blueprint-final.sh [simple|multi-cluster]
+#   ./setup-mas-blueprint.sh [simple|multi-cluster]
 
 set -e
 
 # Configuration
-export KUBECONFIG="${KUBECONFIG:-/home/ltomasbo/git_repos/multicloud-gitops/admin-break-glass.kubeconfig}"
+export KUBECONFIG="${KUBECONFIG:-$HOME/gitops.kubeconfig}"
 export MAS_API_URL="${MAS_API_URL:-https://$(oc get route mas-api -n mao -o jsonpath='{.spec.host}' 2>/dev/null)}"
 export MAS_TOKEN="${MAS_TOKEN:-dev-token}"
-CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-ocp.phkl2.sandbox315.opentlc.com}"
+MAS_API_CA_BUNDLE="${MAS_API_CA_BUNDLE:-}"
+MAS_API_INSECURE_TLS="${MAS_API_INSECURE_TLS:-false}"
+
+# Keep TLS verification enabled unless an operator explicitly opts out for a
+# temporary non-production test. Prefer MAS_API_CA_BUNDLE for private ingress
+# CAs so the API token remains protected by certificate verification.
+MAS_API_CURL_TLS_ARGS=()
+if [ -n "$MAS_API_CA_BUNDLE" ]; then
+  if [ ! -r "$MAS_API_CA_BUNDLE" ]; then
+    echo "❌ MAS_API_CA_BUNDLE is not a readable file: $MAS_API_CA_BUNDLE"
+    exit 1
+  fi
+  MAS_API_CURL_TLS_ARGS+=(--cacert "$MAS_API_CA_BUNDLE")
+elif [ "$MAS_API_INSECURE_TLS" = "true" ]; then
+  MAS_API_CURL_TLS_ARGS+=(--insecure)
+elif [ "$MAS_API_INSECURE_TLS" != "false" ]; then
+  echo "❌ MAS_API_INSECURE_TLS must be 'true' or 'false'"
+  exit 1
+fi
+
+mas_api_curl() {
+  curl "${MAS_API_CURL_TLS_ARGS[@]}" "$@"
+}
+
+CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-bm-cluster.e2e.bos.redhat.com}"
 CLUSTER_ID="api-$(echo $CLUSTER_DOMAIN | sed 's/\./-/g')-6443"
+ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/ask/v1/a2a}"
+
+# Shared by the registered orchestrator resource and the blueprint node. Ask
+# Red Hat's A2A node has an empty bearer_token so MAS can use the inbound
+# execution-context credential; do not place a token in this blueprint.
+ORCHESTRATOR_SYSTEM_MESSAGE=$(cat <<EOF
+You are an OpenShift investigation and Red Hat knowledge router. For every request, decide whether to use the OLS Investigator, Ask Red Hat, or both before finalizing.
+
+AVAILABLE CLUSTER:
+- ${CLUSTER_DOMAIN} → ${CLUSTER_ID}
+
+AVAILABLE AGENTS:
+- OLS Investigator: authoritative live inspection of the configured cluster, including current state, resources, events, errors, and troubleshooting.
+- Ask Red Hat: Red Hat documentation, product information, and guidance. Use it when the request matches a capability advertised in the Ask Red Hat Agent Card. Treat that card's skill names and descriptions as the supported scope; do not invent skills or assume Ask Red Hat can inspect the live cluster.
+
+ROUTING:
+- For questions that require current cluster facts, deployed configuration, or live troubleshooting, delegate to the OLS Investigator.
+- For documentation, product questions, how-to guidance, or other topics covered by an advertised Ask Red Hat Agent Card skill, delegate to Ask Red Hat.
+- If the user needs both live cluster findings and documentation or product guidance to interpret them, delegate to both agents in separate tasks. After each response, decide whether the other agent is still needed; do not finalize until every selected agent has responded.
+- For OLS calls, always use delegate_task and set data to {"headers": {"X-OLS-Cluster": "${CLUSTER_ID}"}}. This header is mandatory for every OLS delegation.
+- For Ask Red Hat calls, use the Ask Red Hat node and do not add the X-OLS-Cluster header.
+
+Synthesize the selected agents' results into one answer. Distinguish observed cluster facts from documentation-based guidance, and do not present documentation as evidence of the cluster's current state.
+EOF
+)
 
 # Orchestrator LLM provider: "openai" (LiteLLM/MaaS, needs LITELLM_API_KEY) or
 # "vertex" (Gemini on Vertex via the google_genai element). Vertex is
@@ -38,18 +87,29 @@ VERTEX_MODEL="${VERTEX_MODEL:-gemini-3.8-flash}"
 BLUEPRINT_TYPE="${1:-simple}"
 
 echo "========================================="
-echo "MAS Multi-Cluster Blueprint Setup"
+echo "MAS A2A Blueprint Setup"
 echo "========================================="
 echo "MAS API: $MAS_API_URL"
 echo "Cluster: $CLUSTER_DOMAIN"
 echo "Blueprint Type: $BLUEPRINT_TYPE"
+echo "Ask Red Hat A2A: $ASK_REDHAT_A2A_URL"
+if [ "$MAS_API_INSECURE_TLS" = "true" ] && [ -z "$MAS_API_CA_BUNDLE" ]; then
+  echo "⚠️  WARNING: MAS API TLS certificate verification is disabled."
+fi
 echo ""
 
 # Check connectivity
 echo "Testing MAS API connectivity..."
-HEALTH=$(curl -s "${MAS_API_URL}/api/health/" | jq -r '.status' 2>/dev/null || echo "error")
+if ! HEALTH_RESPONSE=$(mas_api_curl -sS --connect-timeout 10 --max-time 30 "${MAS_API_URL}/api/health/"); then
+  echo "❌ MAS API health request failed; see the curl error above."
+  echo "   For a private ingress CA, set MAS_API_CA_BUNDLE=/path/to/ca-bundle.crt."
+  echo "   MAS_API_INSECURE_TLS=true is available for temporary non-production testing only."
+  exit 1
+fi
+HEALTH=$(printf '%s' "$HEALTH_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
 if [ "$HEALTH" != "ok" ]; then
-  echo "❌ Cannot reach MAS API"
+  echo "❌ MAS API health check did not return status=ok"
+  echo "   Response: $HEALTH_RESPONSE"
   exit 1
 fi
 echo "✅ MAS API is healthy"
@@ -73,7 +133,7 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
     # api_key is ignored in Vertex mode (google-genai Client(vertexai=true)
     # authenticates via ADC/GOOGLE_APPLICATION_CREDENTIALS mounted in the
     # worker). vertexai/project/location go through the passthrough "extra".
-    LLM_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
+    LLM_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
       -H "Authorization: Bearer ${MAS_TOKEN}" \
       -H "Content-Type: application/json" \
       -d '{
@@ -97,7 +157,7 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
     LLM_MODEL="${LITELLM_MODEL:-gpt-oss-20b}"
     LLM_BASE_URL="${LITELLM_API_BASE:-https://maas-rhdp.apps.maas.redhatworkshops.io/v1}"
     echo "1a. Registering OpenAI/LiteLLM LLM: ${LLM_MODEL}..."
-    LLM_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
+    LLM_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
       -H "Authorization: Bearer ${MAS_TOKEN}" \
       -H "Content-Type: application/json" \
       -d '{
@@ -116,7 +176,7 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
 
   LLM_RID=$(echo "$LLM_RESPONSE" | jq -r '.rid // empty')
   if [ -z "$LLM_RID" ]; then
-    LLM_RID=$(curl -s "${MAS_API_URL}/api/resources/resources.list?category=llms" \
+    LLM_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=llms" \
       -H "Authorization: Bearer ${MAS_TOKEN}" \
       | jq -r '.resources[]? | select(.name == "'"${LLM_NAME}"'") | .rid' | head -1)
   fi
@@ -125,23 +185,26 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
   # 1b. Register Orchestrator Node
   echo ""
   echo "1b. Registering Orchestrator Node..."
-  ORCH_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
-    -H "Authorization: Bearer ${MAS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d '{
+  ORCH_RESPONSE=$(jq -n \
+    --arg llm "$LLM_RID" \
+    --arg system_message "$ORCHESTRATOR_SYSTEM_MESSAGE" \
+    '{
       "category": "nodes",
       "type": "orchestrator_node",
       "name": "Multi-Cluster Router",
       "config": {
         "type": "orchestrator_node",
-        "llm": "'"${LLM_RID}"'",
-        "system_message": "You are a multi-cluster OpenShift investigation router.\n\nAVAILABLE CLUSTERS:\n- '"${CLUSTER_DOMAIN}"' → '"${CLUSTER_ID}"'\n\nWhen delegating to the investigation agent:\n1. Use the delegate_task tool\n2. Set data parameter: {\"headers\": {\"X-OLS-Cluster\": \"'"${CLUSTER_ID}"'\"}}\n\nIMPORTANT: Always include the X-OLS-Cluster header!"
+        "llm": $llm,
+        "system_message": $system_message
       }
-    }')
+      }' | mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
+    -H "Authorization: Bearer ${MAS_TOKEN}" \
+    -H "Content-Type: application/json" \
+    --data-binary @-)
 
   ORCH_RID=$(echo "$ORCH_RESPONSE" | jq -r '.rid // empty')
   if [ -z "$ORCH_RID" ]; then
-    ORCH_RID=$(curl -s "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
+    ORCH_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
       -H "Authorization: Bearer ${MAS_TOKEN}" \
       | jq -r '.resources[]? | select(.name == "Multi-Cluster Router") | .rid' | head -1)
   fi
@@ -154,7 +217,7 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
   # an external ref to a saved conditions resource.
   echo ""
   echo "1b2. Registering Router Condition..."
-  COND_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
+  COND_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
     -H "Authorization: Bearer ${MAS_TOKEN}" \
     -H "Content-Type: application/json" \
     -d '{
@@ -167,37 +230,68 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
     }')
   COND_RID=$(echo "$COND_RESPONSE" | jq -r '.rid // empty')
   if [ -z "$COND_RID" ]; then
-    COND_RID=$(curl -s "${MAS_API_URL}/api/resources/resources.list?category=conditions" \
+    COND_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=conditions" \
       -H "Authorization: Bearer ${MAS_TOKEN}" \
       | jq -r '.resources[]? | select(.name == "Multi-Cluster Orchestrator Router") | .rid' | head -1)
   fi
   echo "   ✅ Router Condition RID: $COND_RID"
 fi
 
-# 1c. Register A2A Agent Node
+# 1c. Register the live-cluster investigator for multi-cluster blueprints.
+if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
+  echo ""
+  echo "1c. Registering OpenShift Lightspeed A2A Agent Node..."
+  A2A_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
+    -H "Authorization: Bearer ${MAS_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "category": "nodes",
+      "type": "a2a_agent_node",
+      "name": "OpenShift Lightspeed Agent",
+      "config": {
+        "base_url": "https://openshift-lightspeed.apps.'"${CLUSTER_DOMAIN}"'/a2a",
+        "bearer_token": "",
+        "verify_ssl": true
+      }
+    }')
+
+  A2A_RID=$(echo "$A2A_RESPONSE" | jq -r '.rid // empty')
+  if [ -z "$A2A_RID" ]; then
+    A2A_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
+      -H "Authorization: Bearer ${MAS_TOKEN}" \
+      | jq -r '.resources[]? | select(.name == "OpenShift Lightspeed Agent") | .rid' | head -1)
+  fi
+  echo "   ✅ OLS A2A Agent RID: $A2A_RID"
+fi
+
+# Register Ask Red Hat for both blueprint types. The empty bearer_token leaves
+# authentication to the MAS execution context instead of storing a static token.
 echo ""
-echo "1c. Registering A2A Agent Node..."
-A2A_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
-  -H "Authorization: Bearer ${MAS_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
+echo "1d. Registering Ask Red Hat A2A Agent Node..."
+ASK_REDHAT_RESPONSE=$(jq -n \
+  --arg base_url "$ASK_REDHAT_A2A_URL" \
+  '{
     "category": "nodes",
     "type": "a2a_agent_node",
-    "name": "OpenShift Lightspeed Agent",
+    "name": "Ask Red Hat",
     "config": {
-      "base_url": "https://openshift-lightspeed.apps.'"${CLUSTER_DOMAIN}"'/a2a",
+      "type": "a2a_agent_node",
+      "base_url": $base_url,
       "bearer_token": "",
       "verify_ssl": true
     }
-  }')
+  }' | mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
+  -H "Authorization: Bearer ${MAS_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data-binary @-)
 
-A2A_RID=$(echo "$A2A_RESPONSE" | jq -r '.rid // empty')
-if [ -z "$A2A_RID" ]; then
-  A2A_RID=$(curl -s "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
+ASK_REDHAT_RID=$(echo "$ASK_REDHAT_RESPONSE" | jq -r '.rid // empty')
+if [ -z "$ASK_REDHAT_RID" ]; then
+  ASK_REDHAT_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
     -H "Authorization: Bearer ${MAS_TOKEN}" \
-    | jq -r '.resources[]? | select(.name == "OpenShift Lightspeed Agent") | .rid' | head -1)
+    | jq -r '.resources[]? | select(.name == "Ask Red Hat") | .rid' | head -1)
 fi
-echo "   ✅ A2A Agent RID: $A2A_RID"
+echo "   ✅ Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
 
 echo ""
 
@@ -215,9 +309,9 @@ if [ "$BLUEPRINT_TYPE" == "simple" ]; then
   echo "Creating simple blueprint..."
 
   cat > /tmp/mas-blueprint.yaml <<EOF
-description: Simple OpenShift investigation via OLS through Praxis proxy
+description: Ask Red Hat documentation and product guidance
 
-name: OLS Investigation Blueprint (Simple)
+name: Ask Red Hat Blueprint (Simple)
 
 nodes:
   - rid: user_question_start
@@ -226,12 +320,13 @@ nodes:
     config:
       type: user_question_node
 
-  - rid: ${A2A_RID}
-    name: OLS Investigator
+  - rid: ${ASK_REDHAT_RID}
+    name: Ask Red Hat
     type: a2a_agent_node
     config:
       type: a2a_agent_node
-      base_url: "https://openshift-lightspeed.apps.${CLUSTER_DOMAIN}/a2a"
+      base_url: "${ASK_REDHAT_A2A_URL}"
+      # Empty uses the token from the MAS execution context; no static token is stored.
       bearer_token: ""
       verify_ssl: true
 
@@ -245,12 +340,12 @@ plan:
   - uid: start
     node: user_question_start
 
-  - uid: investigate
+  - uid: ask_red_hat
     after: start
-    node: ${A2A_RID}
+    node: ${ASK_REDHAT_RID}
 
   - uid: end
-    after: investigate
+    after: ask_red_hat
     node: final_answer_end
 EOF
 
@@ -259,9 +354,9 @@ elif [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
   echo "Creating multi-cluster blueprint..."
 
   cat > /tmp/mas-blueprint.yaml <<EOF
-description: Multi-cluster OpenShift investigation with intelligent routing and feedback loop
+description: Multi-cluster OpenShift investigation and Red Hat knowledge with intelligent routing and feedback loop
 
-name: Multi-Cluster OLS Investigation Blueprint
+name: Multi-Cluster Investigation and Ask Red Hat Blueprint
 
 conditions:
   # External ref to the saved router_direct condition (registered in step 1b2),
@@ -292,13 +387,8 @@ nodes:
       # inventory, the resolved blueprint's llms catalog stays empty, and the
       # session build fails with "unknown llms ref '<rid>'".
       llm: "\$ref:${LLM_RID}"
-      # Strong, mandatory-delegation wording: the orchestrator's built-in
-      # behavior prompt tells it to NOT delegate on assumptions and to just ask
-      # clarifying questions when a request looks vague -- which made the small
-      # model finish in one planning cycle with an empty answer, never calling
-      # the investigation agent. This message overrides that for the cluster
-      # use case: it MUST delegate to the OLS investigator before finalizing.
-      system_message: "You are a multi-cluster OpenShift investigation router. Your ONLY job is to delegate investigation work to the OLS investigation agent and then relay its findings. For ANY request about an OpenShift cluster (status, health, pods, events, errors, resources, troubleshooting, or general OpenShift questions), you MUST delegate to the investigation agent. Never answer from your own knowledge, and never finalize before the investigation agent has responded at least once. When you delegate, always include headers {\"X-OLS-Cluster\": \"${CLUSTER_ID}\"} so the investigation targets the correct cluster. After the investigation agent responds, review its findings and either delegate a focused follow-up (investigate) if more detail is needed, or finalize with a complete answer based strictly on what the investigation agent returned. Do NOT treat the request as vague and do NOT stop to ask the user clarifying questions unless the message names no cluster topic at all; otherwise proceed directly to delegation."
+      system_message: |
+$(printf '%s\n' "$ORCHESTRATOR_SYSTEM_MESSAGE" | sed 's/^/        /')
 
   - rid: ${A2A_RID}
     name: OLS Investigator
@@ -306,6 +396,16 @@ nodes:
     config:
       type: a2a_agent_node
       base_url: "https://openshift-lightspeed.apps.${CLUSTER_DOMAIN}/a2a"
+      bearer_token: ""
+      verify_ssl: true
+
+  - rid: ${ASK_REDHAT_RID}
+    name: Ask Red Hat
+    type: a2a_agent_node
+    config:
+      type: a2a_agent_node
+      base_url: "${ASK_REDHAT_A2A_URL}"
+      # Empty uses the token from the MAS execution context; no static token is stored.
       bearer_token: ""
       verify_ssl: true
 
@@ -323,14 +423,19 @@ plan:
     after:
       - start
       - investigate
+      - ask_red_hat
     node: ${ORCH_RID}
     exit_condition: ${COND_RID}
     branches:
       investigate: investigate
+      ask_red_hat: ask_red_hat
       finalize: finalize
 
   - uid: investigate
     node: ${A2A_RID}
+
+  - uid: ask_red_hat
+    node: ${ASK_REDHAT_RID}
 
   - uid: finalize
     node: final_answer_end
@@ -351,7 +456,7 @@ echo "STEP 3: Saving Blueprint"
 echo "========================================="
 echo ""
 
-SAVE_RESPONSE=$(curl -s -X POST "${MAS_API_URL}/api/blueprints/blueprint.save" \
+SAVE_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/blueprints/blueprint.save" \
   -H "Authorization: Bearer ${MAS_TOKEN}" \
   -H "Content-Type: application/json" \
   -d "{\"blueprintRaw\": $(cat /tmp/mas-blueprint.yaml | jq -Rs .)}")
@@ -379,11 +484,12 @@ echo ""
 echo "Blueprint ID: $BLUEPRINT_ID"
 echo ""
 echo "Inventory Resources:"
-echo "  - A2A Agent RID: $A2A_RID"
 if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
+  echo "  - OLS A2A Agent RID: $A2A_RID"
   echo "  - LLM RID: $LLM_RID"
   echo "  - Orchestrator RID: $ORCH_RID"
 fi
+echo "  - Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
 echo ""
 echo "Next: Update variants/standalone/values-standalone.yaml:"
 echo ""

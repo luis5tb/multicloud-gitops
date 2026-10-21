@@ -156,6 +156,21 @@ class MasA2AChartTests(unittest.TestCase):
 
         for chart in ("mas-api", "mas-worker"):
             with self.subTest(chart=chart):
+                dev_mode = helm_template(
+                    f"charts/all/mao/{chart}",
+                    "--set-string", "identity.providerMode=dev",
+                    "--set", "identity.keycloakCaTrust.enabled=true",
+                )
+                self.assertEqual(dev_mode.returncode, 0, dev_mode.stderr)
+                self.assertIn("name: build-keycloak-ca-bundle", dev_mode.stdout)
+                self.assertIn("name: SSL_CERT_FILE", dev_mode.stdout)
+                self.assertIn(
+                    "name: CURL_CA_BUNDLE\n"
+                    "              value: /var/run/mas-keycloak-trust/ca-bundle.crt",
+                    dev_mode.stdout,
+                )
+                self.assertIn('name: "keycloak-oidc-ca"', dev_mode.stdout)
+
                 result = helm_template(
                     f"charts/all/mao/{chart}",
                     "--set-string", "identity.providerMode=keycloak",
@@ -295,7 +310,7 @@ class MasA2AChartTests(unittest.TestCase):
                 )
                 self.assertNotIn(":release-tag", result.stdout)
 
-    def test_mas_keycloak_ca_trust_extends_existing_roots_for_keycloak_mode_only(self) -> None:
+    def test_mas_private_ca_trust_extends_existing_roots(self) -> None:
         a2a = helm_template(
             "charts/all/mao/mas-a2a",
             "--set", "a2a.enabled=true",
@@ -348,13 +363,6 @@ class MasA2AChartTests(unittest.TestCase):
                 )
                 self.assertNotEqual(insecure.returncode, 0)
                 self.assertIn("requires identity.keycloakVerifySsl=true", insecure.stderr)
-
-        rejected_non_keycloak = helm_template(
-            "charts/all/mao/mas-api",
-            "--set", "identity.keycloakCaTrust.enabled=true",
-        )
-        self.assertNotEqual(rejected_non_keycloak.returncode, 0)
-        self.assertIn("requires identity.providerMode=keycloak", rejected_non_keycloak.stderr)
 
     def test_keycloak_ca_sync_can_publish_to_opt_in_additional_namespace(self) -> None:
         default_targets = helm_template(

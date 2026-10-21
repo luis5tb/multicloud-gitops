@@ -200,11 +200,10 @@ clusterGroup:
         - name: keycloak.masApiAudience
           value: mas-api
         # Bootstrap the managed ingress CA into openshift-config (for the
-        # Authentication OIDC provider) and keycloak-system (for the realm
-        # reconciler), and mao (for optional MAS Keycloak JWKS trust), then
-        # refresh those copies periodically for CA rotation. The MAS pods
-        # still need identity.keycloakCaTrust.enabled when switched to
-        # Keycloak mode; this override alone does not enable MAS A2A.
+        # Authentication OIDC provider), keycloak-system (for the realm
+        # reconciler), and mao (for outbound MAS HTTPS to private cluster
+        # Routes), then refresh those copies periodically for CA rotation.
+        # Each MAS caller still enables its own combined trust bundle below.
         - name: openshiftOIDC.caConfigMapName
           value: keycloak-oidc-ca
         - name: openshiftOIDC.caBundleSync.enabled
@@ -756,6 +755,10 @@ clusterGroup:
         # `LLM_PROVIDER=vertex ./setup-mas-blueprint.sh multi-cluster`.
         - name: vertexCreds.enabled
           value: "true"
+        # The workflow worker fetches A2A Agent Cards and calls cluster Routes;
+        # trust the synced managed-ingress CA without disabling TLS verification.
+        - name: identity.keycloakCaTrust.enabled
+          value: "true"
     mao-api:
       name: mao-api
       namespace: mao
@@ -772,15 +775,17 @@ clusterGroup:
         # WARNING: Do not use in production - no authentication security!
         - name: identity.providerMode
           value: dev
+        # MAS API validates A2A Agent Card URLs over HTTPS; trust the cluster's
+        # managed ingress CA in addition to the image's public roots.
+        - name: identity.keycloakCaTrust.enabled
+          value: "true"
         # In dev mode, all authenticated requests get user_id="dev"
         # Add "dev" to adminAllowedUsers so it can access resources
         - name: identity.adminAllowedUsers
           value: '["dev"]'
-        # These settings are not used in dev mode but kept for reference:
+        # This OIDC setting is not used in dev mode but kept for reference:
         # - name: identity.keycloakAudience
         #   value: mas-api
-        # - name: identity.keycloakCaTrust.enabled
-        #   value: "true"
     mao-a2a:
       name: mao-a2a
       namespace: mao

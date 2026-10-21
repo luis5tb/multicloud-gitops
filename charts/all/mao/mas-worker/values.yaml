@@ -69,9 +69,10 @@ identity:
   keycloakAudience: ""
   keycloakVerifySsl: true
   keycloakTimeout: 30
-  # Opt in only when the Keycloak Route certificate chains to a private CA
-  # absent from this image's system trust bundle. The ConfigMap is published
-  # by keycloak-oidc's openshiftOIDC.caBundleSync when configured for this ns.
+  # Extend outbound HTTPS trust for private-CA-signed Routes (e.g. Keycloak or
+  # Praxis/OLS). The ConfigMap is published by keycloak-oidc's
+  # openshiftOIDC.caBundleSync when configured for this namespace. This works
+  # independently of identity.providerMode and never disables TLS verification.
   keycloakCaTrust:
     enabled: false
     configMapName: keycloak-oidc-ca
