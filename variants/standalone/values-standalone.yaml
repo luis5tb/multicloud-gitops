@@ -675,7 +675,7 @@ clusterGroup:
           # Quote: a git short SHA that happens to be all-digits would otherwise
           # parse as a number and re-serialize in scientific notation, breaking
           # the image reference (AGENTS.md hard-won lesson).
-          value: "61337bff"
+          value: "650f5486"
         # appServerPatch.a2a.keycloakIssuerURL derives from
         # global.clusterBaseDomain + global.keycloakRealm, and
         # appServerPatch.a2a.rpcUrl from global.clusterBaseDomain
