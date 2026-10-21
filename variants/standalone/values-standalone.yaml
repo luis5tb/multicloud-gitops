@@ -796,8 +796,8 @@ clusterGroup:
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
         - name: a2a.enabled
           value: "true"
-        - name: a2a.blueprintId
-          value: "fdd32952-ee40-4db8-acac-f549c1dc9e54"
+        #- name: a2a.blueprintId
+        #  value: ""
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
