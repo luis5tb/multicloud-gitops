@@ -1,0 +1,16 @@
+# AVD-KSV-0011: PostgreSQL StatefulSet; resources.limits.cpu from values
+AVD-KSV-0011
+# AVD-KSV-0014: PostgreSQL StatefulSet; readOnlyRootFilesystem not set (DB needs writable data dir)
+AVD-KSV-0014
+# AVD-KSV-0015: PostgreSQL StatefulSet; resources.requests.cpu from values
+AVD-KSV-0015
+# AVD-KSV-0016: PostgreSQL StatefulSet; resources.requests.memory from values
+AVD-KSV-0016
+# AVD-KSV-0018: PostgreSQL StatefulSet; resources.limits.memory from values
+AVD-KSV-0018
+# AVD-KSV-0020: PostgreSQL StatefulSet; runAsUser from values or OpenShift namespace default
+AVD-KSV-0020
+# AVD-KSV-0021: PostgreSQL StatefulSet; runAsGroup from values or OpenShift namespace default
+AVD-KSV-0021
+# AVD-KSV-0125: PostgreSQL image from chart/default registry; trusted in deployment
+AVD-KSV-0125
