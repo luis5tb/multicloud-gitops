@@ -1,0 +1,171 @@
+global:
+  localClusterDomain: apps.example.com
+  creationPolicy: Owner
+  deletionPolicy: Retain
+  refreshInterval: 1h0m0s
+  refreshPolicy: Periodic
+  secretStore:
+    kind: ClusterSecretStore
+    name: vault-backend
+
+# -- Per-ExternalSecret lifecycle and metadata overrides.
+# Only adminUser and postgresqlDb are managed directly by this chart.
+# All other secrets should use keycloak.extraSecrets.
+externalSecrets:
+  adminUser:
+    metadata: {}
+    targetMetadata: {}
+    #creationPolicy: Owner
+    #deletionPolicy: Retain
+    #refreshPolicy: Periodic
+    #refreshInterval: 1h0m0s
+  postgresqlDb:
+    metadata: {}
+    targetMetadata: {}
+    #creationPolicy: Owner
+    #deletionPolicy: Retain
+    #refreshPolicy: Periodic
+    #refreshInterval: 1h0m0s
+
+# -- Default-deny NetworkPolicy for the keycloak namespace.
+# When enabled, deploys a namespace-wide NetworkPolicy that blocks all ingress and egress
+# for pods without an explicit allow policy. Patterns that need zero-trust network isolation
+# should enable this and provide per-pod allow rules via networkPolicy.
+# @default -- false
+defaultDenyNetworkPolicy:
+  enabled: false
+
+# -- Per-pod NetworkPolicy rules for keycloak, PostgreSQL, and operator pods.
+# Only effective when defaultDenyNetworkPolicy is enabled. The RHBK operator manages its own
+# ingress policy for keycloak pods (keycloak-network-policy) — these templates add egress
+# rules for keycloak and full ingress/egress rules for PostgreSQL and operator pods.
+networkPolicy:
+  keycloak:
+    enabled: false
+    egress: []
+  postgresql:
+    enabled: false
+    ingress: []
+    egress: []
+  operator:
+    enabled: false
+    ingress: []
+    egress: []
+  realmImport:
+    enabled: false
+    podSelector:
+      app: keycloak-realm-import
+    egress: []
+
+keycloak:
+  # -- Extra Keycloak server features appended to the Keycloak CR's
+  # spec.features.enabled (passed by the operator as --features). Use for
+  # versioned/preview features the chart doesn't toggle on its own, e.g.
+  # ["token-exchange-external-internal:v2"] to enable V2 external->internal
+  # token exchange. The operator rebuilds the server image, so pods roll.
+  extraFeatures: []
+  # -- Keycloak admin bootstrap user. Creates an ExternalSecret that pulls the
+  # admin password from the configured secret store.
+  adminUser:
+    enabled: true
+    username: admin
+    passwordVaultKey: ""
+    secretName: keycloak-admin-user
+
+  # -- Keycloak Ingress (OpenShift Route).
+  ingress:
+    enabled: true
+    service: keycloak-service-trusted
+    termination: reencrypt
+    hostname: ""
+
+  # -- Keycloak instance name. Used for pod labels, service names, and hostname generation.
+  name: keycloak
+
+  # -- PostgreSQL database credentials. Creates an ExternalSecret that pulls the
+  # DB password from the configured secret store.
+  postgresqlDb:
+    database: keycloak
+    passwordVaultKey: ""
+    secretName: postgresql-db
+    username: keycloak
+
+  # -- TLS configuration for the Keycloak instance.
+  tls:
+    secret: keycloak-tls
+    serviceServing: true
+
+  # -- Keycloak realm definitions. Each entry is a full Keycloak realm representation
+  # that will be rendered as a KeycloakRealmImport CR. Consumers define their realm
+  # structure (clients, users, roles, scopes, identity providers) here.
+  #
+  # Example:
+  #   realms:
+  #     - realm: my-realm
+  #       enabled: true
+  #       displayName: "My Realm"
+  #       clients: [...]
+  #       users: [...]
+  realms: []
+
+  # -- Realm import placeholders. Maps placeholder variables (used as ${VAR} in realm
+  # definitions) to Kubernetes Secret references. Applied to all realm imports.
+  #
+  # Example:
+  #   realmPlaceholders:
+  #     MY_USER_PASSWORD:
+  #       secret:
+  #         name: my-users-secret
+  #         key: user-password
+  realmPlaceholders: {}
+
+  # -- Extra ExternalSecrets. Each entry creates an ExternalSecret resource that
+  # pulls data from the configured secret store into a Kubernetes Secret.
+  # Use this for user passwords, OIDC client secrets, or any other secrets
+  # that your realm configuration requires.
+  #
+  # Example:
+  #   extraSecrets:
+  #     - name: my-users
+  #       targetName: my-users-secret
+  #       data:
+  #         - secretKey: user_password
+  #           remoteRef:
+  #             key: secret/data/my/path
+  #             property: user-password
+  #       templateData:
+  #         user-password: "{{ .user_password }}"
+  extraSecrets: []
+
+  # -- SPIFFE Identity Provider for Federated Client Authentication.
+  # Requires RHBK 26.4+ with Technology Preview features: spiffe + client-auth-federated
+  # (automatically enabled in keycloak.yaml when this is enabled).
+  #
+  # Uses an OIDC provider type (not Keycloak's native SPIFFE provider) because the
+  # ZTWIM operator forces SpireServer.jwtIssuer to be an HTTPS URL, so JWT SVIDs
+  # contain iss: "https://spire-spiffe-oidc-discovery-provider.<domain>".
+  # Keycloak's native SPIFFE IdP rejects this (expects spiffe:// URI).
+  # The OIDC provider matches the HTTPS issuer, enabling Keycloak's federated-jwt
+  # client authenticator to resolve clients by iss+sub without requiring client_id.
+  #
+  # Reference: https://www.keycloak.org/2026/01/federated-client-authentication
+  spiffeIdentityProvider:
+    enabled: false
+    config:
+      alias: spiffe
+      displayName: SPIFFE Workload Identity
+      providerId: oidc
+      enabled: true
+      hideOnLogin: true
+      config:
+        issuer: ""
+        authorizationUrl: ""
+        tokenUrl: ""
+        jwksUrl: ""
+        clientId: keycloak
+        clientSecret: unused
+        useJwksUrl: "true"
+        validateSignature: "true"
+        supportsClientAssertions: "true"
+        supportsClientAssertionReuse: "true"
+        syncMode: LEGACY

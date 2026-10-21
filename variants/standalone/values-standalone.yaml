@@ -161,8 +161,11 @@ clusterGroup:
       name: keycloak
       namespace: keycloak-system
       argoProject: hub
-      chart: rhbk
-      chartVersion: 0.1.*
+      # Vendored copy of the validatedpatterns rhbk chart (was chart: rhbk,
+      # chartVersion: 0.1.*). Vendored to add keycloak.extraFeatures, which the
+      # upstream chart hardcodes-out: it needs features beyond spiffe/
+      # client-auth-federated on the Keycloak CR. Re-sync with upstream on bumps.
+      path: charts/all/rhbk
       overrides:
         # Vault paths for the admin/DB passwords defined in values-secret.yaml.template
         - name: keycloak.adminUser.passwordVaultKey
@@ -171,6 +174,12 @@ clusterGroup:
           value: secret/data/global/rhbk
         - name: keycloak.spiffeIdentityProvider.enabled
           value: "true"
+        # Enable V2 external->internal token exchange so OLS can broker external
+        # Red Hat SSO (prod/stage) caller tokens via the red-hat-sso-* IdPs using
+        # subject_issuer. Versioned/preview feature; operator rebuilds the server
+        # image and rolls keycloak-0. See agents/AUTHENTICATION.md.
+        - name: keycloak.extraFeatures[0]
+          value: token-exchange-external-internal:v2
     keycloak-oidc:
       name: keycloak-oidc
       namespace: keycloak-system
