@@ -823,7 +823,7 @@ clusterGroup:
         # is realm-import-specific and changes if the service account is
         # recreated; re-fetch after a realm re-import.
         - name: a2a.allowedPrincipals[0]
-          value: "5d5bb0ee-7433-403d-8c6f-3788dc119ad7"
+          value: "94510bf9-b826-402b-a242-d4547e948d76"
         - name: route.enabled
           value: "true"
         # - name: route.host
