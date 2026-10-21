@@ -122,31 +122,38 @@ comma-delimited values. Add organization-specific reserved equivalents with
 `identity.forbiddenAudiences`; do not add a caller's real audience until it has
 been confirmed from an authorized token's decoded claims.
 
-### Private Keycloak Route CA (optional)
+### Private Route CA trust (optional)
 
-If the Keycloak Route's issuer/JWKS endpoint uses a private CA not already
-trusted by the MAS image, configure `identity.keycloakCaTrust.enabled: true`
-in each Keycloak-mode MAS chart (API, worker, and A2A as applicable). The
-`keycloak-oidc` chart must have `openshiftOIDC.caBundleSync.enabled: true` and
-`openshiftOIDC.caBundleSync.additionalTargetNamespaces: [mao]`; its bootstrap
-Job and rotation CronJob publish the same `keycloak-oidc-ca` ConfigMap in
-`mao`. Override `identity.keycloakCaTrust.configMapName`/`configMapKey` only
-when the Keycloak chart uses a different name/key.
+MAS components may make outbound HTTPS requests to cluster Routes while
+resolving or calling A2A agent nodes (for example, the Praxis/OLS agent-card
+URL). If a Route uses the cluster's private ingress CA, configure
+`identity.keycloakCaTrust.enabled: true` on every component that makes those
+requests: `mas-api`, `mas-worker`, and `mas-a2a` when applicable. This trust
+setting works independently of the API/worker identity provider mode; the
+existing values key retains its name for compatibility. The same setting also
+trusts a private Keycloak issuer/JWKS Route.
+
+The `keycloak-oidc` chart must have `openshiftOIDC.caBundleSync.enabled: true`
+and `openshiftOIDC.caBundleSync.additionalTargetNamespaces: [mao]`; its
+bootstrap Job and rotation CronJob publish the `keycloak-oidc-ca` ConfigMap in
+`mao`. The standalone variant already syncs this bundle to `mao`. Override
+`identity.keycloakCaTrust.configMapName`/`configMapKey` only when the Keycloak
+chart uses a different name/key.
 
 Each MAS pod mounts that ConfigMap read-only. An init container using the exact
 runtime image validates the image's existing system/public CA bundle and the
 mounted private CA, then appends the private CA to the existing roots in a
 pod-local bundle. Missing, empty, or invalid roots/CA fail the init container;
 the app uses the combined file through `SSL_CERT_FILE` (and related CA env
-vars) while `identity.keycloakVerifySsl` remains true. This never replaces
-public roots with the private CA and never disables certificate or hostname
-verification. The bundle output is on an `emptyDir`; on clusters that require
-an explicit writable-volume group, set `podSecurityContext.fsGroup` to a
-namespace-permitted value.
+vars). Keycloak validation keeps `identity.keycloakVerifySsl: true`; outbound
+HTTP certificate and hostname verification remain enabled. This never replaces
+public roots with the private CA. The bundle output is on an `emptyDir`; on
+clusters that require an explicit writable-volume group, set
+`podSecurityContext.fsGroup` to a namespace-permitted value.
 
 The Keycloak chart refreshes the ConfigMap on its configured schedule after CA
-rotation. Projected ConfigMap updates alone may not refresh a cached PyJWKClient
-or SSL context, so roll the MAS API, worker, and A2A pods after rotation. This
+rotation. Projected ConfigMap updates alone may not refresh a cached HTTP/TLS
+client context, so roll the MAS API, worker, and A2A pods after rotation. This
 is a deployment prerequisite only: the charts and CA rotation behavior have
 not been validated against a live cluster.
 

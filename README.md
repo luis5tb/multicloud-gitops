@@ -450,11 +450,21 @@ configured group instead of `acme-agent-rca`.
 Use the `setup-mas-blueprint.sh` script to register inventory resources and create
 a multi-cluster blueprint. The script handles:
 
-1. Registering LLM resource for orchestration
-2. Registering Orchestrator Node (references LLM, contains routing logic)
-3. Registering A2A Agent Node (OLS through Praxis)
-4. Creating blueprint with orchestrator feedback loop
-5. Saving blueprint and outputting the ID
+1. Registering an LLM and Orchestrator Node for multi-cluster routing
+2. Registering the OLS A2A Agent (multi-cluster only) and Ask Red Hat A2A Agent
+3. Creating the blueprint and saving it with the resulting ID
+
+Ask Red Hat defaults to `https://access.stage.redhat.com/api/ask/v1/a2a`;
+override it with `ASK_REDHAT_A2A_URL` when running the script. Its
+`bearer_token` is intentionally empty, so MAS uses the inbound request's
+execution-context credential rather than storing a static token in the
+blueprint.
+
+The script verifies the MAS Route's TLS certificate by default. If the cluster
+uses a private ingress CA, set `MAS_API_CA_BUNDLE` to a PEM bundle containing
+that CA before running the script. For temporary, non-production diagnosis
+only, `MAS_API_INSECURE_TLS=true` disables certificate verification for all
+MAS API requests; do not use this with production credentials.
 
 **For multi-cluster with orchestration:**
 
@@ -503,6 +513,10 @@ export LITELLM_MODEL="gpt-oss-20b"
 ./setup-mas-blueprint.sh simple
 ```
 
+The simple blueprint sends requests directly to Ask Red Hat (not OLS). It uses
+the same default Ask Red Hat endpoint and `ASK_REDHAT_A2A_URL` override as the
+multi-cluster blueprint.
+
 The script will output the `BLUEPRINT_ID` at the end. Save this for Step 3.
 
 **Important:** When `agentCard.enabled: true` (enabled by default in
@@ -515,12 +529,16 @@ of bypassing Praxis by calling OLS directly.
 
 The multi-cluster blueprint creates an orchestrator-based workflow:
 - **User Question** → **Orchestrator** (analyzes question, decides routing)
-- **Orchestrator** → **OLS Agent** (investigates cluster) → back to **Orchestrator**
-- **Orchestrator** decides: loop for more info OR finalize answer
+- **Orchestrator** → **OLS Agent** for live cluster investigation and/or
+  **Ask Red Hat** for documentation/product guidance covered by its Agent Card
+  skills; results return to the **Orchestrator**
+- For mixed questions, the orchestrator can call both agents, then decide whether more information is needed or finalize
 - **Orchestrator** → **Final Answer**
 
-The orchestrator uses the registered LLM to make routing decisions and can loop
-back after investigation to gather more information before finalizing the answer.
+The orchestrator uses the registered LLM to select neither, either, or both
+specialists based on the request. OLS calls always include the configured
+`X-OLS-Cluster` header; Ask Red Hat calls do not. The orchestrator may loop back
+after either agent responds to gather the other perspective before finalizing.
 
 **Step 3: Enable MAS A2A**
 

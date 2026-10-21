@@ -11,10 +11,7 @@
 {{- end }}
 {{- end }}
 {{- if .Values.identity.keycloakCaTrust.enabled }}
-{{- if ne .Values.identity.providerMode "keycloak" }}
-{{- fail "identity.keycloakCaTrust.enabled requires identity.providerMode=keycloak" }}
-{{- end }}
-{{- if not .Values.identity.keycloakVerifySsl }}
+{{- if and (eq .Values.identity.providerMode "keycloak") (not .Values.identity.keycloakVerifySsl) }}
 {{- fail "identity.keycloakCaTrust.enabled requires identity.keycloakVerifySsl=true" }}
 {{- end }}
 {{- if or (not .Values.identity.keycloakCaTrust.configMapName) (not .Values.identity.keycloakCaTrust.configMapKey) }}
@@ -53,7 +50,7 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+      {{- if .Values.identity.keycloakCaTrust.enabled }}
       initContainers:
         - name: build-keycloak-ca-bundle
           image: {{ include "mas-api.image" . | quote }}
@@ -209,7 +206,7 @@ spec:
               value: {{ .Values.identity.keycloakVerifySsl | quote }}
             - name: KEYCLOAK_TIMEOUT
               value: {{ .Values.identity.keycloakTimeout | quote }}
-            {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+            {{- if .Values.identity.keycloakCaTrust.enabled }}
             - name: SSL_CERT_FILE
               value: /var/run/mas-keycloak-trust/ca-bundle.crt
             - name: REQUESTS_CA_BUNDLE
@@ -258,7 +255,7 @@ spec:
           volumeMounts:
             - name: shared-storage
               mountPath: {{ .Values.sharedStorage.mountPath }}
-            {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+            {{- if .Values.identity.keycloakCaTrust.enabled }}
             - name: keycloak-ca-trust
               mountPath: /var/run/mas-keycloak-trust
               readOnly: true
@@ -271,7 +268,7 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if and (eq .Values.identity.providerMode "keycloak") .Values.identity.keycloakCaTrust.enabled }}
+        {{- if .Values.identity.keycloakCaTrust.enabled }}
         - name: keycloak-ca
           configMap:
             name: {{ .Values.identity.keycloakCaTrust.configMapName | quote }}
