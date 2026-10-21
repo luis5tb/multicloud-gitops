@@ -1,0 +1,11 @@
+apiVersion: v2
+description: Deploys RHBK
+home: https://github.com/validatedpatterns/rhbk-chart
+keywords:
+- pattern
+maintainers:
+- email: validatedpatterns@googlegroups.com
+  name: Validated Patterns Team
+name: rhbk
+type: application
+version: 0.1.0

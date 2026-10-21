@@ -1,0 +1,40 @@
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: Keycloak
+metadata:
+  name: keycloak
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "36"
+spec:
+{{- if or .Values.keycloak.spiffeIdentityProvider.enabled .Values.keycloak.extraFeatures }}
+  features:
+    enabled:
+      {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+      - spiffe
+      - client-auth-federated
+      {{- end }}
+      {{- range .Values.keycloak.extraFeatures }}
+      - {{ . }}
+      {{- end }}
+{{- end }}
+{{- if eq .Values.keycloak.adminUser.enabled true }}
+  bootstrapAdmin:
+    user:
+      secret: {{ .Values.keycloak.adminUser.secretName }}
+{{- end }}
+  db:
+    host: postgresql-db
+    passwordSecret:
+      key: password
+      name: postgresql-db
+    usernameSecret:
+      key: username
+      name: postgresql-db
+    vendor: postgres
+  hostname:
+    hostname: {{ include "keycloak.ingress.hostname" . }}
+  http:
+    tlsSecret: {{ .Values.keycloak.tls.secret }}
+  ingress:
+    enabled: false
+  instances: 1
