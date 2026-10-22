@@ -560,11 +560,12 @@ clusterGroup:
         - name: route.timeout
           value: 22m
         - name: litellm.apiBase
-          #value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
-          value: ""
+          value: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
+          #value: ""
         - name: litellm.model
           #value: openai/gpt-oss-20b
-          value: gemini/gemini-3.8-flash
+          value: openai/gpt-oss-120b
+          #value: gemini/gemini-3.8-flash
     openshift-lightspeed-config:
       name: openshift-lightspeed-config
       namespace: a2a-lightspeed
