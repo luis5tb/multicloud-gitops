@@ -804,8 +804,14 @@ clusterGroup:
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
         - name: a2a.enabled
           value: "true"
+        # Blueprint re-saved 2026-10-22 (af00895e-...): hardened the
+        # orchestrator prompt's X-OLS-Cluster spelling rule (the planning LLM
+        # had emitted X_OLS_Cluster -- underscores -- in 3 of 5 delegations,
+        # which Praxis fail-closes into HTTP 404) and dropped the planning
+        # LLM to temperature 0. Old blueprint 7f2c9570-... is still in MAS
+        # inventory but unloaded. See setup-mas-blueprint.sh's LIVE FINDING.
         - name: a2a.blueprintId
-          value: "7f2c9570-fbb8-49b3-b516-711403a247fe"
+          value: "df782fdc-da9c-4bce-9b6f-b76714615ffb"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
