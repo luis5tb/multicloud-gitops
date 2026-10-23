@@ -497,7 +497,7 @@ clusterGroup:
           # it became "3.425697e+07", which then fails to parse as an image
           # reference -- InvalidImageName). Always quote tags that could be
           # all-digits.
-          value: "dca32e28"
+          value: "ec6ec017"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
@@ -541,6 +541,13 @@ clusterGroup:
           value: "1260"
         - name: auth.mode
           value: keycloak
+        # Debug-only: the UI generates a private, unguessable nonce and can
+        # retrieve the selected outbound bearer token once from that request.
+        # Disable this when not actively inspecting tokens.
+        - name: auth.tokenDebug.enabled
+          value: "true"
+        - name: auth.tokenDebug.ttlSeconds
+          value: "300"
         # auth.keycloak.issuerUrl and .tokenUrl derive from
         # global.clusterBaseDomain + global.keycloakRealm (the token URL is the
         # issuer + /protocol/openid-connect/token); override only to diverge.
@@ -554,6 +561,19 @@ clusterGroup:
         # global.clusterBaseDomain (apps.<base>), which is exactly the cluster's
         # trust domain (see the zero-trust-workload-identity-manager application's
         # comment above); override only to diverge.
+
+        # Optional Red Hat IdP agent-token mode. Uncomment only after creating
+        # confidential SSO clients in both environments and storing both their
+        # client IDs and secrets in Vault (see values-secret.yaml.template).
+        # Add each token's sub/user_id to MAS's
+        # a2a.allowedPrincipals before enabling it. User-token mode is a TODO.
+        #
+        - name: auth.redhatSso.enabled
+          value: "true"
+        - name: auth.redhatSso.production.tokenUrl
+          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+        - name: auth.redhatSso.stage.tokenUrl
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
         - name: route.enabled
           value: "true"
         # Allow the browser's A2A request to survive the long-running analysis.
@@ -835,6 +855,8 @@ clusterGroup:
         # recreated; re-fetch after a realm re-import.
         - name: a2a.allowedPrincipals[0]
           value: "94510bf9-b826-402b-a242-d4547e948d76"
+        - name: a2a.allowedPrincipals[1]
+          value: "f94b90c3-8d5b-4f8f-9d88-4fdcf6cf2ed7"
         - name: route.enabled
           value: "true"
         # - name: route.host

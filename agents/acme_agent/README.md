@@ -142,6 +142,23 @@ The application supports three downstream authentication modes:
   `client_credentials` grant (SPIFFE JWT-SVID or client secret as the client
   authentication method).
 
+When `A2A_AUTH_MODE=keycloak`, the embedded UI can choose between **Keycloak**
+and **Red Hat IdP** for each request. Red Hat IdP supports the production and
+stage environments and currently mints an **agent token** with
+`grant_type=client_credentials`. The UI also shows a **user token** selector,
+but selecting it fails closed with a clear message; authorization-code/PKCE
+login is intentionally documented as TODO rather than partially implemented.
+Non-UI A2A clients can make the same per-request choice with:
+
+* `X-ACME-Auth-Provider: keycloak` or `redhat`
+* `X-ACME-Auth-Environment: production` or `stage` (Red Hat IdP only)
+* `X-ACME-Auth-Token-Type: agent` (user is rejected until implemented)
+
+The selection is bound to the inbound request with a `ContextVar`; it chooses
+which configured ACME client credential mints Token A and is never forwarded as
+an authorization claim. Downstream MAS, Praxis, and OLS still independently
+validate the resulting JWT.
+
 For the OpenShift deployment, configure `keycloak` and set
 `identity.spiffe.enabled=true` (chart value) so the agent fetches its own
 short-lived JWT-SVID directly from ZTWIM/SPIRE through the Workload API
@@ -171,6 +188,7 @@ The following settings are supported:
 | `LITELLM_API_BASE` | LiteLLM proxy base URL |
 | `LITELLM_API_KEY` | LiteLLM proxy API key |
 | `A2A_AUTH_MODE` | `none`, `static`, or `keycloak` |
+| `A2A_AUTH_PROVIDER` | Default request provider: `keycloak` or `redhat` |
 | `KEYCLOAK_TOKEN_URL` | Keycloak token endpoint (e.g. `https://keycloak.example/realms/rca/protocol/openid-connect/token`) |
 | `KEYCLOAK_CLIENT_ID` | Keycloak client ID |
 | `KEYCLOAK_CLIENT_SECRET` | Optional secret for `client_secret_*` methods |
@@ -185,6 +203,14 @@ The following settings are supported:
 | `ZTO_FORWARD_IDENTITY` | Also forward the identity in `ZTO_IDENTITY_HEADER` |
 | `A2A_TLS_VERIFY` | Set to `false` only for local development with test certificates |
 | `A2A_CA_BUNDLE` | Optional path to a PEM CA bundle used to verify downstream A2A and Keycloak HTTPS connections |
+| `REDHAT_SSO_DEFAULT_ENVIRONMENT` | Default Red Hat IdP environment: `production` or `stage` |
+| `REDHAT_SSO_TOKEN_TYPE` | Must be `agent`; `user` is not implemented yet |
+| `REDHAT_SSO_SCOPE` | OAuth scope requested from Red Hat SSO; the pattern default is `api.ask_red_hat` |
+| `REDHAT_SSO_PRODUCTION_TOKEN_URL` / `REDHAT_SSO_STAGE_TOKEN_URL` | Red Hat SSO token endpoints |
+| `REDHAT_SSO_PRODUCTION_CLIENT_ID` / `REDHAT_SSO_STAGE_CLIENT_ID` | Confidential Red Hat SSO client IDs, supplied from Kubernetes Secrets |
+| `REDHAT_SSO_PRODUCTION_CLIENT_SECRET` / `REDHAT_SSO_STAGE_CLIENT_SECRET` | Red Hat SSO client secrets, supplied from Kubernetes Secrets |
+| `AUTH_TOKEN_DEBUG_ENABLED` | Enables the UI's one-time, short-lived access-token disclosure section |
+| `AUTH_TOKEN_DEBUG_TTL_SECONDS` | Lifetime of a one-time token-debug entry |
 
 For OpenShift routes signed by the cluster's managed ingress CA, the Helm
 chart can sync that CA into the agent namespace (`auth.caBundleSync.enabled`),
@@ -205,6 +231,32 @@ certificate itself is perfectly valid.
 The exact Keycloak client policy is deployment-specific, so the chart exposes
 the token URL, client-auth method, and SPIFFE/ZTO settings as values rather
 than assuming a fixed installation.
+
+### Red Hat IdP deployment notes
+
+Enable `auth.redhatSso` only after registering confidential clients in both
+Red Hat SSO environments (or disabling the unused environment). Set each
+environment's `tokenUrl` in the deployment-specific values layer; the chart
+creates an `ExternalSecret` named `acme-agent-redhat-sso` and injects both the
+production/stage client IDs and client secrets from Vault. See
+`values-secret.yaml.template` for the corresponding optional Vault entries.
+
+The Red Hat SSO client must be allowed to obtain the downstream audience used
+by MAS/OLS (`api.ask_red_hat` by default). Add the resulting
+client-credentials principal (`sub` or `user_id`, not the client ID) to MAS
+A2A's `a2a.allowedPrincipals`; MAS remains the inbound allow-list boundary.
+
+With `auth.tokenDebug.enabled=true`, the UI generates a private nonce, ACME
+stores the outbound token under that nonce, and the UI retrieves it once from
+`/ui/auth/token/<nonce>` within `AUTH_TOKEN_DEBUG_TTL_SECONDS`. The nonce is
+not the logged `X-Request-Id`. Disable this value when token inspection is no
+longer needed.
+
+**TODO: Red Hat IdP user tokens.** Use authorization-code flow with PKCE, a
+per-user token cache keyed by the browser session, redirect URI registration,
+CSRF/state validation, and the same downstream issuer/audience checks. The
+confidential client will still be needed for the redirect, but its secret must
+not be exposed to the browser.
 
 ## Build the image
 

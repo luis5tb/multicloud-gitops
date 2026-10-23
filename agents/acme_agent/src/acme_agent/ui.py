@@ -19,6 +19,14 @@ UI_HTML = r"""<!doctype html>
     .thoughts { margin-bottom: .4rem; color: #888; font-style: italic; font-size: .9em; }
     .thoughts summary { cursor: pointer; color: #888; }
     .thoughts div { margin-top: .3rem; white-space: pre-wrap; }
+    .token details { margin-bottom: .4rem; }
+    .token summary { cursor: pointer; color: #888; }
+    .token textarea { width: 100%; min-height: 6rem; margin-top: .3rem; padding: .4rem;
+      font-family: ui-monospace, monospace; font-size: .75em; white-space: pre; }
+    .token button { margin-top: .3rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: .75rem; margin: 0 0 1rem; }
+    .controls label { display: grid; gap: .25rem; font-size: .85rem; color: #555; }
+    .controls select { padding: .35rem; }
     form { display: flex; gap: .5rem; margin-top: 1rem; }
     textarea { flex: 1; min-height: 4rem; padding: .6rem; }
     button { padding: .6rem 1rem; cursor: pointer; }
@@ -29,15 +37,80 @@ UI_HTML = r"""<!doctype html>
   <div id="status">Requests are forwarded to the configured downstream A2A agent.
     Each message is independent (no saved conversation), so state the target
     OpenShift cluster API URL (e.g. https://api.example.com:6443) every time.</div>
+  <div id="auth-controls" class="controls" hidden>
+    <label>Identity provider
+      <select id="auth-provider"></select>
+    </label>
+    <label>Red Hat SSO
+      <select id="auth-environment"></select>
+    </label>
+    <label>Token
+      <select id="auth-token-type">
+        <option value="agent">Agent token</option>
+        <option value="user">User token (not implemented)</option>
+      </select>
+    </label>
+  </div>
   <main id="messages" aria-live="polite"></main>
   <form id="chat-form">
     <textarea id="prompt" required placeholder="e.g. https://api.example.com:6443 -- then your request..."></textarea>
     <button type="submit">Send</button>
   </form>
+  <script id="auth-options" type="application/json">__AUTH_OPTIONS_JSON__</script>
   <script>
     const messages = document.getElementById('messages');
     const form = document.getElementById('chat-form');
     const prompt = document.getElementById('prompt');
+    const authControls = document.getElementById('auth-controls');
+    const providerSelect = document.getElementById('auth-provider');
+    const environmentSelect = document.getElementById('auth-environment');
+    const tokenTypeSelect = document.getElementById('auth-token-type');
+    let tokenDebugEnabled = false;
+    function readAuthOptions() {
+      let options = {};
+      try { options = JSON.parse(document.getElementById('auth-options').textContent); }
+      catch (error) { console.warn('Ignoring invalid auth options', error); }
+      tokenDebugEnabled = !!options.tokenDebugEnabled;
+      if (!options.selectionEnabled) return;
+      providerSelect.replaceChildren();
+      const keycloak = document.createElement('option');
+      keycloak.value = 'keycloak';
+      keycloak.textContent = 'Keycloak';
+      providerSelect.appendChild(keycloak);
+      if (options.redHatEnabled) {
+        const redhat = document.createElement('option');
+        redhat.value = 'redhat';
+        redhat.textContent = 'Red Hat IdP';
+        providerSelect.appendChild(redhat);
+      }
+      providerSelect.value = options.defaultProvider === 'redhat' && options.redHatEnabled
+        ? 'redhat' : 'keycloak';
+      environmentSelect.replaceChildren();
+      (options.environments || []).forEach((environment) => {
+        const option = document.createElement('option');
+        option.value = environment.id;
+        option.textContent = environment.label;
+        option.disabled = !environment.available;
+        environmentSelect.appendChild(option);
+      });
+      const defaultEnvironment = (options.environments || []).find(
+        (environment) => environment.id === options.defaultEnvironment && environment.available
+      );
+      const firstAvailableEnvironment = (options.environments || []).find(
+        (environment) => environment.available
+      );
+      environmentSelect.value = (defaultEnvironment || firstAvailableEnvironment || {}).id || 'production';
+      tokenTypeSelect.value = options.defaultTokenType === 'user' ? 'user' : 'agent';
+      authControls.hidden = false;
+      updateAuthControls();
+    }
+    function updateAuthControls() {
+      const redhat = providerSelect.value === 'redhat';
+      environmentSelect.disabled = !redhat;
+      tokenTypeSelect.disabled = !redhat;
+    }
+    providerSelect.addEventListener('change', updateAuthControls);
+    readAuthOptions();
     // Renders the agent's final answer prominently and, if present, its
     // reasoning/"thinking" text in a separate, visually muted, collapsible
     // block above it -- the two are never concatenated into one line.
@@ -60,6 +133,51 @@ UI_HTML = r"""<!doctype html>
       item.appendChild(answer);
       messages.appendChild(item);
       messages.scrollTop = messages.scrollHeight;
+      return item;
+    }
+    function addTokenSection(item, token, metadata) {
+      const details = document.createElement('details');
+      details.className = 'token';
+      const summary = document.createElement('summary');
+      summary.textContent = `Access token (${metadata.provider}` +
+        (metadata.environment ? `, ${metadata.environment}` : '') +
+        `, ${metadata.tokenType})`;
+      details.appendChild(summary);
+      const body = document.createElement('div');
+      const field = document.createElement('textarea');
+      field.readOnly = true;
+      field.value = token;
+      field.setAttribute('aria-label', 'Access token');
+      body.appendChild(field);
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.textContent = 'Copy token';
+      copy.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(token);
+          copy.textContent = 'Copied';
+          setTimeout(() => { copy.textContent = 'Copy token'; }, 1500);
+        } catch (error) {
+          copy.textContent = 'Copy failed; select manually';
+        }
+      });
+      body.appendChild(copy);
+      details.appendChild(body);
+      item.appendChild(details);
+      messages.scrollTop = messages.scrollHeight;
+    }
+    async function attachTokenDebug(item, debugId) {
+      if (!tokenDebugEnabled || !debugId) return;
+      try {
+        const response = await fetch(`/ui/auth/token/${encodeURIComponent(debugId)}`, {
+          credentials: 'same-origin'
+        });
+        if (!response.ok) return;
+        const debug = await response.json();
+        if (debug.accessToken) addTokenSection(item, debug.accessToken, debug);
+      } catch (error) {
+        console.warn('Token debug retrieval failed', error);
+      }
     }
     // Walks one A2A Message/Part/array node, bucketing each text part's
     // content into `thoughts` (ADK's own adk_thought/is_thought part
@@ -126,8 +244,8 @@ UI_HTML = r"""<!doctype html>
       item.className = 'message agent';
       const answer = document.createElement('div');
       item.appendChild(answer);
-      let details, thoughtsBody, attached = false;
-      return function update(thoughts, text) {
+      let details, thoughtsBody, tokenDetails, attached = false;
+      function update(thoughts, text) {
         if (!attached) { messages.appendChild(item); attached = true; }
         if (thoughts && thoughts.length) {
           if (!details) {
@@ -144,7 +262,17 @@ UI_HTML = r"""<!doctype html>
         }
         answer.textContent = `Agent: ${text}`;
         messages.scrollTop = messages.scrollHeight;
-      };
+      }
+      async function setToken(debugId) {
+        if (!debugId) return;
+        if (!attached) { messages.appendChild(item); attached = true; }
+        if (!tokenDetails) {
+          tokenDetails = document.createElement('div');
+          item.appendChild(tokenDetails);
+        }
+        await attachTokenDebug(tokenDetails, debugId);
+      }
+      return {update, setToken};
     }
     // Accumulates the streamed A2A events (message/stream) into a running
     // { thoughts, answer }. Each SSE event's `result` is a status-update, an
@@ -215,9 +343,14 @@ UI_HTML = r"""<!doctype html>
       event.preventDefault();
       const text = prompt.value.trim();
       if (!text) return;
+      if (providerSelect.value === 'redhat' && tokenTypeSelect.value === 'user') {
+        addMessage('agent', 'Request failed: Red Hat IdP user tokens are not implemented yet; select Agent token.');
+        return;
+      }
       prompt.value = '';
       addMessage('user', text);
       const id = crypto.randomUUID();
+      const debugId = tokenDebugEnabled ? crypto.randomUUID() : '';
       // Stream (message/stream) rather than message/send: a long investigation
       // can take minutes, and a single non-streaming response holds one idle
       // connection open the whole time, which an intermediary (e.g. a cloud
@@ -228,10 +361,23 @@ UI_HTML = r"""<!doctype html>
       const payload = JSON.stringify({jsonrpc: '2.0', id, method: 'message/stream', params: {
         message: {messageId: id, role: 'user', parts: [{kind: 'text', text}]}
       }});
+      const headers = {
+        'content-type': 'application/json',
+        'accept': 'text/event-stream',
+        'x-request-id': id
+      };
+      if (!authControls.hidden) {
+        headers['x-acme-auth-provider'] = providerSelect.value;
+        if (providerSelect.value === 'redhat') {
+          headers['x-acme-auth-environment'] = environmentSelect.value;
+          headers['x-acme-auth-token-type'] = tokenTypeSelect.value;
+        }
+      }
+      if (debugId) headers['x-acme-token-debug-id'] = debugId;
       try {
         const response = await fetch('/', {
           method: 'POST',
-          headers: {'content-type': 'application/json', 'accept': 'text/event-stream'},
+          headers,
           body: payload
         });
         const contentType = response.headers.get('content-type') || '';
@@ -241,14 +387,22 @@ UI_HTML = r"""<!doctype html>
           const body = await response.json();
           if (!response.ok || body.error) throw new Error(JSON.stringify(body.error || body));
           const { thoughts, answer } = renderTaskResult(body.result);
-          addMessage('agent', answer || JSON.stringify(body.result), thoughts);
+          const item = addMessage('agent', answer || JSON.stringify(body.result), thoughts);
+          await attachTokenDebug(item, debugId);
           return;
         }
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        if (!response.ok) {
+          let message = `HTTP ${response.status}`;
+          try {
+            const body = await response.json();
+            message = body.detail || body.error?.message || JSON.stringify(body);
+          } catch (error) { /* keep the HTTP status */ }
+          throw new Error(message);
+        }
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         const acc = makeAccumulator();
-        const update = addUpdatableAgentMessage();
+        const agentMessage = addUpdatableAgentMessage();
         let buffer = '';
         let streamError = null;
         for (;;) {
@@ -271,13 +425,14 @@ UI_HTML = r"""<!doctype html>
             if (envelope.error) { streamError = new Error(JSON.stringify(envelope.error)); break; }
             acc.ingest(envelope.result);
             const { thoughts, answer } = acc.current();
-            update(thoughts, answer);
+            agentMessage.update(thoughts, answer);
           }
           if (streamError) break;
         }
         if (streamError) throw streamError;
         const { thoughts, answer } = acc.current();
-        update(thoughts, answer || '(the agent returned no answer)');
+        agentMessage.update(thoughts, answer || '(the agent returned no answer)');
+        await agentMessage.setToken(debugId);
       } catch (error) {
         addMessage('agent', `Request failed: ${error.message}`);
       }

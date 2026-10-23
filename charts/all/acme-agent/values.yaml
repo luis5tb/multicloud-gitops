@@ -95,6 +95,14 @@ secretStore:
 auth:
   # none, static, or keycloak
   mode: none
+  # Default outbound identity provider for non-UI callers and the embedded UI:
+  # keycloak or redhat. Request-scoped overrides are sent by the UI.
+  defaultProvider: keycloak
+  # Exposes the outbound bearer token once to the browser that generated the
+  # private debug nonce. Keep this disabled outside a debugging session.
+  tokenDebug:
+    enabled: false
+    ttlSeconds: 300
   tlsVerify: true
   # Optional path to a CA bundle supplied by another volume. Alternatively,
   # set caBundleConfigMap to have this chart mount a ConfigMap and populate
@@ -139,6 +147,35 @@ auth:
       name: ""
       key: client-secret
     tokenRefreshSkew: 30
+  # Red Hat SSO client-credentials tokens. This is additive to auth.keycloak:
+  # both providers can be configured when auth.mode=keycloak, and each UI
+  # request selects one. User-token (authorization-code/PKCE) support is TODO.
+  redhatSso:
+    enabled: false
+    defaultEnvironment: production
+    tokenType: agent
+    # Red Hat SSO clients commonly control token audience through OAuth scope.
+    # The downstream MAS/OLS configuration in this pattern accepts
+    # api.ask_red_hat; override if your SSO client registration differs.
+    scope: api.ask_red_hat
+    credentialsSecret:
+      name: acme-agent-redhat-sso
+      # Optional pre-existing Secret with keys <environment>-client-id and
+      # <environment>-client-secret. When empty, the chart creates the
+      # ExternalSecret from the Vault properties below.
+      existingName: ""
+    production:
+      enabled: true
+      tokenUrl: ""
+      vaultKey: secret/data/global/acme-agent-redhat-sso-production
+      clientIdProperty: client-id
+      clientSecretProperty: client-secret
+    stage:
+      enabled: true
+      tokenUrl: ""
+      vaultKey: secret/data/global/acme-agent-redhat-sso-stage
+      clientIdProperty: client-id
+      clientSecretProperty: client-secret
 
 # Escape hatch for additional container env vars not covered by another
 # value above.

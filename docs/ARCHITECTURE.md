@@ -98,6 +98,12 @@ leftover, not live).
   the eventual API server RBAC check is attributed to the original caller.
   Token A never reaches MCP or the API server; only Token B does. See
   `agents/AUTHENTICATION.md`.
+- **ACME provider selection is request-scoped, not a new trust decision.**
+  The UI may choose local Keycloak or a Red Hat SSO production/stage
+  confidential-client agent token. That choice only determines which
+  configured credential mints Token A; MAS and OLS independently validate the
+  resulting JWT's issuer, audience, signature, and principal. Red Hat SSO
+  user-token login is a documented TODO, not a partially trusted shortcut.
 - **On `a2a-split`, Praxis is the A2A caller allow-list.** OLS reuses its
   configured OIDC module to validate the JWT's signature, issuer and audience;
   it no longer checks a separate `A2A_INBOUND_AZP` allow-list. The same OIDC

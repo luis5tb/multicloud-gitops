@@ -1,8 +1,9 @@
-"""Downstream A2A authentication using Keycloak and ZTO identity tokens."""
+"""Downstream A2A authentication and request-scoped IdP selection."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import ssl
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 # Bound by stamp_request_id for the lifetime of an outbound httpx request so
 # Keycloak mint audits can join the later dispatch line on the same id.
 _outbound_request_id: ContextVar[str] = ContextVar("acme_outbound_request_id", default="")
+_inbound_request_id: ContextVar[str] = ContextVar("acme_inbound_request_id", default="")
+_auth_selection: ContextVar[AuthSelection | None] = ContextVar(
+    "acme_auth_selection", default=None
+)
+_token_debug_id: ContextVar[str] = ContextVar("acme_token_debug_id", default="")
 
 
 def _tls_context_trusting(ca_bundle: str) -> ssl.SSLContext:
@@ -52,14 +58,37 @@ OLS_CLUSTER_HEADER = "X-OLS-Cluster"
 # record share one id and can be joined across the two services.
 REQUEST_ID_HEADER = "X-Request-Id"
 
+# Request-scoped IdP selection headers. They are accepted only from the
+# inbound ASGI middleware, then carried to the outbound httpx hook through a
+# ContextVar; they are never copied into the downstream request.
+AUTH_PROVIDER_HEADER = "X-ACME-Auth-Provider"
+AUTH_ENVIRONMENT_HEADER = "X-ACME-Auth-Environment"
+AUTH_TOKEN_TYPE_HEADER = "X-ACME-Auth-Token-Type"
+TOKEN_DEBUG_ID_HEADER = "X-ACME-Token-Debug-Id"
+
 
 class SpiffeIdentityError(RuntimeError):
     """Raised when ZTWIM/SPIRE cannot issue this pod a JWT-SVID."""
 
 
 @dataclass(frozen=True)
+class AuthSelection:
+    provider: str
+    environment: str
+    token_type: str
+
+
+@dataclass(frozen=True)
+class RedHatSsoEnvironment:
+    token_url: str
+    client_id: str
+    client_secret: str
+
+
+@dataclass(frozen=True)
 class AuthSettings:
     mode: str
+    default_provider: str
     token_url: str
     client_id: str
     client_secret: str
@@ -77,6 +106,12 @@ class AuthSettings:
     tls_verify: bool | str | ssl.SSLContext
     timeout: float
     token_refresh_skew: int
+    redhat_default_environment: str
+    redhat_default_token_type: str
+    redhat_scope: str
+    redhat_environments: dict[str, RedHatSsoEnvironment]
+    token_debug_enabled: bool
+    token_debug_ttl: float
 
     @classmethod
     def from_env(cls) -> "AuthSettings":
@@ -88,6 +123,7 @@ class AuthSettings:
         )
         return cls(
             mode=os.getenv("A2A_AUTH_MODE", "none").strip().lower(),
+            default_provider=os.getenv("A2A_AUTH_PROVIDER", "keycloak").strip().lower(),
             token_url=os.getenv("KEYCLOAK_TOKEN_URL", "").strip(),
             client_id=os.getenv("KEYCLOAK_CLIENT_ID", "").strip(),
             client_secret=os.getenv("KEYCLOAK_CLIENT_SECRET", ""),
@@ -114,7 +150,66 @@ class AuthSettings:
             tls_verify=tls_verify,
             timeout=float(os.getenv("A2A_REQUEST_TIMEOUT", "60")),
             token_refresh_skew=int(os.getenv("KEYCLOAK_TOKEN_REFRESH_SKEW", "30")),
+            redhat_default_environment=os.getenv(
+                "REDHAT_SSO_DEFAULT_ENVIRONMENT", "production"
+            ).strip().lower(),
+            redhat_default_token_type=os.getenv(
+                "REDHAT_SSO_TOKEN_TYPE", "agent"
+            ).strip().lower(),
+            redhat_scope=os.getenv("REDHAT_SSO_SCOPE", "").strip(),
+            redhat_environments={
+                "production": RedHatSsoEnvironment(
+                    token_url=os.getenv("REDHAT_SSO_PRODUCTION_TOKEN_URL", "").strip(),
+                    client_id=os.getenv(
+                        "REDHAT_SSO_PRODUCTION_CLIENT_ID", ""
+                    ).strip(),
+                    client_secret=os.getenv(
+                        "REDHAT_SSO_PRODUCTION_CLIENT_SECRET", ""
+                    ),
+                ),
+                "stage": RedHatSsoEnvironment(
+                    token_url=os.getenv("REDHAT_SSO_STAGE_TOKEN_URL", "").strip(),
+                    client_id=os.getenv("REDHAT_SSO_STAGE_CLIENT_ID", "").strip(),
+                    client_secret=os.getenv("REDHAT_SSO_STAGE_CLIENT_SECRET", ""),
+                ),
+            },
+            token_debug_enabled=env_bool(os.getenv("AUTH_TOKEN_DEBUG_ENABLED")),
+            token_debug_ttl=float(os.getenv("AUTH_TOKEN_DEBUG_TTL_SECONDS", "300")),
         )
+
+    def redhat_environment(self, environment: str) -> RedHatSsoEnvironment | None:
+        configured = self.redhat_environments.get(environment)
+        if (
+            configured
+            and configured.token_url
+            and configured.client_id
+            and configured.client_secret
+        ):
+            return configured
+        return None
+
+    def ui_options(self) -> dict[str, object]:
+        """Describe the choices the embedded UI is allowed to present."""
+
+        environments = [
+            {
+                "id": environment,
+                "label": "sso.redhat.com"
+                if environment == "production"
+                else "sso.stage.redhat.com",
+                "available": self.redhat_environment(environment) is not None,
+            }
+            for environment in ("production", "stage")
+        ]
+        return {
+            "selectionEnabled": self.mode == "keycloak",
+            "defaultProvider": self.default_provider,
+            "defaultEnvironment": self.redhat_default_environment,
+            "defaultTokenType": self.redhat_default_token_type,
+            "redHatEnabled": any(item["available"] for item in environments),
+            "environments": environments,
+            "tokenDebugEnabled": self.token_debug_enabled,
+        }
 
 
 class DownstreamAuth:
@@ -122,9 +217,9 @@ class DownstreamAuth:
 
     def __init__(self, settings: AuthSettings | None = None) -> None:
         self.settings = settings or AuthSettings.from_env()
-        self._access_token = ""
-        self._expires_at = 0.0
+        self._tokens: dict[tuple[str, str, str], tuple[str, float]] = {}
         self._lock = asyncio.Lock()
+        self._debug_tokens: dict[str, tuple[str, AuthSelection, float]] = {}
         self._token_client = httpx.AsyncClient(
             timeout=self.settings.timeout, verify=self.settings.tls_verify
         )
@@ -155,6 +250,75 @@ class DownstreamAuth:
                 "token in ZTO_IDENTITY_TOKEN_FILE or ZTO_IDENTITY_TOKEN"
             )
         return token
+
+    async def _redhat_sso_agent_token(self, environment: str) -> str:
+        configured = self.settings.redhat_environment(environment)
+        if configured is None:
+            prefix = "REDHAT_SSO_" + environment.upper()
+            raise RuntimeError(
+                f"Red Hat SSO {environment} is not configured: "
+                f"{prefix}_TOKEN_URL, {prefix}_CLIENT_ID, and "
+                f"{prefix}_CLIENT_SECRET are required"
+            )
+
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": configured.client_id,
+            "client_secret": configured.client_secret,
+        }
+        if self.settings.redhat_scope:
+            data["scope"] = self.settings.redhat_scope
+
+        request_id = _outbound_request_id.get() or "-"
+        cluster = get_cluster_id() or ""
+        action = f'"mint Red Hat SSO {environment} agent Token A"'
+        try:
+            response = await self._token_client.post(configured.token_url, data=data)
+            response.raise_for_status()
+            payload = response.json()
+            token = payload.get("access_token")
+            if not token:
+                raise RuntimeError(
+                    "Red Hat SSO token response did not contain access_token"
+                )
+        except httpx.HTTPStatusError as error:
+            logger.info(
+                "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                "action=%s outcome=error status=%s",
+                request_id,
+                cluster,
+                action,
+                error.response.status_code,
+            )
+            raise
+        except Exception:
+            logger.info(
+                "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                "action=%s outcome=error",
+                request_id,
+                cluster,
+                action,
+            )
+            raise
+        expires_in = int(payload.get("expires_in", 300))
+        self._store_token(("redhat", environment, "agent"), token, expires_in)
+        logger.info(
+            "acme_audit request_id=%s actor=acme-agent cluster=%s "
+            "action=%s outcome=ok expires_in=%s",
+            request_id,
+            cluster,
+            action,
+            expires_in,
+        )
+        return token
+
+    def _store_token(
+        self, cache_key: tuple[str, str, str], token: str, expires_in: int
+    ) -> None:
+        self._tokens[cache_key] = (
+            token,
+            time.monotonic() + max(expires_in, 1),
+        )
 
     def _spiffe_jwt_svid(self) -> str:
         """Fetch a short-lived JWT-SVID from ZTWIM/SPIRE's Workload API."""
@@ -254,8 +418,7 @@ class DownstreamAuth:
             )
             raise
         expires_in = int(payload.get("expires_in", 300))
-        self._access_token = token
-        self._expires_at = time.monotonic() + max(expires_in, 1)
+        self._store_token(("keycloak", "", ""), token, expires_in)
         logger.info(
             "acme_audit request_id=%s actor=acme-agent cluster=%s "
             "action=%s outcome=ok expires_in=%s",
@@ -269,20 +432,98 @@ class DownstreamAuth:
     async def bearer_token(self) -> str:
         if self.settings.mode == "none":
             return ""
+        selection = _auth_selection.get() or AuthSelection(
+            provider=self.settings.default_provider,
+            environment=self.settings.redhat_default_environment,
+            token_type=self.settings.redhat_default_token_type,
+        )
         if self.settings.mode == "static":
             token = os.getenv("A2A_BEARER_TOKEN", "").strip()
             if not token:
                 raise RuntimeError("A2A_BEARER_TOKEN is required for static auth")
+            self._store_debug_token(token, selection)
             return token
         if self.settings.mode != "keycloak":
             raise RuntimeError("A2A_AUTH_MODE must be none, static, or keycloak")
 
         async with self._lock:
-            if self._access_token and time.monotonic() < (
-                self._expires_at - self.settings.token_refresh_skew
-            ):
-                return self._access_token
-            return await self._keycloak_token()
+            if selection.provider not in {"keycloak", "redhat"}:
+                raise RuntimeError("A2A_AUTH_PROVIDER must be keycloak or redhat")
+            if selection.provider == "keycloak":
+                cache_key = ("keycloak", "", "")
+                cached = self._cached_token(cache_key)
+                if cached:
+                    token = cached
+                else:
+                    token = await self._keycloak_token()
+                self._store_debug_token(token, selection)
+                return token
+
+            if selection.environment not in {"production", "stage"}:
+                raise RuntimeError(
+                    "Red Hat SSO environment must be production or stage"
+                )
+            if selection.token_type != "agent":
+                raise NotImplementedError(
+                    "Red Hat IdP user tokens are not implemented yet; select the "
+                    "agent token type"
+                )
+            cache_key = ("redhat", selection.environment, "agent")
+            cached = self._cached_token(cache_key)
+            if cached:
+                token = cached
+            else:
+                token = await self._redhat_sso_agent_token(selection.environment)
+            self._store_debug_token(token, selection)
+            return token
+
+    def _cached_token(self, cache_key: tuple[str, str, str]) -> str:
+        entry = self._tokens.get(cache_key)
+        if not entry:
+            return ""
+        token, expires_at = entry
+        if time.monotonic() < expires_at - self.settings.token_refresh_skew:
+            return token
+        self._tokens.pop(cache_key, None)
+        return ""
+
+    def _store_debug_token(self, token: str, selection: AuthSelection) -> None:
+        debug_id = _token_debug_id.get()
+        if not self.settings.token_debug_enabled or not debug_id or not token:
+            return
+        self._purge_expired_debug_tokens()
+        self._debug_tokens[debug_id] = (
+            token,
+            selection,
+            time.monotonic() + self.settings.token_debug_ttl,
+        )
+
+    def pop_debug_token(self, debug_id: str) -> dict[str, str] | None:
+        if not self.settings.token_debug_enabled or not debug_id:
+            return None
+        self._purge_expired_debug_tokens()
+        entry = self._debug_tokens.pop(debug_id, None)
+        if not entry:
+            return None
+        token, selection, expires_at = entry
+        if time.monotonic() >= expires_at:
+            return None
+        return {
+            "accessToken": token,
+            "provider": selection.provider,
+            "environment": selection.environment,
+            "tokenType": selection.token_type,
+        }
+
+    def _purge_expired_debug_tokens(self) -> None:
+        now = time.monotonic()
+        expired = [
+            debug_id
+            for debug_id, (_, _, expires_at) in self._debug_tokens.items()
+            if now >= expires_at
+        ]
+        for debug_id in expired:
+            self._debug_tokens.pop(debug_id, None)
 
     async def add_auth(self, request: httpx.Request) -> None:
         token = await self.bearer_token()
@@ -294,6 +535,110 @@ class DownstreamAuth:
 
     async def close(self) -> None:
         await self._token_client.aclose()
+
+
+def _header(scope: dict[str, object], name: str) -> str:
+    headers = scope.get("headers") or []
+    if not isinstance(headers, list):
+        return ""
+    for header in headers:
+        if not isinstance(header, (tuple, list)) or len(header) != 2:
+            continue
+        key, value = header
+        if key.decode("latin-1").lower() == name.lower():
+            return value.decode("latin-1").strip()
+    return ""
+
+
+class AuthSelectionMiddleware:
+    """Validate and bind request-scoped IdP selection before ADK runs.
+
+    The selection deliberately never becomes a downstream authorization claim.
+    It only chooses which already-configured client credential ACME uses to
+    mint Token A. The downstream service still independently validates that
+    token's issuer, audience, signature, and principal allow-list.
+    """
+
+    def __init__(self, app, settings: AuthSettings) -> None:
+        self.app = app
+        self.settings = settings
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        tokens = []
+        provider = _header(scope, AUTH_PROVIDER_HEADER) or self.settings.default_provider
+        environment = (
+            _header(scope, AUTH_ENVIRONMENT_HEADER)
+            or self.settings.redhat_default_environment
+        )
+        token_type = (
+            _header(scope, AUTH_TOKEN_TYPE_HEADER)
+            or self.settings.redhat_default_token_type
+        )
+
+        if self.settings.mode != "keycloak":
+            selection = AuthSelection(provider, environment, token_type)
+        elif provider not in {"keycloak", "redhat"}:
+            message = f"Unsupported identity provider: {provider}"
+            await self._reject(scope, send, message)
+            return
+        elif provider == "redhat":
+            if environment not in {"production", "stage"}:
+                message = f"Unsupported Red Hat SSO environment: {environment}"
+                await self._reject(scope, send, message)
+                return
+            if token_type not in {"agent", "user"}:
+                message = f"Unsupported Red Hat IdP token type: {token_type}"
+                await self._reject(scope, send, message)
+                return
+            if token_type == "user":
+                message = (
+                    "Red Hat IdP user tokens are not implemented yet; select "
+                    "agent token"
+                )
+                await self._reject(scope, send, message)
+                return
+            if self.settings.redhat_environment(environment) is None:
+                message = f"Red Hat SSO {environment} is not configured"
+                await self._reject(scope, send, message)
+                return
+            selection = AuthSelection(provider, environment, token_type)
+        else:
+            selection = AuthSelection(provider, "", "")
+
+        request_id = _header(scope, REQUEST_ID_HEADER)
+        debug_id = _header(scope, TOKEN_DEBUG_ID_HEADER)
+        if request_id and (len(request_id) > 128 or not request_id.isprintable()):
+            await self._reject(scope, send, "Invalid X-Request-Id")
+            return
+        if debug_id and (len(debug_id) > 128 or not debug_id.isprintable()):
+            await self._reject(scope, send, "Invalid token debug id")
+            return
+
+        tokens.append(_auth_selection.set(selection))
+        if request_id:
+            tokens.append(_inbound_request_id.set(request_id))
+        if debug_id:
+            tokens.append(_token_debug_id.set(debug_id))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            for token in reversed(tokens):
+                token.var.reset(token)
+
+    async def _reject(self, scope, send, message: str) -> None:
+        body = json.dumps({"detail": message}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 400,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
 
 
 async def add_cluster_header(request: httpx.Request) -> None:
@@ -344,7 +689,11 @@ async def stamp_request_id(request: httpx.Request) -> None:
 
     if request.method != "POST":
         return
-    request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+    request_id = (
+        request.headers.get(REQUEST_ID_HEADER)
+        or _inbound_request_id.get()
+        or uuid.uuid4().hex
+    )
     request.headers[REQUEST_ID_HEADER] = request_id
     _outbound_request_id.set(request_id)
 
