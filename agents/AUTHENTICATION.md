@@ -274,7 +274,8 @@ rewrite that token: MAS receives it as Token A, validates its issuer/audience
 and principal, and passes it through unchanged. The Red Hat SSO client must be
 allowed to obtain the downstream audience (`api.ask_red_hat` in the standalone
 configuration), and its service-account principal must be added to MAS's
-`a2a.allowedPrincipals`.
+`a2a.allowedPrincipals`. That principal is the token's opaque `sub`, which can
+differ from both `azp` and the OAuth client ID in the external secret.
 
 The UI presents a user-token choice for planning purposes, but selecting it is
 rejected before the agent runs. **TODO:** implement Red Hat IdP user login with

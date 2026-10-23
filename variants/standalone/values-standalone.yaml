@@ -843,20 +843,23 @@ clusterGroup:
         # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
         # JSON string) so the clusterGroup override builds an actual YAML list.
         #
-        # This is the Keycloak access token's `sub`, NOT acme-agent's SPIFFE ID.
-        # MAS checks credentials.user_id (claims["user_id"] or claims["sub"])
-        # against this list. For a client_credentials grant, `sub` is the
-        # acme-agent client's Keycloak service-account user id (an opaque UUID) --
-        # the SPIFFE ID only exists in the client_assertion used to authenticate
-        # TO Keycloak, never in the resulting access token. Obtain it via the
-        # Keycloak Admin API: GET /admin/realms/rca/clients?clientId=acme-agent
-        # then GET .../clients/<uuid>/service-account-user -> .id. NOTE: this id
-        # is realm-import-specific and changes if the service account is
+        # These are validated access-token `sub` values, NOT SPIFFE IDs,
+        # client IDs, or `azp` values. MAS checks credentials.user_id
+        # (claims["user_id"] or claims["sub"]) against this list.
+        #
+        # For local Keycloak, `sub` is acme-agent's service-account user id (an
+        # opaque UUID). Obtain it via GET /admin/realms/rca/clients?clientId=
+        # acme-agent, then .../clients/<uuid>/service-account-user -> .id. This
+        # id is realm-import-specific and changes if the service account is
         # recreated; re-fetch after a realm re-import.
+        #
+        # For Red Hat SSO client credentials, `sub` is the service-account
+        # principal and can differ from `azp`/`client_id`. Decode a real token
+        # and use its `sub`; do not copy the OAuth client UUID from the secret.
         - name: a2a.allowedPrincipals[0]
           value: "94510bf9-b826-402b-a242-d4547e948d76"
         - name: a2a.allowedPrincipals[1]
-          value: "ff524661-b74a-4e10-bc24-4e71322e0852"
+          value: "b6daf56c-157a-418a-b6bf-7a6c18c667a7"
         - name: route.enabled
           value: "true"
         # - name: route.host

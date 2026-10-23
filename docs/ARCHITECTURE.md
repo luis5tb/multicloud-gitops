@@ -332,3 +332,10 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   endpoint: `Client not enabled to retrieve service account`. External-secret
   syncing and local mocked-token tests cannot detect that IdP policy, so ACME
   now surfaces the OAuth error description.
+- **Red Hat SSO's principal is `sub`, not the client UUID.** MAS A2A authorizes
+  the validated token's `user_id`/`sub`; a Red Hat `client_credentials` token's
+  `sub` is its service-account principal and can differ from `azp`/`client_id`.
+  Observed live as a 403 after signature and audience validation succeeded:
+  the standalone allow-list had been populated with the OAuth client UUID.
+  Decode a real non-secret test token and copy only its `sub` into
+  `a2a.allowedPrincipals`.
