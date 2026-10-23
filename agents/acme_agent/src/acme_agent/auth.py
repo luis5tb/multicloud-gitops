@@ -274,7 +274,21 @@ class DownstreamAuth:
         action = f'"mint Red Hat SSO {environment} agent Token A"'
         try:
             response = await self._token_client.post(configured.token_url, data=data)
-            response.raise_for_status()
+            if response.is_error:
+                error_detail = _oauth_error_detail(response)
+                logger.info(
+                    "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                    "action=%s outcome=error status=%s error=%s",
+                    request_id,
+                    cluster,
+                    action,
+                    response.status_code,
+                    error_detail,
+                )
+                raise RuntimeError(
+                    "Red Hat SSO token request failed with HTTP "
+                    f"{response.status_code}: {error_detail}"
+                )
             payload = response.json()
             token = payload.get("access_token")
             if not token:
@@ -535,6 +549,20 @@ class DownstreamAuth:
 
     async def close(self) -> None:
         await self._token_client.aclose()
+
+
+def _oauth_error_detail(response: httpx.Response) -> str:
+    """Return a compact OAuth error without echoing credentials or a token."""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text[:500].strip() or "(empty response body)"
+    error = str(payload.get("error", "")).strip()
+    description = str(payload.get("error_description", "")).strip()
+    if error and description:
+        return f"{error}: {description}"
+    return error or description or "(empty OAuth error body)"
 
 
 def _header(scope: dict[str, object], name: str) -> str:

@@ -246,6 +246,18 @@ by MAS/OLS (`api.ask_red_hat` by default). Add the resulting
 client-credentials principal (`sub` or `user_id`, not the client ID) to MAS
 A2A's `a2a.allowedPrincipals`; MAS remains the inbound allow-list boundary.
 
+**Live finding (2026-10-23):** selecting Red Hat SSO stage in the UI made ADK
+report an agent-card fetch failure ending in `HTTP 401`, but the real failing
+request was ACME's call to `sso.stage.redhat.com/.../token`. Reproducing that
+one request with the synced Secret returned
+`unauthorized_client: Client not enabled to retrieve service account`. The
+stage client registration must enable service accounts (the
+`client_credentials` grant); a confidential client secret alone is not enough.
+Nothing caught this sooner because the unit tests mock a successful token
+response and Helm can verify Secret syncing but not the external IdP's client
+policy. ACME now surfaces the OAuth `error_description` in its exception and
+audit line.
+
 With `auth.tokenDebug.enabled=true`, the UI generates a private nonce, ACME
 stores the outbound token under that nonce, and the UI retrieves it once from
 `/ui/auth/token/<nonce>` within `AUTH_TOKEN_DEBUG_TTL_SECONDS`. The nonce is

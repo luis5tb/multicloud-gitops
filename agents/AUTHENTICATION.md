@@ -291,6 +291,17 @@ nonce is deliberately different from the logged `X-Request-Id`. The resulting
 UI section is collapsible and has a copy button. Disable token debug when not
 actively inspecting a token.
 
+**Live finding:** the first live Red Hat SSO stage attempt surfaced only as an
+ADK agent-card `HTTP 401`, while the actual failing request was the SSO token
+mint. Calling the stage token endpoint with the synced client credentials
+returned `unauthorized_client: Client not enabled to retrieve service account`.
+The fix is in the external SSO client registration, not ACME: enable that
+client's service account / `client_credentials` grant, then confirm the issued
+principal is in MAS's allow-list. ACME now includes the OAuth
+`error_description` in its error. This was not caught sooner because local
+tests mock a successful token response and Helm cannot validate an external
+IdP's client policy.
+
 ## RFC 8693 token exchange, step by step
 
 This is the piece that actually implements "on behalf of X" delegation, and
