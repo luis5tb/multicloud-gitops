@@ -221,6 +221,13 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   alias that can drift from chart values. The OLS image must also preserve
   `subject_token_type=access_token`; the `650f5486` image rewrites external
   tokens to `jwt`, which Keycloak 26.4 rejects.
+- **External-token exchange must also map a Keycloak group.** A successful
+  Red Hat SSO exchange that emits no `groups` claim makes OpenShift authorize
+  the brokered subject as `keycloak:<uuid>`, while the pattern's RBAC targets
+  `Group:keycloak:acme-agent-rca`. Configure each external provider's
+  `hardcodedGroups` with `acme-agent-rca`; the PostSync reconciler matches the
+  live IdP by issuer URL and adds the Hardcoded Group mapper even when the
+  live alias has drifted.
 - **Cluster-id derivation must match exactly, everywhere.** The algorithm
   (`agents/acme_agent/src/acme_agent/cluster_registry.py`'s
   `derive_cluster_id`) is `f"{host}:{port}".replace(".", "-").replace(":",

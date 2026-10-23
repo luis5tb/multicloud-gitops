@@ -146,6 +146,11 @@ keycloak:
   #   isAccessTokenJWT: "true"
     #   # Optional: enable token exchange from this provider (default: true)
     #   allowTokenExchange: true
+    #   # Optional: Keycloak groups assigned to every brokered user from this
+    #   # provider. The group must exist in this realm; on fresh imports the
+    #   # chart renders a Hardcoded Group IdP mapper for each entry.
+    #   hardcodedGroups:
+    #     - acme-agent-rca
     # - alias: red-hat-sso-stage
     #   displayName: Red Hat SSO Stage
     #   issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
@@ -155,6 +160,8 @@ keycloak:
   #   clientId: <red-hat-sso-client-id>
   #   isAccessTokenJWT: "true"
     #   allowTokenExchange: true
+  #   hardcodedGroups:
+  #     - acme-agent-rca
   # Confidential client that exists only so lightspeed-mcp's RFC 8693 token
   # exchange has a real client_id to request as its `audience` parameter --
   # Keycloak's standard (V2) token exchange requires the audience parameter

@@ -142,6 +142,9 @@ in the Admin Console, add the `groups` mapper to both `acme-agent` and
 `keycloak-realm-import.yaml` declares, so a future full realm re-import
 doesn't diverge from what's actually configured.
 
+The external-IdP `hardcodedGroups` mapper is the exception: once its provider
+exists, the PostSync reconciler below creates or updates it on every sync.
+
 `templates/lightspeed-mcp-rbac.yaml` grants the mapped `keycloak:acme-agent-rca`
 group `get`/`list` on `pods` and `events`, in exactly the namespaces listed
 under `lightspeedRbac.namespaces`, and nothing else by default (no pod logs,
@@ -186,6 +189,30 @@ the generic `Keycloak token exchange failed` error.
 OLS should send the external issuer URL as `subject_issuer`. Keycloak accepts
 the issuer URL directly, which avoids depending on an imported IdP alias that
 can drift from chart values on a one-shot realm import.
+
+For callers that must receive the pattern's MCP RBAC identity, add the target
+Keycloak group to each provider's `hardcodedGroups` list (the standalone
+variant uses `acme-agent-rca` for both Red Hat SSO environments). On a fresh
+realm import this renders a `Hardcoded Group` IdP mapper with sync mode
+`FORCE`; on an existing realm, the `rca-realm-secrets-reconciler` PostSync Job
+matches the IdP by its configured issuer URL and creates or updates the same
+mapper. Issuer matching intentionally handles alias drift such as the live
+`rh-sso-stage` alias versus the chart's `red-hat-sso-stage` value.
+
+The mapper settings are:
+
+| Setting | Value |
+| --- | --- |
+| Name | `acme-agent-rca` |
+| Sync Mode Override | `Force` |
+| Mapper Type | `Hardcoded Group` |
+| Group | `/acme-agent-rca` |
+
+After the mapper runs and a **fresh** token exchange occurs (existing access
+tokens are not retroactively changed), Token B must contain
+`groups: ["acme-agent-rca"]`; otherwise OpenShift sees an individual
+`keycloak:<subject>` user and the `Group:keycloak:acme-agent-rca` RBAC binding
+does not apply.
 
 ### End-to-end verification
 
