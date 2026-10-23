@@ -80,6 +80,34 @@ previous default and keeping the generic chart render anchor-free.
 {{- if .Values.auth.keycloak.tokenUrl -}}{{ .Values.auth.keycloak.tokenUrl }}{{- else if eq .Values.auth.mode "keycloak" -}}{{ printf "%s/protocol/openid-connect/token" (trimSuffix "/" (include "acme-agent.effectiveIssuerUrl" .)) }}{{- end -}}
 {{- end -}}
 
+{{- define "acme-agent.redhatSsoCredentialsSecretName" -}}
+{{- $name := .Values.auth.redhatSso.credentialsSecret.existingName | default .Values.auth.redhatSso.credentialsSecret.name -}}
+{{- if and (eq .Values.auth.mode "keycloak") .Values.auth.redhatSso.enabled (not $name) -}}
+{{- fail "auth.redhatSso.credentialsSecret.name (or existingName) is required when Red Hat SSO is enabled" -}}
+{{- end -}}
+{{- $name -}}
+{{- end -}}
+
+{{- define "acme-agent.validateRedhatSso" -}}
+{{- if and (eq .Values.auth.mode "keycloak") .Values.auth.redhatSso.enabled -}}
+{{- if ne .Values.auth.redhatSso.tokenType "agent" -}}
+{{- fail "auth.redhatSso.tokenType must be agent; Red Hat IdP user tokens are not implemented" -}}
+{{- end -}}
+{{- if not (or (eq .Values.auth.redhatSso.defaultEnvironment "production") (eq .Values.auth.redhatSso.defaultEnvironment "stage")) -}}
+{{- fail "auth.redhatSso.defaultEnvironment must be production or stage" -}}
+{{- end -}}
+{{- if not (index .Values.auth.redhatSso .Values.auth.redhatSso.defaultEnvironment).enabled -}}
+{{- fail "auth.redhatSso.defaultEnvironment must refer to an enabled Red Hat SSO environment" -}}
+{{- end -}}
+{{- range $environment := list "production" "stage" -}}
+{{- $config := index $.Values.auth.redhatSso $environment -}}
+{{- if and $config.enabled (not $config.tokenUrl) -}}
+{{- fail (printf "auth.redhatSso.%s.tokenUrl is required when that environment is enabled" $environment) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "acme-agent.effectiveTrustDomain" -}}
 {{- if .Values.identity.clusterSpiffeID.trustDomain -}}{{ .Values.identity.clusterSpiffeID.trustDomain }}{{- else -}}{{ include "acme-agent.appsDomain" . }}{{- end -}}
 {{- end -}}

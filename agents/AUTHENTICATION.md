@@ -234,10 +234,11 @@ Praxis has two modes, selected by `policy.enabled` (default `true`) in
   before any MCP call.
 
 **Why standalone runs router-only.** Two concrete reasons:
-1. The UI presents its **own** Red Hat SSO (stage) token, whose `azp` is **not**
-   `acme-agent`. Praxis's `azp == acme-agent` allow-list would reject it even if
-   everything else were fine, so letting the UI's own token reach OLS requires
-   dropping that gate at Praxis.
+1. A Red Hat SSO caller token is issued by an external issuer and is not the
+   local Keycloak `acme-agent` client token. ACME currently mints it as a
+   confidential-client agent token; a future user-token mode would preserve the
+   same issue. Praxis's local `azp == acme-agent` allow-list would reject the
+   external token even if everything else were fine.
 2. The pinned Praxis image's Rust HTTP client resolves the external SSO hosts to
    **IPv6** and does not fall back to IPv4; this cluster has IPv4-only egress, so
    Praxis's own JWKS fetch for `sso.redhat.com`/`sso.stage.redhat.com` fails
@@ -249,11 +250,46 @@ Praxis has two modes, selected by `policy.enabled` (default `true`) in
 longer enforces any caller allow-list, and OLS does **not** re-check `azp`. The
 effective gate becomes "a validly-signed token whose issuer/audience OLS trusts,
 from anyone who can reach the public Route." The meaningful constraint is the
-**per-issuer audience** — `openshift-lightspeed` for the Red Hat SSO issuers and
+**per-issuer audience** — `api.ask_red_hat` for the Red Hat SSO issuers and
 `lightspeed-a2a` for the local Keycloak issuer — so keep those audiences tight
 and specific. If you need a caller allow-list back (e.g. a non-sandbox
 deployment with IPv6 egress, or where the caller always presents a Keycloak
 token), leave `policy.enabled: true`.
+
+## ACME IdP selection and token debugging
+
+ACME's outbound Token A can now be minted from either the local Keycloak realm
+or Red Hat SSO production/stage. The choice is **request-scoped**, not a
+process-global setting: the embedded UI sends
+`X-ACME-Auth-Provider`, `X-ACME-Auth-Environment`, and
+`X-ACME-Auth-Token-Type`; ASGI middleware validates and binds those values to
+a `ContextVar`; and the shared outbound `httpx` client reads that context when
+it attaches `Authorization`. Concurrent browser conversations can therefore use
+different providers without cross-contaminating one another.
+
+The current Red Hat IdP implementation supports only the **agent token**
+(`grant_type=client_credentials`). ACME uses a confidential Red Hat SSO client
+ID and secret, both injected through an ExternalSecret. It does **not** exchange or
+rewrite that token: MAS receives it as Token A, validates its issuer/audience
+and principal, and passes it through unchanged. The Red Hat SSO client must be
+allowed to obtain the downstream audience (`api.ask_red_hat` in the standalone
+configuration), and its service-account principal must be added to MAS's
+`a2a.allowedPrincipals`.
+
+The UI presents a user-token choice for planning purposes, but selecting it is
+rejected before the agent runs. **TODO:** implement Red Hat IdP user login with
+authorization-code flow plus PKCE, registered redirect URIs, CSRF/state
+validation, a per-user token cache keyed by the browser session, and downstream
+validation identical to the agent-token path. The confidential client remains
+server-side; its secret must never be exposed to the browser.
+
+For debugging, `auth.tokenDebug.enabled=true` lets the UI generate a private,
+unguessable nonce and retrieve the outbound bearer token once from
+`/ui/auth/token/<nonce>` within `AUTH_TOKEN_DEBUG_TTL_SECONDS`. The response is
+`Cache-Control: no-store`, the entry is deleted on first retrieval, and the
+nonce is deliberately different from the logged `X-Request-Id`. The resulting
+UI section is collapsible and has a copy button. Disable token debug when not
+actively inspecting a token.
 
 ## RFC 8693 token exchange, step by step
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -18,6 +19,7 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from .auth import (
+    AuthSelectionMiddleware,
     DownstreamAuth,
     log_dispatch_audit,
     stamp_request_id,
@@ -146,7 +148,18 @@ async def healthz(request) -> JSONResponse:
 
 
 async def ui(request) -> HTMLResponse:
-    return HTMLResponse(UI_HTML)
+    options = json.dumps(AUTH.settings.ui_options()).replace("</", "<\\/")
+    return HTMLResponse(UI_HTML.replace("__AUTH_OPTIONS_JSON__", options))
+
+
+async def token_debug(request) -> JSONResponse:
+    token = AUTH.pop_debug_token(str(request.path_params["debug_id"]))
+    if token is None:
+        return JSONResponse({"detail": "token not found"}, status_code=404)
+    return JSONResponse(
+        token,
+        headers={"cache-control": "no-store"},
+    )
 
 
 @asynccontextmanager
@@ -170,6 +183,7 @@ _adk_app.routes.extend(
     [
         Route("/", ui, methods=["GET"]),
         Route("/ui", ui, methods=["GET"]),
+        Route("/ui/auth/token/{debug_id}", token_debug, methods=["GET"]),
         Route("/healthz", healthz, methods=["GET"]),
     ]
 )
@@ -180,5 +194,5 @@ _adk_app.routes.extend(
 # therefore served directly. The cluster-routing middleware (routing.py) and
 # registry (cluster_registry.py) are retained for the direct
 # ACME -> Praxis -> OLS path but intentionally not wired in here.
-a2a_app = _adk_app
+a2a_app = AuthSelectionMiddleware(_adk_app, AUTH.settings)
 

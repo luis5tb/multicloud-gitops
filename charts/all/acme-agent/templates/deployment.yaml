@@ -1,6 +1,7 @@
 {{- if and .Values.ztoIdentity.enabled .Values.identity.spiffe.enabled }}
 {{- fail "configure only one of ztoIdentity.enabled or identity.spiffe.enabled" }}
 {{- end }}
+{{- include "acme-agent.validateRedhatSso" . }}
 {{- if not .Values.litellm.enabled }}
 {{- fail "litellm.enabled must remain true: the local coordinator's model is configured through LiteLLM" }}
 {{- end }}
@@ -118,6 +119,12 @@ spec:
               value: {{ .Values.a2a.publicProtocol | quote }}
             - name: A2A_AUTH_MODE
               value: {{ .Values.auth.mode | quote }}
+            - name: A2A_AUTH_PROVIDER
+              value: {{ .Values.auth.defaultProvider | quote }}
+            - name: AUTH_TOKEN_DEBUG_ENABLED
+              value: {{ .Values.auth.tokenDebug.enabled | quote }}
+            - name: AUTH_TOKEN_DEBUG_TTL_SECONDS
+              value: {{ .Values.auth.tokenDebug.ttlSeconds | quote }}
             - name: A2A_TLS_VERIFY
               value: {{ .Values.auth.tlsVerify | quote }}
             - name: A2A_CA_BUNDLE
@@ -155,6 +162,42 @@ spec:
               value: {{ .Values.auth.keycloak.scope | quote }}
             - name: KEYCLOAK_TOKEN_REFRESH_SKEW
               value: {{ .Values.auth.keycloak.tokenRefreshSkew | quote }}
+            {{- if and (eq .Values.auth.mode "keycloak") .Values.auth.redhatSso.enabled }}
+            - name: REDHAT_SSO_DEFAULT_ENVIRONMENT
+              value: {{ .Values.auth.redhatSso.defaultEnvironment | quote }}
+            - name: REDHAT_SSO_TOKEN_TYPE
+              value: {{ .Values.auth.redhatSso.tokenType | quote }}
+            - name: REDHAT_SSO_SCOPE
+              value: {{ .Values.auth.redhatSso.scope | quote }}
+            {{- if .Values.auth.redhatSso.production.enabled }}
+            - name: REDHAT_SSO_PRODUCTION_TOKEN_URL
+              value: {{ .Values.auth.redhatSso.production.tokenUrl | quote }}
+            - name: REDHAT_SSO_PRODUCTION_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "acme-agent.redhatSsoCredentialsSecretName" . }}
+                  key: production-client-id
+            - name: REDHAT_SSO_PRODUCTION_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "acme-agent.redhatSsoCredentialsSecretName" . }}
+                  key: production-client-secret
+            {{- end }}
+            {{- if .Values.auth.redhatSso.stage.enabled }}
+            - name: REDHAT_SSO_STAGE_TOKEN_URL
+              value: {{ .Values.auth.redhatSso.stage.tokenUrl | quote }}
+            - name: REDHAT_SSO_STAGE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "acme-agent.redhatSsoCredentialsSecretName" . }}
+                  key: stage-client-id
+            - name: REDHAT_SSO_STAGE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "acme-agent.redhatSsoCredentialsSecretName" . }}
+                  key: stage-client-secret
+            {{- end }}
+            {{- end }}
             {{- if .Values.auth.staticTokenSecret.name }}
             - name: A2A_BEARER_TOKEN
               valueFrom:
