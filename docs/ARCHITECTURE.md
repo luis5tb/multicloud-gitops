@@ -299,3 +299,25 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   belt-and-suspenders `groups` mappers on both clients; re-verify after
   realm/mapper changes (see `charts/all/keycloak-oidc/README.md`
   "End-to-end verification" and `agents/AUTHENTICATION.md` Grant 2).
+- **Never let an LLM spell a transport header.** Observed live on the MAS
+  orchestrator: the planning LLM (Gemini, temperature 0.7) emitted the
+  routing header as `X_OLS_Cluster` -- underscores -- in 3 of 5 OLS
+  delegations, while the blueprint prompt showed the correct hyphenated
+  form. MAS forwards work-item `headers` verbatim on the outbound A2A
+  POST, and Praxis matches the `X-OLS-Cluster` name exactly (fail-closed,
+  no default route), so each misspelling became
+  `no route matched path=/a2a` -> HTTP 404 and the delegation was silently
+  lost -- intermittent ("sometimes works"), because the model spelling is
+  sampled per request. Nothing caught it sooner because the cluster id
+  *value* was always correct and praxis logs the 404 as a routine router
+  decision. Models habitually normalize hyphenated dict/JSON keys to
+  underscores, so any header whose name comes from model tool args is a
+  latent intermittent failure. Mitigated in the blueprint prompt (explicit
+  spelling rule + temperature 0, see `setup-mas-blueprint.sh`'s LIVE
+  FINDING); the durable fix is deterministic header injection in the MAS
+  image (canonicalize `X_OLS_*` -> `X-OLS-*`, or set it on the
+  `a2a_agent_node` instead of via model tool args). Related trap found
+  while fixing it: MAS `resource.save` rejects duplicates with 400
+  "exists for user", so re-running `setup-mas-blueprint.sh` used to
+  silently keep the stale resource config (a temperature change refused
+  to apply); the script now upserts via `resource.update`.

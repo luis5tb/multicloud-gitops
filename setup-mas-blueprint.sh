@@ -43,6 +43,41 @@ mas_api_curl() {
   curl "${MAS_API_CURL_TLS_ARGS[@]}" "$@"
 }
 
+# Create a MAS inventory resource, or update the already-registered
+# same-named one. resource.save rejects a duplicate (category, type, name)
+# with HTTP 400 "exists for user"; without this fallback a re-run of this
+# script silently kept the STALE config of the existing resource (the rid
+# lookup returned the old doc unchanged -- discovered live when a
+# temperature change refused to apply). Prints the save/update response
+# JSON (both carry .rid) on stdout; non-zero exit if neither is possible.
+mas_api_upsert_resource() {
+  local payload="$1" response rid category name
+  response=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
+    -H "Authorization: Bearer ${MAS_TOKEN}" \
+    -H "Content-Type: application/json" \
+    --data-binary "$payload")
+  rid=$(printf '%s' "$response" | jq -r '.rid // empty' 2>/dev/null || true)
+  if [ -n "$rid" ]; then
+    printf '%s\n' "$response"
+    return 0
+  fi
+  category=$(printf '%s' "$payload" | jq -r '.category')
+  name=$(printf '%s' "$payload" | jq -r '.name')
+  rid=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=${category}" \
+    -H "Authorization: Bearer ${MAS_TOKEN}" \
+    | jq -r ".resources[]? | select(.name == \"${name}\") | .rid" | head -1)
+  if [ -z "$rid" ]; then
+    echo "❌ resource.save failed and no existing ${category} resource named '${name}' found to update:" >&2
+    printf '%s\n' "$response" >&2
+    return 1
+  fi
+  printf '%s' "$payload" | jq --arg rid "$rid" '{resourceId: $rid, config: .config}' \
+    | mas_api_curl -sS -X PUT "${MAS_API_URL}/api/resources/resource.update" \
+      -H "Authorization: Bearer ${MAS_TOKEN}" \
+      -H "Content-Type: application/json" \
+      --data-binary @-
+}
+
 CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-bm-cluster.e2e.bos.redhat.com}"
 CLUSTER_ID="api-$(echo $CLUSTER_DOMAIN | sed 's/\./-/g')-6443"
 ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/ask/v1/a2a}"
@@ -50,6 +85,20 @@ ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/as
 # Shared by the registered orchestrator resource and the blueprint node. Ask
 # Red Hat's A2A node has an empty bearer_token so MAS can use the inbound
 # execution-context credential; do not place a token in this blueprint.
+#
+# LIVE FINDING (2026-10-22, bm-cluster): with only the "mandatory header"
+# bullet below and the planning LLM at temperature 0.7, Gemini emitted the
+# routing header name as X_OLS_Cluster (underscores) in 3 of 5 delegations.
+# MAS forwards work-item headers verbatim on the outbound A2A POST, Praxis
+# matches the X-OLS-Cluster header name exactly (fail-closed, no default
+# route), so every misspelling became "no route matched path=/a2a" -> HTTP
+# 404 and the delegation was silently lost. Models habitually normalize
+# hyphenated keys to underscores in dict/JSON-valued tool arguments, so the
+# prompt now states the spelling rule explicitly (with the wrong form named)
+# and the LLM registers at temperature 0. If this still proves unreliable,
+# the durable fix is in the MAS image: canonicalize the header name when
+# building the outbound request (see UPSTREAM_CONTRIBUTIONS.md), or set it
+# statically on the a2a_agent_node instead of via model tool args.
 ORCHESTRATOR_SYSTEM_MESSAGE=$(cat <<EOF
 You are an OpenShift investigation and Red Hat knowledge router. For every request, decide whether to use the OLS Investigator, Ask Red Hat, or both before finalizing.
 
@@ -65,6 +114,7 @@ ROUTING:
 - For documentation, product questions, how-to guidance, or other topics covered by an advertised Ask Red Hat Agent Card skill, delegate to Ask Red Hat.
 - If the user needs both live cluster findings and documentation or product guidance to interpret them, delegate to both agents in separate tasks. After each response, decide whether the other agent is still needed; do not finalize until every selected agent has responded.
 - For OLS calls, always use delegate_task and set data to {"headers": {"X-OLS-Cluster": "${CLUSTER_ID}"}}. This header is mandatory for every OLS delegation.
+- Copy the header name character for character: X-OLS-Cluster (uppercase, single hyphens). The name X_OLS_Cluster (underscores) or any other spelling is invalid: the gateway matches the header name literally, ignores a misspelled one, and rejects the request with HTTP 404, losing the entire delegation.
 - For Ask Red Hat calls, use the Ask Red Hat node and do not add the X-OLS-Cluster header.
 
 Synthesize the selected agents' results into one answer. Distinguish observed cluster facts from documentation-based guidance, and do not present documentation as evidence of the cluster's current state.
@@ -133,10 +183,12 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
     # api_key is ignored in Vertex mode (google-genai Client(vertexai=true)
     # authenticates via ADC/GOOGLE_APPLICATION_CREDENTIALS mounted in the
     # worker). vertexai/project/location go through the passthrough "extra".
-    LLM_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
-      -H "Authorization: Bearer ${MAS_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d '{
+    # temperature 0 (was 0.7): routing-header spelling in tool args must be
+    # deterministic -- see the LIVE FINDING comment above
+    # ORCHESTRATOR_SYSTEM_MESSAGE. max_tokens 64000: MAS defaults it to
+    # 8192 when unset, which is tight for multi-agent plan + synthesis
+    # turns; 64000 fits gemini-3.8-flash's 65536-token output cap.
+    LLM_PAYLOAD='{
         "category": "llms",
         "type": "google_genai",
         "name": "'"${LLM_NAME}"'",
@@ -144,10 +196,12 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
           "type": "google_genai",
           "model_name": "'"${VERTEX_MODEL}"'",
           "api_key": "unused-vertex-adc",
-          "temperature": 0.7,
+          "temperature": 0.0,
+          "max_tokens": 64000,
           "extra": {"vertexai": true, "project": "'"${VERTEX_PROJECT}"'", "location": "'"${VERTEX_LOCATION}"'"}
         }
-      }')
+      }'
+    LLM_RESPONSE=$(mas_api_upsert_resource "$LLM_PAYLOAD")
   else
     if [ -z "$LITELLM_API_KEY" ]; then
       echo "❌ Error: LITELLM_API_KEY required for LLM_PROVIDER=openai"
@@ -157,10 +211,12 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
     LLM_MODEL="${LITELLM_MODEL:-gpt-oss-20b}"
     LLM_BASE_URL="${LITELLM_API_BASE:-https://maas-rhdp.apps.maas.redhatworkshops.io/v1}"
     echo "1a. Registering OpenAI/LiteLLM LLM: ${LLM_MODEL}..."
-    LLM_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
-      -H "Authorization: Bearer ${MAS_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d '{
+    # temperature 0 (was 0.7): routing-header spelling in tool args must be
+    # deterministic -- see the LIVE FINDING comment above
+    # ORCHESTRATOR_SYSTEM_MESSAGE. max_tokens 64000: MAS defaults it to
+    # 8192 when unset, which is tight for multi-agent plan + synthesis
+    # turns; 64000 fits gemini-3.8-flash's 65536-token output cap.
+    LLM_PAYLOAD='{
         "category": "llms",
         "type": "openai",
         "name": "'"${LLM_NAME}"'",
@@ -169,9 +225,11 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
           "model_name": "'"${LLM_MODEL}"'",
           "api_key": "'"${LITELLM_API_KEY}"'",
           "base_url": "'"${LLM_BASE_URL}"'",
-          "temperature": 0.7
+          "temperature": 0.0,
+          "max_tokens": 64000
         }
-      }')
+      }'
+    LLM_RESPONSE=$(mas_api_upsert_resource "$LLM_PAYLOAD")
   fi
 
   LLM_RID=$(echo "$LLM_RESPONSE" | jq -r '.rid // empty')
@@ -185,7 +243,7 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
   # 1b. Register Orchestrator Node
   echo ""
   echo "1b. Registering Orchestrator Node..."
-  ORCH_RESPONSE=$(jq -n \
+  ORCH_PAYLOAD=$(jq -n \
     --arg llm "$LLM_RID" \
     --arg system_message "$ORCHESTRATOR_SYSTEM_MESSAGE" \
     '{
@@ -197,10 +255,8 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
         "llm": $llm,
         "system_message": $system_message
       }
-      }' | mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
-    -H "Authorization: Bearer ${MAS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    --data-binary @-)
+      }')
+  ORCH_RESPONSE=$(mas_api_upsert_resource "$ORCH_PAYLOAD")
 
   ORCH_RID=$(echo "$ORCH_RESPONSE" | jq -r '.rid // empty')
   if [ -z "$ORCH_RID" ]; then
@@ -217,17 +273,15 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
   # an external ref to a saved conditions resource.
   echo ""
   echo "1b2. Registering Router Condition..."
-  COND_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
-    -H "Authorization: Bearer ${MAS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d '{
+  COND_PAYLOAD='{
       "category": "conditions",
       "type": "router_direct",
       "name": "Multi-Cluster Orchestrator Router",
       "config": {
         "type": "router_direct"
       }
-    }')
+    }'
+  COND_RESPONSE=$(mas_api_upsert_resource "$COND_PAYLOAD")
   COND_RID=$(echo "$COND_RESPONSE" | jq -r '.rid // empty')
   if [ -z "$COND_RID" ]; then
     COND_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=conditions" \
@@ -241,10 +295,7 @@ fi
 if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
   echo ""
   echo "1c. Registering OpenShift Lightspeed A2A Agent Node..."
-  A2A_RESPONSE=$(mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
-    -H "Authorization: Bearer ${MAS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d '{
+  A2A_PAYLOAD='{
       "category": "nodes",
       "type": "a2a_agent_node",
       "name": "OpenShift Lightspeed Agent",
@@ -253,7 +304,8 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
         "bearer_token": "",
         "verify_ssl": true
       }
-    }')
+    }'
+  A2A_RESPONSE=$(mas_api_upsert_resource "$A2A_PAYLOAD")
 
   A2A_RID=$(echo "$A2A_RESPONSE" | jq -r '.rid // empty')
   if [ -z "$A2A_RID" ]; then
@@ -268,7 +320,7 @@ fi
 # authentication to the MAS execution context instead of storing a static token.
 echo ""
 echo "1d. Registering Ask Red Hat A2A Agent Node..."
-ASK_REDHAT_RESPONSE=$(jq -n \
+ASK_REDHAT_PAYLOAD=$(jq -n \
   --arg base_url "$ASK_REDHAT_A2A_URL" \
   '{
     "category": "nodes",
@@ -280,10 +332,8 @@ ASK_REDHAT_RESPONSE=$(jq -n \
       "bearer_token": "",
       "verify_ssl": true
     }
-  }' | mas_api_curl -sS -X POST "${MAS_API_URL}/api/resources/resource.save" \
-  -H "Authorization: Bearer ${MAS_TOKEN}" \
-  -H "Content-Type: application/json" \
-  --data-binary @-)
+  }')
+ASK_REDHAT_RESPONSE=$(mas_api_upsert_resource "$ASK_REDHAT_PAYLOAD")
 
 ASK_REDHAT_RID=$(echo "$ASK_REDHAT_RESPONSE" | jq -r '.rid // empty')
 if [ -z "$ASK_REDHAT_RID" ]; then
