@@ -334,7 +334,7 @@ spec:
         groups:
           - {{ printf "/%s" .Values.keycloak.adminGroupName | quote }}
       {{- end }}
-    {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
+    {{- if or .Values.keycloak.spiffeIdentityProvider.enabled .Values.keycloak.externalOidcProviders }}
     # Backs the two confidential agent clients' federated-jwt authentication
     # above. Config key names are this Keycloak build's actual internal
     # field names (verified against the running server), not the field
@@ -342,12 +342,14 @@ spec:
     # domain, not an OIDC issuer URL, because Keycloak's SpiffeIdentityProviderConfig
     # reuses the generic IdentityProviderModel.ISSUER config key for it.
     identityProviders:
+      {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
       - alias: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
         providerId: spiffe
         enabled: true
         config:
           issuer: {{ printf "spiffe://%s" (include "keycloak-oidc.effectiveTrustDomain" .) | quote }}
           bundleEndpoint: {{ .Values.keycloak.spiffeIdentityProvider.bundleEndpoint | quote }}
+      {{- end }}
     {{- end }}
     {{- if .Values.keycloak.externalOidcProviders }}
     {{- /* External OIDC providers trusted for token exchange. Keycloak validates
@@ -386,5 +388,19 @@ spec:
           tokenExchangeEnabled: "true"
           {{- end }}
     {{- end }}
+    {{- end }}
+    {{- if ne (include "keycloak-oidc.externalGroupMappings" .) "[]" }}
+    identityProviderMappers:
+      {{- range $provider := .Values.keycloak.externalOidcProviders }}
+      {{- $groups := default list .hardcodedGroups }}
+      {{- range $group := $groups }}
+      - name: {{ $group | quote }}
+        identityProviderAlias: {{ $provider.alias | quote }}
+        identityProviderMapper: hardcoded-group
+        config:
+          group: {{ printf "/%s" (trimPrefix "/" $group) | quote }}
+          syncMode: FORCE
+      {{- end }}
+      {{- end }}
     {{- end }}
 {{- end }}

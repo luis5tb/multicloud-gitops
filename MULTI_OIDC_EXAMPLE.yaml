@@ -71,6 +71,9 @@ keycloak-oidc:
         clientId: <red-hat-sso-client-id>
         isAccessTokenJWT: "true"
         allowTokenExchange: true
+        # Assigns brokered callers to the Keycloak group used by MCP RBAC.
+        hardcodedGroups:
+          - acme-agent-rca
       - alias: red-hat-sso-stage
         displayName: "Red Hat SSO Stage"
         issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
@@ -80,6 +83,8 @@ keycloak-oidc:
         clientId: <red-hat-sso-client-id>
         isAccessTokenJWT: "true"
         allowTokenExchange: true
+        hardcodedGroups:
+          - acme-agent-rca
 
 # =============================================================================
 # 4. MAS A2A - Multi-Issuer Token Validation (Optional)
@@ -134,11 +139,14 @@ mao-a2a:
 #    - Common options: 'preferred_username', 'email', 'sub'
 #    - Check a decoded token from your SSO to verify
 #
-# 5. **One-Shot Realm Import**: If you're adding externalOidcProviders to an
-#    existing realm, you'll need to either:
+# 5. **One-Shot Realm Import**: Adding a new externalOidcProviders entry to
+#    an existing realm still requires either:
 #    - Delete and recreate the realm (data loss!)
 #    - Manually configure in Keycloak Admin Console
 #    - Use Keycloak Admin REST API to add the identity providers
+#
+#    Once that provider exists, hardcodedGroups is not one-shot: the chart's
+#    PostSync reconciler creates or updates its Hardcoded Group mappers.
 #
 # 6. **Token Exchange Direction**: This configuration supports:
 #    External SSO → Keycloak exchange (for MCP tokens)
