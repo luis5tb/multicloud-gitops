@@ -849,7 +849,7 @@ clusterGroup:
         - name: a2a.allowedPrincipals[0]
           value: "94510bf9-b826-402b-a242-d4547e948d76"
         - name: a2a.allowedPrincipals[1]
-          value: "f94b90c3-8d5b-4f8f-9d88-4fdcf6cf2ed7"
+          value: "ff524661-b74a-4e10-bc24-4e71322e0852"
         - name: route.enabled
           value: "true"
         # - name: route.host
