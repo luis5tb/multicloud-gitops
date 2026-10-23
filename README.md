@@ -637,7 +637,7 @@ acme-agent:
     - name: a2a.remoteAgents[0].name
       value: mas_orchestrator
     - name: a2a.remoteAgents[0].description
-      value: "MAS A2A Orchestrator for OpenShift Lightspeed"
+      value: "MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat and OpenShift cluster investigation through OpenShift Lightspeed (OLS). Use for all Red Hat-related requests, including non-OpenShift questions; MAO selects the appropriate specialist(s)."
     - name: a2a.remoteAgents[0].endpoint
       # Must equal the MAS A2A base URL from Step 4 (MAS_A2A_URL), which is the
       # same value as mao-a2a's a2a.publicBaseUrl. With route.host unset, the
