@@ -69,3 +69,20 @@ the OTHER charts use. The deployer keeps the two equal (both default "rca").
 {{- define "keycloak-oidc.effectiveTrustDomain" -}}
 {{- if .Values.keycloak.spiffeIdentityProvider.trustDomain -}}{{ .Values.keycloak.spiffeIdentityProvider.trustDomain }}{{- else -}}{{ include "keycloak-oidc.appsDomain" . }}{{- end -}}
 {{- end -}}
+
+{{/*
+External IdP-to-group assignments, serialized as JSON so both the one-shot
+realm import and the existing-realm PostSync reconciler consume the same
+source of truth. Reconciliation matches by issuer first because the live IdP
+alias can drift when KeycloakRealmImport was initially created with another
+alias.
+*/}}
+{{- define "keycloak-oidc.externalGroupMappings" -}}
+{{- $mappings := list -}}
+{{- range .Values.keycloak.externalOidcProviders -}}
+{{- if .hardcodedGroups -}}
+{{- $mappings = append $mappings (dict "alias" .alias "issuerUrl" .issuerUrl "groups" .hardcodedGroups) -}}
+{{- end -}}
+{{- end -}}
+{{- $mappings | toJson -}}
+{{- end -}}

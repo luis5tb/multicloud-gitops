@@ -316,6 +316,11 @@ clusterGroup:
           value: "true"
         - name: keycloak.externalOidcProviders[0].allowTokenExchange
           value: "true"
+        # Every brokered Red Hat SSO caller gets the same read-only MCP RBAC
+        # identity. The reconciler matches by issuer, so the existing realm's
+        # older rh-sso-stage alias does not need to be renamed.
+        - name: keycloak.externalOidcProviders[0].hardcodedGroups[0]
+          value: acme-agent-rca
         - name: keycloak.externalOidcProviders[1].alias
           value: red-hat-sso-stage
         - name: keycloak.externalOidcProviders[1].displayName
@@ -334,6 +339,8 @@ clusterGroup:
           value: "true"
         - name: keycloak.externalOidcProviders[1].allowTokenExchange
           value: "true"
+        - name: keycloak.externalOidcProviders[1].hardcodedGroups[0]
+          value: acme-agent-rca
         # Namespace scope for lightspeed-mcp-rbac.yaml's Role/RoleBinding,
         # granting the keycloak:acme-agent-rca group read-only MCP access.
         # No override here -- left at the chart's own default (empty list,

@@ -141,6 +141,11 @@ keycloak-oidc:
         clientId: <red-hat-sso-client-id>
         isAccessTokenJWT: "true"
         allowTokenExchange: true
+        # Assigns every brokered caller from this IdP to the Keycloak group
+        # used by the MCP RBAC binding. Fresh imports render a Hardcoded
+        # Group mapper; existing realms are healed by the PostSync reconciler.
+        hardcodedGroups:
+          - acme-agent-rca
       - alias: red-hat-sso-stage
         displayName: "Red Hat SSO Stage"
         issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
@@ -150,6 +155,8 @@ keycloak-oidc:
         clientId: <red-hat-sso-client-id>
         isAccessTokenJWT: "true"
         allowTokenExchange: true
+        hardcodedGroups:
+          - acme-agent-rca
 ```
 
 This configuration tells Keycloak to:
@@ -157,6 +164,8 @@ This configuration tells Keycloak to:
 - Validate their signatures using the provided JWKS URLs
 - Validate the subject token via introspection and userinfo on Keycloak 26.4
 - Allow the exchange to proceed (issue Token B with Keycloak as issuer)
+- Assign every brokered caller from these providers to `acme-agent-rca`, so
+  Token B carries the `groups` claim required by the pattern's MCP RBAC binding
 
 **Note**: This is separate from browser-based "Login with Red Hat SSO" federation. This configuration is purely for validating externally-issued tokens during programmatic token exchange.
 
@@ -322,7 +331,7 @@ Update the image tag in `variants/standalone/values-standalone.yaml`:
 
 ## Limitations
 
-- **One-shot realm import**: Adding `externalOidcProviders` after the realm already exists requires manual configuration in Keycloak Admin Console or a realm re-import
+- **One-shot realm import**: Adding a new `externalOidcProviders` entry after the realm already exists still requires manual configuration or a realm re-import. Once that provider exists, its `hardcodedGroups` mappers are reconciled on every Argo CD sync
 - **Token exchange direction**: Only external → Keycloak exchange is supported (not Keycloak → external)
 - **No `act` claim**: Standard Keycloak V2 token exchange doesn't populate RFC 8693 `act` (actor) claim; audit trail is in logs only
 - **MAS A2A custom image**: Multi-issuer support for MAS A2A requires a custom-built image from the `uie-mas-hosted` repository with the changes described above

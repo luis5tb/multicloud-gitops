@@ -486,6 +486,16 @@ group (e.g. `cluster-admins`) and adding users to it. Everything downstream of
 that -- the claim appearing in tokens, the API server trusting it, and RBAC
 resolving it -- is what steps 1-3 above wire up automatically.
 
+External OIDC brokered users are different: Keycloak does not automatically
+put them in a local realm group when it exchanges their external token. Each
+`keycloak.externalOidcProviders[]` entry therefore supports
+`hardcodedGroups` (the standalone values use `acme-agent-rca` for both Red Hat
+SSO environments). A fresh realm import renders a `Hardcoded Group` IdP
+mapper; on an already-imported realm, `realm-secrets-reconciler-job.yaml`
+matches the provider by issuer URL and creates or updates that mapper. The
+mapper must run before the **next** token exchange -- an already-issued Token
+B does not retroactively gain a group claim.
+
 ## The five Keycloak clients
 
 Defined by `charts/all/keycloak-oidc`, in the `rca` realm. Conflating any of
@@ -1136,6 +1146,16 @@ has been validated on a live deployment of this Pattern.
   different from the chart value. The OLS image must also keep
   `subject_token_type=access_token`; the `650f5486` image rewrites external
   tokens to `jwt`, which Keycloak 26.4 rejects.
+- **A successful external-token exchange can still fail MCP RBAC as
+  `User "keycloak:<uuid>"` if Token B has no `groups` claim.** Hit live after
+  enabling Red Hat SSO exchange: the API server mapped the brokered subject
+  as an individual user, while `lightspeed-mcp-rbac.yaml` targets
+  `Group:keycloak:acme-agent-rca`. The fix is a `Hardcoded Group` mapper on
+  the external IdP (name `acme-agent-rca`, sync mode `Force`, group
+  `/acme-agent-rca`), now automated by
+  `keycloak.externalOidcProviders[].hardcodedGroups`. Reconcile it, then
+  repeat the request so OLS exchanges a fresh subject token; the old Token B
+  cannot gain the claim retroactively.
 - **OLS's MCP tool call fails with `<resource> is forbidden: User
   "keycloak:<uuid>" cannot list resource "<resource>"`, even though the
   whole identity chain (SPIFFE → Keycloak exchange → OIDC-mapped OpenShift
