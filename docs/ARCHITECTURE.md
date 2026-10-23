@@ -327,3 +327,8 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   "exists for user", so re-running `setup-mas-blueprint.sh` used to
   silently keep the stale resource config (a temperature change refused
   to apply); the script now upserts via `resource.update`.
+- **Red Hat SSO client-credentials requires service accounts enabled.**
+  Observed live as an ADK agent-card 401 that actually came from the SSO token
+  endpoint: `Client not enabled to retrieve service account`. External-secret
+  syncing and local mocked-token tests cannot detect that IdP policy, so ACME
+  now surfaces the OAuth error description.

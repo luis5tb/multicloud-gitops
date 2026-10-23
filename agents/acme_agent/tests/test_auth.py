@@ -84,6 +84,39 @@ def test_redhat_user_token_is_explicitly_unimplemented(
         _auth_selection.reset(selection)
 
 
+def test_redhat_token_error_surfaces_oauth_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth = DownstreamAuth(_settings(monkeypatch))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={
+                "error": "unauthorized_client",
+                "error_description": "Client not enabled to retrieve service account",
+            },
+        )
+
+    async def run() -> None:
+        await auth._token_client.aclose()
+        auth._token_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        selection = _auth_selection.set(
+            AuthSelection(provider="redhat", environment="stage", token_type="agent")
+        )
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="Client not enabled to retrieve service account",
+            ):
+                await auth.bearer_token()
+        finally:
+            _auth_selection.reset(selection)
+        await auth.close()
+
+    asyncio.run(run())
+
+
 def test_middleware_rejects_user_token_before_the_agent_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
