@@ -156,8 +156,10 @@ auth:
     tokenType: agent
     # Red Hat SSO clients commonly control token audience through OAuth scope.
     # The downstream MAS/OLS configuration in this pattern accepts
-    # api.ask_red_hat; override if your SSO client registration differs.
-    scope: api.ask_red_hat
+    # api.ask_red_hat; openid is also required so Keycloak 26.4 can call the
+    # issuer's userinfo endpoint during RFC 8693 token exchange. Override only
+    # if your SSO client registration differs.
+    scope: openid api.ask_red_hat
     credentialsSecret:
       name: acme-agent-redhat-sso
       # Optional pre-existing Secret with keys <environment>-client-id and

@@ -21,7 +21,7 @@ from acme_agent.auth import (
 def _settings(monkeypatch: pytest.MonkeyPatch) -> AuthSettings:
     monkeypatch.setenv("A2A_AUTH_MODE", "keycloak")
     monkeypatch.setenv("A2A_AUTH_PROVIDER", "keycloak")
-    monkeypatch.setenv("REDHAT_SSO_SCOPE", "api.ask_red_hat")
+    monkeypatch.setenv("REDHAT_SSO_SCOPE", "openid api.ask_red_hat")
     monkeypatch.setenv("REDHAT_SSO_STAGE_TOKEN_URL", "https://sso.example.test/token")
     monkeypatch.setenv("REDHAT_SSO_STAGE_CLIENT_ID", "acme-stage")
     monkeypatch.setenv("REDHAT_SSO_STAGE_CLIENT_SECRET", "stage-secret")
@@ -67,7 +67,7 @@ def test_redhat_agent_token_uses_client_credentials_and_debug_is_single_use(
     assert form["grant_type"] == ["client_credentials"]
     assert form["client_id"] == ["acme-stage"]
     assert form["client_secret"] == ["stage-secret"]
-    assert form["scope"] == ["api.ask_red_hat"]
+    assert form["scope"] == ["openid api.ask_red_hat"]
 
 
 def test_redhat_user_token_is_explicitly_unimplemented(

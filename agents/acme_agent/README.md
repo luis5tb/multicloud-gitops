@@ -207,7 +207,7 @@ The following settings are supported:
 | `A2A_CA_BUNDLE` | Optional path to a PEM CA bundle used to verify downstream A2A and Keycloak HTTPS connections |
 | `REDHAT_SSO_DEFAULT_ENVIRONMENT` | Default Red Hat IdP environment: `production` or `stage` |
 | `REDHAT_SSO_TOKEN_TYPE` | Must be `agent`; `user` is not implemented yet |
-| `REDHAT_SSO_SCOPE` | OAuth scope requested from Red Hat SSO; the pattern default is `api.ask_red_hat` |
+| `REDHAT_SSO_SCOPE` | OAuth scope requested from Red Hat SSO; the pattern default is `openid api.ask_red_hat` |
 | `REDHAT_SSO_PRODUCTION_TOKEN_URL` / `REDHAT_SSO_STAGE_TOKEN_URL` | Red Hat SSO token endpoints |
 | `REDHAT_SSO_PRODUCTION_CLIENT_ID` / `REDHAT_SSO_STAGE_CLIENT_ID` | Confidential Red Hat SSO client IDs, supplied from Kubernetes Secrets |
 | `REDHAT_SSO_PRODUCTION_CLIENT_SECRET` / `REDHAT_SSO_STAGE_CLIENT_SECRET` | Red Hat SSO client secrets, supplied from Kubernetes Secrets |

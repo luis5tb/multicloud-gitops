@@ -138,12 +138,22 @@ keycloak:
     #   displayName: Red Hat SSO Production
     #   issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
     #   jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+  #   # Required for Keycloak 26.4's standard token exchange:
+  #   # introspection and userinfo validation of the external subject token.
+  #   tokenIntrospectionUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
+  #   userInfoUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
+  #   clientId: <red-hat-sso-client-id>
+  #   isAccessTokenJWT: "true"
     #   # Optional: enable token exchange from this provider (default: true)
     #   allowTokenExchange: true
     # - alias: red-hat-sso-stage
     #   displayName: Red Hat SSO Stage
     #   issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
     #   jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+  #   tokenIntrospectionUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
+  #   userInfoUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
+  #   clientId: <red-hat-sso-client-id>
+  #   isAccessTokenJWT: "true"
     #   allowTokenExchange: true
   # Confidential client that exists only so lightspeed-mcp's RFC 8693 token
   # exchange has a real client_id to request as its `audience` parameter --

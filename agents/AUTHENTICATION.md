@@ -1123,6 +1123,19 @@ has been validated on a live deployment of this Pattern.
   `attributes["jwt.credential.sub"]`); a future full realm re-import would
   also pick up the new value, but re-importing an existing realm isn't
   something this pattern's chart does today.
+- **Red Hat SSO agent tokens need `openid` for Keycloak 26.4 exchange.**
+  Keycloak's standard token exchange validates an external subject token with
+  introspection **and** userinfo. A client-credentials token requested with
+  only `api.ask_red_hat` still reaches MAS, but OLS's exchange fails with the
+  generic `Keycloak token exchange failed`; Keycloak's event log then shows
+  `reason="user info call failure"`. A direct userinfo request with that token
+  returns HTTP 403. Request `openid api.ask_red_hat` from Red Hat SSO instead;
+  userinfo then returns the service-account `sub`. On the OLS side, send the
+  external issuer URL as `subject_issuer` rather than relying on the imported
+  Keycloak IdP alias, because a one-shot realm import can leave that alias
+  different from the chart value. The OLS image must also keep
+  `subject_token_type=access_token`; the `650f5486` image rewrites external
+  tokens to `jwt`, which Keycloak 26.4 rejects.
 - **OLS's MCP tool call fails with `<resource> is forbidden: User
   "keycloak:<uuid>" cannot list resource "<resource>"`, even though the
   whole identity chain (SPIFFE → Keycloak exchange → OIDC-mapped OpenShift

@@ -213,6 +213,12 @@ SPIFFE workload API must be mounted. The chart renders only current
 `A2A_SPIFFE_ENDPOINT_SOCKET`, and its timeout/cache variables. Inbound OIDC
 validation remains independent of RFC 8693 token exchange.
 
+The app-server image must be newer than `650f5486` when using Keycloak 26.4
+external-issuer exchange. Required behavior is to send external subject tokens
+as `subject_token_type=access_token` and include the issuer URL in
+`subject_issuer`; the older image rewrites the token type to `jwt` and
+Keycloak rejects the exchange.
+
 ### Optional private-Keycloak-CA trust (`appServerPatch.oidcTrust.enabled`)
 
 Inbound OIDC uses `httpx.AsyncClient(verify=True)`. For a private Keycloak

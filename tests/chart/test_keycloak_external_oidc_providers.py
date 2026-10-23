@@ -28,6 +28,10 @@ def test_external_oidc_providers_for_token_exchange() -> None:
             "displayName": "Red Hat SSO Production",
             "issuerUrl": "https://sso.redhat.com/auth/realms/redhat-external",
             "jwksUrl": "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs",
+            "tokenIntrospectionUrl": "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect",
+            "userInfoUrl": "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo",
+            "clientId": "red-hat-prod-client",
+            "isAccessTokenJWT": "true",
             "allowTokenExchange": "true",
         },
         {
@@ -35,6 +39,10 @@ def test_external_oidc_providers_for_token_exchange() -> None:
             "displayName": "Red Hat SSO Stage",
             "issuerUrl": "https://sso.stage.redhat.com/auth/realms/redhat-external",
             "jwksUrl": "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs",
+            "tokenIntrospectionUrl": "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect",
+            "userInfoUrl": "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo",
+            "clientId": "red-hat-stage-client",
+            "isAccessTokenJWT": "true",
             "allowTokenExchange": "true",
         },
     ]
@@ -78,6 +86,10 @@ def test_external_oidc_providers_for_token_exchange() -> None:
     assert sso_prod["config"]["jwksUrl"] == "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs"
     assert sso_prod["config"]["validateSignature"] == "true"
     assert sso_prod["config"]["useJwksUrl"] == "true"
+    assert sso_prod["config"]["tokenIntrospectionUrl"] == "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect"
+    assert sso_prod["config"]["userInfoUrl"] == "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo"
+    assert sso_prod["config"]["clientId"] == "red-hat-prod-client"
+    assert sso_prod["config"]["isAccessTokenJWT"] == "true"
     assert sso_prod["config"]["tokenExchangeEnabled"] == "true", (
         "allowTokenExchange must be true for OLS to exchange Red Hat SSO tokens"
     )
@@ -92,4 +104,8 @@ def test_external_oidc_providers_for_token_exchange() -> None:
     assert sso_stage["config"]["jwksUrl"] == "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs"
     assert sso_stage["config"]["validateSignature"] == "true"
     assert sso_stage["config"]["useJwksUrl"] == "true"
+    assert sso_stage["config"]["tokenIntrospectionUrl"] == "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect"
+    assert sso_stage["config"]["userInfoUrl"] == "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo"
+    assert sso_stage["config"]["clientId"] == "red-hat-stage-client"
+    assert sso_stage["config"]["isAccessTokenJWT"] == "true"
     assert sso_stage["config"]["tokenExchangeEnabled"] == "true"
