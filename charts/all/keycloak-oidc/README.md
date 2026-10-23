@@ -173,6 +173,20 @@ Verify it's active:
 oc get role,rolebinding -n <a namespace in lightspeedRbac.namespaces> <lightspeedRbac.roleName, default "lightspeed-mcp-investigate">
 ```
 
+### External Red Hat SSO token exchange
+
+Keycloak 26.4's standard V2 token exchange validates an external subject token
+with introspection and userinfo, not JWKS alone. When configuring
+`keycloak.externalOidcProviders` for Red Hat SSO, include the issuer's
+`tokenIntrospectionUrl`, `userInfoUrl`, and the Red Hat SSO client ID used to
+mint the subject token. ACME must request `openid api.ask_red_hat`; with only
+`api.ask_red_hat`, Red Hat's userinfo endpoint returns 403 and OLS sees only
+the generic `Keycloak token exchange failed` error.
+
+OLS should send the external issuer URL as `subject_issuer`. Keycloak accepts
+the issuer URL directly, which avoids depending on an imported IdP alias that
+can drift from chart values on a one-shot realm import.
+
 ### End-to-end verification
 
 This is genuinely two separate things to verify, only one of which can be

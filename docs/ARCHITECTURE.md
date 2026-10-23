@@ -211,6 +211,16 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   disable TLS verification. The local setup script's CA setting does not
   configure trust inside the pods. Praxis's service-ca bundle for its internal
   OLS upstream is a separate TLS hop and does not fix MAS-to-Route trust.
+- **Red Hat SSO agent tokens need `openid` for Keycloak 26.4 exchange.**
+  Keycloak's standard V2 exchange calls both introspection and userinfo after
+  receiving an external subject token. With only `api.ask_red_hat`, the Red Hat
+  client-credentials token passes introspection but Red Hat's userinfo endpoint
+  returns 403, surfacing in OLS only as `Keycloak token exchange failed`.
+  Request `openid api.ask_red_hat`, and configure OLS to send the external
+  issuer URL as `subject_issuer`; this avoids depending on an imported IdP
+  alias that can drift from chart values. The OLS image must also preserve
+  `subject_token_type=access_token`; the `650f5486` image rewrites external
+  tokens to `jwt`, which Keycloak 26.4 rejects.
 - **Cluster-id derivation must match exactly, everywhere.** The algorithm
   (`agents/acme_agent/src/acme_agent/cluster_registry.py`'s
   `derive_cluster_id`) is `f"{host}:{port}".replace(".", "-").replace(":",

@@ -1,5 +1,7 @@
 # Multi-OIDC Configuration Example
 # Add these sections to variants/standalone/values-standalone.yaml to enable multi-OIDC support
+# ACME must request `openid api.ask_red_hat` from Red Hat SSO; Keycloak 26.4
+# calls userinfo during token exchange.
 
 # =============================================================================
 # 1. PRAXIS PROXY - Multi-Issuer Token Validation (Optional)
@@ -64,11 +66,19 @@ keycloak-oidc:
         displayName: "Red Hat SSO Production"
         issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        tokenIntrospectionUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
+        userInfoUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
+        clientId: <red-hat-sso-client-id>
+        isAccessTokenJWT: "true"
         allowTokenExchange: true
       - alias: red-hat-sso-stage
         displayName: "Red Hat SSO Stage"
         issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        tokenIntrospectionUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
+        userInfoUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
+        clientId: <red-hat-sso-client-id>
+        isAccessTokenJWT: "true"
         allowTokenExchange: true
 
 # =============================================================================

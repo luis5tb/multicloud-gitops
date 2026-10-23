@@ -363,6 +363,18 @@ spec:
         config:
           issuer: {{ .issuerUrl | quote }}
           jwksUrl: {{ .jwksUrl | quote }}
+          {{- if .tokenIntrospectionUrl }}
+          tokenIntrospectionUrl: {{ .tokenIntrospectionUrl | quote }}
+          {{- end }}
+          {{- if .userInfoUrl }}
+          userInfoUrl: {{ .userInfoUrl | quote }}
+          {{- end }}
+          {{- if .clientId }}
+          clientId: {{ .clientId | quote }}
+          {{- end }}
+          {{- if .isAccessTokenJWT }}
+          isAccessTokenJWT: {{ .isAccessTokenJWT | quote }}
+          {{- end }}
           validateSignature: "true"
           useJwksUrl: "true"
           # Allow this provider's tokens to be used in token exchange
