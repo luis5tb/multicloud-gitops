@@ -6,18 +6,20 @@ of several configurable downstream A2A sub-agents. It also serves a browser UI
 from the same HTTP service.
 
 The exposed `acme_agent` is a local ADK coordinator agent. Its configured
-`RemoteA2aAgent` children are downstream peers, not the public entrypoint. The
-coordinator validates that the user named an allow-listed cluster API URL,
-selects a peer using its description, transfers to that peer, and lets the
-peer answer the user directly.
+`RemoteA2aAgent` children are downstream peers, not the public entrypoint. In
+the standalone deployment, ACME delegates Red Hat-related questions to the MAO
+workflow, which selects Ask Red Hat for product/project/documentation guidance,
+OpenShift Lightspeed (OLS) for cluster investigation, or both. ACME must not
+reject a question just because it is not explicitly about OpenShift or does not
+include a cluster URL; MAO owns specialist selection and cluster validation.
 
 Each peer is attached via `sub_agents=` (not wrapped in `AgentTool`). The
 root LLM delegates with `transfer_to_agent`; ADK's `RemoteA2aAgent` then
 calls the remote with `message/stream` and yields each remote event
 (`TaskStatusUpdate` / `TaskArtifactUpdate` / `Message`) incrementally. As a
 `sub_agent`, those events propagate through this agent's own A2A
-`message/stream` response, so OpenShift Lightspeed's per-iteration progress
-and final answer stream straight to the caller.
+`message/stream` response, so the downstream workflow's progress and final
+answer stream straight to the caller.
 
 `AgentTool` was used here before, but `AgentTool.run_async` buffers the
 sub-agent down to a single return value -- under `message/stream` that emits
@@ -28,11 +30,11 @@ the default mode streams events and treats stream end /
 `TASK_STATE_COMPLETED` as completion. See `agents/AUTHENTICATION.md` for
 the identity chain on each delegated call.
 
-Before the ADK agent runs at all, `ClusterRoutingMiddleware` extracts the
-cluster API URL from the inbound JSON-RPC message, canonicalizes it against
-the GitOps-managed `global.olsClusters` allow-list, and binds the derived
-id to the request (`X-OLS-Cluster` on outbound POSTs only). Unknown or
-missing URLs are rejected with a JSON-RPC error -- fail closed.
+The current ACME → MAO deployment does not validate a cluster URL at ACME's
+entrypoint. MAO selects and validates the target cluster and adds
+`X-OLS-Cluster` on its call to Praxis. The old `ClusterRoutingMiddleware` and
+cluster registry remain in the source for the direct ACME → Praxis → OLS path,
+but are intentionally not wired into the deployed app.
 
 ## Project layout
 
@@ -352,17 +354,15 @@ acme-agent:
       value: quay.io/<your-quay-org>/acme-agent
     - name: image.tag
       value: <immutable-tag>
-    # The Praxis gateway's edge-TLS Route in front of OpenShift Lightspeed,
-    # not its in-cluster Service DNS name -- google-adk's RemoteA2aAgent
-    # requires https (or loopback) for any agent card it fetches. See
-    # agents/AUTHENTICATION.md. A single downstream agent is still a
-    # one-item a2a.remoteAgents list.
+    # The MAO A2A Route. MAO chooses Ask Red Hat and/or OLS for each request;
+    # google-adk's RemoteA2aAgent requires https (or loopback) for any agent
+    # card it fetches. A single downstream agent is still a one-item list.
     - name: a2a.remoteAgents[0].name
-      value: openshift_lightspeed
+      value: mas_orchestrator
     - name: a2a.remoteAgents[0].description
-      value: Answers OpenShift questions and investigates cluster incidents using OpenShift Lightspeed grounded against the live cluster via its OpenShift MCP tools.
+      value: MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat and OpenShift cluster investigation through OpenShift Lightspeed (OLS). Use for all Red Hat-related requests, including non-OpenShift questions; MAO selects the appropriate specialist(s).
     - name: a2a.remoteAgents[0].endpoint
-      value: https://<praxis-route>
+      value: https://<mao-a2a-route>
     - name: auth.mode
       value: keycloak
     - name: auth.keycloak.issuerUrl

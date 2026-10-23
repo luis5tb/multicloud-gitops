@@ -26,6 +26,7 @@ from .auth import (
 )
 from .config import agent_card_url, remote_agents_from_env
 from .ols_mode import ols_mode_remote_agent_config
+from .routing_prompt import ROUTER_INSTRUCTION
 from .ui import UI_HTML
 
 
@@ -119,26 +120,10 @@ root_agent = Agent(
     model=_model(),
     name=os.getenv("AGENT_NAME", "acme_agent"),
     description=(
-        "A local A2A entrypoint that routes requests to configured downstream "
-        "A2A agents."
+        "A local A2A entrypoint that routes Red Hat-related requests through "
+        "configured downstream workflows, including the MAO orchestrator."
     ),
-    instruction=(
-        "You are the ACME A2A entrypoint and router. Delegate every request "
-        "to the appropriate configured downstream agent by transferring to "
-        "it, preserving the user's full request verbatim -- including any "
-        "OpenShift cluster API URL the user stated -- without rewriting, "
-        "summarizing, reordering, or dropping details.\n\n"
-        "You do NOT select, validate, or ask for the target OpenShift "
-        "cluster: the downstream MAS A2A orchestrator owns cluster selection "
-        "and enforcement. Do not reject a request for a missing cluster URL "
-        "and do not add, guess, or infer one yourself -- just pass the "
-        "user's message through unchanged and let the downstream agent handle "
-        "it.\n\n"
-        "The downstream agent answers the user directly -- do not restate, "
-        "summarize, wrap, or add commentary to its response, and do not answer "
-        "from your own knowledge. If no configured downstream agent is "
-        "suitable, explain that the request cannot be routed."
-    ),
+    instruction=ROUTER_INSTRUCTION,
     sub_agents=remote_agents,
 )
 
@@ -195,4 +180,3 @@ _adk_app.routes.extend(
 # registry (cluster_registry.py) are retained for the direct
 # ACME -> Praxis -> OLS path but intentionally not wired in here.
 a2a_app = AuthSelectionMiddleware(_adk_app, AUTH.settings)
-

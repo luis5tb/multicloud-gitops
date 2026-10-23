@@ -15,14 +15,15 @@ as Applications, parameterized per-cluster by `variants/<variant>/values-
 <variant>.yaml` (currently only `standalone` is live; `hub` exists but is
 not the focus of this work).
 
-This branch's actual payload is an **agentic OpenShift investigation
-pattern**: a chat agent (ACME, built on Google's ADK) that answers "what's
-wrong with my cluster" questions by delegating to OpenShift Lightspeed
-(OLS), which uses MCP tools to actually query the live cluster -- with the
-caller's identity propagated end-to-end through Keycloak + SPIFFE + an RFC
-8693 token exchange, so the resulting RBAC check is attributed to the real
-caller, not to OLS's own service account. A Praxis Policy Engine gateway
-sits in front of OLS enforcing the caller allow-list.
+This branch's actual payload is an **agentic Red Hat assistance pattern**: a
+chat agent (ACME, built on Google's ADK) delegates Red Hat-related questions
+to the MAO workflow. MAO can use Ask Red Hat for product, project, and
+documentation guidance, OpenShift Lightspeed (OLS) for cluster investigation,
+or both. OLS uses MCP tools to query the live cluster -- with the caller's
+identity propagated end-to-end through Keycloak + SPIFFE + an RFC 8693 token
+exchange, so the resulting RBAC check is attributed to the real caller, not to
+OLS's own service account. A Praxis Policy Engine gateway sits in front of OLS
+enforcing the caller allow-list.
 
 This replaces an earlier "RCA agent" + OPA-based pattern that lived in this
 same repo; you may still see comments/leftovers referencing "RCA" or

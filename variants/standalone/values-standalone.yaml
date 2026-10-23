@@ -497,7 +497,7 @@ clusterGroup:
           # it became "3.425697e+07", which then fails to parse as an image
           # reference -- InvalidImageName). Always quote tags that could be
           # all-digits.
-          value: "ec6ec017"
+          value: "db41b3fb"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
@@ -519,7 +519,7 @@ clusterGroup:
         - name: a2a.remoteAgents[0].name
           value: mas_orchestrator
         - name: a2a.remoteAgents[0].description
-          value: "MAS A2A Orchestrator for OpenShift Lightspeed"
+          value: "MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat and OpenShift cluster investigation through OpenShift Lightspeed (OLS). Use for all Red Hat-related requests, including non-OpenShift questions; MAO selects the appropriate specialist(s)."
         - name: a2a.remoteAgents[0].endpoint
           value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
         # Outbound OLS mode (metadata.ols_mode); chart default is troubleshooting.
