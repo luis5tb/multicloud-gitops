@@ -43,8 +43,10 @@ inbound orchestrator. No fixture ID is configured by this chart.
 
 The allow-list matches the validated JWT `user_id` or `sub` claim exactly. For
 the Keycloak validator, the subject is normally the opaque Keycloak user `sub`,
-not a username, group, or email address. Obtain it from an authorized test
-token's decoded claims; never log or copy the token itself. The chart fails
+not a username, group, or email address. For a Red Hat SSO
+`client_credentials` token, use its opaque service-account `sub`; it can differ
+from `azp` and the OAuth `client_id`. Obtain the principal from an authorized
+test token's decoded claims; never log or copy the token itself. The chart fails
 rendering when enabled without the blueprint, principal allow-list, production
 issuer/audience, or pinned image configuration.
 
