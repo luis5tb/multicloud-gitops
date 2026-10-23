@@ -253,9 +253,10 @@ appServerPatch:
     # auth settings while applying that configuration.
     exchangeAudience: openshift-mcp
     exchangeClientAssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
-    # Maps EXTERNAL caller-token issuers to the Keycloak identity-provider alias
-    # that brokers each one (alias must match keycloak-oidc's
-    # externalOidcProviders[*].alias). The chart serializes this list into the
+    # Maps EXTERNAL caller-token issuers to the value sent as Keycloak's
+    # subject_issuer. Use the issuer URL on Keycloak 26.4; it is accepted
+    # directly and avoids depending on the imported IdP alias. The chart
+    # serializes this list into the
     # A2A_EXCHANGE_SUBJECT_ISSUER_MAP JSON object env var; when a caller token's
     # iss matches, a2a_auth.py adds subject_issuer to the RFC 8693 exchange so
     # Keycloak validates the external token via that IdP. Empty = native-only

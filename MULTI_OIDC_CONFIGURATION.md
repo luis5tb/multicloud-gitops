@@ -38,6 +38,7 @@ This guide explains how to configure the Validated Pattern to support tokens fro
 2. **Token exchange happens ONLY against Keycloak** (the local instance deployed by the pattern)
 3. **Keycloak trusts** the external issuers via Identity Provider configuration
 4. **Praxis validates** tokens from all configured issuers (optional - can be disabled to let OLS handle all validation)
+5. **ACME requests `openid api.ask_red_hat`** from Red Hat SSO so Keycloak 26.4 can call the issuer's userinfo endpoint during token exchange
 
 ## Configuration Steps
 
@@ -135,17 +136,26 @@ keycloak-oidc:
         displayName: "Red Hat SSO Production"
         issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        tokenIntrospectionUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
+        userInfoUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
+        clientId: <red-hat-sso-client-id>
+        isAccessTokenJWT: "true"
         allowTokenExchange: true
       - alias: red-hat-sso-stage
         displayName: "Red Hat SSO Stage"
         issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
+        tokenIntrospectionUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
+        userInfoUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
+        clientId: <red-hat-sso-client-id>
+        isAccessTokenJWT: "true"
         allowTokenExchange: true
 ```
 
 This configuration tells Keycloak to:
 - Trust tokens from these external issuers **when used as subject_token in RFC 8693 token exchange**
 - Validate their signatures using the provided JWKS URLs
+- Validate the subject token via introspection and userinfo on Keycloak 26.4
 - Allow the exchange to proceed (issue Token B with Keycloak as issuer)
 
 **Note**: This is separate from browser-based "Login with Red Hat SSO" federation. This configuration is purely for validating externally-issued tokens during programmatic token exchange.

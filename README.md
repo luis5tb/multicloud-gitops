@@ -86,6 +86,10 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     and defaults to disabled. This pattern must enable it explicitly alongside
     OIDC inbound validation; otherwise OLS sends the caller's original token
     to MCP instead of exchanging it for an `openshift-mcp`-audience token.
+    The image must also include the Keycloak 26.4 exchange fix that sends
+    external tokens as `subject_token_type=access_token` with the external
+    issuer URL in `subject_issuer`; the older `650f5486` image rewrites the
+    token type to `jwt` and Keycloak rejects the exchange.
     OLS now uses its configured OIDC authentication module for both A2A and
     the stock REST API; clients of `/v1/*` that previously used OpenShift
     ServiceAccount tokens must be retested with OIDC credentials. Praxis
