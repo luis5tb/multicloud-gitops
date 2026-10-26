@@ -340,11 +340,28 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   spelling rule + temperature 0, see `setup-mas-blueprint.sh`'s LIVE
   FINDING); the durable fix is deterministic header injection in the MAS
   image (canonicalize `X_OLS_*` -> `X-OLS-*`, or set it on the
-  `a2a_agent_node` instead of via model tool args). Related trap found
+  `a2a_agent_node` instead of via model tool args).
+  **Recurrence (2026-10-23, live via scripts/monitor.sh):** the prompt
+  mitigation reduced but did not eliminate it -- Praxis still 404'd 12 of
+  41 `/a2a` POSTs in 72h *after* the temperature-0 blueprint re-save, and
+  the worker's `tool.execute`/`applying_runtime_headers` lines still show
+  `X_OLS_Cluster` in the args. The monitor's MISSPELLED ROUTING HEADER and
+  PRAXIS NO ROUTE cards exist to catch exactly this; the durable in-image
+  fix remains outstanding. Related trap found
   while fixing it: MAS `resource.save` rejects duplicates with 400
   "exists for user", so re-running `setup-mas-blueprint.sh` used to
   silently keep the stale resource config (a temperature change refused
   to apply); the script now upserts via `resource.update`.
+- **Each MAS stage mints its own request id -- `request_id` does not join
+  across the orchestrated flow.** Observed live (2026-10-23): the MAO A2A
+  endpoint's middleware logged its own dashed-UUID `request_id` for an
+  inbound POST, while OLS's `a2a_audit` for the same request (correlated
+  by time) logged a different hex id; ACME's `X-Request-Id` never
+  reappears downstream of MAS. The ACME↔OLS `request_id` join documented
+  in `agents/AUTHENTICATION.md` only works for the Phase-1 direct flow;
+  with MAS in the path, trace by time window (every card in
+  `scripts/monitor.sh` carries a wall-clock timestamp) or by Keycloak
+  Realm Events, not by id.
 - **Red Hat SSO client-credentials requires service accounts enabled.**
   Observed live as an ADK agent-card 401 that actually came from the SSO token
   endpoint: `Client not enabled to retrieve service account`. External-secret

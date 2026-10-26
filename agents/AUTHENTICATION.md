@@ -839,8 +839,18 @@ the same id (neither line ever contains a token):
 ```bash
 # From the acme-agent log above, grab the request_id, then:
 oc logs -n acme-agent    -l app.kubernetes.io/name=acme-agent | grep "acme_audit" | grep "<request_id>"
-oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server | grep "a2a_audit" | grep "<request_id>"
+oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server -c lightspeed-service-api | grep "a2a_audit" | grep "<request_id>"
 ```
+
+**This join only holds for the direct flow (ACME → Praxis → OLS).** With MAS
+in the path (the orchestrated flow above), each MAS stage mints its own
+request id and ACME's `X-Request-Id` never reappears downstream -- observed
+live: the MAO A2A endpoint's middleware logged its own dashed-UUID id for an
+inbound POST while OLS's `a2a_audit` for the same request (correlated by
+time) logged a different hex id. Trace the orchestrated flow by time window
+instead -- `scripts/monitor.sh` timestamps every card for exactly this --
+or by Keycloak Realm Events (below), which records each grant/exchange
+regardless of header propagation.
 
 ## Separate trust boundary: inbound MAS A2A (with token passthrough)
 
