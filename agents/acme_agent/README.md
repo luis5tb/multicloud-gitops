@@ -266,6 +266,39 @@ stores the outbound token under that nonce, and the UI retrieves it once from
 not the logged `X-Request-Id`. Disable this value when token inspection is no
 longer needed.
 
+### Token renewal
+
+Downstream work can outlive Token A. A downstream A2A agent then either
+answers HTTP 401, or pauses its task in `TASK_STATE_AUTH_REQUIRED` and waits
+for a follow-up message on that task carrying a fresh token. MAS and OpenShift
+Lightspeed both behave this way. ACME's HTTP client renews transparently
+(`renewal.py`): it mints a new Token A for the same identity provider and
+environment the request started with, resends the request (401) or sends the
+follow-up on the paused task, and splices the new response in place of the
+paused one. ADK never sees the pause. A Red Hat SSO stage task is therefore
+always renewed with a stage token: MAS scopes tasks by the token's subject, so
+a token from another provider would not match the task.
+
+`auth.renewal.maxRenewals` (default 2) bounds renewals per downstream call;
+after that, or if no token can be minted, the auth-required state reaches the
+caller unchanged. Keep `auth.keycloak.tokenRefreshSkew` (default 90) above the
+MAS worker's `credentialRenewal.minValiditySeconds` (60): a cached token with
+less validity left would be refused as a renewal.
+
+### Pasted tokens (testing)
+
+With `auth.tokenOverride.enabled=true`, the UI offers "Use a pasted token for
+the next request". The pasted token replaces Token A for that request's first
+downstream call only; renewals mint fresh tokens with the selected provider,
+so paste a token from that same provider. Combined with the token debug view,
+this lets you reuse an earlier, now expired token (MAS answers 401) or a token
+that is about to expire. Anyone with UI access could send arbitrary tokens
+through ACME while this is on, so keep it off outside test environments.
+
+`python -m acme_agent.mint_token [--provider redhat --environment stage]`
+prints a freshly minted Token A inside the pod. It is used by
+`scripts/a2a-renewal-scenarios.py`.
+
 **TODO: Red Hat IdP user tokens.** Use authorization-code flow with PKCE, a
 per-user token cache keyed by the browser session, redirect URI registration,
 CSRF/state validation, and the same downstream issuer/audience checks. The

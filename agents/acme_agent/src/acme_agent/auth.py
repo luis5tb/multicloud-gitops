@@ -28,6 +28,9 @@ _auth_selection: ContextVar[AuthSelection | None] = ContextVar(
     "acme_auth_selection", default=None
 )
 _token_debug_id: ContextVar[str] = ContextVar("acme_token_debug_id", default="")
+_token_override: ContextVar[TokenOverride | None] = ContextVar(
+    "acme_token_override", default=None
+)
 
 
 def _tls_context_trusting(ca_bundle: str) -> ssl.SSLContext:
@@ -65,6 +68,11 @@ AUTH_PROVIDER_HEADER = "X-ACME-Auth-Provider"
 AUTH_ENVIRONMENT_HEADER = "X-ACME-Auth-Environment"
 AUTH_TOKEN_TYPE_HEADER = "X-ACME-Auth-Token-Type"
 TOKEN_DEBUG_ID_HEADER = "X-ACME-Token-Debug-Id"
+# Testing aid, accepted only when ACME_ALLOW_TOKEN_OVERRIDE=true: a bearer
+# token pasted in the UI that replaces Token A for this request's downstream
+# call. Renewals always mint fresh tokens with the selected provider.
+TOKEN_OVERRIDE_HEADER = "X-ACME-Auth-Token"
+MAX_OVERRIDE_TOKEN_LENGTH = 16384
 
 
 class SpiffeIdentityError(RuntimeError):
@@ -76,6 +84,28 @@ class AuthSelection:
     provider: str
     environment: str
     token_type: str
+
+
+@dataclass
+class TokenOverride:
+    """A pasted token for one inbound request, until a renewal replaces it.
+
+    Mutable on purpose: the renewal transport deactivates it from inside the
+    downstream response stream, and that change must be visible to any later
+    downstream call made for the same inbound request.
+    """
+
+    token: str
+    active: bool = True
+
+
+@dataclass(frozen=True)
+class CapturedAuth:
+    """Request-scoped auth state captured when a downstream call was sent."""
+
+    selection: AuthSelection | None
+    override: TokenOverride | None
+    debug_id: str
 
 
 @dataclass(frozen=True)
@@ -112,6 +142,7 @@ class AuthSettings:
     redhat_environments: dict[str, RedHatSsoEnvironment]
     token_debug_enabled: bool
     token_debug_ttl: float
+    token_override_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "AuthSettings":
@@ -175,6 +206,7 @@ class AuthSettings:
             },
             token_debug_enabled=env_bool(os.getenv("AUTH_TOKEN_DEBUG_ENABLED")),
             token_debug_ttl=float(os.getenv("AUTH_TOKEN_DEBUG_TTL_SECONDS", "300")),
+            token_override_enabled=env_bool(os.getenv("ACME_ALLOW_TOKEN_OVERRIDE")),
         )
 
     def redhat_environment(self, environment: str) -> RedHatSsoEnvironment | None:
@@ -209,6 +241,8 @@ class AuthSettings:
             "redHatEnabled": any(item["available"] for item in environments),
             "environments": environments,
             "tokenDebugEnabled": self.token_debug_enabled,
+            "tokenOverrideEnabled": self.token_override_enabled
+            and self.mode != "none",
         }
 
 
@@ -443,14 +477,27 @@ class DownstreamAuth:
         )
         return token
 
-    async def bearer_token(self) -> str:
-        if self.settings.mode == "none":
-            return ""
-        selection = _auth_selection.get() or AuthSelection(
+    def _default_selection(self) -> AuthSelection:
+        return AuthSelection(
             provider=self.settings.default_provider,
             environment=self.settings.redhat_default_environment,
             token_type=self.settings.redhat_default_token_type,
         )
+
+    async def bearer_token(
+        self,
+        selection: AuthSelection | None = None,
+        *,
+        override: TokenOverride | None = None,
+        force_refresh: bool = False,
+    ) -> str:
+        if self.settings.mode == "none":
+            return ""
+        selection = selection or _auth_selection.get() or self._default_selection()
+        override = override if override is not None else _token_override.get()
+        if override is not None and override.active and override.token:
+            self._store_debug_token(override.token, selection)
+            return override.token
         if self.settings.mode == "static":
             token = os.getenv("A2A_BEARER_TOKEN", "").strip()
             if not token:
@@ -465,6 +512,8 @@ class DownstreamAuth:
                 raise RuntimeError("A2A_AUTH_PROVIDER must be keycloak or redhat")
             if selection.provider == "keycloak":
                 cache_key = ("keycloak", "", "")
+                if force_refresh:
+                    self._tokens.pop(cache_key, None)
                 cached = self._cached_token(cache_key)
                 if cached:
                     token = cached
@@ -483,6 +532,8 @@ class DownstreamAuth:
                     "agent token type"
                 )
             cache_key = ("redhat", selection.environment, "agent")
+            if force_refresh:
+                self._tokens.pop(cache_key, None)
             cached = self._cached_token(cache_key)
             if cached:
                 token = cached
@@ -543,6 +594,43 @@ class DownstreamAuth:
         token = await self.bearer_token()
         if token:
             request.headers["Authorization"] = f"Bearer {token}"
+        if self.settings.zto_forward_identity:
+            identity = self._identity_token(required=True)
+            request.headers[self.settings.zto_identity_header] = identity
+
+    def renewal_supported(self) -> bool:
+        """Whether ACME can mint a fresh token when a downstream asks for one."""
+        return self.settings.mode == "keycloak"
+
+    def capture(self) -> CapturedAuth:
+        """Snapshot the request-scoped selection for later renewals."""
+        return CapturedAuth(
+            selection=_auth_selection.get(),
+            override=_token_override.get(),
+            debug_id=_token_debug_id.get(),
+        )
+
+    async def reauthorize(self, request: httpx.Request, captured: CapturedAuth) -> None:
+        """Attach a freshly minted token for the captured provider selection.
+
+        A downstream refused the current token, so a pasted override token is
+        retired and the cached token for this selection is never reused: the
+        renewal must carry a different, newly issued token for the same
+        principal (same provider and environment as the original call).
+        """
+        if captured.override is not None:
+            captured.override.active = False
+        selection = captured.selection or self._default_selection()
+        debug_token = _token_debug_id.set(captured.debug_id)
+        try:
+            token = await self.bearer_token(
+                selection, override=captured.override, force_refresh=True
+            )
+        finally:
+            _token_debug_id.reset(debug_token)
+        if not token:
+            raise RuntimeError("No downstream token could be minted for renewal")
+        request.headers["Authorization"] = f"Bearer {token}"
         if self.settings.zto_forward_identity:
             identity = self._identity_token(required=True)
             request.headers[self.settings.zto_identity_header] = identity
@@ -637,6 +725,19 @@ class AuthSelectionMiddleware:
         else:
             selection = AuthSelection(provider, "", "")
 
+        override_token = _header(scope, TOKEN_OVERRIDE_HEADER)
+        if override_token:
+            if not self.settings.token_override_enabled or self.settings.mode == "none":
+                await self._reject(scope, send, "Token override is not enabled")
+                return
+            if (
+                len(override_token) > MAX_OVERRIDE_TOKEN_LENGTH
+                or not override_token.isprintable()
+                or " " in override_token
+            ):
+                await self._reject(scope, send, "Invalid override token")
+                return
+
         request_id = _header(scope, REQUEST_ID_HEADER)
         debug_id = _header(scope, TOKEN_DEBUG_ID_HEADER)
         if request_id and (len(request_id) > 128 or not request_id.isprintable()):
@@ -651,6 +752,8 @@ class AuthSelectionMiddleware:
             tokens.append(_inbound_request_id.set(request_id))
         if debug_id:
             tokens.append(_token_debug_id.set(debug_id))
+        if override_token:
+            tokens.append(_token_override.set(TokenOverride(token=override_token)))
         try:
             await self.app(scope, receive, send)
         finally:

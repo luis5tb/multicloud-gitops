@@ -125,6 +125,10 @@ spec:
               value: {{ .Values.auth.tokenDebug.enabled | quote }}
             - name: AUTH_TOKEN_DEBUG_TTL_SECONDS
               value: {{ .Values.auth.tokenDebug.ttlSeconds | quote }}
+            - name: ACME_ALLOW_TOKEN_OVERRIDE
+              value: {{ .Values.auth.tokenOverride.enabled | quote }}
+            - name: ACME_MAX_TOKEN_RENEWALS
+              value: {{ .Values.auth.renewal.maxRenewals | quote }}
             - name: A2A_TLS_VERIFY
               value: {{ .Values.auth.tlsVerify | quote }}
             - name: A2A_CA_BUNDLE
