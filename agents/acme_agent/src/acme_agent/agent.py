@@ -26,6 +26,7 @@ from .auth import (
 )
 from .config import agent_card_url, remote_agents_from_env
 from .ols_mode import ols_mode_remote_agent_config
+from .renewal import CredentialRenewingTransport
 from .routing_prompt import ROUTER_INSTRUCTION
 from .ui import UI_HTML
 
@@ -42,9 +43,18 @@ AUTH = DownstreamAuth()
 # and sets X-OLS-Cluster on its own outbound call to Praxis. ACME just
 # authenticates (Token A) and forwards the user's request verbatim, so the
 # add_cluster_header hook is intentionally not registered here.
+#
+# The transport renews Token A transparently when a downstream agent answers
+# HTTP 401 or pauses its task in TASK_STATE_AUTH_REQUIRED (see renewal.py).
+# TLS verification lives on the inner transport: an explicit transport
+# replaces the client's own verify setting.
 HTTP_CLIENT = httpx.AsyncClient(
     timeout=AUTH.settings.timeout,
-    verify=AUTH.settings.tls_verify,
+    transport=CredentialRenewingTransport(
+        httpx.AsyncHTTPTransport(verify=AUTH.settings.tls_verify),
+        AUTH,
+        max_renewals=int(os.getenv("ACME_MAX_TOKEN_RENEWALS", "2")),
+    ),
     event_hooks={
         "request": [
             stamp_request_id,

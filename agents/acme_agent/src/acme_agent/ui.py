@@ -27,6 +27,8 @@ UI_HTML = r"""<!doctype html>
     .controls { display: flex; flex-wrap: wrap; gap: .75rem; margin: 0 0 1rem; }
     .controls label { display: grid; gap: .25rem; font-size: .85rem; color: #555; }
     .controls select { padding: .35rem; }
+    .override { display: grid; gap: .35rem; margin: 0 0 1rem; font-size: .85rem; color: #555; }
+    .override textarea { min-height: 4rem; font-family: ui-monospace, monospace; font-size: .75em; }
     form { display: flex; gap: .5rem; margin-top: 1rem; }
     textarea { flex: 1; min-height: 4rem; padding: .6rem; }
     button { padding: .6rem 1rem; cursor: pointer; }
@@ -51,6 +53,14 @@ UI_HTML = r"""<!doctype html>
       </select>
     </label>
   </div>
+  <div id="override-controls" class="override" hidden>
+    <label><input type="checkbox" id="override-enabled">
+      Use a pasted token for the next request (testing)</label>
+    <textarea id="override-token" placeholder="Paste a bearer token, e.g. one copied from an earlier answer" hidden></textarea>
+    <div>The pasted token replaces Token A for the first downstream call only.
+      If a downstream agent asks for renewal, ACME mints a fresh token with the
+      identity provider selected above, so paste a token from that same provider.</div>
+  </div>
   <main id="messages" aria-live="polite"></main>
   <form id="chat-form">
     <textarea id="prompt" required placeholder="e.g. https://api.example.com:6443 -- then your request..."></textarea>
@@ -65,12 +75,19 @@ UI_HTML = r"""<!doctype html>
     const providerSelect = document.getElementById('auth-provider');
     const environmentSelect = document.getElementById('auth-environment');
     const tokenTypeSelect = document.getElementById('auth-token-type');
+    const overrideControls = document.getElementById('override-controls');
+    const overrideEnabled = document.getElementById('override-enabled');
+    const overrideToken = document.getElementById('override-token');
     let tokenDebugEnabled = false;
+    overrideEnabled.addEventListener('change', () => {
+      overrideToken.hidden = !overrideEnabled.checked;
+    });
     function readAuthOptions() {
       let options = {};
       try { options = JSON.parse(document.getElementById('auth-options').textContent); }
       catch (error) { console.warn('Ignoring invalid auth options', error); }
       tokenDebugEnabled = !!options.tokenDebugEnabled;
+      overrideControls.hidden = !options.tokenOverrideEnabled;
       if (!options.selectionEnabled) return;
       providerSelect.replaceChildren();
       const keycloak = document.createElement('option');
@@ -374,6 +391,14 @@ UI_HTML = r"""<!doctype html>
         }
       }
       if (debugId) headers['x-acme-token-debug-id'] = debugId;
+      if (!overrideControls.hidden && overrideEnabled.checked) {
+        const pasted = overrideToken.value.trim().replace(/^Bearer\s+/i, '');
+        if (!pasted) {
+          addMessage('agent', 'Request failed: paste a token or clear "Use a pasted token".');
+          return;
+        }
+        headers['x-acme-auth-token'] = pasted;
+      }
       try {
         const response = await fetch('/', {
           method: 'POST',
