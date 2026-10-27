@@ -318,6 +318,35 @@ Token B), not an end-user OIDC login. Anyone who can reach ACME acts as the
 `acme-agent` client (or the Red Hat SSO confidential client) for cluster
 investigation.
 
+## Approval and token renewal scenarios
+
+`a2a-renewal-scenarios.py` plays ACME's role against MAS's A2A endpoint and
+checks each behavior end to end. It mints Token A inside the ACME pod
+(`python -m acme_agent.mint_token`), so tasks belong to ACME's real principal.
+
+| Scenario | What happens | Needs |
+| --- | --- | --- |
+| `approval` | MAS pauses in `TASK_STATE_INPUT_REQUIRED` at the approval gate; the script replies (`--decision approve` or `reject`) and waits for completion | HITL blueprint |
+| `expired-at-door` | An expired token gets HTTP 401 before any task exists | `--expired-token`, or waits one token lifetime |
+| `expiry-in-mas` | Token A runs out while the approval waits; after approving, MAS pauses in `TASK_STATE_AUTH_REQUIRED` before the next step and completes after a fresh token | HITL blueprint, short token lifespan |
+
+Prerequisites:
+
+1. Build the blueprint with the approval gate and point `mao-a2a`'s
+   `a2a.blueprintId` at it: `./setup-mas-blueprint.sh multi-cluster-hitl`
+   (with `HITL_OC_TOKEN`, or `HITL_CREATE_SA=true`).
+2. For `expiry-in-mas`, shorten acme-agent's token lifespan, e.g. 120 seconds
+   (`keycloak.acmeAccessTokenLifespanSeconds` on a fresh realm, or Clients >
+   acme-agent > Advanced > Access Token Lifespan on an existing one).
+3. Use a prompt that makes MAS delegate to OLS and names the cluster API URL.
+
+```bash
+./scripts/a2a-renewal-scenarios.py \
+  --mas-url "https://$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')" \
+  --prompt "On https://api.${CLUSTER_DOMAIN}:6443 list failing pods in openshift-monitoring" \
+  --scenario all
+```
+
 ## Related docs
 
 - [agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md) — full identity chain (direct + orchestrated/passthrough flows), claim shapes, Troubleshooting (including Keycloak Admin Events for grants/exchanges)

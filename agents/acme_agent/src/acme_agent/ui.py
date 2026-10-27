@@ -28,6 +28,10 @@ UI_HTML = r"""<!doctype html>
     .controls label { display: grid; gap: .25rem; font-size: .85rem; color: #555; }
     .controls select { padding: .35rem; }
     .override { display: grid; gap: .35rem; margin: 0 0 1rem; font-size: .85rem; color: #555; }
+    .conversation { display: flex; align-items: center; gap: .5rem; margin: 0 0 1rem;
+      font-size: .85rem; color: #555; }
+    .conversation button { padding: .3rem .7rem; }
+    .notice { color: #888; font-style: italic; }
     .override textarea { min-height: 4rem; font-family: ui-monospace, monospace; font-size: .75em; }
     form { display: flex; gap: .5rem; margin-top: 1rem; }
     textarea { flex: 1; min-height: 4rem; padding: .6rem; }
@@ -37,8 +41,13 @@ UI_HTML = r"""<!doctype html>
 <body>
   <h1>ACME A2A agent</h1>
   <div id="status">Requests are forwarded to the configured downstream A2A agent.
-    Each message is independent (no saved conversation), so state the target
-    OpenShift cluster API URL (e.g. https://api.example.com:6443) every time.</div>
+    Messages in one conversation share context, so later questions can refer to
+    earlier answers. Name the target OpenShift cluster API URL
+    (e.g. https://api.example.com:6443) at least once per conversation.</div>
+  <div class="conversation">
+    <span id="conversation-label">New conversation</span>
+    <button type="button" id="new-conversation">New conversation</button>
+  </div>
   <div id="auth-controls" class="controls" hidden>
     <label>Identity provider
       <select id="auth-provider"></select>
@@ -126,8 +135,54 @@ UI_HTML = r"""<!doctype html>
       environmentSelect.disabled = !redhat;
       tokenTypeSelect.disabled = !redhat;
     }
-    providerSelect.addEventListener('change', updateAuthControls);
+    // One conversation = one A2A contextId. ACME keys its ADK session by the
+    // contextId, and ADK's RemoteA2aAgent then reuses the downstream (MAS)
+    // context it got back, so history is kept on both sides. Kept in
+    // sessionStorage so a page reload stays in the same conversation; ACME's
+    // sessions are in memory, so an ACME restart starts over on the server.
+    const conversationLabel = document.getElementById('conversation-label');
+    let contextId = sessionStorage.getItem('acme-context-id') || '';
+    function showConversation() {
+      conversationLabel.textContent = contextId
+        ? `Conversation ${contextId.slice(0, 8)}`
+        : 'New conversation';
+    }
+    function setContextId(value) {
+      if (!value || value === contextId) return;
+      contextId = value;
+      sessionStorage.setItem('acme-context-id', contextId);
+      showConversation();
+    }
+    function startNewConversation(reason) {
+      const hadConversation = !!contextId;
+      contextId = '';
+      sessionStorage.removeItem('acme-context-id');
+      showConversation();
+      if (hadConversation) {
+        const note = document.createElement('div');
+        note.className = 'message notice';
+        note.textContent = reason || 'New conversation started.';
+        messages.appendChild(note);
+        messages.scrollTop = messages.scrollHeight;
+      }
+    }
+    // Pulls the contextId out of any A2A result shape: a task, a message, or a
+    // status/artifact update, in either the 1.0 (nested) or 0.3 (flat) form.
+    function captureContextId(result) {
+      if (!result || typeof result !== 'object') return;
+      const nested = result.task || result.statusUpdate || result.artifactUpdate || result.message;
+      setContextId((nested && nested.contextId) || result.contextId);
+    }
+    document.getElementById('new-conversation').addEventListener('click', () => startNewConversation());
+    // A downstream conversation belongs to one principal, so switching the
+    // identity provider (or Red Hat SSO environment) starts a new one.
+    function onIdentityChange() {
+      startNewConversation('Identity changed; started a new conversation.');
+    }
+    providerSelect.addEventListener('change', () => { updateAuthControls(); onIdentityChange(); });
+    environmentSelect.addEventListener('change', onIdentityChange);
     readAuthOptions();
+    showConversation();
     // Renders the agent's final answer prominently and, if present, its
     // reasoning/"thinking" text in a separate, visually muted, collapsible
     // block above it -- the two are never concatenated into one line.
@@ -376,7 +431,10 @@ UI_HTML = r"""<!doctype html>
       // eventually produced a full answer. Streaming keeps bytes flowing so the
       // idle timer never trips, and lets the answer render as it arrives.
       const payload = JSON.stringify({jsonrpc: '2.0', id, method: 'message/stream', params: {
-        message: {messageId: id, role: 'user', parts: [{kind: 'text', text}]}
+        message: Object.assign(
+          {messageId: id, role: 'user', parts: [{kind: 'text', text}]},
+          contextId ? {contextId} : {}
+        )
       }});
       const headers = {
         'content-type': 'application/json',
@@ -411,6 +469,7 @@ UI_HTML = r"""<!doctype html>
         if (!response.body || !contentType.includes('text/event-stream')) {
           const body = await response.json();
           if (!response.ok || body.error) throw new Error(JSON.stringify(body.error || body));
+          captureContextId(body.result);
           const { thoughts, answer } = renderTaskResult(body.result);
           const item = addMessage('agent', answer || JSON.stringify(body.result), thoughts);
           await attachTokenDebug(item, debugId);
@@ -448,6 +507,7 @@ UI_HTML = r"""<!doctype html>
             let envelope;
             try { envelope = JSON.parse(data); } catch (e) { continue; }
             if (envelope.error) { streamError = new Error(JSON.stringify(envelope.error)); break; }
+            captureContextId(envelope.result);
             acc.ingest(envelope.result);
             const { thoughts, answer } = acc.current();
             agentMessage.update(thoughts, answer);

@@ -223,6 +223,9 @@ env vars.
 {{- if $a2a.keycloakDiscoveryCacheSeconds -}}
 {{- $env = append $env (dict "name" "A2A_KEYCLOAK_DISCOVERY_CACHE_SECONDS" "value" ($a2a.keycloakDiscoveryCacheSeconds | toString)) -}}
 {{- end -}}
+{{- if $a2a.authRequiredTimeoutSeconds -}}
+{{- $env = append $env (dict "name" "A2A_AUTH_REQUIRED_TIMEOUT_SECONDS" "value" ($a2a.authRequiredTimeoutSeconds | toString)) -}}
+{{- end -}}
 {{- end -}}
 {{- range .Values.appServerPatch.extraEnv -}}
 {{- $env = append $env (dict "name" .name "value" .value) -}}

@@ -30,6 +30,17 @@ build/pin guidance. Use the same pinned MAS image revision for API, worker,
 and A2A; the worker and A2A service must share Redis-backed channels for
 A2A streaming and cross-process HITL.
 
+The A2A build (`uie-mas-hosted` branch `a2a-inbound-deploy`: the A2A PR
+stack plus multi-issuer OIDC and Vertex ADC) seals each A2A caller's
+credentials with Fernet keys shared by the API, worker, and A2A service.
+`runCredentials` in each chart reads them from the Vault entry
+`global/mao-run-credentials` (see `values-secret.yaml.template`); `mas-a2a`
+refuses to render without them. The worker's `credentialRenewal` settings
+bound how long a task waits in `TASK_STATE_AUTH_REQUIRED` for the caller to
+send a fresh token; keep the timeout below OpenShift Lightspeed's
+`appServerPatch.a2a.authRequiredTimeoutSeconds`. `hitl.approvalCollection` and
+`credentialRenewal.collection` must match across the charts that set them.
+
 The source repository also contains a Vault Secrets Operator chart. It is not
 deployed here because the Pattern already installs Vault and the Validated
 Patterns `vault-backend` ClusterSecretStore through ESO. The runtime defaults

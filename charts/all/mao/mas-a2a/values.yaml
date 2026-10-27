@@ -89,6 +89,9 @@ a2a:
   streamingEnabled: true
   streamMaxDurationSeconds: 300
   streamReadBlockMs: 5000
+  # Dedicated threads for blocking Redis stream reads, separate from the
+  # pool used by authentication, Mongo and readiness.
+  streamReaderThreads: 64
   shutdownTimeoutSeconds: 330
 
 mongo:
@@ -208,3 +211,30 @@ readinessProbe:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Fernet keys (RUN_CREDENTIAL_KEYS, a JSON array, newest first) that seal the
+# caller's credentials between the A2A/API submitter and the Temporal workers.
+# mas-api, mas-worker and mas-a2a must read the same keys. Generate one with:
+#   python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+# and store '["<key>"]' in Vault (see values-secret.yaml.template).
+runCredentials:
+  # Secret with key RUN_CREDENTIAL_KEYS. Required: A2A refuses to start without it.
+  secretName: mas-a2a-run-credentials
+  vault:
+    # Create secretName from Vault through an ExternalSecret.
+    enabled: true
+    key: secret/data/global/mao-run-credentials
+    property: keys
+
+# Durable approval mailbox shared by mas-api, mas-worker and mas-a2a.
+hitl:
+  approvalCollection: hitl_approvals
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 2m0s
+
+# Credential renewal mailbox shared with mas-worker (same collection in both).
+credentialRenewal:
+  collection: credential_renewals

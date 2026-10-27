@@ -276,6 +276,11 @@ appServerPatch:
     keycloakTimeoutSeconds: "5"
     tokenExchangeTimeoutSeconds: "10"
     keycloakDiscoveryCacheSeconds: "300"
+    # How long a task paused in TASK_STATE_AUTH_REQUIRED (Keycloak refused the
+    # caller token during exchange) waits for the caller to renew. Keep it
+    # longer than MAS's worker credentialRenewal.timeoutSeconds (900), so the
+    # paused OLS task is still open when MAS's renewal arrives.
+    authRequiredTimeoutSeconds: "960"
   # Mounts SPIRE's csi.spiffe.io CSI driver volume into the app-server only
   # when tokenExchangeEnabled is true, so it can fetch a JWT-SVID for RFC 8693.
   # OLSConfig/the operator expose no field for this volume; the bridge adds it

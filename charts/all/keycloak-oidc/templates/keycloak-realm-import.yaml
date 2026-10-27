@@ -221,9 +221,17 @@ spec:
         serviceAccountsEnabled: true
         {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
         clientAuthenticatorType: federated-jwt
+        {{- end }}
+        {{- if or .Values.keycloak.spiffeIdentityProvider.enabled .Values.keycloak.acmeAccessTokenLifespanSeconds }}
         attributes:
+          {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
           jwt.credential.issuer: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
           jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" (include "keycloak-oidc.effectiveTrustDomain" .) .Values.keycloak.acmeWorkload.namespace .Values.keycloak.acmeWorkload.serviceAccount | quote }}
+          {{- end }}
+          {{- if .Values.keycloak.acmeAccessTokenLifespanSeconds }}
+          # Test aid: short-lived Token A to exercise expiry and renewal.
+          access.token.lifespan: {{ .Values.keycloak.acmeAccessTokenLifespanSeconds | toString | quote }}
+          {{- end }}
         {{- end }}
         protocolMappers:
           # Lightspeed A2A inbound audience -- a plain custom string, no

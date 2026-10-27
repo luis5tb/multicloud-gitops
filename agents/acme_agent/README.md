@@ -266,6 +266,20 @@ stores the outbound token under that nonce, and the UI retrieves it once from
 not the logged `X-Request-Id`. Disable this value when token inspection is no
 longer needed.
 
+### Conversations
+
+The UI keeps one conversation per browser tab: it sends the A2A `contextId`
+returned by the first answer with every later message. ACME's ADK server uses
+the `contextId` as its session ID, and ADK's `RemoteA2aAgent` then continues
+the same downstream MAS context, so follow-up questions can refer to earlier
+answers (MAS also passes its thread to OpenShift Lightspeed as one context).
+"New conversation" starts over, and so does switching the identity provider or
+Red Hat SSO environment, because a downstream conversation belongs to one
+principal. ACME's sessions are in memory: a restarted ACME pod starts a fresh
+session even when the browser still sends the old `contextId`, while MAS keeps
+its side of the conversation. A turn that is still running (or paused) in MAS
+makes the next message in that conversation fail as busy until it finishes.
+
 ### Token renewal
 
 Downstream work can outlive Token A. A downstream A2A agent then either

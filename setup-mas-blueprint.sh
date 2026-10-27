@@ -11,7 +11,17 @@
 #   export LITELLM_API_KEY="your-key"
 #   export LITELLM_API_BASE="https://maas-rhdp.apps.maas.redhatworkshops.io/v1"
 #   export LITELLM_MODEL="gpt-oss-20b"
-#   ./setup-mas-blueprint.sh [simple|multi-cluster]
+#   ./setup-mas-blueprint.sh [simple|multi-cluster|multi-cluster-hitl]
+#
+# multi-cluster-hitl is multi-cluster plus an approval gate before the
+# orchestrator, to test human approval (TASK_STATE_INPUT_REQUIRED) and token
+# expiry deterministically: a custom agent with hitl_mode=ask runs one
+# read-only `oc whoami` through the oc_exec tool, which always needs approval.
+# It needs a cluster token for that tool:
+#   HITL_OC_TOKEN   token for HITL_OC_SERVER; or set HITL_CREATE_SA=true to
+#                   create a view-only ServiceAccount (mas-hitl-test in mao)
+#                   and a 30-day token with `oc` (needs cluster-admin).
+#   HITL_OC_SERVER  defaults to https://api.${CLUSTER_DOMAIN}:6443
 
 set -e
 
@@ -135,6 +145,14 @@ VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
 VERTEX_MODEL="${VERTEX_MODEL:-gemini-3.8-flash}"
 
 BLUEPRINT_TYPE="${1:-simple}"
+case "$BLUEPRINT_TYPE" in
+  simple) IS_MULTI_CLUSTER=false ;;
+  multi-cluster|multi-cluster-hitl) IS_MULTI_CLUSTER=true ;;
+  *)
+    echo "❌ Unknown blueprint type '$BLUEPRINT_TYPE' (simple, multi-cluster, multi-cluster-hitl)"
+    exit 1
+    ;;
+esac
 
 echo "========================================="
 echo "MAS A2A Blueprint Setup"
@@ -174,7 +192,7 @@ echo "STEP 1: Registering Inventory Resources"
 echo "========================================="
 echo ""
 
-if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
+if [ "$IS_MULTI_CLUSTER" == "true" ]; then
 
   # 1a. Register LLM (Vertex/Gemini or OpenAI/LiteLLM)
   if [ "$LLM_PROVIDER" == "vertex" ]; then
@@ -292,7 +310,7 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
 fi
 
 # 1c. Register the live-cluster investigator for multi-cluster blueprints.
-if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
+if [ "$IS_MULTI_CLUSTER" == "true" ]; then
   echo ""
   echo "1c. Registering OpenShift Lightspeed A2A Agent Node..."
   A2A_PAYLOAD='{
@@ -342,6 +360,68 @@ if [ -z "$ASK_REDHAT_RID" ]; then
     | jq -r '.resources[]? | select(.name == "Ask Red Hat") | .rid' | head -1)
 fi
 echo "   ✅ Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
+
+# 1e. Approval-gate tool for the multi-cluster-hitl test blueprint.
+HITL_GATE_NODE=""
+HITL_GATE_PLAN=""
+ORCHESTRATE_FIRST_AFTER="start"
+if [ "$BLUEPRINT_TYPE" == "multi-cluster-hitl" ]; then
+  echo ""
+  echo "1e. Registering the HITL test oc_exec tool..."
+  HITL_OC_SERVER="${HITL_OC_SERVER:-https://api.${CLUSTER_DOMAIN}:6443}"
+  if [ -z "${HITL_OC_TOKEN:-}" ] && [ "${HITL_CREATE_SA:-false}" == "true" ]; then
+    oc create serviceaccount mas-hitl-test -n mao --dry-run=client -o yaml | oc apply -f -
+    oc adm policy add-cluster-role-to-user view -z mas-hitl-test -n mao >/dev/null
+    HITL_OC_TOKEN=$(oc create token mas-hitl-test -n mao --duration=720h)
+  fi
+  if [ -z "${HITL_OC_TOKEN:-}" ]; then
+    echo "❌ multi-cluster-hitl needs HITL_OC_TOKEN, or HITL_CREATE_SA=true"
+    exit 1
+  fi
+  HITL_TOOL_PAYLOAD=$(jq -n \
+    --arg server "$HITL_OC_SERVER" \
+    --arg token "$HITL_OC_TOKEN" \
+    '{
+      "category": "tools",
+      "type": "oc_exec",
+      "name": "HITL Test oc (read-only)",
+      "config": {"type": "oc_exec", "server": $server, "token": $token, "skip_tls_verify": false}
+    }')
+  HITL_TOOL_RESPONSE=$(mas_api_upsert_resource "$HITL_TOOL_PAYLOAD")
+  HITL_TOOL_RID=$(echo "$HITL_TOOL_RESPONSE" | jq -r '.rid // empty')
+  if [ -z "$HITL_TOOL_RID" ]; then
+    HITL_TOOL_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=tools" \
+      -H "Authorization: Bearer ${MAS_TOKEN}" \
+      | jq -r '.resources[]? | select(.name == "HITL Test oc (read-only)") | .rid' | head -1)
+  fi
+  echo "   ✅ HITL test tool RID: $HITL_TOOL_RID"
+  HITL_GATE_NODE=$(cat <<NODE
+  - rid: hitl_gate
+    name: Approval Gate (HITL test)
+    type: custom_agent_node
+    config:
+      type: custom_agent_node
+      llm: "\$ref:${LLM_RID}"
+      tools:
+        - "\$ref:${HITL_TOOL_RID}"
+      # oc_exec is a WRITE tool, so every call waits for human approval.
+      hitl_mode: ask
+      max_rounds: 3
+      system_message: |
+        You are a test approval gate. For every request, call the oc tool
+        exactly once with the command "whoami". Then reply with one short
+        sentence saying the pre-flight check ran (or was rejected). Do not
+        answer the user's question; the orchestrator does that next.
+NODE
+)
+  HITL_GATE_PLAN=$(cat <<PLAN
+  - uid: hitl_gate
+    after: start
+    node: hitl_gate
+PLAN
+)
+  ORCHESTRATE_FIRST_AFTER="hitl_gate"
+fi
 
 echo ""
 
@@ -399,7 +479,7 @@ plan:
     node: final_answer_end
 EOF
 
-elif [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
+elif [ "$IS_MULTI_CLUSTER" == "true" ]; then
 
   echo "Creating multi-cluster blueprint..."
 
@@ -424,6 +504,8 @@ nodes:
     type: user_question_node
     config:
       type: user_question_node
+
+${HITL_GATE_NODE}
 
   - rid: ${ORCH_RID}
     name: Multi-Cluster Router
@@ -469,9 +551,11 @@ plan:
   - uid: start
     node: user_question_start
 
+${HITL_GATE_PLAN}
+
   - uid: orchestrate
     after:
-      - start
+      - ${ORCHESTRATE_FIRST_AFTER}
       - investigate
       - ask_red_hat
     node: ${ORCH_RID}
@@ -534,7 +618,7 @@ echo ""
 echo "Blueprint ID: $BLUEPRINT_ID"
 echo ""
 echo "Inventory Resources:"
-if [ "$BLUEPRINT_TYPE" == "multi-cluster" ]; then
+if [ "$IS_MULTI_CLUSTER" == "true" ]; then
   echo "  - OLS A2A Agent RID: $A2A_RID"
   echo "  - LLM RID: $LLM_RID"
   echo "  - Orchestrator RID: $ORCH_RID"
