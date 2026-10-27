@@ -29,6 +29,11 @@ keycloak:
   # charts/all/acme-agent).
   acmeClientId: acme-agent
   acmeClientName: ACME A2A agent
+  # Optional access-token lifespan (seconds) for acme-agent's client, e.g.
+  # "120" to test token expiry and renewal. Empty keeps the realm default
+  # (300). Realm imports only apply when the realm is first created; on an
+  # existing realm set Clients > acme-agent > Advanced > Access Token Lifespan.
+  acmeAccessTokenLifespanSeconds: ""
   # Dedicated group for calls attributed to acme-agent when it invokes
   # OpenShift Lightspeed -- named <caller>-<callee> (not just "acme-agent")
   # so it reads as "acme-agent's rights when calling Lightspeed/MCP", not

@@ -151,3 +151,31 @@ readinessProbe:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Fernet keys (RUN_CREDENTIAL_KEYS, a JSON array, newest first) that seal the
+# caller's credentials between the A2A/API submitter and the Temporal workers.
+# mas-api, mas-worker and mas-a2a must read the same keys. Generate one with:
+#   python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+# and store '["<key>"]' in Vault (see values-secret.yaml.template).
+runCredentials:
+  # Secret with key RUN_CREDENTIAL_KEYS. Empty omits it; set it whenever mas-a2a is deployed.
+  secretName: ""
+  vault:
+    # Create secretName from Vault through an ExternalSecret.
+    enabled: false
+    key: secret/data/global/mao-run-credentials
+    property: keys
+
+# Durable approval mailbox shared by mas-api, mas-worker and mas-a2a.
+hitl:
+  approvalCollection: hitl_approvals
+
+# Credential renewal mailbox shared with mas-a2a (same collection in both).
+credentialRenewal:
+  collection: credential_renewals
+  # How long a paused step waits for the A2A caller to send a fresh token.
+  # Keep it below OLS's A2A_AUTH_REQUIRED_TIMEOUT_SECONDS so OLS does not
+  # expire its paused task before the renewal arrives.
+  timeoutSeconds: 900
+  # Renew proactively when delegated credentials have less validity left.
+  minValiditySeconds: 60
