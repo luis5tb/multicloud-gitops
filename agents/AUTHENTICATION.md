@@ -50,6 +50,11 @@ own participant instead of folding it into a `Note`.
 
 ## Target-cluster selection (gates everything below, not an authorization step)
 
+> **Scope:** this section describes the **direct flow** (ACME → Praxis → OLS).
+> In the deployed **orchestrated flow**, ACME no longer gates inbound requests
+> on a target-cluster URL: the MAS A2A orchestrator performs target-cluster
+> selection and validation instead.
+
 Before any of the identity chain runs, ACME's root agent requires the user to
 state the target OpenShift cluster's API URL explicitly in their message (see
 `agents/acme_agent/src/acme_agent/agent.py`'s instruction) -- it never

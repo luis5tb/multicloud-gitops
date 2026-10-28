@@ -26,9 +26,9 @@ OLS's own service account. A Praxis Policy Engine gateway sits in front of OLS
 enforcing the caller allow-list.
 
 This replaces an earlier "RCA agent" + OPA-based pattern that lived in this
-same repo; you may still see comments/leftovers referencing "RCA" or
-`charts/all/opa` (present but **not wired into any Application** --
-leftover, not live).
+same repo; you may still see comments/leftovers referencing "RCA" or a
+former `charts/all/opa` chart, since removed (it was never wired into any
+Application).
 
 ## Repository layout
 

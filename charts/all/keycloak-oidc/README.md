@@ -17,8 +17,9 @@ The five clients serve distinct purposes and must not be conflated:
   own exact principal allow-list, so the audience mapper alone does not grant
   A2A access.
 - `keycloak.lightspeedMcpClientId` (default `lightspeed-mcp`): confidential
-  client the OpenShift Lightspeed A2A integration (`vendor/lightspeed-service`)
-  uses to exchange a caller's token for one scoped to OpenShift MCP.
+  client the OpenShift Lightspeed A2A integration (built from the external
+  fork `luis5tb/lightspeed-service@a2a-split`) uses to exchange a caller's
+  token for one scoped to OpenShift MCP.
 - `keycloak.mcpAudienceClientId` (default `openshift-mcp`): confidential
   client that exists only so `lightspeed-mcp`'s token exchange has a real
   `client_id` to name as its `audience` parameter -- Keycloak's standard (V2)

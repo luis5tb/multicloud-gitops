@@ -179,17 +179,21 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     ```bash
     oc login <new-cluster-api>
 
-    # The lightspeed-operator Subscription's package/channel/source in
-    # variants/standalone/values-standalone.yaml are best guesses
-    # ("stable"/redhat-operators), not yet confirmed against a live
-    # catalog -- a wrong value here leaves the Subscription stuck
-    # (CatalogSourcesUnhealthy/ResolutionFailed) and nothing downstream
-    # of it (openshift-lightspeed-config, its OLSConfig, the
-    # operator-managed MCP server) ever comes up. Check before installing:
+    # The lightspeed-operator Subscription in
+    # variants/standalone/values-standalone.yaml is pinned to
+    # lightspeed-operator.v1.1.5 (channel "stable", redhat-operators)
+    # with installPlanApproval: Manual. v2.0.0 MUST be avoided: an
+    # auto-upgrade to it reset the app-server to the stock image
+    # (dropping the a2a-split patch) and assumes the openshift-lightspeed
+    # namespace, breaking everything downstream
+    # (openshift-lightspeed-config, its OLSConfig, the operator-managed
+    # MCP server). Because approval is Manual, the first InstallPlan must
+    # be approved by hand during install. Confirm the pinned CSV is
+    # available in the live catalog before installing:
     oc get packagemanifest lightspeed-operator -o jsonpath='{.status.channels[*].name}{"\n"}{.status.defaultChannel}{"\n"}' -n openshift-marketplace
-    # If the package/channel/source differ from values-standalone.yaml's
-    # lightspeed-operator subscription entry, fix it there now, before
-    # the first sync.
+    # After the first sync, approve the pending InstallPlan so the
+    # operator installs:
+    oc -n a2a-lightspeed patch installplan "$(oc -n a2a-lightspeed get installplan -o jsonpath='{.items[0].metadata.name}')" --type merge -p '{"spec":{"approved":true}}'
 
     make validate-prereq
     make validate-origin
@@ -657,9 +661,8 @@ Commit and push. Wait for ArgoCD to sync the `acme-agent` application.
 Send a test request:
 
 ACME's A2A JSON-RPC endpoint is the root path `/` (served by Google ADK's
-`to_a2a`), not `/a2a/jsonrpc`. Use the A2A `message/send` method. ACME refuses
-to delegate unless the message contains exactly one explicit cluster API URL,
-so include it in the text:
+`to_a2a`), not `/a2a/jsonrpc`. Use the A2A `message/send` method. Include the
+cluster API URL in the text so MAO can route to OpenShift Lightspeed:
 
 ```bash
 ACME_URL="https://$(oc get route acme-agent -n acme-agent -o jsonpath='{.spec.host}')"
@@ -867,7 +870,7 @@ published image has been supplied for activation. Do not turn it on simply
 because its Argo CD Application appears Synced.
 
 **IMPORTANT:** The A2A functionality requires a custom-built MAS image from
-the `a2a-inbound-support` branch. The existing `mas-api` and `mas-worker`
+the `a2a-inbound-deploy` branch. The existing `mas-api` and `mas-worker`
 `latest` defaults do NOT contain A2A support. Follow the build and
 configuration steps below before enabling.
 
@@ -876,14 +879,14 @@ configuration steps below before enabling.
 The A2A runtime (`ROLE=a2a-serve`) is built into the same container image as
 the MAS API and worker. Build from the
 [`ltomasbo/uie-mas-hosted`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted)
-repository on branch `a2a-inbound-support`:
+repository on branch `a2a-inbound-deploy`:
 
 ```bash
 export QUAY_ORG=<your-quay-org>
 podman login quay.io
 
 # Clone the A2A-enabled source
-git clone --branch a2a-inbound-support --single-branch \
+git clone --branch a2a-inbound-deploy --single-branch \
   git@gitlab.cee.redhat.com:ltomasbo/uie-mas-hosted.git /tmp/uie-mas-hosted
 cd /tmp/uie-mas-hosted
 
@@ -1326,7 +1329,7 @@ oc logs -n a2a-lightspeed -l app=lightspeed-app-server --tail=50 | grep a2a_audi
 # Should show: on_behalf_of=acme-agent
 ```
 
-See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted/-/blob/a2a-inbound-support/docs/a2a-inbound.md)
+See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted/-/blob/a2a-inbound-deploy/docs/a2a-inbound.md)
 for client examples and the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
 for the full authentication flow. The [`mas-a2a` chart guide](charts/all/mao/mas-a2a/README.md)
 has deployment details and the full verification checklist.
