@@ -89,7 +89,39 @@ mas_api_upsert_resource() {
 }
 
 CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-bm-cluster.e2e.bos.redhat.com}"
-CLUSTER_ID="api-$(echo $CLUSTER_DOMAIN | sed 's/\./-/g')-6443"
+
+# X-OLS-Cluster id -- single source of truth. acme, praxis and OLS all *consume*
+# the authored key of global.olsClusters; only acme_agent.cluster_registry
+# .derive_cluster_id ever generates one (see AGENTS.md "mirror any change" and
+# charts/all/openshift-lightspeed-config/templates/_helpers.tpl). Reconstructing
+# the id here from CLUSTER_DOMAIN drifted from that key whenever the API host was
+# not api.<domain>, the port was not 6443, the host had uppercase, or the id
+# needed truncation -- a mismatch Praxis fail-closes into HTTP 404, silently
+# losing OLS delegation. Read the authored registry key instead; allow CLUSTER_ID
+# to override; fall back to reconstruction only if the registry cannot be read.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STANDALONE_VALUES="${STANDALONE_VALUES:-$SCRIPT_DIR/variants/standalone/values-standalone.yaml}"
+if [ -z "${CLUSTER_ID:-}" ] && [ -f "$STANDALONE_VALUES" ]; then
+  _ols_cluster_ids="$(awk '
+    /^  olsClusters:[[:space:]]*$/ { inblock=1; next }
+    inblock && /^  [^[:space:]]/ { inblock=0 }
+    inblock && /^    [^[:space:]].*:[[:space:]]*$/ { k=$1; sub(/:$/,"",k); print k }
+  ' "$STANDALONE_VALUES")"
+  _ols_count="$(printf '%s' "$_ols_cluster_ids" | grep -c .)"
+  if [ "$_ols_count" -eq 1 ]; then
+    CLUSTER_ID="$_ols_cluster_ids"
+  elif [ "$_ols_count" -gt 1 ]; then
+    echo "ERROR: multiple global.olsClusters entries in $STANDALONE_VALUES;" >&2
+    echo "set CLUSTER_ID to the intended X-OLS-Cluster key (one of):" >&2
+    printf '  %s\n' $_ols_cluster_ids >&2
+    exit 1
+  fi
+fi
+if [ -z "${CLUSTER_ID:-}" ]; then
+  CLUSTER_ID="api-$(echo "$CLUSTER_DOMAIN" | sed 's/\./-/g')-6443"
+  echo "WARNING: could not read global.olsClusters from $STANDALONE_VALUES;" >&2
+  echo "falling back to reconstructed CLUSTER_ID=$CLUSTER_ID -- verify it matches the authored registry key." >&2
+fi
 ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/ask/v1/a2a}"
 
 # Shared by the registered orchestrator resource and the blueprint node. Ask

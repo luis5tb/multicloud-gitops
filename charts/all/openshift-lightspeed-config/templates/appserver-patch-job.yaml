@@ -50,7 +50,23 @@ only to validate -- acme/praxis consume the authored key, they never derive it.
 {{- range $id, $cfg := (.Values.global.olsClusters | default dict) }}
 {{- if $cfg.apiURL }}
 {{- $expected := include "openshift-lightspeed-config.deriveClusterId" $cfg.apiURL }}
-{{- if ne $id $expected }}
+{{- if gt (len $expected) 63 }}
+{{- /*
+derive_cluster_id truncates to 63 chars and appends a SHA-256 suffix once the
+"host-port" base would exceed the DNS label limit (see
+acme_agent.cluster_registry). That branch is impractical to reproduce faithfully
+in Helm, so for long hosts validate the authored key's shape only -- it must be a
+DNS-safe label of at most 63 chars -- and defer the exact value to the single
+generator (acme_agent). This prevents a correctly-truncated key from being
+falsely rejected at render time.
+*/}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $id) }}
+{{- fail (printf "global.olsClusters key %q is not a DNS-safe label. For this long apiURL %q, derive it with acme_agent.cluster_registry.derive_cluster_id (truncated host:port + SHA-256 suffix, <=63 chars); see AGENTS.md." $id $cfg.apiURL) }}
+{{- end }}
+{{- if gt (len $id) 63 }}
+{{- fail (printf "global.olsClusters key %q exceeds 63 characters. Derive it with acme_agent.cluster_registry.derive_cluster_id (it truncates and appends a SHA-256 suffix); see AGENTS.md." $id) }}
+{{- end }}
+{{- else if ne $id $expected }}
 {{- fail (printf "global.olsClusters key %q does not match the id derived from its apiURL %q (expected %q). The key must equal derive_cluster_id: f\"{host}:{port}\" with lowercase host and every '.'/':' replaced by '-' (see AGENTS.md). A drifted key makes acme-agent crash-loop and Praxis/Envoy reject the cluster name." $id $cfg.apiURL $expected) }}
 {{- end }}
 {{- end }}
