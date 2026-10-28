@@ -52,7 +52,14 @@ def test_static_agent_card_uses_response_filter_not_lb_cluster() -> None:
         if filter_config.get("filter") == "static_response"
     )
     card = json.loads(static_response["body"])
-    assert card["rpc_url"] == "https://openshift-lightspeed.apps.ocp.phkl2.sandbox315.opentlc.com/a2a"
+    # The RPC endpoint auto-derives from global.clusterBaseDomain in the variant,
+    # so compute the expected host from that value rather than pinning a domain.
+    base_domain = yaml.safe_load(VARIANT.read_text())["global"]["clusterBaseDomain"]
+    expected_rpc_url = f"https://openshift-lightspeed.apps.{base_domain}/a2a"
+    # A top-level "url" is retained for backward compatibility with A2A 0.3.0
+    # clients; newer clients read supportedInterfaces[].url. Both must agree.
+    assert card["url"] == expected_rpc_url
+    assert card["supportedInterfaces"][0]["url"] == expected_rpc_url
     assert static_response["conditions"] == [
         {"when": {"path": "/.well-known/agent-card.json", "methods": ["GET"]}}
     ]

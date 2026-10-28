@@ -63,7 +63,7 @@ def test_redhat_sso_agent_credentials_render() -> None:
     }
     assert env["A2A_AUTH_PROVIDER"]["value"] == "keycloak"
     assert env["AUTH_TOKEN_DEBUG_ENABLED"]["value"] == "true"
-    assert env["REDHAT_SSO_SCOPE"]["value"] == "api.ask_red_hat"
+    assert env["REDHAT_SSO_SCOPE"]["value"] == "openid api.ask_red_hat"
     assert (
         env["REDHAT_SSO_PRODUCTION_TOKEN_URL"]["value"]
         == "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
