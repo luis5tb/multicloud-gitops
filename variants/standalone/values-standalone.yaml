@@ -835,8 +835,22 @@ clusterGroup:
           value: "67edabde1faf"
         - name: image.pullPolicy
           value: Always
+        # No public Route: inbound MAS A2A (mao-a2a) is active, and the mas-a2a
+        # chart README forbids leaving the mas-api Route reachable while it still
+        # runs the development identity mode (dev mode admits every request as the
+        # admin user "dev"). The runtime investigation flow does not use this API
+        # (it goes through mao-a2a + mao-worker), so the control-plane API is kept
+        # cluster-internal only. For blueprint setup, port-forward the Service and
+        # set MAS_API_URL (see setup-mas-blueprint.sh). For an internet-facing
+        # deployment, re-enable the Route only after switching identity.providerMode
+        # to keycloak with a dedicated audience (mas-api) and a real
+        # identity.adminAllowedUsers list.
+        - name: route.enabled
+          value: "false"
         # DEV MODE: Accept any token without validation (for testing/blueprint setup)
         # WARNING: Do not use in production - no authentication security!
+        # Only acceptable here because route.enabled=false keeps the API off the
+        # public ingress; do not re-enable the Route without leaving dev mode.
         - name: identity.providerMode
           value: dev
         # MAS API validates A2A Agent Card URLs over HTTPS; trust the cluster's
