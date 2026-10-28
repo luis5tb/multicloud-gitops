@@ -748,7 +748,11 @@ def test_standalone_ols_application_overrides_render_enabled_bridge() -> None:
     assert 'name: A2A_OIDC_AUTH_ENABLED\n              value: "true"' in rendered
     assert 'name: OIDC_CA_TRUST_ENABLED\n              value: "true"' in rendered
     assert re.search(r'name: OIDC_TRUST_ROLLOUT_ENABLED\s+value: "true"', rendered)
-    assert "4d85f430" in rendered
+    # The app-server image tag must be wired through from the variant, not a
+    # literal pinned here (that broke on every image bump). Assert whatever tag
+    # the variant currently sets is present in the rendered output.
+    image_tag = next(value for key, value in overrides if key == "appServerPatch.image.tag")
+    assert image_tag and image_tag in rendered
 
 
 def _render_chart(

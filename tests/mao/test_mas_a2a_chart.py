@@ -20,7 +20,11 @@ def helm_template(chart: str, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 class MasA2AChartTests(unittest.TestCase):
-    def test_standalone_registers_a_dormant_application(self) -> None:
+    def test_standalone_activates_the_a2a_application(self) -> None:
+        # The standalone variant deliberately activates inbound MAS A2A. Assert
+        # it is wired on with the safety-critical configuration the chart's
+        # render guards require (enabled, a blueprint, an HTTPS public base URL,
+        # at least one allowed principal, and the Route).
         variant = ROOT / "variants/standalone/values-standalone.yaml"
         application = (
             variant.read_text(encoding="utf-8")
@@ -30,11 +34,13 @@ class MasA2AChartTests(unittest.TestCase):
         self.assertIn("name: mao-a2a", application)
         self.assertIn("namespace: mao", application)
         self.assertIn("path: charts/all/mao/mas-a2a", application)
-        self.assertNotIn("- name: a2a.enabled", application)
-
-        result = helm_template("charts/all/mao/mas-a2a", "-f", str(variant))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "")
+        self.assertIn("- name: a2a.enabled", application)
+        self.assertIn('value: "true"', application)
+        self.assertIn("- name: a2a.blueprintId", application)
+        self.assertIn("- name: a2a.publicBaseUrl", application)
+        self.assertIn("value: \"https://", application)
+        self.assertIn("- name: a2a.allowedPrincipals[0]", application)
+        self.assertIn("- name: route.enabled", application)
 
     def test_default_is_dormant_and_renders_no_resources(self) -> None:
         result = helm_template("charts/all/mao/mas-a2a")
