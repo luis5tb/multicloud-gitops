@@ -191,6 +191,14 @@ policy:
     sourceConfigMap: default-ingress-cert
     sourceKey: ca-bundle.crt
     targetConfigMapName: praxis-keycloak-ca
+    # SSL_CERT_FILE replaces OpenSSL's default trust store, so when policy
+    # enforcement validates external OIDC issuers (e.g. Red Hat SSO's public
+    # JWKS) the synced bundle must also carry public roots, not just the cluster
+    # ingress CA. When true, the sync appends the sync container's own public CA
+    # roots to the ingress CA. Required for policy.enabled=true with external
+    # issuers; harmless (public roots) when only Keycloak is validated.
+    includeSystemRoots: false
+    systemRootsPath: /etc/pki/tls/certs/ca-bundle.crt
     schedule: "*/5 * * * *"
     image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
     resources:
@@ -219,6 +227,39 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
+# IPv4-only clusters: the pinned Praxis image's HTTP client resolves external
+# hosts to IPv6 and does NOT fall back to IPv4, so on an IPv4-only pod its
+# outbound JWKS fetch for policy.oidcIssuers (e.g. Red Hat SSO sso.redhat.com)
+# fails with ConnectNoRoute / Network unreachable. That is why the standalone
+# variant historically ran policy.enabled=false (router-only). This opt-in
+# sidecar runs a tiny CoreDNS that strips AAAA answers and forwards everything
+# else to the cluster DNS, and points the pod's own resolver at it
+# (dnsPolicy: None), so the Praxis client only ever receives A records and
+# connects over IPv4. It lets policy.enabled=true work with external issuers on
+# an IPv4-only cluster WITHOUT rebuilding the Praxis image. CoreDNS binds
+# loopback:53 as non-root via the "safe" sysctl net.ipv4.ip_unprivileged_port_start
+# (accepted by OpenShift's restricted-v2 SCC; verified live). In-cluster names
+# still resolve (non-AAAA queries are forwarded unchanged).
+dnsIPv4Only:
+  enabled: false
+  # CoreDNS image. Empty on purpose (AGENTS.md: no image refs in chart defaults).
+  # Set it in the variant -- the in-cluster OpenShift CoreDNS image is a good
+  # choice because it needs no extra pull.
+  image: ""
+  # Cluster DNS Service ClusterIP that non-AAAA queries are forwarded to.
+  # OpenShift's default is the dns-default Service in openshift-dns (172.30.0.10).
+  clusterDnsIP: "172.30.0.10"
+  # Extra DNS search domains appended after the namespace-scoped cluster ones
+  # (dnsPolicy: None requires searches to be set explicitly).
+  extraSearches: []
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
 
 # Static agent card configuration for MAS and multi-cluster routing.
 # When enabled, Praxis returns its own agent card (with Praxis as the rpc_url)
