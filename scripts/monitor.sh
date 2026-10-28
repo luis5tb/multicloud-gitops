@@ -157,7 +157,7 @@ print_diagram() {
   └─────────────────────────────────────────────────────────────────────────┘
        ▼  TOKEN A (unchanged)
   ┌─ PRAXIS-PROXY ──────────────────────────────────────────────────────────┐
-  │ 10. Standalone: router-only (policy.enabled=false; OLS validates)       │
+  │ 10. Policy filter: validate TOKEN A + azp allow-list (else deny)        │
   │     Route by X-OLS-Cluster → OLS upstream (fail-closed, no default)     │
   │     (raise logLevel / RUST_LOG for routing + JWT detail)                │
   └─────────────────────────────────────────────────────────────────────────┘
@@ -551,10 +551,23 @@ parse_line() {
     return 0
   fi
 
-  # ── Praxis (router-only in standalone; patterns CONFIRMED LIVE) ──────────
-  # Tracing output, colours stripped above. Success/fail both appear as
-  # router decisions; readiness probes route every 10s and are skipped.
+  # ── Praxis (policy enforcement in standalone; patterns CONFIRMED LIVE) ───
+  # Tracing output, colours stripped above. The policy filter validates the
+  # caller JWT and enforces the azp allow-list before routing; success/fail
+  # both appear as filter/router decisions and readiness probes are skipped.
   if [[ "$src" == "praxis" ]]; then
+    # The dnsIPv4Only CoreDNS sidecar shares this pod. Surface only its errors
+    # (a failing AAAA-strip/forward resolver breaks the external SSO JWKS
+    # fetch); skip its routine output.
+    if grep -q '/dns-ipv4only' <<<"$line"; then
+      if grep -qE '\[ERROR\]|SERVFAIL|plugin/errors' <<<"$line"; then
+        printf "\n${R}┌─ PRAXIS DNS SIDECAR ERROR [${ts}]${N}\n"
+        printf "${R}│${N} ${D}AAAA-strip/forward resolver failing — SSO JWKS lookups at risk${N}\n"
+        printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
+        printf "${R}└─${N}\n"
+      fi
+      return 0
+    fi
     if grep -qE 'path="?/readiness|path="?/health' <<<"$line"; then
       return 0
     fi
@@ -572,7 +585,7 @@ parse_line() {
       p_cluster=$(grep -oP 'cluster=\K\S+' <<<"$line" | head -1 || true)
       printf "\n${B}┌─ PRAXIS ROUTE [${ts}]${N}\n"
       printf "${B}│${N} ${D}path=${p_path} → ${p_cluster}${N}\n"
-      printf "${B}└─ Token A forwarded unchanged to the OLS backend${N}\n"
+      printf "${B}└─ policy filter validated caller (JWT + azp allow-list); Token A forwarded${N}\n"
       return 0
     fi
     # static_response "request rejected … status=200" is the agent card being
@@ -583,7 +596,12 @@ parse_line() {
       p_status=$(grep -oP 'status=\K[0-9]+' <<<"$line" || true)
       if [[ "$p_status" =~ ^[45] ]]; then
         printf "\n${R}┌─ PRAXIS REJECT [${ts}] ${R}${p_status}${N}\n"
-        printf "${R}│${N} ${D}filter=${p_filter} — request denied before any OLS backend${N}\n"
+        if [[ "$p_filter" == "policy" ]]; then
+          printf "${R}│${N} ${D}policy filter denied — caller JWT invalid, or its azp is not${N}\n"
+          printf "${R}│${N} ${D}in policy.allowedCallers (acme-agent + Red Hat SSO client)${N}\n"
+        else
+          printf "${R}│${N} ${D}filter=${p_filter} — request denied before any OLS backend${N}\n"
+        fi
         printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
         printf "${R}└─${N}\n"
       fi
