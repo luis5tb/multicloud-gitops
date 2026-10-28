@@ -432,30 +432,54 @@ clusterGroup:
         # identity.keycloak.issuerUrl derives from global.clusterBaseDomain +
         # global.keycloakRealm (https://keycloak.apps.<base>/realms/<realm>);
         # override here only to diverge.
-        # Run Praxis as a pure router/load-balancer: skip the policy filter
-        # (no caller JWT verification, no azp allow-list). OpenShift Lightspeed
-        # is the validating boundary -- its multi-issuer inbound OIDC validates
-        # the caller token (Keycloak + Red Hat SSO prod/stage) and its Keycloak
-        # RFC 8693 exchange re-validates it. This is also required so the UI's
-        # own Red Hat SSO token (azp != acme-agent) can reach OLS, which the
-        # azp allow-list would otherwise block; and it avoids Praxis's Rust
-        # client failing to fetch the external SSO JWKS over IPv6 on this
-        # IPv4-egress cluster. See agents/AUTHENTICATION.md. The identity.* and
-        # policy.* settings below are inert while disabled (kept for easy
-        # re-enable). Disabling policy also skips the enforcementTest Job.
+        # Run Praxis WITH policy enforcement (caller JWT validation + azp
+        # allow-list) before routing. OpenShift Lightspeed still re-validates
+        # downstream, but Praxis is now a real gate: only tokens whose azp is
+        # allow-listed below reach OLS. The two IPv4-only-cluster blockers that
+        # previously forced router-only are handled here (see
+        # agents/AUTHENTICATION.md and charts/all/praxis-proxy/README.md):
+        #   1. the UI's Red Hat SSO token has azp != acme-agent, so its azp is
+        #      added to policy.allowedCallers below; and
+        #   2. Praxis's Rust client cannot fetch the external SSO JWKS over IPv6
+        #      on this IPv4-egress cluster, so dnsIPv4Only (below) strips AAAA.
         - name: policy.enabled
-          value: "false"
-        # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide
-        # private IdP egress switch. Its only configured callout is this
-        # static Keycloak JWKS URL; do not add user-controlled URLs here.
+          value: "true"
+        # Callers allowed past the policy filter, matched on the token's azp.
+        # acme-agent is the local Keycloak client; the UUID is ACME's confidential
+        # Red Hat SSO client (the azp of the UI's SSO prod/stage tokens).
+        - name: policy.allowedCallers[0]
+          value: acme-agent
+        - name: policy.allowedCallers[1]
+          value: ff524661-b74a-4e10-bc24-4e71322e0852
+        # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide private
+        # IdP egress switch. Configured callouts are the static Keycloak JWKS and
+        # the Red Hat SSO JWKS (identity.oidcIssuers below); do not add
+        # user-controlled URLs here.
         - name: policy.allowPrivateIdp
           value: "true"
-        # Praxis's policy transport uses OpenSSL's trust file. Sync the
-        # managed ingress CA into this namespace for the Keycloak JWKS fetch.
+        # Praxis's policy transport uses OpenSSL's trust file (SSL_CERT_FILE),
+        # which REPLACES the default store. Sync the managed ingress CA (for the
+        # Keycloak Route) AND append public roots (for the Red Hat SSO JWKS).
         - name: policy.caBundleConfigMap.name
           value: praxis-keycloak-ca
         - name: policy.caBundleSync.enabled
           value: "true"
+        - name: policy.caBundleSync.includeSystemRoots
+          value: "true"
+        # IPv4-only JWKS fix: a CoreDNS sidecar strips AAAA so the IPv6-preferring,
+        # no-fallback Praxis client reaches sso.redhat.com over IPv4. Validated
+        # live; see charts/all/praxis-proxy/README.md "IPv4-only clusters".
+        - name: dnsIPv4Only.enabled
+          value: "true"
+        # In-cluster OpenShift CoreDNS image (no extra pull). Update the digest if
+        # the cluster version changes: oc get ds dns-default -n openshift-dns \
+        #   -o jsonpath='{.spec.template.spec.containers[?(@.name=="dns")].image}'
+        - name: dnsIPv4Only.image
+          value: "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:2168f78e98dee245b93011b4af41970f4e2e64ae46ece6ce7742dc3c2a0cd1cd"
+        - name: dnsIPv4Only.clusterDnsIP
+          value: "172.30.0.10"
+        - name: dnsIPv4Only.extraSearches[0]
+          value: bm-cluster.e2e.bos.redhat.com
         # Static agent card for multi-cluster routing: Praxis serves its own
         # agent card (with Praxis's endpoint as rpc_url) instead of proxying
         # to the first OLS cluster. This ensures MAS and other A2A clients
@@ -466,10 +490,9 @@ clusterGroup:
         # agentCard.name, description, skills inherit OLS defaults from
         # charts/all/praxis-proxy/values.yaml; override only to diverge.
         # agentCard.rpcUrl auto-derives from global.clusterBaseDomain.
-        # NOTE: inert while policy.enabled=false (Praxis runs router-only in
-        # standalone; see the policy.enabled override above). Kept for an easy
-        # re-enable. Accept Red Hat SSO production and stage tokens in addition
-        # to the local Keycloak issuer (which the chart appends automatically).
+        # Trusted issuers the policy filter validates caller tokens against
+        # (policy.enabled=true above): Red Hat SSO production and stage, plus the
+        # local Keycloak issuer (which the chart appends automatically).
         # SSO audience is api.ask_red_hat -- verified from a real sso.stage
         # token whose aud array is
         # ["cloud-services","api.graphql","api.ask_red_hat","api.console"];

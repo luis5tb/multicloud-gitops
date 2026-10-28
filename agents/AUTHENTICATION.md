@@ -214,52 +214,63 @@ sequenceDiagram
 - No changes to Praxis policy, OLS config, or RBAC needed
 - MAS is **invisible** to the authentication chain
 
-## Praxis policy mode (standalone: router-only)
+## Praxis policy mode (standalone: policy enforcement)
 
 Praxis has two modes, selected by `policy.enabled` (default `true`) in
 `charts/all/praxis-proxy`:
 
-- **`policy.enabled: true` (default, chart-generic):** Praxis runs its `policy`
-  filter — it validates the caller JWT against the configured trusted
-  issuers/JWKS **and** enforces the `claim.azp == acme-agent` allow-list
-  (`policy.allowedCallers`) before routing. This is the mode every mermaid
-  sequence and troubleshooting entry in this document describes.
+- **`policy.enabled: true` (default, and now what the `standalone` variant
+  sets):** Praxis runs its `policy` filter — it validates the caller JWT against
+  the configured trusted issuers/JWKS **and** enforces the `claim.azp` allow-list
+  (`policy.allowedCallers`) before routing, and the `enforcement-check-job`
+  PostSync check asserts it denies a non-allow-listed caller. This is the mode
+  every mermaid sequence and troubleshooting entry in this document describes.
 
-- **`policy.enabled: false` (what the `standalone` variant sets):** the `policy`
-  filter is skipped entirely (`charts/all/praxis-proxy/files/praxis.yaml` wraps
-  the `- filter: policy` block in `{{- if .Values.policy.enabled }}`, and the
+- **`policy.enabled: false` (router-only):** the `policy` filter is skipped
+  entirely (`charts/all/praxis-proxy/files/praxis.yaml` wraps the
+  `- filter: policy` block in `{{- if .Values.policy.enabled }}`, and the
   `enforcement-check-job` PostSync check is skipped too). Praxis becomes a
   **pure router/load-balancer**: it does **no** caller JWT verification and
   enforces **no** `azp` allow-list; it only matches the `X-OLS-Cluster` header
-  to a backend (the `static_response` agent-card and `load_balancer` filters
-  remain). **OpenShift Lightspeed is then the validating boundary** — its
-  multi-issuer inbound OIDC (local Keycloak **plus** Red Hat SSO prod/stage,
-  each with its own JWKS and audience; see `appServerPatch.a2a.oidcIssuers`)
-  validates the caller token, and the RFC 8693 Keycloak exchange re-validates it
-  before any MCP call.
+  to a backend. **OpenShift Lightspeed is then the only validating boundary** —
+  its multi-issuer inbound OIDC and the RFC 8693 Keycloak exchange re-validate
+  the caller before any MCP call. Standalone ran this way until the two blockers
+  below were resolved; it remains available as a fallback where a downstream
+  boundary validates instead.
 
-**Why standalone runs router-only.** Two concrete reasons:
-1. A Red Hat SSO caller token is issued by an external issuer and is not the
-   local Keycloak `acme-agent` client token. ACME currently mints it as a
-   confidential-client agent token; a future user-token mode would preserve the
-   same issue. Praxis's local `azp == acme-agent` allow-list would reject the
-   external token even if everything else were fine.
-2. The pinned Praxis image's Rust HTTP client resolves the external SSO hosts to
-   **IPv6** and does not fall back to IPv4; this cluster has IPv4-only egress, so
-   Praxis's own JWKS fetch for `sso.redhat.com`/`sso.stage.redhat.com` fails
-   (`ConnectNoRoute` / `Network unreachable`). OLS (Python/HTTPX, which does
-   IPv4 happy-eyeballs fallback) and Keycloak (which caches external-IdP keys)
-   do not hit this, so moving external-issuer validation to them sidesteps it.
+**Enabling policy enforcement on this IPv4-only cluster.** Standalone now runs
+`policy.enabled: true`. Two concrete blockers previously forced router-only, both
+now handled (see `charts/all/praxis-proxy/README.md`, "Policy enforcement on
+IPv4-only clusters"):
 
-**Security tradeoff (state it plainly).** With the policy filter off, Praxis no
-longer enforces any caller allow-list, and OLS does **not** re-check `azp`. The
-effective gate becomes "a validly-signed token whose issuer/audience OLS trusts,
-from anyone who can reach the public Route." The meaningful constraint is the
-**per-issuer audience** — `api.ask_red_hat` for the Red Hat SSO issuers and
-`lightspeed-a2a` for the local Keycloak issuer — so keep those audiences tight
-and specific. If you need a caller allow-list back (e.g. a non-sandbox
-deployment with IPv6 egress, or where the caller always presents a Keycloak
-token), leave `policy.enabled: true`.
+1. **Caller allow-list.** A Red Hat SSO caller token is issued by an external
+   issuer with `azp` = ACME's confidential SSO client, not `acme-agent`, so the
+   `azp` allow-list would reject it. Fixed by adding that SSO client's `azp` to
+   `policy.allowedCallers` alongside `acme-agent`.
+2. **External JWKS fetch over IPv4.** The pinned Praxis image's Rust HTTP client
+   resolves the external SSO hosts to **IPv6** and does not fall back to IPv4;
+   this cluster has IPv4-only egress, so Praxis's own JWKS fetch for
+   `sso.redhat.com`/`sso.stage.redhat.com` failed (`ConnectNoRoute` / `Network
+   unreachable`). The image is Alpine/musl, so the glibc `options no-aaaa`
+   resolver switch does not apply. Fixed with the `dnsIPv4Only` CoreDNS sidecar
+   (strips AAAA; the pod resolves through it via `dnsPolicy: None`, so the client
+   only ever receives A records), plus `policy.caBundleSync.includeSystemRoots=true`
+   so Praxis's `SSL_CERT_FILE` bundle — which *replaces* the default trust store —
+   also trusts the public SSO chain, not just the Keycloak ingress CA. Verified
+   live from the Praxis pod: the default resolver returns A+AAAA, the sidecar
+   returns A only, in-cluster names still resolve, and the SSO JWKS loads over
+   the public roots. (OLS, Python/HTTPX with IPv4 happy-eyeballs, and Keycloak,
+   which caches external-IdP keys, never hit the IPv6 problem — only Praxis's
+   Rust client does.)
+
+**Security posture.** With the policy filter on, Praxis validates every caller
+token (issuer/JWKS/audience) and denies any caller whose `azp` is not in
+`policy.allowedCallers`, on top of OLS's own downstream validation and the RFC
+8693 exchange — so reaching OLS now requires both an allow-listed `azp` and a
+token OLS trusts, not merely "any validly-signed token from anyone who can reach
+the public Route." Keep the per-issuer audiences tight (`api.ask_red_hat` for the
+Red Hat SSO issuers, `lightspeed-a2a` for the local Keycloak issuer) and the
+`allowedCallers` list minimal.
 
 ## ACME IdP selection and token debugging
 

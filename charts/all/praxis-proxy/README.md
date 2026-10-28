@@ -155,6 +155,40 @@ ConfigMap, validate the rendered inner YAML too; the chart regression test
 `tests/chart/test_praxis_multi_oidc.py` parses that value and checks all trusted
 issuers.
 
+### Policy enforcement on IPv4-only clusters (external SSO JWKS)
+
+Running `policy.enabled=true` with an external issuer such as Red Hat SSO means
+Praxis itself must fetch that issuer's JWKS over the public internet. On an
+IPv4-only cluster two things break that fetch, and both are handled by this
+chart (see `agents/AUTHENTICATION.md` for the live investigation):
+
+1. **TLS trust.** The policy plugin points OpenSSL's `SSL_CERT_FILE` at the
+   synced `policy.caBundleConfigMap` bundle, which *replaces* the default trust
+   store. The ingress-CA-only bundle (for Keycloak's Route) does not trust the
+   public chain of `sso.redhat.com`, so the JWKS fetch fails certificate
+   verification. Set `policy.caBundleSync.includeSystemRoots=true` so the sync
+   appends the sync container's public CA roots to the ingress CA — one
+   self-contained bundle that trusts both Keycloak and the external issuer.
+
+2. **IPv6 with no fallback.** The pinned Praxis image's Rust HTTP client
+   resolves external hosts to IPv6 and does **not** fall back to IPv4, so on an
+   IPv4-only pod the JWKS fetch fails with `ConnectNoRoute`. The image is
+   Alpine/musl, so the glibc `options no-aaaa` resolver switch does not apply.
+   Set `dnsIPv4Only.enabled=true` (with `dnsIPv4Only.image` and
+   `dnsIPv4Only.clusterDnsIP`) to run a CoreDNS sidecar that strips AAAA records
+   and forwards everything else to the cluster DNS; the pod resolves through it
+   (`dnsPolicy: None`), so the client only ever receives A records. CoreDNS
+   binds loopback:53 as non-root via the "safe" sysctl
+   `net.ipv4.ip_unprivileged_port_start=53` (accepted by OpenShift's
+   restricted-v2 SCC). In-cluster names still resolve (non-AAAA queries are
+   forwarded unchanged). Validated live from the Praxis pod: the default
+   resolver returns A+AAAA, the sidecar returns A only, and the OLS Service name
+   still resolves.
+
+Also add every non-`acme-agent` caller's `azp` to `policy.allowedCallers` — e.g.
+the UI's Red Hat SSO client — or the `azp` allow-list will `deny` it even though
+its token validates.
+
 **Header routing and the `role: user` workaround (read this before touching
 the allow-list predicate).** This chart's identity/jwt plugin is configured
 `role: user` and compares `claim.azp`, even though it is authenticating an

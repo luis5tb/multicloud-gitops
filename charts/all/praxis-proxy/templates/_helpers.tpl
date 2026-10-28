@@ -85,6 +85,10 @@ containers:
         value: {{ .Values.policy.caBundleConfigMap.key | quote }}
       - name: TARGET_DEPLOYMENT
         value: {{ include "praxis-proxy.fullname" . | quote }}
+      - name: INCLUDE_SYSTEM_ROOTS
+        value: {{ .Values.policy.caBundleSync.includeSystemRoots | quote }}
+      - name: SYSTEM_ROOTS_PATH
+        value: {{ .Values.policy.caBundleSync.systemRootsPath | quote }}
       - name: PYTHONDONTWRITEBYTECODE
         value: "1"
     securityContext:

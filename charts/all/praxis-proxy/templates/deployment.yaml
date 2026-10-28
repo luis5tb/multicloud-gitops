@@ -22,9 +22,34 @@ spec:
         ca-bundle-sync-sha256: ""
         {{- end }}
     spec:
+      {{- if .Values.dnsIPv4Only.enabled }}
+      # Resolve through the loopback AAAA-stripping CoreDNS sidecar so the
+      # IPv6-preferring Praxis client only sees IPv4. See values.yaml dnsIPv4Only.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 127.0.0.1
+        searches:
+          - {{ printf "%s.svc.cluster.local" .Release.Namespace }}
+          - svc.cluster.local
+          - cluster.local
+          {{- range .Values.dnsIPv4Only.extraSearches }}
+          - {{ . | quote }}
+          {{- end }}
+        options:
+          - name: ndots
+            value: "5"
+      {{- end }}
       automountServiceAccountToken: false
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
+        {{- if .Values.dnsIPv4Only.enabled }}
+        # "Safe" sysctl (accepted by OpenShift's restricted-v2 SCC): lets the
+        # non-root CoreDNS sidecar bind loopback:53 without NET_BIND_SERVICE.
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "53"
+        {{- end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -103,11 +128,45 @@ spec:
               mountPath: /etc/praxis/upstream-ca
               readOnly: true
             {{- end }}
+        {{- if .Values.dnsIPv4Only.enabled }}
+        - name: dns-ipv4only
+          image: {{ required "praxis-proxy: dnsIPv4Only.image is required when dnsIPv4Only.enabled" .Values.dnsIPv4Only.image | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - -conf
+            - /etc/coredns/Corefile
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8053
+            periodSeconds: 20
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8053
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml .Values.dnsIPv4Only.resources | nindent 12 }}
+          volumeMounts:
+            - name: dns-ipv4only-config
+              mountPath: /etc/coredns
+              readOnly: true
+        {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "praxis-proxy.fullname" . }}
             defaultMode: 0444
+        {{- if .Values.dnsIPv4Only.enabled }}
+        - name: dns-ipv4only-config
+          configMap:
+            name: {{ include "praxis-proxy.fullname" . }}-dns-ipv4only
+            defaultMode: 0444
+        {{- end }}
         {{- if .Values.policy.caBundleConfigMap.name }}
         - name: policy-ca-bundle
           configMap:

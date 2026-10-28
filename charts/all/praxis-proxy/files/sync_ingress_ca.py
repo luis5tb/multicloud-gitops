@@ -68,6 +68,26 @@ def main() -> None:
     if not bundle:
         raise RuntimeError(f"{source_namespace}/{source_name} has no {source_key} data")
 
+    # Praxis's policy plugin points OpenSSL's SSL_CERT_FILE at this single bundle,
+    # which REPLACES the default trust store. When policy enforcement validates
+    # external OIDC issuers (e.g. Red Hat SSO's public JWKS) the bundle must also
+    # carry the public roots, not just the cluster ingress CA (for Keycloak's
+    # Route). Append the sync container's own public CA roots when asked.
+    if os.environ.get("INCLUDE_SYSTEM_ROOTS", "false").strip().lower() == "true":
+        system_roots_path = os.environ.get(
+            "SYSTEM_ROOTS_PATH", "/etc/pki/tls/certs/ca-bundle.crt"
+        )
+        try:
+            with open(system_roots_path, encoding="utf-8") as roots_file:
+                system_roots = roots_file.read()
+        except OSError as error:
+            raise RuntimeError(
+                f"reading system roots {system_roots_path} failed: {error}"
+            ) from error
+        if "BEGIN CERTIFICATE" not in system_roots:
+            raise RuntimeError(f"system roots {system_roots_path} has no certificates")
+        bundle = bundle.rstrip("\n") + "\n" + system_roots
+
     target_path = f"/api/v1/namespaces/{target_namespace}/configmaps/{target_name}"
     status, target = request("GET", target_path)
     if status == 404:

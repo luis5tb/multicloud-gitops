@@ -1,0 +1,25 @@
+{{- if .Values.dnsIPv4Only.enabled }}
+# AAAA-stripping resolver for the Praxis pod. See values.yaml dnsIPv4Only for the
+# full rationale (IPv6-preferring, no-fallback Praxis client on an IPv4-only pod).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-dns-ipv4only
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+data:
+  Corefile: |
+    .:53 {
+        bind 127.0.0.1
+        errors
+        health :8053
+        # Return NODATA for every AAAA query so the Praxis client only ever
+        # receives A records and connects over IPv4 on this IPv4-only pod.
+        template IN AAAA . {
+            rcode NOERROR
+        }
+        forward . {{ required "praxis-proxy: dnsIPv4Only.clusterDnsIP is required when dnsIPv4Only.enabled" .Values.dnsIPv4Only.clusterDnsIP }}
+        cache 30
+        reload
+    }
+{{- end }}
