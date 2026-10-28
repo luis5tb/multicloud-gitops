@@ -2,9 +2,10 @@
 
 This directory contains agents that can be deployed with the multicloud GitOps
 pattern. [`acme_agent`](./acme_agent/) is the public A2A coordinator: it
-validates a user-supplied target OpenShift cluster API URL, then forwards the
-request through the Praxis gateway to OpenShift Lightspeed, which answers
-questions and investigates cluster incidents using its OpenShift MCP tools.
+delegates each request to the MAO workflow, which selects the appropriate
+specialists (Ask Red Hat and/or OpenShift Lightspeed) and owns target-cluster
+selection and validation. OpenShift Lightspeed answers questions and
+investigates cluster incidents using its OpenShift MCP tools.
 
 OpenShift Lightspeed itself is deployed via the OpenShift Lightspeed Operator
 (see `charts/all/openshift-lightspeed-config/`) and an A2A-enabled image built

@@ -18,11 +18,11 @@ praxis-proxy:
       - name: red-hat-sso-prod
         issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
       - name: red-hat-sso-stage
         issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
 
 # =============================================================================
 # 2. OPENSHIFT LIGHTSPEED CONFIG - OLS Multi-Issuer Validation
@@ -41,11 +41,11 @@ openshift-lightspeed-config:
       # The local Keycloak issuer is automatically appended to this list
       oidcIssuers:
         - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
-          audience: openshift-lightspeed
+          audience: api.ask_red_hat
           username_claim: preferred_username  # or 'email' - check your SSO config
           jwks_cache_seconds: 300
         - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
-          audience: openshift-lightspeed
+          audience: api.ask_red_hat
           username_claim: preferred_username
           jwks_cache_seconds: 300
 
@@ -103,11 +103,11 @@ mao-a2a:
     oidcIssuers:
       - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
         jwks_url: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
         username_claim: preferred_username
       - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
         jwks_url: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
         username_claim: preferred_username
       # IMPORTANT: Include Keycloak explicitly if you want to accept Keycloak tokens
       - issuer_url: https://keycloak.apps.<your-cluster>/realms/rca
@@ -126,7 +126,7 @@ mao-a2a:
 #    - Praxis oidcIssuers[].audience (if Praxis validation is enabled)
 #    - OLS oidcIssuers[].audience
 #    - MAS A2A oidcIssuers[].audience (if MAS A2A is used)
-#    Use 'openshift-lightspeed' or configure your SSO to issue the correct audience
+#    Use 'api.ask_red_hat' for Red Hat SSO issuers, or configure your SSO to issue the correct audience
 #
 # 2. **Issuer URLs**: Must match EXACTLY as they appear in the token's 'iss' claim
 #    - Include the full path including /auth/realms/<realm-name>

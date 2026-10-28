@@ -239,12 +239,12 @@ public-path backend selection" above for which backend answers them):
 - `GET /.well-known/agent-card.json` serves A2A discovery. The card must
   advertise the public Praxis Route, not an internal OLS Service.
 - `GET /readiness` lets the proxy readiness probe verify both the gateway
-  and the selected OLS backend's readiness -- this is
-  `vendor/lightspeed-service/ols/app/endpoints/health.py`'s real
-  `readiness_probe_get_method` route (no `/v1` prefix), confirmed against
-  the vendored source. This path was originally `/health/ready`, copied
+  and the selected OLS backend's readiness -- this is the external fork
+  `luis5tb/lightspeed-service@a2a-split`'s `ols/app/endpoints/health.py`
+  real `readiness_probe_get_method` route (no `/v1` prefix), confirmed
+  against that source. This path was originally `/health/ready`, copied
   from the prior RCA-era chart without verification against the actual
-  vendored OLS service -- confirmed broken (404) against a live backend
+  OLS service -- confirmed broken (404) against a live backend
   and fixed here.
 
 All other paths, including the A2A RPC endpoint, hit the authenticated

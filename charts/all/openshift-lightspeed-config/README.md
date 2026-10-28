@@ -39,13 +39,12 @@ a real deployment.
 ## What this chart creates
 
 - `templates/olsconfig.yaml` -- the `OLSConfig` singleton CR (`metadata.name:
-  cluster` by convention), with a `google_vertex` LLM provider pointed at the
-  same Vertex AI project/model as `charts/all/lightspeed-agentic-operator`'s
-  `agents.gemini`, and `spec.ols.introspectionEnabled: true` so the operator
-  auto-deploys its built-in OpenShift MCP server.
+  cluster` by convention), with a `google_vertex` LLM provider pointed at a
+  Vertex AI project/model, and `spec.ols.introspectionEnabled: true` so the
+  operator auto-deploys its built-in OpenShift MCP server.
 - `templates/externalsecret-vertex.yaml` -- an ESO `ExternalSecret` reading
-  the same Vault path as `lightspeed-agentic-operator`'s `llm-creds-vertex`
-  (`secret/data/global/llm-creds-vertex`, `credentials` property) into a
+  the Vault path `secret/data/global/llm-creds-vertex` (`credentials`
+  property) into a
   **separate** Kubernetes Secret (`ols-llm-creds-vertex` by default) and key
   (`apitoken` by default, per T0.9's frozen interface decision) so the two
   operators never reconcile the same object.
@@ -455,8 +454,8 @@ fighting a problem the operator itself already solves.
 
 - `values-secret.yaml.template`'s `llm-creds-vertex` entry is commented out
   and is owned by a different workstream; it must be uncommented/populated
-  for this chart's `ExternalSecret` (and `lightspeed-agentic-operator`'s) to
-  resolve a real credential. Not edited here per this chart's scope.
+  for this chart's `ExternalSecret` to resolve a real credential. Not edited
+  here per this chart's scope.
 - The operator-created `lightspeed-app-server` / `openshift-mcp-server`
   ServiceAccounts are not created by this chart (operator-managed).
   `appServer.podSelectorLabels`, `appServerPatch.deploymentName` /
@@ -466,11 +465,14 @@ fighting a problem the operator itself already solves.
 - The Keycloak `lightspeed-mcp` client, its SPIFFE federation, and the
   `openshift-mcp` audience/`groups` mappers are `charts/all/keycloak-oidc`'s
   responsibility (Phase 3), not this chart's.
-- The `lightspeed-operator` Subscription's package name/channel/source in
-  `variants/standalone/values-standalone.yaml` are a best-effort guess
-  (`stable` channel, Red Hat Operators catalog) per
-  `LIGHTSPEED_IMPLEMENTATION_PLAN.md` T2.1's instructions and need
-  confirmation against the live cluster's actual catalog before cutover.
+- The `lightspeed-operator` Subscription in
+  `variants/standalone/values-standalone.yaml` is **pinned** to
+  `lightspeed-operator.v1.1.5` (`stable` channel, Red Hat Operators catalog)
+  with `installPlanApproval: Manual`. v2.0.0 must be avoided: an auto-upgrade
+  to it reset the app-server to the stock image (dropping the a2a-split patch)
+  and assumes the `openshift-lightspeed` namespace, breaking the pattern.
+  Because approval is manual, the first InstallPlan must be approved by hand
+  during install.
 - This chart's `NetworkPolicy` is additive to, and cannot narrow, the
   operator's `NetworkPolicy/lightspeed-app-server` for the same pods.
   Confirmed live: that operator policy allows ingress from

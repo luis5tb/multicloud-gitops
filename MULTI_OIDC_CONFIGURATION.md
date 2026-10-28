@@ -54,11 +54,11 @@ praxis-proxy:
       - name: red-hat-sso-prod
         issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
       - name: red-hat-sso-stage
         issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
         jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
 ```
 
 **Note:** When `oidcIssuers` is set, the local Keycloak issuer is automatically included. If you want Praxis to skip validation and let OLS handle everything, leave `oidcIssuers` empty.
@@ -74,11 +74,11 @@ openshift-lightspeed-config:
       # Multi-issuer OIDC configuration
       oidcIssuers:
         - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
-          audience: openshift-lightspeed
+          audience: api.ask_red_hat
           username_claim: preferred_username  # or 'email' depending on SSO config
           jwks_cache_seconds: 300
         - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
-          audience: openshift-lightspeed
+          audience: api.ask_red_hat
           username_claim: preferred_username
           jwks_cache_seconds: 300
 ```
@@ -99,11 +99,11 @@ mao-a2a:
     oidcIssuers:
       - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
         jwks_url: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
         username_claim: preferred_username
       - issuer_url: https://sso.stage.redhat.com/auth/realms/redhat-external
         jwks_url: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        audience: openshift-lightspeed
+        audience: api.ask_red_hat
         username_claim: preferred_username
       # IMPORTANT: Keycloak is NOT auto-appended; include it explicitly
       - issuer_url: https://keycloak.apps.<cluster>/realms/rca
@@ -194,7 +194,7 @@ This configuration tells Keycloak to:
 
 ### Important Notes
 
-- **The `audience` field**: All external tokens must have `audience: openshift-lightspeed` (or whatever you configure). This must match across:
+- **The `audience` field**: All external Red Hat SSO tokens must have `audience: api.ask_red_hat` (or whatever you configure). This must match across:
   - Praxis `oidcIssuers[].audience`
   - OLS `oidcIssuers[].audience`
   - The actual token from Red Hat SSO
@@ -282,7 +282,7 @@ The multi-issuer configuration is passed to the patch Job via:
   [
     {
       "issuer_url": "https://sso.redhat.com/auth/realms/redhat-external",
-      "audience": "openshift-lightspeed",
+      "audience": "api.ask_red_hat",
       "username_claim": "preferred_username",
       "jwks_cache_seconds": 300
     },
@@ -298,7 +298,7 @@ The multi-issuer configuration is passed to the patch Job via:
 
 ## MAS A2A Code Changes
 
-To enable multi-issuer OIDC support in MAS A2A, apply these changes to the `uie-mas-hosted` repository (branch `a2a-inbound-support`):
+To enable multi-issuer OIDC support in MAS A2A, apply these changes to the `uie-mas-hosted` repository (branch `a2a-inbound-deploy`):
 
 ### New Files
 - `adapters/outbound/auth/multi_issuer_validator.py` - Multi-issuer token validator
