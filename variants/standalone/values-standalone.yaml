@@ -919,8 +919,8 @@ clusterGroup:
         # were deleted from MAS inventory. See setup-mas-blueprint.sh's
         # LIVE FINDING.
         - name: a2a.blueprintId
-          #value: "df782fdc-da9c-4bce-9b6f-b76714615ffb"
-          value: "8df7ef7a-863d-4729-991a-0054a94a2eac"
+          value: "df782fdc-da9c-4bce-9b6f-b76714615ffb"
+          #value: "8df7ef7a-863d-4729-991a-0054a94a2eac"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
