@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -12,6 +13,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -93,6 +95,32 @@ def token_fingerprint(token: str) -> str:
     if not token:
         return "-"
     return "fp:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def token_exp_unverified(token: str) -> str:
+    """The token's ``exp`` claim as an ISO timestamp, or "" when unknown.
+
+    Decodes the JWT payload WITHOUT verifying the signature -- the value
+    is only ever written to audit logs (``exp=...`` on the dispatch line)
+    so an operator can see that a refused pasted token was simply
+    expired. It must never be used for an auth decision. Non-JWT tokens
+    (or malformed ones) return "", which logs as "-".
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return ""
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)  # restore stripped base64 padding
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode()))
+        exp = claims.get("exp")
+        if not isinstance(exp, (int, float)):
+            return ""
+        return datetime.fromtimestamp(exp, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except (ValueError, UnicodeDecodeError):
+        return ""
 
 
 @dataclass(frozen=True)
@@ -878,12 +906,13 @@ async def log_dispatch_audit(request: httpx.Request) -> None:
     )
     logger.info(
         "acme_audit request_id=%s actor=acme-agent cluster=%s "
-        "action=%s outcome=sent token=%s source=%s",
+        "action=%s outcome=sent token=%s source=%s exp=%s",
         request_id,
         get_cluster_id() or "",
         '"dispatch A2A query to OLS"',
         token_fingerprint(token),
         source,
+        token_exp_unverified(token) or "-",
     )
 
 

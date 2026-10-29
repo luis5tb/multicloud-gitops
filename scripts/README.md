@@ -95,8 +95,9 @@ order:
    the endpoint validates Token A and hands it to the orchestrator
 3. `ORCHESTRATOR PLAN`, `TOKEN A PASSTHROUGH`, `MAS OUTBOUND A2A`,
    `MAS DELEGATED` as the worker plans and dispatches
-4. `PRAXIS ROUTE` (or `PRAXIS NO ROUTE` + a red `MISSPELLED ROUTING HEADER`
-   from the worker if the LLM emitted `X_OLS_Cluster`)
+4. `PRAXIS ROUTE` (or `PRAXIS NO ROUTE` + a yellow `MISSPELLED ROUTING HEADER?`
+   from the worker if the LLM emitted `X_OLS_Cluster` — confirm via the
+   NO ROUTE card; a following `OLS CALLER VALIDATED` means it recovered)
 5. `OLS CALLER VALIDATED` (Token A validated, `User ID:` resolved), then the
    explicit **`OLS TOKEN EXCHANGE`** card — the Keycloak token-endpoint POST
    that mints Token B — followed by `OLS → MCP SESSION` and `OLS TOOL LOOP`
@@ -163,10 +164,10 @@ If a selector matches no pods, the script prints a warning and skips that hop
 | **TOKEN A MINT** | ACME obtained (or failed to obtain) Token A via Keycloak `client_credentials` (`acme_audit` … `action="mint Keycloak Token A"`), with the new token's fingerprint (`token=fp:…`) |
 | **TOKEN A MINT (Red Hat SSO)** | Same, but minted by Red Hat SSO prod/stage as a confidential-client agent token (`action="mint Red Hat SSO … agent Token A"`) |
 | **CLUSTER ALLOW-LIST REJECT** | `ClusterRoutingMiddleware` denied a missing/unknown cluster URL before ADK or Keycloak ran (`outcome=denied`) |
-| **ACME DISPATCH** | ACME stamped `X-Request-Id` and sent Token A toward the remote agent (`acme_audit` … `outcome=sent token=fp:… source=…`) — `source=pasted_override` (yellow) marks a UI-pasted token, `source=minted` a real Token A |
+| **ACME DISPATCH** | ACME stamped `X-Request-Id` and sent Token A toward the remote agent (`acme_audit` … `outcome=sent token=fp:… source=… exp=…`) — `source=pasted_override` (yellow) marks a UI-pasted token, `source=minted` a real Token A; `expires` shows the token's `exp` (decoded unverified, display-only) and flags it red when already in the past |
 | **ACME TOKEN RENEWAL** | A downstream refused the current token (HTTP 401 / `TASK_STATE_AUTH_REQUIRED`); ACME minted a fresh Token A and resent (`action="renew Token A"`, `renewed_from=fp:…` → `token=fp:…`, `override=retired` when a pasted token was the one refused) |
 | **MAS SESSION START** | The endpoint submitted an orchestrator session with `auth=True` — Token A attached to the run context |
-| **MAS TOKEN REJECTED** | No configured issuer validated the bearer (`Token validation failed for all … issuers`); expect a 401 and, from ACME, an **ACME TOKEN RENEWAL** |
+| **MAS TOKEN REJECTED** | No configured issuer validated the bearer (`Token validation failed for all … issuers`) — a token problem (sig/iss/exp/aud), explicitly not the principal allow-list (that is 403); expect a 401 and, from ACME, an **ACME TOKEN RENEWAL**. When the preceding dispatch carried the pasted override, the card says so and points at the dispatch's `expires` line |
 | mas issuer probe miss (dim) | `Failed to resolve signing key` — **benign**: the multi-issuer validator probing the next issuer's JWKS; the same ERROR appears on fully successful requests (confirmed live 2026-10-29) |
 | **MAS A2A INBOUND** | The endpoint completed a JSON-RPC call carrying Token A (method/path/status/duration; 401=bad token, 403=principal not allow-listed) |
 | **MAS A2A AUTH DENY** | Validation failure logged outside the middleware line (best-effort fallback) |
@@ -174,7 +175,7 @@ If a selector matches no pods, the script prints a warning and skips that hop
 | **TOKEN A PASSTHROUGH** | `a2a_agent_node` with an empty `bearer_token` using `RunContext.auth_token` — the literal Token A passthrough (DEBUG-level) |
 | **MAS OUTBOUND A2A** | `A2A stream_message to agent=… auth=True` — the outbound call carrying Token A |
 | **MAS DELEGATED** | The work item was dispatched to the remote agent |
-| **MISSPELLED ROUTING HEADER** | The planning LLM emitted `X_OLS_Cluster` (underscores) — Praxis will fail-closed 404 it ([live lesson](../docs/ARCHITECTURE.md); still recurring, see below) |
+| **MISSPELLED ROUTING HEADER?** | The planning LLM emitted `X_OLS_Cluster` (underscores) in tool args — a warning, not a verdict: only a following `PRAXIS NO ROUTE` / `MAS DELEGATION LOST` confirms the trap (observed live 2026-10-29: a delegation with the underscore spelling still reached OLS) |
 | **MAS DELEGATION LOST (404)** | An outbound A2A call came back 404 — usually that misspelled/missing `X-OLS-Cluster` |
 | **MAS OUTBOUND TLS FAILURE** | Agent-card fetch / A2A call hit an untrusted Route CA — check `identity.keycloakCaTrust.enabled` |
 | **ORCHESTRATOR ERROR** | ERROR-level or Traceback lines from the worker — failures are matched by log *level*, not keyword, because INFO lines legitimately contain `'error': None` in context dicts (e.g. `final_answer` on a successful flow) |
@@ -189,7 +190,7 @@ If a selector matches no pods, the script prints a warning and skips that hop
 | **MCP/API DENY** | 401/403 from MCP logs — really API-server OIDC/RBAC rejecting Token B (MCP is passthrough) |
 | **OLS → MCP SESSION** | OLS's MCP client opened a session carrying Token B (`Received session ID: …`) — the tool calls follow on it |
 | **OLS TOOL LOOP** | OLS's tool-calling rounds (`Tool loop iteration N/5 outcome=…`) — MCP tools executing with Token B |
-| **MCP SESSION** | The operator-managed MCP server accepting the Token B session (`server session connected session_id="…"`; the Go server logs no tool names at default verbosity — the tool detail lives on the OLS side) |
+| **MCP SESSION** | The operator-managed MCP server accepting the Token B session (`server session connected session_id="…"`; the Go server logs no tool names at default verbosity — the tool detail lives on the OLS side). Deduplicated against **OLS → MCP SESSION** on the session id — the same session is carded once |
 | **API TOKEN REJECT** (`--api`) | The API server's own OIDC authenticator rejected a bearer (audience/issuer/signature) |
 | **API AUTHZ DENY** (`--api`) | A `Forbidden` line from the API server |
 
@@ -237,12 +238,14 @@ MCP-server patterns were confirmed against captured live logs on bm-cluster
   `no route matched path=/a2a`, `request rejected by filter filter="router"
   status=404`
 
-One deliberate limitation: the `MISSPELLED ROUTING HEADER` trap fires only
+One deliberate limitation: the `MISSPELLED ROUTING HEADER?` trap fires only
 on the worker's `tool.execute` line (the LLM's own output). The
 `a2a.applying_runtime_headers` line can show the stored underscore name even
 on attempts that route successfully (observed live 2026-10-26: a retried
-delegation showed `X_OLS_Cluster` there yet Praxis routed it) — the actual
-failure is always caught by `PRAXIS NO ROUTE` regardless.
+delegation showed `X_OLS_Cluster` there yet Praxis routed it) — and even the
+`tool.execute` spelling is not always fatal (observed live 2026-10-29: a
+delegation carrying it still reached OLS). The card is therefore a yellow
+warning, and the actual failure is always caught by `PRAXIS NO ROUTE`.
 
 Routine noise that is deliberately **not** carded:
 

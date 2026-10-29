@@ -36,6 +36,10 @@ set -euo pipefail
 SINCE="${MONITOR_SINCE:-0s}"
 FILTER_REQ="${REQUEST_ID:-}"
 MODE="all"
+# Cross-hop scratch state (what ACME last dispatched). Followers run as
+# separate pipelines, so globals cannot cross hops; a tiny file can.
+# MONITOR_STATE_FILE lets you pin it (or inspect it) manually.
+STATE_FILE="${MONITOR_STATE_FILE:-$(mktemp "${TMPDIR:-/tmp}/acme-monitor.XXXXXX")}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -212,7 +216,7 @@ parse_line() {
 
   # ── ACME structured audit ───────────────────────────────────────────────
   if [[ "$line" == *"acme_audit "* ]]; then
-    local rid cluster action outcome token source renewed_from reason
+    local rid cluster action outcome token source renewed_from reason token_exp
     rid=$(grep -oP 'request_id=\K[^ ]+' <<<"$line" || true)
     cluster=$(grep -oP 'cluster=\K[^ ]+' <<<"$line" || true)
     action=$(grep -oP 'action=\K("[^"]*"|[^ ]+)' <<<"$line" || true)
@@ -220,7 +224,8 @@ parse_line() {
     token=$(grep -oP ' token=\K\S+' <<<"$line" || true)
     source=$(grep -oP 'source=\K\S+' <<<"$line" || true)
     renewed_from=$(grep -oP 'renewed_from=\K\S+' <<<"$line" || true)
-    reason=$(grep -oP 'reason=\K[^ ]+' <<<"$line" || true)
+    reason=$(grep -oP 'reason=\K.*?(?= renewed_from=|$)' <<<"$line" || true)
+    token_exp=$(grep -oP ' exp=\K\S+' <<<"$line" || true)
 
     if [[ "$action" == *'renew Token A'* ]]; then
       local rn_color="$G"
@@ -274,17 +279,37 @@ parse_line() {
     printf "${C}│${N} ${D}CREATOR : Keycloak or Red Hat SSO (Token A)${N}\n"
     printf "${C}│${N} ${D}NEXT    : MAO A2A endpoint (Phase 3) · Praxis→OLS (Phase 1)${N}\n"
     printf "${C}│${N} request_id : ${W}${rid}${N}\n"
-    printf "${C}│${N} cluster    : ${W}${cluster}${N}\n"
+    if [[ -n "$cluster" ]]; then
+      printf "${C}│${N} cluster    : ${W}${cluster}${N}\n"
+    else
+      printf "${C}│${N} cluster    : ${D}(none — MAS selects the target cluster)${N}\n"
+    fi
     if [[ -n "$token" ]]; then
       if [[ "$source" == "pasted_override" ]]; then
         printf "${C}│${N} token      : ${Y}${token}${N} ${Y}(UI-pasted override — not a minted Token A)${N}\n"
       else
         printf "${C}│${N} token      : ${W}${token}${N} ${D}(minted Token A)${N}\n"
       fi
+      if [[ -n "$token_exp" && "$token_exp" != "-" ]]; then
+        # exp is decoded unverified from the JWT payload by ACME purely for
+        # this display; an exp in the past explains a following 401 without
+        # guessing between expiry / signature / audience.
+        local exp_epoch exp_color="$G" exp_note="still valid at dispatch time"
+        exp_epoch=$(date -u -d "$token_exp" +%s 2>/dev/null || echo 0)
+        if [[ "$exp_epoch" -gt 0 && "$exp_epoch" -lt "$(date -u +%s)" ]]; then
+          exp_color="$R"; exp_note="EXPIRED — a downstream 401 on this token is expected"
+        fi
+        printf "${C}│${N} expires    : ${exp_color}${token_exp}${N} ${D}(${exp_note})${N}\n"
+      fi
     fi
     printf "${C}│${N} action     : ${action}\n"
     printf "${C}│${N} outcome    : ${G}${outcome}${N}\n"
     printf "${C}└─ → follow Token A: mas-a2a validation → orchestrator → a2a_audit${N}\n"
+    # Remember what went out (state file — followers run in separate
+    # pipelines, so shell globals do not cross hops): the MAS TOKEN
+    # REJECTED card uses this to say whether the refused bearer was a
+    # pasted override.
+    printf 'dispatch_source=%s\ndispatch_fp=%s\n' "$source" "$token" > "$STATE_FILE" 2>/dev/null || true
     return 0
   fi
 
@@ -370,6 +395,12 @@ parse_line() {
     if grep -q 'Received session ID:' <<<"$line"; then
       local mcpsid
       mcpsid=$(grep -oP 'Received session ID: \K\S+' <<<"$line" || true)
+      # The MCP pod logs the same session as "server session connected" —
+      # card it once (the OLS side carries the Token B context).
+      if grep -q "^mcp_session=${mcpsid}\$" "$STATE_FILE" 2>/dev/null; then
+        return 0
+      fi
+      printf 'mcp_session=%s\n' "$mcpsid" >> "$STATE_FILE" 2>/dev/null || true
       printf "\n${M}┌─ OLS → MCP SESSION [${ts}]${N}\n"
       printf "${M}│${N} ${D}session_id=${mcpsid} — MCP connection opened with Token B${N}\n"
       printf "${M}└─ tool calls follow on this session; API-server RBAC decides on Token B${N}\n"
@@ -378,6 +409,7 @@ parse_line() {
     if grep -q 'Tool loop iteration' <<<"$line"; then
       local loop
       loop=$(grep -oP 'Tool loop iteration \K\S+ outcome=\S+' <<<"$line" || true)
+      loop="${loop%.}"
       printf "\n${D}┌─ OLS TOOL LOOP [${ts}]${N}\n"
       printf "${D}│${N} ${D}${loop} — MCP tools executing with Token B${N}\n"
       printf "${D}└─${N}\n"
@@ -406,8 +438,16 @@ parse_line() {
       return 0
     fi
     if grep -q 'Token validation failed for all' <<<"$line"; then
+      local rej_src
+      rej_src=$(grep '^dispatch_source=' "$STATE_FILE" 2>/dev/null | cut -d= -f2 || true)
       printf "\n${R}┌─ MAS TOKEN REJECTED [${ts}]${N}\n"
-      printf "${R}│${N} ${D}no configured issuer validated the bearer (bad sig/iss/exp/aud)${N}\n"
+      printf "${R}│${N} ${D}no configured issuer validated the bearer — this is a TOKEN${N}\n"
+      printf "${R}│${N} ${D}problem (signature / issuer / expiry / audience), NOT the${N}\n"
+      printf "${R}│${N} ${D}principal allow-list (that rejects with 403, after validation)${N}\n"
+      if [[ "$rej_src" == "pasted_override" ]]; then
+        printf "${R}│${N} ${D}the preceding ACME DISPATCH carried the UI-pasted override —${N}\n"
+        printf "${R}│${N} ${D}check its expires line: an exp in the past is the usual cause${N}\n"
+      fi
       printf "${R}│${N} ${D}→ expect HTTP 401 next; ACME's renewal transport will mint a${N}\n"
       printf "${R}│${N} ${D}  fresh Token A and resend (watch for ACME TOKEN RENEWAL)${N}\n"
       printf "${R}└─ a UI-pasted token dying here is exactly how the override is tested${N}\n"
@@ -430,8 +470,13 @@ parse_line() {
       printf "${M}│${N} request_id : ${W}${m_rid}${N} ${D}(MAS's own, not ACME's X-Request-Id)${N}\n"
       if [[ "$m_status" =~ ^2 ]]; then
         printf "${M}└─ Token A validated + principal allow-listed; orchestrator takes over${N}\n"
+      elif [[ "$m_status" == "401" ]]; then
+        printf "${M}└─ 401 = the TOKEN failed issuer validation (sig/iss/exp/aud) — not${N}\n"
+        printf "${M}   the principal allow-list, which rejects with 403 after validation${N}\n"
+      elif [[ "$m_status" == "403" ]]; then
+        printf "${M}└─ 403 = token validated but sub is not in a2a.allowedPrincipals${N}\n"
       else
-        printf "${M}└─ 401=bad token (sig/iss/exp/aud) · 403=sub not in a2a.allowedPrincipals${N}\n"
+        printf "${M}└─ ${m_color}${m_status}${N}\n"
       fi
       return 0
     fi
@@ -479,18 +524,18 @@ parse_line() {
       return 0
     fi
     # Live trap: the planning LLM emits X_OLS_Cluster (underscores) in
-    # workplan tool args; Praxis matches the header name exactly and
-    # fail-closes into HTTP 404. Trapped ONLY on the tool.execute line (the
-    # LLM's own output): the a2a.applying_runtime_headers line can show the
-    # stored underscore name even on attempts that route successfully
-    # (observed live 2026-10-26 — a retried delegation trapped on
-    # applying_runtime_headers yet Praxis routed it), and the actual failure
-    # is always caught by PRAXIS NO ROUTE regardless.
+    # workplan tool args; Praxis matches the header name exactly and can
+    # fail-close into HTTP 404. WARNING, not a hard failure: observed live
+    # (2026-10-29) a delegation carrying the underscore spelling that still
+    # reached OLS — MAS can normalize or retry it. Treat this card as "check
+    # what follows": a PRAXIS NO ROUTE / MAS DELEGATION LOST confirms the
+    # trap; an OLS CALLER VALIDATED card means it recovered.
     if grep -q 'X_OLS_Cluster' <<<"$line" && grep -q 'tool.execute' <<<"$line"; then
-      printf "\n${R}┌─ MISSPELLED ROUTING HEADER [${ts}]${N}\n"
-      printf "${R}│${N} ${D}X_OLS_Cluster (underscores) in a delegation — Praxis will 404 it${N}\n"
-      printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
-      printf "${R}└─ docs/ARCHITECTURE.md: never let an LLM spell a transport header${N}\n"
+      printf "\n${Y}┌─ MISSPELLED ROUTING HEADER? [${ts}]${N}\n"
+      printf "${Y}│${N} ${D}X_OLS_Cluster (underscores) in a delegation's tool args${N}\n"
+      printf "${Y}│${N} %s\n" "$(trunc "$line" 160)"
+      printf "${Y}└─ only a failure if PRAXIS NO ROUTE follows — OLS CALLER VALIDATED${N}\n"
+      printf "${Y}   means the delegation recovered (normalized or retried)${N}\n"
       return 0
     fi
     # The Token A passthrough itself: a2a_agent_node with an empty
@@ -683,6 +728,11 @@ parse_line() {
     if grep -q 'server session connected' <<<"$line"; then
       local s_id
       s_id=$(grep -oP 'session_id="\K[^"]+' <<<"$line" || true)
+      # OLS logs the same session via "Received session ID:" — card it once.
+      if [[ -n "$s_id" ]] && grep -q "^mcp_session=${s_id}\$" "$STATE_FILE" 2>/dev/null; then
+        return 0
+      fi
+      [[ -n "$s_id" ]] && printf 'mcp_session=%s\n' "$s_id" >> "$STATE_FILE" 2>/dev/null || true
       printf "\n${G}┌─ MCP SESSION [${ts}]${N}\n"
       printf "${G}│${N} ${D}session_id=${s_id} — MCP accepted the Token B session${N}\n"
       printf "${G}└─ require_oauth passed; the API server's RBAC is the authority${N}\n"
@@ -707,6 +757,7 @@ follow() {
 }
 
 cleanup() {
+  rm -f "$STATE_FILE" 2>/dev/null || true
   jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM

@@ -316,9 +316,11 @@ UI alone you cannot tell whether the paste was ever sent (that exact confusion
 cost a live debugging session on 2026-10-29). The `acme_audit` lines settle
 it: the dispatch line carries `token=fp:<sha256-12>` plus
 `source=pasted_override` or `source=minted` (fingerprints, never token
-values), and a renewal logs `"renew Token A"` with `renewed_from=fp:…`
+values) and `exp=<iso>` — the token's expiry decoded unverified, display
+only — and a renewal logs `"renew Token A"` with `renewed_from=fp:…`
 → `token=fp:…` and `override=retired`. `bash scripts/monitor.sh` renders
-these as **ACME DISPATCH** and **ACME TOKEN RENEWAL** cards, and MAS's
+these as **ACME DISPATCH** (with an EXPIRED marker on the expires line)
+and **ACME TOKEN RENEWAL** cards, and MAS's
 answering 401 as **MAS TOKEN REJECTED**.
 
 `python -m acme_agent.mint_token [--provider redhat --environment stage]`
