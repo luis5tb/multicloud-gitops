@@ -49,7 +49,17 @@ def _configure_logging() -> None:
     package_logger.setLevel(level)
     if not package_logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        # A real timestamp matters: every other hop in this pattern (MAS,
+        # Praxis, OLS, MCP) logs one, and scripts/monitor.sh orders its
+        # cards by the pod's own clock. Without it, ACME cards can only
+        # be stamped with the monitor's receipt time (~), which arrives
+        # in arbitrary order relative to the other pipelines.
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s %(name)s %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+            )
+        )
         package_logger.addHandler(handler)
     package_logger.propagate = False
 

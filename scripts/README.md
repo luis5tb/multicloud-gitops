@@ -302,7 +302,12 @@ mints its own id and does not propagate ACME's. Practical consequences:
 - `REQUEST_ID=<id>` isolates one hop's lines (mostly useful for `--acme`).
 - End-to-end tracing across the MAS stages is by **time window**: every card
   carries a wall-clock timestamp, and the chain is slow enough (tens of
-  seconds to minutes per hop) that the ordering is unambiguous:
+  seconds to minutes per hop) that the ordering is unambiguous. Card stamps
+  are taken from the **pod's own log line** (converted to local time) so
+  cross-hop order is truthful; a leading `~` marks cards where the line had
+  no timestamp and only the monitor's receipt time is known — those can
+  interleave with same-second cards from other hops (each hop is a separate
+  `oc logs -f` pipeline with independent delivery latency).
 
 ```bash
 oc logs -n acme-agent -l app.kubernetes.io/name=acme-agent --since=30m | grep acme_audit

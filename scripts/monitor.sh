@@ -27,7 +27,11 @@
 # parse_line and scripts/README.md for the routine-noise exclusions and the
 # request_id caveats. Tokens are never printed by design — audit lines and
 # cards carry only short SHA-256 fingerprints (fp:…) that identify a token
-# without being usable as one.
+# without being usable as one. Cards are stamped with the POD'S OWN
+# timestamp (converted to local time); a leading ~ means the line carried
+# no timestamp and the monitor's receipt time was used instead — cross-hop
+# order between a ~ card and stamped cards is only approximate, because
+# each hop is a separate log pipeline with its own delivery latency.
 #
 # See scripts/README.md for selectors, overrides, and troubleshooting tips.
 
@@ -203,7 +207,30 @@ DIAGRAM
 # Parse one log line into a coloured card when it matches known patterns.
 parse_line() {
   local src="$1" line="$2" ts
-  ts=$(date +%H:%M:%S)
+  # Prefer the POD'S OWN timestamp from the line over the monitor's
+  # receipt time: each hop is a separate `oc logs -f` pipeline whose
+  # delivery latency differs, so receipt-time ordering interleaves
+  # same-second events from different hops arbitrarily (observed live:
+  # a MAS probe-miss card landing before the ACME dispatch that caused
+  # it). Stamps taken from the line keep cross-hop order truthful.
+  # Pod stamps are UTC and are converted to local time; "~" marks the
+  # fallback: no timestamp in the line, receipt time only.
+  ts="~$(date +%H:%M:%S)"
+  local stamp
+  stamp=""
+  if [[ "$line" =~ ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.0-9]*Z?) ]]; then
+    stamp="${BASH_REMATCH[1]}"
+  elif [[ "$line" =~ ([0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]][0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+    # Python asctime-style, no timezone.
+    stamp="${BASH_REMATCH[1]}"
+  fi
+  if [[ -n "$stamp" ]]; then
+    # Pods log in UTC (with or without an explicit Z); convert to the
+    # monitor's local time so all stamps — and the ~ receipt fallback —
+    # share one clock.
+    [[ "$stamp" != *Z ]] && stamp="${stamp}Z"
+    ts=$(date -d "$stamp" +%H:%M:%S 2>/dev/null || echo "${stamp:11:8}")
+  fi
 
   # Optional REQUEST_ID filter
   if [[ -n "$FILTER_REQ" ]] && ! grep -qF "$FILTER_REQ" <<<"$line"; then
