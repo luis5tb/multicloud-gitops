@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -77,6 +78,21 @@ MAX_OVERRIDE_TOKEN_LENGTH = 16384
 
 class SpiffeIdentityError(RuntimeError):
     """Raised when ZTWIM/SPIRE cannot issue this pod a JWT-SVID."""
+
+
+def token_fingerprint(token: str) -> str:
+    """Short non-reversible id for a bearer token, safe for audit logs.
+
+    Tokens themselves are never logged (they would land in pod logs and
+    cluster log pipelines); this 12-hex-char SHA-256 prefix is enough to
+    tell two tokens apart and to see a renewal replace one with another,
+    without the value being usable as a credential. It is what the
+    ``token=fp:...`` field on the mint / dispatch / renew acme_audit
+    lines carries, and what scripts/monitor.sh shows on its cards.
+    """
+    if not token:
+        return "-"
+    return "fp:" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -352,11 +368,12 @@ class DownstreamAuth:
         self._store_token(("redhat", environment, "agent"), token, expires_in)
         logger.info(
             "acme_audit request_id=%s actor=acme-agent cluster=%s "
-            "action=%s outcome=ok expires_in=%s",
+            "action=%s outcome=ok expires_in=%s token=%s",
             request_id,
             cluster,
             action,
             expires_in,
+            token_fingerprint(token),
         )
         return token
 
@@ -469,11 +486,12 @@ class DownstreamAuth:
         self._store_token(("keycloak", "", ""), token, expires_in)
         logger.info(
             "acme_audit request_id=%s actor=acme-agent cluster=%s "
-            "action=%s outcome=ok expires_in=%s",
+            "action=%s outcome=ok expires_in=%s token=%s",
             request_id,
             cluster,
             '"mint Keycloak Token A"',
             expires_in,
+            token_fingerprint(token),
         )
         return token
 
@@ -842,12 +860,30 @@ async def log_dispatch_audit(request: httpx.Request) -> None:
     if not request_id:
         request_id = uuid.uuid4().hex
         request.headers[REQUEST_ID_HEADER] = request_id
+    # Which token went out: add_auth has already run (hook order above), so
+    # the Authorization header names the exact bearer. The source field
+    # distinguishes a UI-pasted override token from a minted Token A --
+    # without it, "did the pasted token actually get used?" is unanswerable
+    # from logs alone, because a 401 on the paste is silently healed by the
+    # renewal transport before anything else logs (observed live
+    # 2026-10-29: same X-Request-Id on the downstream 401 and the retried
+    # 200, zero distinguishing lines on the ACME side).
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+    override = _token_override.get()
+    source = (
+        "pasted_override"
+        if token and override is not None and override.active and override.token == token
+        else "minted"
+    )
     logger.info(
         "acme_audit request_id=%s actor=acme-agent cluster=%s "
-        "action=%s outcome=sent",
+        "action=%s outcome=sent token=%s source=%s",
         request_id,
         get_cluster_id() or "",
         '"dispatch A2A query to OLS"',
+        token_fingerprint(token),
+        source,
     )
 
 

@@ -46,7 +46,9 @@ routine-noise exclusions and how to refine after a MAS image bump.
 
 Token A never reaches MCP or the API server; only Token B does. Tokens
 themselves are never printed (by design of `acme_audit` / `a2a_audit` and of
-the MAS matchers — the monitor only ever names the token stage). One further
+the MAS matchers — the monitor only ever names the token stage; ACME audit
+lines carry short SHA-256 fingerprints `fp:…` that identify a token without
+being usable as one). One further
 credential appears on the worker cards and is deliberately labelled as
 **not** Token A: the orchestrator's planning LLM uses its own static Vertex
 ADC grant (`PLANNING LLM GRANT`), the separate credential system described
@@ -158,11 +160,14 @@ If a selector matches no pods, the script prints a warning and skips that hop
 
 | Card | Meaning |
 | --- | --- |
-| **TOKEN A MINT** | ACME obtained (or failed to obtain) Token A via Keycloak `client_credentials` (`acme_audit` … `action="mint Keycloak Token A"`) |
+| **TOKEN A MINT** | ACME obtained (or failed to obtain) Token A via Keycloak `client_credentials` (`acme_audit` … `action="mint Keycloak Token A"`), with the new token's fingerprint (`token=fp:…`) |
 | **TOKEN A MINT (Red Hat SSO)** | Same, but minted by Red Hat SSO prod/stage as a confidential-client agent token (`action="mint Red Hat SSO … agent Token A"`) |
 | **CLUSTER ALLOW-LIST REJECT** | `ClusterRoutingMiddleware` denied a missing/unknown cluster URL before ADK or Keycloak ran (`outcome=denied`) |
-| **ACME DISPATCH** | ACME stamped `X-Request-Id` and sent Token A toward the remote agent (`acme_audit` … `outcome=sent`) |
+| **ACME DISPATCH** | ACME stamped `X-Request-Id` and sent Token A toward the remote agent (`acme_audit` … `outcome=sent token=fp:… source=…`) — `source=pasted_override` (yellow) marks a UI-pasted token, `source=minted` a real Token A |
+| **ACME TOKEN RENEWAL** | A downstream refused the current token (HTTP 401 / `TASK_STATE_AUTH_REQUIRED`); ACME minted a fresh Token A and resent (`action="renew Token A"`, `renewed_from=fp:…` → `token=fp:…`, `override=retired` when a pasted token was the one refused) |
 | **MAS SESSION START** | The endpoint submitted an orchestrator session with `auth=True` — Token A attached to the run context |
+| **MAS TOKEN REJECTED** | No configured issuer validated the bearer (`Token validation failed for all … issuers`); expect a 401 and, from ACME, an **ACME TOKEN RENEWAL** |
+| mas issuer probe miss (dim) | `Failed to resolve signing key` — **benign**: the multi-issuer validator probing the next issuer's JWKS; the same ERROR appears on fully successful requests (confirmed live 2026-10-29) |
 | **MAS A2A INBOUND** | The endpoint completed a JSON-RPC call carrying Token A (method/path/status/duration; 401=bad token, 403=principal not allow-listed) |
 | **MAS A2A AUTH DENY** | Validation failure logged outside the middleware line (best-effort fallback) |
 | **ORCHESTRATOR PLAN** | `workplan.plan_and_delegate` — the LLM routed the request to Ask Red Hat / OLS, with the `X-OLS-Cluster` it chose (when spelled correctly); carded once per planning call (the `tool_args` line — MAS also logs the bare tool name and phase-timing tables, which are skipped) |

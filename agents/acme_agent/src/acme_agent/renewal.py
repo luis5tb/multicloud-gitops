@@ -30,7 +30,7 @@ from typing import Any
 
 import httpx
 
-from .auth import CapturedAuth, DownstreamAuth
+from .auth import CapturedAuth, DownstreamAuth, token_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -346,11 +346,25 @@ class CredentialRenewingTransport(httpx.AsyncBaseTransport):
                 type(error).__name__,
             )
             return None
+        # old → new fingerprints: the one line that proves a renewal actually
+        # replaced the refused token (and retires a pasted override). Without
+        # it, a 401 on a UI-pasted expired token is healed silently and the
+        # token-debug view shows the renewed mint, leaving the operator
+        # unable to tell whether the paste was ever sent (observed live
+        # 2026-10-29 on bm-cluster).
+        old_token = request.headers.get("Authorization", "")
+        old_token = old_token[7:] if old_token.startswith("Bearer ") else old_token
+        new_token = retry.headers.get("Authorization", "")
+        new_token = new_token[7:] if new_token.startswith("Bearer ") else new_token
         logger.info(
-            "acme_audit request_id=%s action=%s outcome=ok reason=%s",
+            "acme_audit request_id=%s action=%s outcome=ok reason=%s "
+            "renewed_from=%s token=%s source=minted override=%s",
             retry.headers.get("X-Request-Id", "-"),
             '"renew Token A"',
             reason,
+            token_fingerprint(old_token),
+            token_fingerprint(new_token),
+            "retired" if captured.override is not None else "-",
         )
         return retry
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -30,6 +31,30 @@ from .renewal import CredentialRenewingTransport
 from .routing_prompt import ROUTER_INSTRUCTION
 from .ui import UI_HTML
 
+
+def _configure_logging() -> None:
+    """Make the package's acme_audit INFO lines actually reach stdout.
+
+    uvicorn's default log_config only configures the ``uvicorn.*`` loggers;
+    records from ``acme_agent.*`` propagate to a root logger with no
+    handler and hit Python's last-resort handler, which drops everything
+    below WARNING. Observed live (bm-cluster, 2026-10-29): a full pasted-
+    token → 401 → renewal flow left *zero* acme_audit lines in the pod log
+    (no mint, no dispatch, no "renew Token A"), sending the debugging
+    session to the MAS side for evidence ACME had emitted all along. Give
+    the package logger its own stdout handler; ACME_LOG_LEVEL overrides.
+    """
+    level = getattr(logging, os.getenv("ACME_LOG_LEVEL", "INFO").upper(), logging.INFO)
+    package_logger = logging.getLogger("acme_agent")
+    package_logger.setLevel(level)
+    if not package_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        package_logger.addHandler(handler)
+    package_logger.propagate = False
+
+
+_configure_logging()
 
 AUTH = DownstreamAuth()
 
