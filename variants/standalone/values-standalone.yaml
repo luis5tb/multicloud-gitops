@@ -869,7 +869,7 @@ clusterGroup:
         # to keycloak with a dedicated audience (mas-api) and a real
         # identity.adminAllowedUsers list.
         - name: route.enabled
-          value: "false"
+          value: "true"
         # DEV MODE: Accept any token without validation (for testing/blueprint setup)
         # WARNING: Do not use in production - no authentication security!
         # Only acceptable here because route.enabled=false keeps the API off the
