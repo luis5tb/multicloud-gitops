@@ -297,23 +297,32 @@ clusterGroup:
         # External OIDC providers Keycloak trusts for RFC 8693 token exchange.
         # When OLS receives a token from Red Hat SSO (prod or stage), it
         # exchanges that token via Keycloak's token endpoint using that SSO
-        # token as the subject_token. Keycloak validates the subject_token by
-        # checking its signature against these providers' JWKS. Without this,
-        # token exchange fails with "unknown issuer".
+        # token as the subject_token. Keycloak validates it through authenticated
+        # introspection and userinfo as well as signature verification. Reuse
+        # ACME's Vault records so the IdP credentials stay consistent; the
+        # PostSync hook configures existing realms as well as fresh imports.
         - name: keycloak.externalOidcProviders[0].alias
           value: red-hat-sso-prod
         - name: keycloak.externalOidcProviders[0].displayName
           value: "Red Hat SSO Production"
         - name: keycloak.externalOidcProviders[0].issuerUrl
           value: https://sso.redhat.com/auth/realms/redhat-external
+        - name: keycloak.externalOidcProviders[0].authorizationUrl
+          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/auth
+        - name: keycloak.externalOidcProviders[0].tokenUrl
+          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
         - name: keycloak.externalOidcProviders[0].jwksUrl
           value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: keycloak.externalOidcProviders[0].tokenIntrospectionUrl
           value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
         - name: keycloak.externalOidcProviders[0].userInfoUrl
           value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
-        - name: keycloak.externalOidcProviders[0].clientId
-          value: ff524661-b74a-4e10-bc24-4e71322e0852
+        - name: keycloak.externalOidcProviders[0].credentials.vaultKey
+          value: secret/data/global/acme-agent-redhat-sso-production
+        - name: keycloak.externalOidcProviders[0].clientAuthMethod
+          value: client_secret_post
+        - name: keycloak.externalOidcProviders[0].defaultScope
+          value: openid api.ask_red_hat
         - name: keycloak.externalOidcProviders[0].isAccessTokenJWT
           value: "true"
         - name: keycloak.externalOidcProviders[0].allowTokenExchange
@@ -329,14 +338,22 @@ clusterGroup:
           value: "Red Hat SSO Stage"
         - name: keycloak.externalOidcProviders[1].issuerUrl
           value: https://sso.stage.redhat.com/auth/realms/redhat-external
+        - name: keycloak.externalOidcProviders[1].authorizationUrl
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/auth
+        - name: keycloak.externalOidcProviders[1].tokenUrl
+          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
         - name: keycloak.externalOidcProviders[1].jwksUrl
           value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: keycloak.externalOidcProviders[1].tokenIntrospectionUrl
           value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
         - name: keycloak.externalOidcProviders[1].userInfoUrl
           value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
-        - name: keycloak.externalOidcProviders[1].clientId
-          value: ff524661-b74a-4e10-bc24-4e71322e0852
+        - name: keycloak.externalOidcProviders[1].credentials.vaultKey
+          value: secret/data/global/acme-agent-redhat-sso-stage
+        - name: keycloak.externalOidcProviders[1].clientAuthMethod
+          value: client_secret_post
+        - name: keycloak.externalOidcProviders[1].defaultScope
+          value: openid api.ask_red_hat
         - name: keycloak.externalOidcProviders[1].isAccessTokenJWT
           value: "true"
         - name: keycloak.externalOidcProviders[1].allowTokenExchange

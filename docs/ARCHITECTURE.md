@@ -233,6 +233,14 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   alias that can drift from chart values. The OLS image must also preserve
   `subject_token_type=access_token`; the `650f5486` image rewrites external
   tokens to `jwt`, which Keycloak 26.4 rejects.
+- **External IdP introspection needs its own client secret.** Verified live
+  on 2026-10-29: stage exchange reached Keycloak with valid SPIFFE client
+  authentication but Red Hat SSO introspection returned 401 because the IdP
+  had no client secret; ACME's credentials made the same probe return 200.
+  The chart now reuses ACME's Vault records in the Keycloak namespace and
+  reconciles complete IdP endpoints, credentials, and group mappers on sync,
+  including existing realms. See the keycloak-oidc README's external SSO
+  troubleshooting finding and secret-rotation caveat.
 - **External-token exchange must also map a Keycloak group.** A successful
   Red Hat SSO exchange that emits no `groups` claim makes OpenShift authorize
   the brokered subject as `keycloak:<uuid>`, while the pattern's RBAC targets

@@ -134,37 +134,34 @@ keycloak:
     # SPIRE's OIDC discovery provider JWKS endpoint, e.g.
     # https://spire-spiffe-oidc-discovery-provider.zero-trust-workload-identity-manager.svc.cluster.local/keys
     bundleEndpoint: ""
-  # External OIDC identity providers that Keycloak trusts for token exchange.
-  # When a token from one of these issuers is used as the subject_token in an
-  # RFC 8693 token exchange, Keycloak will accept it. Each entry needs alias,
-  # issuerUrl (OIDC issuer), and jwksUrl (JWKS endpoint).
+  # External OIDC providers trusted for token exchange. The import and
+  # PostSync hook share this configuration; existing IdPs are matched by issuer
+  # before alias. Endpoints are explicit so this also works with non-Keycloak
+  # issuers whose endpoint paths cannot be derived from their issuer URL.
+  # No plaintext client secret is accepted in values. Reuse the caller's Vault
+  # record (client-id/client-secret), or a same-namespace existing Secret with
+  # those two keys. Secret rotation is applied on the next ArgoCD sync.
   externalOidcProviders: []
-    # - alias: red-hat-sso-prod
-    #   displayName: Red Hat SSO Production
-    #   issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
-    #   jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-  #   # Required for Keycloak 26.4's standard token exchange:
-  #   # introspection and userinfo validation of the external subject token.
-  #   tokenIntrospectionUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
-  #   userInfoUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
-  #   clientId: <red-hat-sso-client-id>
+  # - alias: external-sso
+  #   displayName: External SSO
+  #   issuerUrl: https://sso.example.com/realms/example
+  #   authorizationUrl: https://sso.example.com/realms/example/protocol/openid-connect/auth
+  #   tokenUrl: https://sso.example.com/realms/example/protocol/openid-connect/token
+  #   jwksUrl: https://sso.example.com/realms/example/protocol/openid-connect/certs
+  #   tokenIntrospectionUrl: https://sso.example.com/realms/example/protocol/openid-connect/token/introspect
+  #   userInfoUrl: https://sso.example.com/realms/example/protocol/openid-connect/userinfo
+  #   clientAuthMethod: client_secret_post
+  #   defaultScope: openid
+  #   credentials:
+  #     vaultKey: secret/data/global/external-sso
+  #     clientIdProperty: client-id       # default
+  #     clientSecretProperty: client-secret # default
+  #     # Alternative to vaultKey (Secret in keycloak.namespace):
+  #     # existingSecretName: external-sso-credentials
+  #   # Legacy providers without managed credentials may still set clientId.
   #   isAccessTokenJWT: "true"
-    #   # Optional: enable token exchange from this provider (default: true)
-    #   allowTokenExchange: true
-    #   # Optional: Keycloak groups assigned to every brokered user from this
-    #   # provider. The group must exist in this realm; on fresh imports the
-    #   # chart renders a Hardcoded Group IdP mapper for each entry.
-    #   hardcodedGroups:
-    #     - acme-agent-rca
-    # - alias: red-hat-sso-stage
-    #   displayName: Red Hat SSO Stage
-    #   issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
-    #   jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-  #   tokenIntrospectionUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token/introspect
-  #   userInfoUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/userinfo
-  #   clientId: <red-hat-sso-client-id>
-  #   isAccessTokenJWT: "true"
-    #   allowTokenExchange: true
+  #   allowTokenExchange: true
+  #   # Optional groups assigned to every brokered caller; groups must exist.
   #   hardcodedGroups:
   #     - acme-agent-rca
   # Confidential client that exists only so lightspeed-mcp's RFC 8693 token
