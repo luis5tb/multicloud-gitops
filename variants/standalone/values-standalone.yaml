@@ -396,8 +396,8 @@ clusterGroup:
         # exposes write tools (its config read_only=false, set by the
         # appServerPatch bridge). See lightspeedRbac.writeNamespaces in
         # charts/all/keycloak-oidc/values.yaml.
-        - name: lightspeedRbac.writeNamespaces[0]
-          value: payments
+        #- name: lightspeedRbac.writeNamespaces[0]
+        #  value: payments
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
