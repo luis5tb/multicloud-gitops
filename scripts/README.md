@@ -1,3 +1,115 @@
+# Interactive MAS query
+
+`mas-query.py` calls MAS directly over A2A 1.0 without starting ACME or a local
+LLM. It needs Python 3.10+ and uses only the standard library.
+
+```bash
+python3 scripts/mas-query.py --mas-url https://<mas-a2a-route>
+```
+
+To discover the deployed Route using your current `oc` login:
+
+```bash
+python3 scripts/mas-query.py \
+  --mas-url "https://$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')"
+```
+
+The prompts are:
+
+1. **Paste a token** or **Get a token**. Pasting accepts a raw access token or
+   `Bearer <token>` and skips the provider questions.
+2. When getting a token, choose **Keycloak**, **Red Hat SSO**, or **Red Hat SSO
+   stage**. Supply the token endpoint URL, client ID, and client secret if they
+   are not already configured in the environment. Keycloak also offers a
+   JWT-SVID/assertion file instead of a client secret.
+3. **Question to ask**. Include the cluster API URL for an OLS investigation;
+   MAS selects the cluster and adds its downstream routing header, as with ACME.
+
+`--mas-url` also accepts the full `/a2a/jsonrpc` or agent-card URL. `MAS_URL`
+can supply it; otherwise the script prompts for it after the question. Use the
+**MAS A2A Route**, not the Flask MAS API Route.
+
+The output prints the **full bearer token actually used**, live **Thinking**
+parts when MAS marks them as such, **Progress** messages and task states, and
+the final **Result**. The script displays only what MAS exposes; some workflows
+provide progress summaries without reasoning text. Token replacements are
+printed too. Token and client-secret prompts do not echo keyboard input, but
+the requested token output remains visible in terminal history or captured logs.
+
+## Getting tokens without ACME
+
+The local token path uses `client_credentials`, matching ACME's agent-token
+mode. It reads these same environment variables, prompting for missing values:
+
+| Provider | Environment variables |
+| --- | --- |
+| Keycloak | `KEYCLOAK_TOKEN_URL`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_CLIENT_SECRET` |
+| Red Hat SSO | `REDHAT_SSO_PRODUCTION_TOKEN_URL`, `REDHAT_SSO_PRODUCTION_CLIENT_ID`, `REDHAT_SSO_PRODUCTION_CLIENT_SECRET` |
+| Red Hat SSO stage | `REDHAT_SSO_STAGE_TOKEN_URL`, `REDHAT_SSO_STAGE_CLIENT_ID`, `REDHAT_SSO_STAGE_CLIENT_SECRET` |
+
+Keycloak defaults to `client_secret_post`; `KEYCLOAK_CLIENT_AUTH_METHOD` sets
+the prompt's default to `client_secret_post`, `client_secret_basic`, or
+`client_assertion_post`. Assertion mode reads `ZTO_IDENTITY_TOKEN_FILE` (or a
+prompted path) at each mint, using `KEYCLOAK_CLIENT_ASSERTION_TYPE` or ACME's
+`urn:ietf:params:oauth:client-assertion-type:jwt-spiffe` default. The assertion
+must be issued for the configured Keycloak client authentication flow; this
+script does not itself fetch JWT-SVIDs from a SPIFFE Workload API socket.
+
+`KEYCLOAK_SCOPE` is optional. Red Hat SSO defaults to
+`openid api.ask_red_hat`, required for the downstream Keycloak exchange;
+`REDHAT_SSO_SCOPE` overrides it. Use confidential clients with service accounts
+enabled. This path obtains agent tokens; paste an existing token for user-token
+flows. A locally configured client must already be trusted by MAS and downstream
+services: MAS checks the token's audience and exact subject allow-list. Creating
+a new client ID alone does not grant access. See the
+[MAS authentication prerequisites](../charts/all/mao/mas-a2a/README.md).
+
+## Reusing the deployed SPIFFE identity
+
+For the existing Keycloak client authenticated by ACME's workload identity,
+use its mint helper as an optional token command. This uses the deployed pod's
+credentials and SPIFFE socket, while the query and A2A transport run locally:
+
+```bash
+python3 scripts/mas-query.py --mas-url https://<mas-a2a-route> \
+  --token-command 'oc exec -n acme-agent deploy/acme-agent -- python -m acme_agent.mint_token --provider {provider} --environment "{environment}"'
+```
+
+The same command supports all three provider choices using ACME's configured
+credentials. `--token-command` (or `MAS_TOKEN_COMMAND`) must write only a raw
+token to stdout and exit successfully. `{provider}` becomes `keycloak` or
+`redhat`; `{environment}` becomes empty, `production`, or `stage`. Commands
+are executed without a shell; use a wrapper executable for pipelines or other
+shell logic. A pasted token bypasses the command.
+
+## TLS, long tasks, and approvals
+
+Use `--ca-bundle /path/to/ca.pem` or `A2A_CA_BUNDLE` for private Route CAs. The
+bundle extends the system trust store for both MAS and token endpoints. HTTPS
+verification stays enabled; loopback HTTP is supported for local development.
+
+The script reads MAS's public agent card, streams when advertised, and polls
+otherwise. A closed stream triggers task retrieval and reattachment rather than
+resubmission of the question. The default overall timeout is 1,200 seconds
+(`--timeout`), with a 330-second socket timeout (`--request-timeout`) and a
+2-second poll/reconnect delay (`--poll-interval`). Interruption or timeout does
+not cancel the remote task; its task/context IDs are printed for recovery.
+
+HTTP 401 renews the token and retries that call once, preserving its message ID.
+`AUTH_REQUIRED` renews credentials and resumes the same task, at most twice.
+For pasted tokens, renewal prompts for another token for the **same principal**;
+minted credentials reuse the selected provider. `INPUT_REQUIRED` prompts for a
+reply, such as `approve` or `reject`, and resumes the same task/context with a
+new message ID. Approval is always interactive. Task failures return a nonzero
+exit code.
+
+Offline tests, inside a temporary environment:
+
+```bash
+python3 -m venv /tmp/mas-query-tests
+/tmp/mas-query-tests/bin/python -m unittest discover -s tests/scripts -v
+```
+
 # Flow monitor
 
 Real-time view of the agentic investigation identity chain on an OpenShift

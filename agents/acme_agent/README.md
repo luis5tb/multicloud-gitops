@@ -58,6 +58,11 @@ alongside every other component in this pattern.
 
 ## Local setup
 
+For an interactive terminal client that calls MAS directly, see
+[`scripts/mas-query.py`](../../scripts/README.md#interactive-mas-query). It
+supports pasted tokens, Keycloak, and Red Hat SSO production/stage tokens
+without running the ACME UI or coordinator LLM.
+
 Python 3.11 or newer is recommended.
 
 ```bash
