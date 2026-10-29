@@ -143,8 +143,8 @@ in the Admin Console, add the `groups` mapper to both `acme-agent` and
 `keycloak-realm-import.yaml` declares, so a future full realm re-import
 doesn't diverge from what's actually configured.
 
-The external-IdP `hardcodedGroups` mapper is the exception: once its provider
-exists, the PostSync reconciler below creates or updates it on every sync.
+External OIDC providers and their `hardcodedGroups` mappers are the exception:
+the PostSync reconciler below creates or updates them on every sync.
 
 `templates/lightspeed-mcp-rbac.yaml` grants the mapped `keycloak:acme-agent-rca`
 group `get`/`list` on `pods` and `events`, in exactly the namespaces listed
@@ -182,8 +182,9 @@ oc get role,rolebinding -n <a namespace in lightspeedRbac.namespaces> <lightspee
 Keycloak 26.4's standard V2 token exchange validates an external subject token
 with introspection and userinfo, not JWKS alone. When configuring
 `keycloak.externalOidcProviders` for Red Hat SSO, include the issuer's
-`tokenIntrospectionUrl`, `userInfoUrl`, and the Red Hat SSO client ID used to
-mint the subject token. ACME must request `openid api.ask_red_hat`; with only
+`authorizationUrl`, `tokenUrl`, `jwksUrl`, `tokenIntrospectionUrl`, and
+`userInfoUrl`. The standalone variant configures all five endpoints for both
+SSO environments. ACME must request `openid api.ask_red_hat`; with only
 `api.ask_red_hat`, Red Hat's userinfo endpoint returns 403 and OLS sees only
 the generic `Keycloak token exchange failed` error.
 
@@ -191,13 +192,61 @@ OLS should send the external issuer URL as `subject_issuer`. Keycloak accepts
 the issuer URL directly, which avoids depending on an imported IdP alias that
 can drift from chart values on a one-shot realm import.
 
+**Live finding (2026-10-29): stage introspection also needs the external
+client secret in Keycloak's IdP configuration.** Requests at 15:31, 15:33,
+and 15:34 UTC reached Keycloak as `lightspeed-mcp` using `federated-jwt`
+authentication and the correct stage `subject_issuer`, but failed with
+`Introspection endpoint call failure. Introspection response status: 401`.
+Red Hat SSO returned `Authentication failed.` The live `red-hat-sso-stage`
+IdP had the same client ID as ACME but no `config.clientSecret`. A direct
+probe with a freshly minted stage token reproduced HTTP 401 using the IdP's
+credentials; the same token returned HTTP 200 with `active: true` using
+ACME's stage client ID and secret. Userinfo also returned HTTP 200, ruling
+out the separate missing-`openid` failure above.
+
+The chart previously rendered only the external client ID and some endpoints;
+the PostSync hook managed only group mappers. The old chart tests checked
+those rendered fields without exercising authenticated introspection, so they
+passed despite the missing credential. Authorization and token URLs were also
+absent. Native Keycloak subject tokens avoid this external hop, explaining why
+that path worked.
+
+The pattern now supplies the IdP client ID and secret from the **same Vault
+record ACME uses**, with no new credentials to provision:
+
+```yaml
+credentials:
+  vaultKey: secret/data/global/acme-agent-redhat-sso-stage
+```
+
+The chart creates a per-provider ExternalSecret in `keycloak.namespace` with
+keys `client-id` and `client-secret`. Vault property names default to those
+same names; override `credentials.clientIdProperty` and
+`credentials.clientSecretProperty` when needed. Alternatively, set
+`credentials.existingSecretName` to a Secret in the Keycloak namespace with
+those keys; this is mutually exclusive with `vaultKey`. Never put a real
+client secret into Helm values. The standalone variant uses the existing
+production and stage Vault records already documented in
+`values-secret.yaml.template`.
+
+Fresh imports resolve both credentials through `KeycloakRealmImport`
+placeholders. On every ArgoCD sync, `rca-realm-secrets-reconciler` also creates
+missing IdPs or updates existing ones through the Admin API: endpoints,
+credentials, signature validation, token-exchange setting, client auth method,
+scope, and group mappers. Issuer matching preserves existing aliases and
+unmanaged settings. The default client auth method is `client_secret_post`;
+`defaultScope` defaults to `openid` (standalone uses `openid api.ask_red_hat`).
+Configured providers are enabled; removing one from the list does not delete
+it or its existing group mappers. Secret rotation reaches the Kubernetes Secret
+on the ExternalSecret refresh interval, then reaches Keycloak on the **next
+ArgoCD sync**; refresh alone does not trigger the PostSync hook. No realm
+deletion or re-import is required.
+
 For callers that must receive the pattern's MCP RBAC identity, add the target
 Keycloak group to each provider's `hardcodedGroups` list (the standalone
-variant uses `acme-agent-rca` for both Red Hat SSO environments). On a fresh
-realm import this renders a `Hardcoded Group` IdP mapper with sync mode
-`FORCE`; on an existing realm, the `rca-realm-secrets-reconciler` PostSync Job
-matches the IdP by its configured issuer URL and creates or updates the same
-mapper. Issuer matching intentionally handles alias drift such as the live
+variant uses `acme-agent-rca` for both Red Hat SSO environments). Both the
+realm import and PostSync hook manage a `Hardcoded Group` IdP mapper with
+sync mode `FORCE`. Issuer matching intentionally handles alias drift such as the live
 `rh-sso-stage` alias versus the chart's `red-hat-sso-stage` value.
 
 The mapper settings are:

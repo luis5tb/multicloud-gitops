@@ -86,3 +86,50 @@ alias.
 {{- end -}}
 {{- $mappings | toJson -}}
 {{- end -}}
+
+{{/* Shared managed configuration for imports and existing-realm updates. */}}
+{{- define "keycloak-oidc.externalProviderConfig" -}}
+{{- $credentials := default dict .credentials -}}
+{{- if or $credentials.vaultKey $credentials.existingSecretName -}}
+{{- range $field := list "authorizationUrl" "tokenUrl" "jwksUrl" "tokenIntrospectionUrl" "userInfoUrl" -}}
+{{- $_ := required (printf "external OIDC provider %s requires %s when credentials are managed" $.alias $field) (index $ $field) -}}
+{{- end -}}
+{{- end -}}
+{{- $config := dict "issuer" (required "external OIDC provider issuerUrl is required" .issuerUrl) "validateSignature" "true" "useJwksUrl" "true" "tokenExchangeEnabled" "true" "clientAuthMethod" (default "client_secret_post" .clientAuthMethod) "defaultScope" (default "openid" .defaultScope) -}}
+{{- if hasKey . "allowTokenExchange" -}}
+{{- $_ := set $config "tokenExchangeEnabled" (.allowTokenExchange | toString) -}}
+{{- end -}}
+{{- range $field := list "authorizationUrl" "tokenUrl" "jwksUrl" "tokenIntrospectionUrl" "userInfoUrl" "clientId" "isAccessTokenJWT" -}}
+{{- if hasKey $ $field -}}
+{{- $_ := set $config $field (index $ $field | toString) -}}
+{{- end -}}
+{{- end -}}
+{{- $config | toJson -}}
+{{- end -}}
+
+{{- define "keycloak-oidc.externalProviderSecretName" -}}
+{{- $credentials := default dict .provider.credentials -}}
+{{- if and $credentials.existingSecretName $credentials.vaultKey -}}
+{{- fail "external OIDC credentials: set only one of existingSecretName and vaultKey" -}}
+{{- end -}}
+{{- if $credentials.existingSecretName -}}
+{{- $credentials.existingSecretName -}}
+{{- else -}}
+{{- printf "%s-idp-%s" (include "keycloak-oidc.fullname" .root) .provider.alias | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "keycloak-oidc.externalProviders" -}}
+{{- $providers := list -}}
+{{- range $index, $provider := .Values.keycloak.externalOidcProviders -}}
+{{- $desired := dict "alias" (required "external OIDC provider alias is required" $provider.alias) "issuerUrl" $provider.issuerUrl "config" (include "keycloak-oidc.externalProviderConfig" $provider | fromJson) "groups" (default list $provider.hardcodedGroups) -}}
+{{- if $provider.displayName -}}{{- $_ := set $desired "displayName" $provider.displayName -}}{{- end -}}
+{{- $credentials := default dict $provider.credentials -}}
+{{- if or $credentials.vaultKey $credentials.existingSecretName -}}
+{{- $_ := set $desired "clientIdEnv" (printf "EXTERNAL_IDP_%d_CLIENT_ID" $index) -}}
+{{- $_ := set $desired "clientSecretEnv" (printf "EXTERNAL_IDP_%d_CLIENT_SECRET" $index) -}}
+{{- end -}}
+{{- $providers = append $providers $desired -}}
+{{- end -}}
+{{- $providers | toJson -}}
+{{- end -}}

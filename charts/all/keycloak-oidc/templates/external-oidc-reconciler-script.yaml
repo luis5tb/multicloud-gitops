@@ -1,0 +1,12 @@
+{{- if and .Values.realmImport.enabled .Values.keycloak.externalOidcProviders }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "keycloak-oidc.fullname" . }}-external-oidc-reconciler
+  namespace: {{ .Values.keycloak.namespace }}
+  labels:
+    {{- include "keycloak-oidc.labels" . | nindent 4 }}
+data:
+  reconcile_external_oidc.py: |
+{{ .Files.Get "files/reconcile_external_oidc.py" | indent 4 }}
+{{- end }}
