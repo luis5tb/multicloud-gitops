@@ -12,6 +12,7 @@ from acme_agent.auth import (
     add_request_id,
     log_dispatch_audit,
     stamp_request_id,
+    token_exp_unverified,
 )
 from acme_agent.cluster_context import (
     ClusterIdMissingError,
@@ -175,9 +176,37 @@ def test_dispatch_audit_names_the_token_and_its_source(caplog):
     assert "source=pasted_override" in caplog.text
     assert "source=minted" in caplog.text
     assert " token=fp:" in caplog.text
+    # Non-JWT test tokens log an empty exp as "-".
+    assert "exp=-" in caplog.text
     # Fingerprint only — the bearer values never reach the log.
     assert "pasted-token" not in caplog.text
     assert "a-minted-token" not in caplog.text
+
+
+def test_token_exp_unverified_reads_jwt_expiry():
+    """exp is decoded (unverified) purely so logs can explain a 401.
+
+    Signature verification is deliberately absent — the value is display
+    only. A past exp is what makes an "expired paste" diagnosis possible
+    from the dispatch audit line alone.
+    """
+    import base64
+    import json as _json
+
+    def _b64(segment: str) -> str:
+        return base64.urlsafe_b64encode(segment.encode()).decode().rstrip("=")
+
+    past = 1735689600  # 2025-01-01T00:00:00Z
+    token = ".".join(
+        [
+            _b64(_json.dumps({"alg": "RS256"})),
+            _b64(_json.dumps({"exp": past})),
+            "unused-signature",
+        ]
+    )
+    assert token_exp_unverified(token) == "2025-01-01T00:00:00Z"
+    assert token_exp_unverified("not-a-jwt") == ""
+    assert token_exp_unverified("") == ""
 
 
 def test_concurrent_tasks_do_not_leak_cluster_id():
