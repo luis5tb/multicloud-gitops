@@ -245,7 +245,7 @@ def test_renewal_uses_the_requests_red_hat_sso_environment(
     assert issuer.issued == ["stage-1", "stage-2"]
 
 
-def test_pasted_token_is_used_once_then_renewed(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pasted_token_is_used_once_then_renewed(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     """A pasted override serves the first call; renewal mints a real token."""
     issuer = TokenIssuer()
     auth = _auth(monkeypatch, issuer, ACME_ALLOW_TOKEN_OVERRIDE="true")
@@ -258,9 +258,10 @@ def test_pasted_token_is_used_once_then_renewed(monkeypatch: pytest.MonkeyPatch)
     async def run() -> str:
         token = _token_override.set(override)
         try:
-            async with _client(auth, downstream) as client:
-                await _stream_results(client, _send_body())
-            return await auth.bearer_token()
+            with caplog.at_level("INFO", logger="acme_agent.renewal"):
+                async with _client(auth, downstream) as client:
+                    await _stream_results(client, _send_body())
+                return await auth.bearer_token()
         finally:
             _token_override.reset(token)
 
@@ -269,6 +270,18 @@ def test_pasted_token_is_used_once_then_renewed(monkeypatch: pytest.MonkeyPatch)
     assert downstream.tokens() == ["Bearer pasted-token", "Bearer kc-1"]
     assert override.active is False
     assert later == "kc-1"
+    # The renewal audit line must prove the swap: fingerprints of the refused
+    # (pasted) and the freshly minted token, and that the override was
+    # retired. This is the one line that makes a pasted-token test verifiable
+    # from logs alone (see monitor.sh's ACME TOKEN RENEWAL card).
+    assert '"renew Token A"' in caplog.text
+    assert "renewed_from=fp:" in caplog.text
+    assert " token=fp:" in caplog.text
+    assert "source=minted" in caplog.text
+    assert "override=retired" in caplog.text
+    # Fingerprints only — the token values themselves never reach the log.
+    assert "pasted-token" not in caplog.text
+    assert "kc-1" not in caplog.text
 
 
 def test_renewals_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

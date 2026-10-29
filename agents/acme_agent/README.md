@@ -309,9 +309,31 @@ this lets you reuse an earlier, now expired token (MAS answers 401) or a token
 that is about to expire. Anyone with UI access could send arbitrary tokens
 through ACME while this is on, so keep it off outside test environments.
 
+**Seeing the paste and the renewal in the logs.** An expired paste is healed
+silently by the renewal transport (MAS 401 → fresh mint → resend), and the
+token debug view then shows the *renewed* token, not the pasted one — from the
+UI alone you cannot tell whether the paste was ever sent (that exact confusion
+cost a live debugging session on 2026-10-29). The `acme_audit` lines settle
+it: the dispatch line carries `token=fp:<sha256-12>` plus
+`source=pasted_override` or `source=minted` (fingerprints, never token
+values), and a renewal logs `"renew Token A"` with `renewed_from=fp:…`
+→ `token=fp:…` and `override=retired`. `bash scripts/monitor.sh` renders
+these as **ACME DISPATCH** and **ACME TOKEN RENEWAL** cards, and MAS's
+answering 401 as **MAS TOKEN REJECTED**.
+
 `python -m acme_agent.mint_token [--provider redhat --environment stage]`
 prints a freshly minted Token A inside the pod. It is used by
 `scripts/a2a-renewal-scenarios.py`.
+
+### Audit logging
+
+`acme_audit` lines are INFO-level on the `acme_agent.*` loggers. Uvicorn's
+default log config only configures the `uvicorn.*` loggers, so the app
+installs its own stdout handler for `acme_agent` at import time
+(`agent.py::_configure_logging`) — without it every INFO record is dropped by
+Python's last-resort handler and the pod log shows *zero* audit lines even
+for flows that clearly logged them. `ACME_LOG_LEVEL` (default `INFO`)
+overrides the level.
 
 **TODO: Red Hat IdP user tokens.** Use authorization-code flow with PKCE, a
 per-user token cache keyed by the browser session, redirect URI registration,

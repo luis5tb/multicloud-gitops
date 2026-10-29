@@ -25,7 +25,9 @@
 # and MCP-server patterns were confirmed against live logs on bm-cluster
 # (2026-10-23 and 2026-10-26, mas image a80e09316564) -- see the comments in
 # parse_line and scripts/README.md for the routine-noise exclusions and the
-# request_id caveats. Tokens are never printed by design.
+# request_id caveats. Tokens are never printed by design — audit lines and
+# cards carry only short SHA-256 fingerprints (fp:…) that identify a token
+# without being usable as one.
 #
 # See scripts/README.md for selectors, overrides, and troubleshooting tips.
 
@@ -138,7 +140,9 @@ print_diagram() {
   │       azp=acme-agent  aud=[mas-a2a, lightspeed-a2a]  groups=acme-…-rca  │
   │     · or Red Hat SSO prod/stage agent token (aud=api.ask_red_hat)       │
   │  4. POST to MAO A2A endpoint  Authorization: Bearer TOKEN A             │
-  │     → logs acme_audit … outcome=sent                                    │
+  │     → logs acme_audit … outcome=sent token=fp:… source=…               │
+  │  4b. On 401 / TASK_STATE_AUTH_REQUIRED: mint fresh Token A, resend     │
+  │     → logs acme_audit … "renew Token A" renewed_from=fp:… token=fp:…   │
   └─────────────────────────────────────────────────────────────────────────┘
        ▼  TOKEN A (unchanged)
   ┌─ MAO A2A ENDPOINT (mao/mas-a2a) ────────────────────────────────────────┐
@@ -208,11 +212,29 @@ parse_line() {
 
   # ── ACME structured audit ───────────────────────────────────────────────
   if [[ "$line" == *"acme_audit "* ]]; then
-    local rid cluster action outcome
+    local rid cluster action outcome token source renewed_from reason
     rid=$(grep -oP 'request_id=\K[^ ]+' <<<"$line" || true)
     cluster=$(grep -oP 'cluster=\K[^ ]+' <<<"$line" || true)
     action=$(grep -oP 'action=\K("[^"]*"|[^ ]+)' <<<"$line" || true)
     outcome=$(grep -oP 'outcome=\K[^ ]+' <<<"$line" || true)
+    token=$(grep -oP ' token=\K\S+' <<<"$line" || true)
+    source=$(grep -oP 'source=\K\S+' <<<"$line" || true)
+    renewed_from=$(grep -oP 'renewed_from=\K\S+' <<<"$line" || true)
+    reason=$(grep -oP 'reason=\K[^ ]+' <<<"$line" || true)
+
+    if [[ "$action" == *'renew Token A'* ]]; then
+      local rn_color="$G"
+      [[ "$outcome" != "ok" ]] && rn_color="$R"
+      printf "\n${Y}┌─ ACME TOKEN RENEWAL [${ts}] ${rn_color}${outcome}${N}\n"
+      printf "${Y}│${N} ${D}reason : ${reason:-?} — downstream refused the current token${N}\n"
+      printf "${Y}│${N} ${D}token  : ${renewed_from:-?} → ${W}${token:-?}${N} ${D}(refused → freshly minted)${N}\n"
+      if grep -q 'override=retired' <<<"$line"; then
+        printf "${Y}│${N} ${D}a UI-pasted override token was refused and is now retired${N}\n"
+      fi
+      printf "${Y}│${N} request_id : ${W}${rid}${N}\n"
+      printf "${Y}└─ CredentialRenewingTransport resent the request with the fresh token${N}\n"
+      return 0
+    fi
 
     if [[ "$action" == *'mint'*'Token A'* ]]; then
       local st_color="$G" label="TOKEN A MINT"
@@ -226,10 +248,11 @@ parse_line() {
       printf "${M}│${N} ${D}CREATOR : ${creator}${N}\n"
       printf "${M}│${N} request_id : ${W}${rid}${N}\n"
       printf "${M}│${N} cluster    : ${cluster}\n"
+      printf "${M}│${N} token      : ${W}${token}${N}\n"
       printf "${M}│${N} action     : ${action}\n"
       printf "${M}│${N} outcome    : ${st_color}${outcome}${N}\n"
       if [[ "$outcome" == "ok" ]]; then
-        printf "${M}└─ Token A cached for the outbound A2A call (never logged)${N}\n"
+        printf "${M}└─ Token A cached for the outbound A2A call (never logged in full)${N}\n"
       else
         printf "${M}└─ no Token A — dispatch will fail${N}\n"
       fi
@@ -252,6 +275,13 @@ parse_line() {
     printf "${C}│${N} ${D}NEXT    : MAO A2A endpoint (Phase 3) · Praxis→OLS (Phase 1)${N}\n"
     printf "${C}│${N} request_id : ${W}${rid}${N}\n"
     printf "${C}│${N} cluster    : ${W}${cluster}${N}\n"
+    if [[ -n "$token" ]]; then
+      if [[ "$source" == "pasted_override" ]]; then
+        printf "${C}│${N} token      : ${Y}${token}${N} ${Y}(UI-pasted override — not a minted Token A)${N}\n"
+      else
+        printf "${C}│${N} token      : ${W}${token}${N} ${D}(minted Token A)${N}\n"
+      fi
+    fi
     printf "${C}│${N} action     : ${action}\n"
     printf "${C}│${N} outcome    : ${G}${outcome}${N}\n"
     printf "${C}└─ → follow Token A: mas-a2a validation → orchestrator → a2a_audit${N}\n"
@@ -359,13 +389,31 @@ parse_line() {
   # Patterns CONFIRMED LIVE (bm-cluster, 2026-10-23, mas image a80e09316564):
   # the endpoint logs structured `context={...}` dicts (inbound.a2a.middleware,
   # mas.session.service). Routine noise is skipped explicitly:
-  #  - "Failed to resolve signing key" (ERROR, ~once per request): the
-  #    multi-issuer validator tries each issuer's JWKS in turn and logs a
-  #    miss even when a later issuer validates the token successfully.
   #  - "Task … already exists. Ignoring task replacement." (task polling)
   #  - /readyz + /healthz probes, giant agent-card dumps, startup banners.
+  # "Failed to resolve signing key" (ERROR, ~once per request) is NOT noise to
+  # hide: the multi-issuer validator probes each issuer's JWKS in turn and
+  # logs a miss even when a later issuer validates the token successfully —
+  # CONFIRMED LIVE 2026-10-29: the same ERROR appears on fully successful
+  # requests. It is shown as a dim benign card (not hidden, not red) so it is
+  # never mistaken for the actual rejection signal, which is the
+  # "Token validation failed for all … issuers" WARNING + 401 below.
   if [[ "$src" == "mas" ]]; then
-    if grep -qE 'Failed to resolve signing key|already exists\. Ignoring task replacement|/readyz|/healthz|/\.well-known/agent-card|Successfully fetched agent card data|token validator initialized|Starting A2A ASGI server|bootstrap\.container' <<<"$line"; then
+    if grep -q 'Failed to resolve signing key' <<<"$line"; then
+      local miss_kid
+      miss_kid=$(grep -oP 'matches: "\K[^"]+' <<<"$line" || true)
+      printf "${D}┄─ mas issuer probe miss [${ts}] kid=${miss_kid} — benign: next issuer's JWKS is tried (multi-issuer OIDC)${N}\n"
+      return 0
+    fi
+    if grep -q 'Token validation failed for all' <<<"$line"; then
+      printf "\n${R}┌─ MAS TOKEN REJECTED [${ts}]${N}\n"
+      printf "${R}│${N} ${D}no configured issuer validated the bearer (bad sig/iss/exp/aud)${N}\n"
+      printf "${R}│${N} ${D}→ expect HTTP 401 next; ACME's renewal transport will mint a${N}\n"
+      printf "${R}│${N} ${D}  fresh Token A and resend (watch for ACME TOKEN RENEWAL)${N}\n"
+      printf "${R}└─ a UI-pasted token dying here is exactly how the override is tested${N}\n"
+      return 0
+    fi
+    if grep -qE 'already exists\. Ignoring task replacement|/readyz|/healthz|/\.well-known/agent-card|Successfully fetched agent card data|token validator initialized|Starting A2A ASGI server|bootstrap\.container' <<<"$line"; then
       return 0
     fi
     if [[ "$line" == *"A2A HTTP request completed"* ]]; then

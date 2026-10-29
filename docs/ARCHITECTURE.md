@@ -167,6 +167,18 @@ Local render lesson: Praxis multi-OIDC output is YAML nested inside a ConfigMap
 string. Helm whitespace trimming once joined the last external JWKS URL to the
 local issuer item; parse `data.policy.yaml` itself, not only the outer Helm YAML.
 
+Live ACME logging finding (2026-10-29): uvicorn's default log config only
+configures the `uvicorn.*` loggers, so every `acme_audit` INFO record was
+dropped by Python's last-resort handler — a full pasted-token → 401 → renewal
+flow left zero audit lines in the pod log, and the renewal could only be
+proven from the MAS side (same X-Request-Id on its 401 and the retried 200).
+The app now installs its own handler at import (`agent.py`); audit lines also
+carry token fingerprints (`fp:…`) and `source=pasted_override|minted` so a
+paste and its renewal are visible without the token values. Related: MAS's
+`Failed to resolve signing key` ERROR is benign multi-issuer probe noise —
+it appears on fully successful requests too; the real rejection signal is
+`Token validation failed for all … issuers` + 401.
+
 Live Praxis startup finding: enabling the static agent card originally rendered
 `static_files` as a `load_balancer.clusters[]` field. The pinned
 `ghcr.io/praxis-proxy/ai:0.4.1` image embeds Core 0.7.0, whose strict cluster

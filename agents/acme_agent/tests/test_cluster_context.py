@@ -6,6 +6,8 @@ import pytest
 from acme_agent.auth import (
     OLS_CLUSTER_HEADER,
     REQUEST_ID_HEADER,
+    TokenOverride,
+    _token_override,
     add_cluster_header,
     add_request_id,
     log_dispatch_audit,
@@ -138,6 +140,44 @@ def test_stamp_then_dispatch_share_request_id(caplog):
     assert stamped
     assert stamped in caplog.text
     assert "dispatch A2A query to OLS" in caplog.text
+
+
+def test_dispatch_audit_names_the_token_and_its_source(caplog):
+    """The dispatch line must say WHICH token went out and where it came from.
+
+    A pasted override and a minted Token A are otherwise indistinguishable
+    in the logs, and the renewal transport heals a refused paste silently —
+    source=pasted_override / token=fp:… is what makes the paste observable.
+    """
+
+    async def run() -> None:
+        with cluster_id_scope("cluster-a"):
+            pasted = httpx.Request(
+                "POST",
+                "https://example.test/rpc",
+                headers={"Authorization": "Bearer pasted-token"},
+            )
+            override = _token_override.set(TokenOverride(token="pasted-token"))
+            try:
+                with caplog.at_level("INFO", logger="acme_agent.auth"):
+                    await log_dispatch_audit(pasted)
+            finally:
+                _token_override.reset(override)
+            minted = httpx.Request(
+                "POST",
+                "https://example.test/rpc",
+                headers={"Authorization": "Bearer a-minted-token"},
+            )
+            with caplog.at_level("INFO", logger="acme_agent.auth"):
+                await log_dispatch_audit(minted)
+
+    asyncio.run(run())
+    assert "source=pasted_override" in caplog.text
+    assert "source=minted" in caplog.text
+    assert " token=fp:" in caplog.text
+    # Fingerprint only — the bearer values never reach the log.
+    assert "pasted-token" not in caplog.text
+    assert "a-minted-token" not in caplog.text
 
 
 def test_concurrent_tasks_do_not_leak_cluster_id():
