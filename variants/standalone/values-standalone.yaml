@@ -32,6 +32,8 @@ global:
   olsClusters:
     api-bm-cluster-e2e-bos-redhat-com-6443:
       apiURL: https://api.bm-cluster.e2e.bos.redhat.com:6443
+  options:
+    autoApproveManualInstallPlans: true
 
 clusterGroup:
   name: standalone
