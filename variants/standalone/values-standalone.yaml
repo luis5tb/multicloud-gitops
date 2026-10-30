@@ -927,8 +927,8 @@ clusterGroup:
         - name: image.pullPolicy
           value: Always
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
-        - name: a2a.enabled
-          value: "true"
+        #- name: a2a.enabled
+        #  value: "true"
         # Blueprint re-saved 2026-10-22 (df782fdc-...): hardened the
         # orchestrator prompt's X-OLS-Cluster spelling rule (the planning LLM
         # had emitted X_OLS_Cluster -- underscores -- in 3 of 5 delegations,
@@ -937,13 +937,13 @@ clusterGroup:
         # when unset). Superseded blueprints (7f2c9570-..., af00895e-...)
         # were deleted from MAS inventory. See setup-mas-blueprint.sh's
         # LIVE FINDING.
-        - name: a2a.blueprintId
-          value: "5d468bf9-97d4-4884-95e3-79fd61f15f79"
+        #- name: a2a.blueprintId
+        #  value: "5d468bf9-97d4-4884-95e3-79fd61f15f79"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
-        - name: a2a.publicBaseUrl
-          value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
+        #- name: a2a.publicBaseUrl
+        #  value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
         # Must be a real list: the chart applies toJson so the app can JSON-decode
         # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
         # JSON string) so the clusterGroup override builds an actual YAML list.
@@ -961,15 +961,15 @@ clusterGroup:
         # For Red Hat SSO client credentials, `sub` is the service-account
         # principal and can differ from `azp`/`client_id`. Decode a real token
         # and use its `sub`; do not copy the OAuth client UUID from the secret.
-        - name: a2a.allowedPrincipals[0]
-          value: "409d044c-4119-430b-9ec8-9388d127210b"
-          #value: "94510bf9-b826-402b-a242-d4547e948d76"
-        - name: a2a.allowedPrincipals[1]
-          value: "b6daf56c-157a-418a-b6bf-7a6c18c667a7"
-        - name: route.enabled
-          value: "true"
-        # - name: route.host
-        #   value: "mas-a2a.apps.bm-cluster.e2e.bos.redhat.com"
+        #- name: a2a.allowedPrincipals[0]
+        #  value: "409d044c-4119-430b-9ec8-9388d127210b"
+        #  #value: "94510bf9-b826-402b-a242-d4547e948d76"
+        #- name: a2a.allowedPrincipals[1]
+        #  value: "b6daf56c-157a-418a-b6bf-7a6c18c667a7"
+        #- name: route.enabled
+        #  value: "true"
+        ## - name: route.host
+        ##   value: "mas-a2a.apps.bm-cluster.e2e.bos.redhat.com"
 
         # Multi-issuer OIDC: accept tokens from Red Hat SSO and Keycloak
         # Keycloak is NOT auto-appended; include it explicitly
