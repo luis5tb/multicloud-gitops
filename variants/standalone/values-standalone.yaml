@@ -835,9 +835,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          # uie-mas-hosted a2a-inbound-deploy (PR stack parts 1-8 plus
-          # multi-issuer OIDC and Vertex ADC). Build and push it before sync.
-          value: "67edabde1faf"
+          value: "a6674f23f9d0"
         - name: image.pullPolicy
           value: Always
         # DEBUG temporarily to capture the orchestrator's planning LLM
@@ -872,9 +870,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          # uie-mas-hosted a2a-inbound-deploy (PR stack parts 1-8 plus
-          # multi-issuer OIDC and Vertex ADC). Build and push it before sync.
-          value: "67edabde1faf"
+          value: "a6674f23f9d0"
         - name: image.pullPolicy
           value: Always
         # No public Route: inbound MAS A2A (mao-a2a) is active, and the mas-a2a
@@ -921,9 +917,7 @@ clusterGroup:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
         - name: image.tag
-          # uie-mas-hosted a2a-inbound-deploy (PR stack parts 1-8 plus
-          # multi-issuer OIDC and Vertex ADC). Build and push it before sync.
-          value: "67edabde1faf"
+          value: "a6674f23f9d0"
         - name: image.pullPolicy
           value: Always
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
