@@ -298,7 +298,7 @@ The multi-issuer configuration is passed to the patch Job via:
 
 ## MAS A2A Code Changes
 
-To enable multi-issuer OIDC support in MAS A2A, apply these changes to the `uie-mas-hosted` repository (branch `a2a-inbound-deploy`):
+To enable multi-issuer OIDC support in MAS A2A, apply these changes to the `uie-mas-hosted` repository (branch `a2a-inbound-review-pr0`, which includes the multi-issuer commits):
 
 ### New Files
 - `adapters/outbound/auth/multi_issuer_validator.py` - Multi-issuer token validator

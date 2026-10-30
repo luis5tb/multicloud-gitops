@@ -1,3 +1,6 @@
+{{- if not .Values.runCredentials.secretName }}
+{{- fail "runCredentials.secretName must name the Secret holding RUN_CREDENTIAL_KEYS (shared with the other MAS charts); MAS refuses to start without it" }}
+{{- end }}
 {{- if eq .Values.identity.providerMode "keycloak" }}
 {{- if not (include "mas-api.keycloakIssuerUri" .) }}
 {{- fail "identity.keycloakIssuerUri or global.clusterBaseDomain/global.keycloakRealm is required when identity.providerMode=keycloak" }}
@@ -166,7 +169,6 @@ spec:
               value: {{ .Values.mongo.tls | quote }}
             - name: MONGO_DB
               value: {{ .Values.mongo.database | quote }}
-            {{- if .Values.runCredentials.secretName }}
             # Fernet keys sealing caller credentials between the submitter
             # (API/A2A) and the Temporal workers; identical in all MAS charts.
             - name: RUN_CREDENTIAL_KEYS
@@ -174,7 +176,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.runCredentials.secretName }}
                   key: RUN_CREDENTIAL_KEYS
-            {{- end }}
             - name: HITL_APPROVAL_COLL
               value: {{ .Values.hitl.approvalCollection | quote }}
             - name: REDIS_IP

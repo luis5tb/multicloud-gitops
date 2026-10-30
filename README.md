@@ -870,7 +870,7 @@ published image has been supplied for activation. Do not turn it on simply
 because its Argo CD Application appears Synced.
 
 **IMPORTANT:** The A2A functionality requires a custom-built MAS image from
-the `a2a-inbound-deploy` branch. The existing `mas-api` and `mas-worker`
+the `a2a-inbound-review-pr8` branch. The existing `mas-api` and `mas-worker`
 `latest` defaults do NOT contain A2A support. Follow the build and
 configuration steps below before enabling.
 
@@ -879,14 +879,16 @@ configuration steps below before enabling.
 The A2A runtime (`ROLE=a2a-serve`) is built into the same container image as
 the MAS API and worker. Build from the
 [`ltomasbo/uie-mas-hosted`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted)
-repository on branch `a2a-inbound-deploy`:
+repository on branch `a2a-inbound-review-pr8` (the A2A PR stack, including the
+multi-issuer OIDC and Vertex ADC commits; the `a2a-inbound-review-pr0`..`pr8`
+branches are the chained PRs, so `pr8` contains all of them):
 
 ```bash
 export QUAY_ORG=<your-quay-org>
 podman login quay.io
 
 # Clone the A2A-enabled source
-git clone --branch a2a-inbound-deploy --single-branch \
+git clone --branch a2a-inbound-review-pr8 --single-branch \
   git@gitlab.cee.redhat.com:ltomasbo/uie-mas-hosted.git /tmp/uie-mas-hosted
 cd /tmp/uie-mas-hosted
 
@@ -1329,7 +1331,7 @@ oc logs -n a2a-lightspeed -l app=lightspeed-app-server --tail=50 | grep a2a_audi
 # Should show: on_behalf_of=acme-agent
 ```
 
-See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted/-/blob/a2a-inbound-deploy/docs/a2a-inbound.md)
+See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted/-/blob/a2a-inbound-review-pr8/docs/a2a-inbound.md)
 for client examples and the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
 for the full authentication flow. The [`mas-a2a` chart guide](charts/all/mao/mas-a2a/README.md)
 has deployment details and the full verification checklist.
@@ -1344,7 +1346,7 @@ blueprint if you have multiple OLS clusters registered in `global.olsClusters`.
 - Praxis static agent card enabled (`agentCard.enabled: true` - already configured in values-standalone.yaml)
 - OLS external Routes configured for each cluster (completed in Phase 1)
 - Multiple clusters registered in `global.olsClusters` with different IDs
-- MAS image with dynamic headers support (uie-mas-hosted commit 3de31db or later)
+- MAS image with per-task header forwarding (uie-mas-hosted `a2a-inbound-review-pr1` or later)
 
 **MAS orchestrator + Praxis routing** enables investigating multiple OpenShift
 clusters through a single interface. The orchestrator analyzes the user's question
@@ -1382,8 +1384,13 @@ for a complete multi-cluster orchestrator that:
 **Requirements:**
 - Praxis static agent card enabled (`agentCard.enabled: true` in values-standalone.yaml)
 - OLS external Routes configured for each cluster (see Phase 1)
-- MAS image with dynamic headers support (commit 3de31db or later in uie-mas-hosted)
+- MAS image with per-task header forwarding (`a2a-inbound-review-pr1` or later in uie-mas-hosted)
 
-**uie-mas-hosted changes:** The `a2a_agent_node` now reads `task.data["headers"]`
-and applies them via `a2a_provider.update_headers()` before sending requests,
-enabling per-task header injection without static blueprint configuration.
+**uie-mas-hosted changes:** The `a2a_agent_node` reads `task.data["headers"]`
+and passes them to `a2a_provider.set_call_headers()`, so they are sent with
+that task's outbound A2A calls only and replaced on the next task. Set the
+header on every delegation (as the blueprints above do); it does not carry over.
+Because the values can come from model tool arguments, `Authorization`,
+`Proxy-Authorization`, `Cookie`, `Host` and `Content-Length` are dropped, and
+the node's configured or delegated credentials always take precedence.
+`X-OLS-Cluster` is forwarded unchanged.
