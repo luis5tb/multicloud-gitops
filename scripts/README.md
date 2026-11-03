@@ -19,8 +19,13 @@ The prompts are:
 1. **Paste a token** or **Get a token**. Pasting accepts a raw access token or
    `Bearer <token>` and skips the provider questions.
 2. When getting a token, choose **Keycloak**, **Red Hat SSO**, or **Red Hat SSO
-   stage**. Supply the token endpoint URL, client ID, and client secret if they
-   are not already configured in the environment. Keycloak also offers a
+   stage**. Supply the client ID and client secret if they are not already
+   configured in the environment. The Red Hat SSO token endpoints are built in.
+   When `--mas-url` uses a standard OpenShift `apps` Route, Keycloak defaults
+   to `https://keycloak.apps.<domain>/realms/rca/protocol/openid-connect/token`.
+   Keycloak uses `KEYCLOAK_TOKEN_URL` or `KEYCLOAK_ISSUER_URL` first;
+   `KEYCLOAK_HOST` and `KEYCLOAK_REALM` adjust the derived default. It prompts
+   only when no default can be derived. Keycloak also offers a
    JWT-SVID/assertion file instead of a client secret.
 3. **Question to ask**. Include the cluster API URL for an OLS investigation;
    MAS selects the cluster and adds its downstream routing header, as with ACME.
@@ -47,13 +52,22 @@ mode. It reads these same environment variables, prompting for missing values:
 | Red Hat SSO | `REDHAT_SSO_PRODUCTION_TOKEN_URL`, `REDHAT_SSO_PRODUCTION_CLIENT_ID`, `REDHAT_SSO_PRODUCTION_CLIENT_SECRET` |
 | Red Hat SSO stage | `REDHAT_SSO_STAGE_TOKEN_URL`, `REDHAT_SSO_STAGE_CLIENT_ID`, `REDHAT_SSO_STAGE_CLIENT_SECRET` |
 
-Keycloak defaults to `client_secret_post`; `KEYCLOAK_CLIENT_AUTH_METHOD` sets
-the prompt's default to `client_secret_post`, `client_secret_basic`, or
-`client_assertion_post`. Assertion mode reads `ZTO_IDENTITY_TOKEN_FILE` (or a
-prompted path) at each mint, using `KEYCLOAK_CLIENT_ASSERTION_TYPE` or ACME's
+The Red Hat SSO production and stage token endpoint URLs default to the
+public Red Hat SSO endpoints used by this pattern. Keycloak's token endpoint is
+derived from the MAS Route's `apps` domain, using the chart's standard
+`keycloak` host and `rca` realm. For a nonstandard installation, set
+`KEYCLOAK_ISSUER_URL` (preferred), `KEYCLOAK_TOKEN_URL`, `KEYCLOAK_HOST`, or
+`KEYCLOAK_REALM`; an issuer's token URL is
+`<issuer>/protocol/openid-connect/token`.
+Keycloak defaults to `client_assertion_post`, matching ACME's SPIFFE workload
+identity; assertion mode uses no client ID or client secret. It reads
+`ZTO_IDENTITY_TOKEN_FILE` (or a prompted path) at each mint, using
+`KEYCLOAK_CLIENT_ASSERTION_TYPE` or ACME's
 `urn:ietf:params:oauth:client-assertion-type:jwt-spiffe` default. The assertion
 must be issued for the configured Keycloak client authentication flow; this
-script does not itself fetch JWT-SVIDs from a SPIFFE Workload API socket.
+script does not itself fetch JWT-SVIDs from a SPIFFE Workload API socket. To
+reuse ACME's in-pod SPIFFE identity directly, use the token command below
+rather than exporting or copying its short-lived JWT-SVID.
 
 `KEYCLOAK_SCOPE` is optional. Red Hat SSO defaults to
 `openid api.ask_red_hat`, required for the downstream Keycloak exchange;
@@ -87,6 +101,13 @@ shell logic. A pasted token bypasses the command.
 Use `--ca-bundle /path/to/ca.pem` or `A2A_CA_BUNDLE` for private Route CAs. The
 bundle extends the system trust store for both MAS and token endpoints. HTTPS
 verification stays enabled; loopback HTTP is supported for local development.
+With a current `oc` login, export the managed ingress CA used by OpenShift
+Routes:
+
+```bash
+oc get configmap default-ingress-cert -n openshift-config-managed \
+  -o jsonpath='{.data.ca-bundle\.crt}' > /tmp/ingress-ca.pem
+```
 
 The script reads MAS's public agent card, streams when advertised, and polls
 otherwise. A closed stream triggers task retrieval and reattachment rather than
