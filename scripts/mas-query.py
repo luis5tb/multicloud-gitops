@@ -26,6 +26,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 TERMINAL = {"COMPLETED", "FAILED", "CANCELED", "REJECTED"}
+REDHAT_SSO_TOKEN_URLS = {
+    "production": "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token",
+    "stage": "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token",
+}
 
 
 class QueryError(Exception):
@@ -63,6 +67,10 @@ def choose(label: str, options: list[str], default: int = 1) -> int:
 
 
 def validate_url(value: str) -> str:
+    value = value.strip()
+    wrappers = {'"': '"', "'": "'", "<": ">"}
+    if len(value) >= 2 and value[0] in wrappers and value[-1] == wrappers[value[0]]:
+        value = value[1:-1].strip()
     parsed = urllib.parse.urlsplit(value)
     if (
         parsed.scheme not in {"https", "http"}
@@ -72,16 +80,41 @@ def validate_url(value: str) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise QueryError("Use an HTTP(S) URL without credentials, query, or fragment.")
+        raise QueryError(
+            f"Invalid URL {value!r}; use an HTTP(S) URL without credentials, "
+            "query, or fragment."
+        )
     if parsed.scheme == "http" and parsed.hostname not in {
         "localhost",
         "127.0.0.1",
         "::1",
     }:
         raise QueryError(
-            "Use HTTPS for remote endpoints; HTTP is supported only on loopback."
+            f"Invalid URL {value!r}; HTTPS is required for remote endpoints."
         )
     return value.rstrip("/")
+
+
+def keycloak_token_url_from_mas_url(mas_url: str) -> str:
+    """Derive this pattern's standard Keycloak Route from a MAS Route."""
+    parsed = urllib.parse.urlsplit(mas_url)
+    hostname = parsed.hostname or ""
+    if parsed.scheme != "https" or ".apps." not in hostname:
+        return ""
+    apps_domain = hostname.split(".apps.", 1)[1]
+    keycloak_host = os.getenv("KEYCLOAK_HOST", "keycloak").strip()
+    realm = os.getenv("KEYCLOAK_REALM", "rca").strip()
+    if not apps_domain or not keycloak_host or not realm:
+        return ""
+    if any(
+        "/" in part or any(char.isspace() for char in part)
+        for part in [keycloak_host, realm]
+    ):
+        return ""
+    return (
+        f"https://{keycloak_host}.apps.{apps_domain}/realms/{realm}"
+        "/protocol/openid-connect/token"
+    )
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -122,6 +155,19 @@ class Http:
                     f"HTTP 401: token or client credentials rejected{detail}"
                 ) from None
             raise QueryError(f"HTTP {error.code}{detail}") from None
+        except urllib.error.URLError as error:
+            failure_reason = getattr(error, "reason", error)
+            reason = str(failure_reason)
+            if isinstance(failure_reason, ssl.SSLError):
+                raise QueryError(
+                    f"TLS verification failed for {request.full_url}. The Route uses "
+                    "a CA not trusted by this machine. Export the cluster's managed "
+                    "ingress CA and retry with --ca-bundle /path/to/ca.pem; do not "
+                    "disable certificate verification."
+                ) from None
+            raise QueryError(
+                f"Request to {request.full_url} failed: {reason}"
+            ) from None
 
 
 def clean_token(token: str) -> str:
@@ -137,6 +183,7 @@ def clean_token(token: str) -> str:
 class Credentials:
     http: Http
     token_command: str = ""
+    mas_url: str = ""
     provider: str = ""
     environment: str = ""
     token_url: str = ""
@@ -168,10 +215,20 @@ class Credentials:
             if self.provider == "keycloak"
             else f"REDHAT_SSO_{self.environment.upper()}"
         )
+        default_token_url = os.getenv(prefix + "_TOKEN_URL", "")
+        if not default_token_url and self.provider == "keycloak":
+            issuer_url = os.getenv("KEYCLOAK_ISSUER_URL", "").rstrip("/")
+            if issuer_url:
+                default_token_url = (
+                    issuer_url + "/protocol/openid-connect/token"
+                )
+            else:
+                default_token_url = keycloak_token_url_from_mas_url(self.mas_url)
+        if not default_token_url and self.provider == "redhat":
+            default_token_url = REDHAT_SSO_TOKEN_URLS[self.environment]
         self.token_url = validate_url(
-            required("Token endpoint URL", os.getenv(prefix + "_TOKEN_URL", ""))
+            required("Token endpoint URL", default_token_url)
         )
-        client_id = required("Client ID", os.getenv(prefix + "_CLIENT_ID", ""))
         self.form = {"grant_type": "client_credentials"}
         scope = os.getenv(
             "KEYCLOAK_SCOPE" if self.provider == "keycloak" else "REDHAT_SSO_SCOPE"
@@ -180,7 +237,11 @@ class Credentials:
             scope = "" if self.provider == "keycloak" else "openid api.ask_red_hat"
         if scope:
             self.form["scope"] = scope
-        method = "client_secret_post"
+        method = (
+            "client_assertion_post"
+            if self.provider == "keycloak"
+            else "client_secret_post"
+        )
         if self.provider == "keycloak":
             methods = [
                 "client_secret_post",
@@ -209,6 +270,9 @@ class Credentials:
             # Keycloak resolves a SPIFFE assertion's client from sub. Supplying
             # client_id here fails when that sub differs from the OAuth ID.
         else:
+            client_id = required(
+                "Client ID", os.getenv(prefix + "_CLIENT_ID", "")
+            )
             secret = required(
                 "Client secret", os.getenv(prefix + "_CLIENT_SECRET", ""), secret=True
             )
@@ -579,7 +643,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         http = Http(args.ca_bundle, args.request_timeout)
-        credentials = Credentials(http, token_command=args.token_command)
+        credentials = Credentials(
+            http, token_command=args.token_command, mas_url=args.mas_url
+        )
         credentials.select()
         question = required(
             "Question to ask (include the cluster API URL for cluster investigations)"

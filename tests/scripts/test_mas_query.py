@@ -6,6 +6,7 @@ import base64
 import importlib.util
 import io
 import json
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -159,6 +160,97 @@ class MasQueryTests(unittest.TestCase):
                     },
                 )
 
+    def test_redhat_token_endpoint_defaults_by_environment(self):
+        for environment in ["production", "stage"]:
+            with (
+                self.subTest(environment=environment),
+                patch.dict(
+                    "os.environ",
+                    {
+                        f"REDHAT_SSO_{environment.upper()}_CLIENT_ID": "client",
+                        f"REDHAT_SSO_{environment.upper()}_CLIENT_SECRET": "secret",
+                    },
+                ),
+                patch("builtins.input", return_value=""),
+            ):
+                http = Mock()
+                credentials = query.Credentials(
+                    http, provider="redhat", environment=environment
+                )
+                credentials.configure()
+                self.assertEqual(
+                    credentials.token_url,
+                    query.REDHAT_SSO_TOKEN_URLS[environment],
+                )
+
+    def test_keycloak_token_endpoint_derives_from_issuer(self):
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "KEYCLOAK_ISSUER_URL": "https://keycloak.example.test/realms/rca/",
+                    "KEYCLOAK_CLIENT_AUTH_METHOD": "client_secret_post",
+                    "KEYCLOAK_CLIENT_ID": "client",
+                    "KEYCLOAK_CLIENT_SECRET": "secret",
+                },
+            ),
+            patch("builtins.input", return_value=""),
+        ):
+            credentials = query.Credentials(Mock(), provider="keycloak")
+            credentials.configure()
+            self.assertEqual(
+                credentials.token_url,
+                "https://keycloak.example.test/realms/rca/protocol/openid-connect/token",
+            )
+
+    def test_keycloak_token_endpoint_derives_from_mas_route(self):
+        credentials = query.Credentials(
+            Mock(),
+            provider="keycloak",
+            mas_url="https://mao-a2a-mas-a2a-mao.apps.cluster.example.test/a2a/jsonrpc",
+        )
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "KEYCLOAK_CLIENT_AUTH_METHOD": "client_secret_post",
+                    "KEYCLOAK_CLIENT_ID": "client",
+                    "KEYCLOAK_CLIENT_SECRET": "secret",
+                },
+            ),
+            patch("builtins.input", return_value=""),
+        ):
+            credentials.configure()
+        self.assertEqual(
+            credentials.token_url,
+            "https://keycloak.apps.cluster.example.test/realms/rca"
+            "/protocol/openid-connect/token",
+        )
+
+    def test_keycloak_route_derivation_supports_host_and_realm_overrides(self):
+        with patch.dict(
+            "os.environ",
+            {"KEYCLOAK_HOST": "sso", "KEYCLOAK_REALM": "custom"},
+        ):
+            self.assertEqual(
+                query.keycloak_token_url_from_mas_url(
+                    "https://mao-a2a-mas-a2a-mao.apps.cluster.example.test"
+                ),
+                "https://sso.apps.cluster.example.test/realms/custom"
+                "/protocol/openid-connect/token",
+            )
+
+    def test_validate_url_accepts_copied_quoted_or_placeholder_urls(self):
+        for value in [
+            '"https://example.test/token"',
+            "'https://example.test/token'",
+            "<https://example.test/token>",
+        ]:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    query.validate_url(value), "https://example.test/token"
+                )
+
     def test_spiffe_assertion_is_reread_and_omits_client_id(self):
         with tempfile.TemporaryDirectory() as directory:
             assertion = Path(directory) / "assertion"
@@ -173,8 +265,7 @@ class MasQueryTests(unittest.TestCase):
                 "builtins.input",
                 side_effect=[
                     "https://keycloak.example.test/token",
-                    "client",
-                    "3",
+                    "",
                     str(assertion),
                 ],
             ):
@@ -196,7 +287,7 @@ class MasQueryTests(unittest.TestCase):
         with (
             patch(
                 "builtins.input",
-                side_effect=["https://keycloak.example.test/token", "client:id", "2"],
+                side_effect=["https://keycloak.example.test/token", "2", "client:id"],
             ),
             patch.object(query.getpass, "getpass", return_value="a:b c"),
         ):
@@ -261,6 +352,22 @@ class MasQueryTests(unittest.TestCase):
         ) as caught:
             http.open(Mock())
         self.assertNotIn("do-not-print", str(caught.exception))
+
+    def test_certificate_failure_names_url_and_ca_bundle_fix(self):
+        http = query.Http("", 10)
+        request = urllib.request.Request("https://mas.example.test")
+        certificate_error = ssl.SSLCertVerificationError(
+            "certificate verify failed: self-signed certificate in certificate chain"
+        )
+        http.opener.open = Mock(
+            side_effect=urllib.error.URLError(certificate_error)
+        )
+        with self.assertRaisesRegex(
+            query.QueryError,
+            r"TLS verification failed for https://mas\.example\.test.*--ca-bundle",
+        ) as caught:
+            http.open(request)
+        self.assertIn("do not disable certificate verification", str(caught.exception))
 
     def test_ca_bundle_extends_system_trust_and_redirects_are_disabled(self):
         with patch.object(query.ssl, "create_default_context") as create:
