@@ -30,7 +30,7 @@ def test_static_agent_card_uses_response_filter_not_lb_cluster() -> None:
             "--values",
             str(VARIANT),
             "--set",
-            "agentCard.enabled=true",
+            "identity.keycloak.audience=mas-a2a",
         ],
         check=True,
         capture_output=True,
@@ -55,32 +55,29 @@ def test_static_agent_card_uses_response_filter_not_lb_cluster() -> None:
     # The RPC endpoint auto-derives from global.clusterBaseDomain in the variant,
     # so compute the expected host from that value rather than pinning a domain.
     base_domain = yaml.safe_load(VARIANT.read_text())["global"]["clusterBaseDomain"]
-    expected_rpc_url = f"https://openshift-lightspeed.apps.{base_domain}/a2a"
+    expected_rpc_url = f"https://praxis-proxy.apps.{base_domain}/a2a"
     # A top-level "url" is retained for backward compatibility with A2A 0.3.0
     # clients; newer clients read supportedInterfaces[].url. Both must agree.
     assert card["url"] == expected_rpc_url
     assert card["supportedInterfaces"][0]["url"] == expected_rpc_url
+    # The no-investigator gateway advertises no OLS skills or extensions.
+    assert "skills" not in card
+    assert "extensions" not in card
     assert static_response["conditions"] == [
         {"when": {"path": "/.well-known/agent-card.json", "methods": ["GET"]}}
     ]
 
-    load_balancer = next(
+    # No upstream clusters are configured: the chart must not render a
+    # load_balancer filter at all, and readiness is answered locally.
+    assert not any(
+        filter_config.get("filter") == "load_balancer"
+        for filter_config in filters
+    )
+    readiness = [
         filter_config
         for filter_config in filters
-        if filter_config.get("filter") == "load_balancer"
-    )
-    assert all(
-        cluster["name"] != "static-agent-card"
-        and "static_files" not in cluster
-        for cluster in load_balancer["clusters"]
-    )
-
-    ols_cluster = next(
-        cluster
-        for cluster in load_balancer["clusters"]
-        if cluster["name"].startswith("ols-")
-    )
-    assert ols_cluster["endpoints"] == [
-        "lightspeed-app-server.a2a-lightspeed.svc.cluster.local:8443"
+        if filter_config.get("filter") == "static_response"
+        and filter_config["conditions"]
+        == [{"when": {"path": "/readiness", "methods": ["GET"]}}]
     ]
-    assert ols_cluster["tls"]["sni"] == "lightspeed-app-server.a2a-lightspeed.svc"
+    assert readiness and readiness[0]["status"] == 200

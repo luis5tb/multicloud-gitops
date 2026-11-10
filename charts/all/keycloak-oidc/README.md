@@ -1,12 +1,17 @@
-# Keycloak/OIDC integration for ACME, OpenShift Lightspeed, and optional MAS A2A
+# Keycloak/OIDC integration for ACME and optional MAS A2A
 
 This companion chart is installed after the validated pattern's `rhbk` chart.
-It imports the `rca` realm, its five clients, a SPIFFE identity provider, and
-its groups into the deployed Keycloak, and creates least-privilege,
-namespace-scoped RBAC (`templates/lightspeed-mcp-rbac.yaml`) for the group
-whose tokens carry OpenShift Lightspeed's exchanged, MCP-scoped access.
+It imports the `rca` realm, its three clients, a SPIFFE identity provider, and
+its groups into the deployed Keycloak.
 
-The five clients serve distinct purposes and must not be conflated:
+> Historical note: this chart previously also created the `lightspeed-mcp` /
+> `openshift-mcp` clients and `templates/lightspeed-mcp-rbac.yaml` for the
+> OpenShift Lightspeed investigation backend. That backend was removed (see
+> `PLAN-lightspeed-hub-migration.md` Task A); the realm import is one-shot, so
+> cleaning those out of a live realm is a manual Admin API step covered by
+> that plan's teardown runbook.
+
+The three clients serve distinct purposes and must not be conflated:
 
 - `keycloak.clientId` (default `openshift-cli`): public client for browser/`oc
   login` OIDC flows (Native OIDC). Cannot authenticate itself. Registered as
@@ -16,36 +21,24 @@ The five clients serve distinct purposes and must not be conflated:
   audience for the optional MAS inbound A2A endpoint. MAS still requires its
   own exact principal allow-list, so the audience mapper alone does not grant
   A2A access.
-- `keycloak.lightspeedMcpClientId` (default `lightspeed-mcp`): confidential
-  client the OpenShift Lightspeed A2A integration (built from the external
-  fork `luis5tb/lightspeed-service@a2a-split`) uses to exchange a caller's
-  token for one scoped to OpenShift MCP.
-- `keycloak.mcpAudienceClientId` (default `openshift-mcp`): confidential
-  client that exists only so `lightspeed-mcp`'s token exchange has a real
-  `client_id` to name as its `audience` parameter -- Keycloak's standard (V2)
-  token exchange requires that parameter to be an actual client in the
-  realm, not an arbitrary string. Never authenticates itself.
 - `keycloak.acmeClientId` (default `acme-agent`): confidential client
   `charts/all/acme-agent` uses for its client-credentials
   call to Keycloak. Its service account belongs to `keycloak.acmeGroupName`
-  (default `acme-agent-rca`, named `<caller>-<callee>` rather than just
-  `acme-agent` so it reads as "acme-agent's rights when calling
-  Lightspeed/MCP") -- without this group, and the `groups` protocol mapper
-  this chart attaches to the client, the token this client mints (and,
-  unchanged, the token `lightspeed-mcp` exchanges it for) carries no groups
-  claim at all, so `templates/lightspeed-mcp-rbac.yaml` has nothing to key on
-  for calls attributed to acme-agent.
+  (default `acme-agent-rca`) -- without this group, and the `groups` protocol
+  mapper this chart attaches to the client, the token this client mints
+  carries no groups claim at all, so group-based authorization downstream has
+  nothing to key on for calls attributed to acme-agent.
 - `keycloak.consoleClientId` (default `openshift-console`): confidential
   client registered as the `console` OIDC platform client when
   `openshiftOIDC.enabled` is true. See "OpenShift Native OIDC" below.
 
-`lightspeed-mcp` and `acme-agent` authenticate with a SPIFFE JWT-SVID (no
+`acme-agent` authenticates with a SPIFFE JWT-SVID (no
 static secret) via Keycloak's federated client authentication feature
 (`clientAuthenticatorType: federated-jwt`), against the `spiffe` identity
 provider this chart also creates (`keycloak.spiffeIdentityProvider.*`). This
 is fully declarative -- no manual Admin Console step is required for it, and
 the `jwt.credential.sub` value each client expects is computed from
-`keycloak.acmeWorkload`/`keycloak.lightspeedWorkload` (the namespace/ServiceAccount
+`keycloak.acmeWorkload` (the namespace/ServiceAccount
 pair ZTWIM/SPIRE issues that workload's JWT-SVID for) and the SPIFFE trust
 domain. The trust domain, like the issuer URL and console route, is derived
 from `global.clusterBaseDomain` (`apps.<base>`) when
@@ -62,38 +55,20 @@ worth knowing when debugging directly against Keycloak:
   ("client_id parameter does not match sub claim") if a `client_id` form
   parameter is present and differs from the assertion's `sub` -- which it
   always will for a SPIFFE assertion, since `sub` is a SPIFFE ID, never the
-  Keycloak client_id. Both agents' code omits `client_id` from these
+  Keycloak client_id. The agent's code omits `client_id` from these
   requests entirely; the client is resolved from the assertion's `sub`.
 - The SPIFFE JWT-SVID used as `client_assertion` must itself be requested
   with the Keycloak realm issuer URL as its audience (`SPIFFE_JWT_AUDIENCE`
-  in both agent charts) -- that is what Keycloak's federated-jwt validator
+  in the agent chart) -- that is what Keycloak's federated-jwt validator
   checks the assertion's `aud` claim against by default, not the workload's
   own name.
-- `lightspeed-mcp`'s actual RFC 8693 exchange additionally needs
-  `standard.token.exchange.enabled: "true"` (a client attribute this chart
-  sets) plus a protocol mapper adding `keycloak.mcpAudienceClientId` as an
-  audience on `lightspeed-mcp` itself, and a protocol mapper on
-  `acme-agent` adding `keycloak.lightspeedMcpClientId` as an audience (a real
-  client, `included.client.audience`) to the tokens it mints -- Keycloak's
-  standard token exchange requires the *subject_token* to already carry the
-  exchanging client as an audience, and the `audience` request parameter
-  only ever narrows audiences a client scope already resolves, it never adds
-  a new one. `acme-agent` also carries a *separate* mapper adding
-  `keycloak.lightspeedA2aAudience` as an audience (`included.custom.audience`,
-  no client involved) -- that one exists only to satisfy Lightspeed's own A2A
-  inbound check and has nothing to do with the exchange itself. All of this
-  is templated already; it's listed here because it is not obvious from
-  Keycloak's own error messages if you ever need to debug it directly.
 
 ## Dedicated audience for MAS inbound A2A
 
 The `openshift-cli` and `acme-agent` clients have an `mas-a2a-audience` mapper
 whose custom audience defaults to `keycloak.masA2aAudience` (`mas-a2a`). The
-ACME mapper lets the same client-credentials token pass MAS A2A validation and
-then be forwarded to Praxis/OLS, which independently validate the
-`lightspeed-a2a` audience. This is separate from
-`lightspeedA2aAudience` (`lightspeed-a2a`), `mcpAudienceClientId`
-(`openshift-mcp`), and the `openshift` API audience. Configure the MAS A2A
+ACME mapper lets the same client-credentials token pass MAS A2A validation.
+This is separate from the `openshift` API audience. Configure the MAS A2A
 chart's `identity.keycloakAudience` to the audience present in its caller's
 access token. MAS additionally checks the exact validated `sub` against
 `a2a.allowedPrincipals`; the mapper does not grant access by itself.
@@ -121,62 +96,6 @@ a live realm merely to update the mapper. If a different client issues the
 caller token, add the mapper to that client (or an appropriate client scope)
 instead of assuming either default mapper applies.
 
-## Least-privilege MCP RBAC for the mapped acme-agent-rca group
-
-**If the `rca` realm has already reached `Done: True`, none of this section's
-Keycloak-side pieces (the `acme-agent-rca` group, its membership, or the
-`groups` protocol mappers on `acme-agent`/`lightspeed-mcp`) take effect
-just from the next sync** -- same one-shot limitation as `keycloak.adminGroupName`
-(see "Keeping admin access after enabling OIDC" below): `KeycloakRealmImport`
-is only applied when the realm doesn't already exist, and isn't continuously
-reconciled after that. Check with:
-
-```bash
-oc get keycloakrealmimport <keycloak.realm, default "rca"> \
-  -n <keycloak.namespace, default "keycloak-system"> -o jsonpath='{.status.conditions}'
-```
-
-If it's already `Done: True`, create the `acme-agent-rca` group manually
-in the Admin Console, add the `groups` mapper to both `acme-agent` and
-`lightspeed-mcp` by hand, and add `acme-agent`'s service account
-(`service-account-acme-agent`) to the group -- matching what
-`keycloak-realm-import.yaml` declares, so a future full realm re-import
-doesn't diverge from what's actually configured.
-
-External OIDC providers and their `hardcodedGroups` mappers are the exception:
-the PostSync reconciler below creates or updates them on every sync.
-
-`templates/lightspeed-mcp-rbac.yaml` grants the mapped `keycloak:acme-agent-rca`
-group `get`/`list` on `pods` and `events`, in exactly the namespaces listed
-under `lightspeedRbac.namespaces`, and nothing else by default (no pod logs,
-no Secrets, no RBAC objects, no write verbs -- see
-`LIGHTSPEED_DESIGN.md`'s "Rights to grant (and not grant)" section).
-`lightspeedRbac.useBuiltinViewRole` (off by default) swaps this hand-picked
-rule list for OpenShift's built-in `view` ClusterRole instead: confirmed live
-that the MCP server's investigation tools (`resources_list`, etc.) are not
-pod-specific and can ask about any resource kind, so the narrow default only
-ever covers whatever kind an investigation has already hit. `view` still
-excludes Secrets and RBAC objects (same privilege-escalation reasoning), so
-it stays within the same boundary while covering everything else at once --
-a real widening versus the default, appropriate for a sandbox/demo cluster.
-`lightspeedRbac.grantMonitoringView` (off by default, independent of and
-additive to `useBuiltinViewRole`) additionally binds the built-in
-`cluster-monitoring-view` ClusterRole: cluster/pod metrics (Thanos querier)
-sit behind OpenShift monitoring's own auth proxy and its own
-`SubjectAccessReview` check, which neither the default rules nor `view`
-satisfy -- confirmed live via MCP's `list_metrics` tool failing with a bare
-`client error: 403`.
-This is OpenShift RBAC on the exchanged Token B's own mapped identity; it has
-no relationship to any AgenticRun-style admission policy -- OpenShift
-Lightspeed's MCP tools are authorized purely by this RBAC plus whatever
-toolset/read-only restrictions the MCP server itself applies.
-
-Verify it's active:
-
-```bash
-oc get role,rolebinding -n <a namespace in lightspeedRbac.namespaces> <lightspeedRbac.roleName, default "lightspeed-mcp-investigate">
-```
-
 ### External Red Hat SSO token exchange
 
 Keycloak 26.4's standard V2 token exchange validates an external subject token
@@ -185,16 +104,21 @@ with introspection and userinfo, not JWKS alone. When configuring
 `authorizationUrl`, `tokenUrl`, `jwksUrl`, `tokenIntrospectionUrl`, and
 `userInfoUrl`. The standalone variant configures all five endpoints for both
 SSO environments. ACME must request `openid api.ask_red_hat`; with only
-`api.ask_red_hat`, Red Hat's userinfo endpoint returns 403 and OLS sees only
-the generic `Keycloak token exchange failed` error.
+`api.ask_red_hat`, Red Hat's userinfo endpoint returns 403 and the caller
+sees only the generic `Keycloak token exchange failed` error.
 
-OLS should send the external issuer URL as `subject_issuer`. Keycloak accepts
+The exchanging caller should send the external issuer URL as
+`subject_issuer`. Keycloak accepts
 the issuer URL directly, which avoids depending on an imported IdP alias that
 can drift from chart values on a one-shot realm import.
 
-**Live finding (2026-10-29): stage introspection also needs the external
+**Live finding (2026-10-29, historical -- recorded while the removed
+lightspeed-mcp exchange path still existed; the introspection requirement it
+established still applies to any caller of these IdPs): stage introspection
+also needs the external
 client secret in Keycloak's IdP configuration.** Requests at 15:31, 15:33,
-and 15:34 UTC reached Keycloak as `lightspeed-mcp` using `federated-jwt`
+and 15:34 UTC reached Keycloak as `lightspeed-mcp` (the since-removed
+exchanging client) using `federated-jwt`
 authentication and the correct stage `subject_issuer`, but failed with
 `Introspection endpoint call failure. Introspection response status: 401`.
 Red Hat SSO returned `Authentication failed.` The live `red-hat-sso-stage`
@@ -242,7 +166,8 @@ on the ExternalSecret refresh interval, then reaches Keycloak on the **next
 ArgoCD sync**; refresh alone does not trigger the PostSync hook. No realm
 deletion or re-import is required.
 
-For callers that must receive the pattern's MCP RBAC identity, add the target
+For brokered callers that must receive a specific Keycloak group identity,
+add the target
 Keycloak group to each provider's `hardcodedGroups` list (the standalone
 variant uses `acme-agent-rca` for both Red Hat SSO environments). Both the
 realm import and PostSync hook manage a `Hardcoded Group` IdP mapper with
@@ -259,119 +184,10 @@ The mapper settings are:
 | Group | `/acme-agent-rca` |
 
 After the mapper runs and a **fresh** token exchange occurs (existing access
-tokens are not retroactively changed), Token B must contain
-`groups: ["acme-agent-rca"]`; otherwise OpenShift sees an individual
-`keycloak:<subject>` user and the `Group:keycloak:acme-agent-rca` RBAC binding
+tokens are not retroactively changed), the exchanged token must contain
+`groups: ["acme-agent-rca"]`; otherwise downstream group-based authorization
+sees an individual `keycloak:<subject>` user and the group binding
 does not apply.
-
-### End-to-end verification
-
-This is genuinely two separate things to verify, only one of which can be
-scripted without a live token.
-
-**1. RBAC, via impersonation (fully scriptable, no live Keycloak token
-needed).** `oc`'s `--as`/`--as-group` populate `request.userInfo` the same
-way a real exchanged token's mapped identity would:
-
-```bash
-# Positive: the mapped group may read pods in an allow-listed namespace.
-oc auth can-i get pods \
-  --as=nobody --as-group=keycloak:acme-agent-rca \
-  -n <a namespace in lightspeedRbac.namespaces>
-
-# Negative: the same group has no rights in a namespace outside the
-# allow-list -- RBAC alone enforces this, no admission policy needed.
-oc auth can-i get pods \
-  --as=nobody --as-group=keycloak:acme-agent-rca \
-  -n <a namespace NOT in lightspeedRbac.namespaces>
-# expect: no
-
-# Negative: no write access even in an allow-listed namespace.
-oc auth can-i delete pods \
-  --as=nobody --as-group=keycloak:acme-agent-rca \
-  -n <a namespace in lightspeedRbac.namespaces>
-# expect: no
-```
-
-**2. That the real exchanged token actually carries the `groups` claim
-(needs a live pod).** `groups` mappers exist on both `acme-agent` and
-`lightspeed-mcp` (see the comment in `keycloak-realm-import.yaml`). **Verified
-live** on this pattern's deployment: Token B carried
-`groups: ["acme-agent-rca"]` with `aud: "openshift-mcp"`, `azp: "lightspeed-mcp"`,
-and `sub` unchanged from Token A (see `agents/AUTHENTICATION.md` Grant 2).
-Re-run after realm/mapper changes by decoding a real exchanged token's
-payload -- **never log or print the full token, only its decoded claims**:
-
-```bash
-# 1) Mint Token A inside acme-agent (SPIFFE client_credentials; omit client_id).
-# 2) Exchange inside lightspeed-app-server (env names match the appServerPatch
-#    A2A_* vars). Pass Token A only via a one-shot env var; print claims only.
-#
-# Mint (claims + token lines -- keep TOKEN off shared logs):
-oc exec -n acme-agent deploy/acme-agent -- python3 -c '
-import base64, json, os, ssl
-from pathlib import Path
-import httpx
-from spiffe import WorkloadApiClient
-ctx = ssl.create_default_context()
-ca = os.environ.get("A2A_CA_BUNDLE", "").strip()
-if ca and Path(ca).is_file():
-    ctx.load_verify_locations(cafile=ca)
-with WorkloadApiClient(socket_path=os.environ["SPIFFE_ENDPOINT_SOCKET"]) as c:
-    svid = c.fetch_jwt_svid(audience={os.environ["SPIFFE_JWT_AUDIENCE"]})
-assertion = str(getattr(svid, "token", "") or getattr(svid, "jwt_svid", "") or "")
-with httpx.Client(verify=ctx, timeout=30.0) as client:
-    r = client.post(os.environ["KEYCLOAK_TOKEN_URL"], data={
-        "grant_type": "client_credentials",
-        "client_assertion_type": os.environ["KEYCLOAK_CLIENT_ASSERTION_TYPE"],
-        "client_assertion": assertion,
-    })
-    r.raise_for_status()
-    tok = r.json()["access_token"]
-p = tok.split(".")[1] + "=" * (-len(tok.split(".")[1]) % 4)
-print("CLAIMS", json.dumps({k: json.loads(base64.urlsafe_b64decode(p)).get(k)
-    for k in ("iss","aud","sub","azp","groups")}))
-print("TOKEN", tok)
-'
-
-# Exchange (set CALLER_TOKEN_FOR_VERIFICATION to Token A from above; do not commit it):
-oc exec -n a2a-lightspeed deploy/lightspeed-app-server -c lightspeed-service-api -- \
-  env CALLER_TOKEN_FOR_VERIFICATION="$TOKEN_A" python3 -c '
-import base64, json, os
-import httpx
-from spiffe import WorkloadApiClient
-issuer = os.environ["A2A_KEYCLOAK_ISSUER_URL"].rstrip("/")
-socket = os.environ["A2A_SPIFFE_ENDPOINT_SOCKET"]
-aud = os.environ.get("A2A_SPIFFE_JWT_AUDIENCE") or issuer
-with WorkloadApiClient(socket_path=socket) as c:
-    svid = c.fetch_jwt_svid(audience={aud})
-assertion = str(getattr(svid, "token", "") or getattr(svid, "jwt_svid", "") or "")
-with httpx.Client(timeout=30.0) as client:
-    r = client.post(issuer + "/protocol/openid-connect/token", data={
-        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
-        "subject_token": os.environ["CALLER_TOKEN_FOR_VERIFICATION"],
-        "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
-        "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
-        "client_assertion_type": os.environ.get(
-            "A2A_EXCHANGE_CLIENT_ASSERTION_TYPE",
-            "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"),
-        "client_assertion": assertion,
-        "audience": os.environ["A2A_EXCHANGE_AUDIENCE"],
-    })
-    r.raise_for_status()
-    tok = r.json()["access_token"]
-p = tok.split(".")[1] + "=" * (-len(tok.split(".")[1]) % 4)
-print(json.dumps({k: json.loads(base64.urlsafe_b64decode(p)).get(k)
-    for k in ("iss","aud","sub","azp","groups","act")}, indent=2))
-'
-```
-
-Confirm: `iss` is the expected realm, `aud` is `openshift-mcp`, `sub`
-matches the caller's (not the Lightspeed app-server's own) subject, `azp` is
-`lightspeed-mcp`, and `groups` contains `acme-agent-rca`. If it doesn't, the
-belt-and-suspenders mapper placement didn't work and `lightspeed-mcp-rbac.yaml`
-has nothing to key on; see `keycloak-realm-import.yaml`'s comment on the
-`lightspeed-mcp` client's `groups` mapper for what to try next.
 
 ## OpenShift Native OIDC
 

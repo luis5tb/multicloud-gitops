@@ -45,7 +45,7 @@ Each derived value stays explicitly overridable per app.
 {{- end -}}
 
 {{- define "praxis-proxy.effectiveRouteHost" -}}
-{{- if .Values.route.host -}}{{ .Values.route.host }}{{- else -}}{{ printf "openshift-lightspeed.%s" (include "praxis-proxy.appsDomain" .) }}{{- end -}}
+{{- if .Values.route.host -}}{{ .Values.route.host }}{{- else -}}{{ printf "praxis-proxy.%s" (include "praxis-proxy.appsDomain" .) }}{{- end -}}
 {{- end -}}
 
 {{- define "praxis-proxy.image" -}}

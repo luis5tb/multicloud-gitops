@@ -25,21 +25,6 @@ loud if the anchor is unresolvable, so the old non-empty guard is redundant.
 {{- if not .Values.a2a.remoteAgents }}
 {{- fail "a2a.remoteAgents must have at least one entry (name, description, endpoint) -- there is no default downstream agent" }}
 {{- end }}
-{{- if not .Values.global.olsClusters }}
-{{- fail "global.olsClusters must have at least one entry -- ACME requires the shared OpenShift cluster allow-list (see LIGHTSPEED_DESIGN.md SS7) to enforce X-OLS-Cluster routing; see acme_agent.cluster_registry" }}
-{{- end }}
-{{- /*
-ACME only needs {id: apiURL} from the shared registry -- never the
-upstreamHost/upstreamPort/upstreamSNI fields Praxis alone uses. Project
-the shared global.olsClusters map down to that shape here rather than
-forking a second, independently-maintained copy of the registry (see
-LIGHTSPEED_DESIGN.md SS7 / LIGHTSPEED_IMPLEMENTATION_PLAN.md
-"Rules and shared contracts": both workstreams render from one map).
-*/}}
-{{- $acmeOlsClusters := dict }}
-{{- range $id, $cfg := .Values.global.olsClusters }}
-{{- $_ := set $acmeOlsClusters $id $cfg.apiURL }}
-{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -99,16 +84,8 @@ spec:
                   key: {{ if .Values.litellm.existingSecret.name }}{{ .Values.litellm.existingSecret.key }}{{ else }}LITELLM_API_KEY{{ end }}
             - name: REMOTE_A2A_AGENTS_JSON
               value: {{ include "acme-agent.remoteAgentsJSON" . | quote }}
-            # {id: apiURL} allow-list consumed by acme_agent.cluster_registry
-            # to validate the target cluster URL and derive the
-            # X-OLS-Cluster id on every inbound message. Projected from the
-            # shared global.olsClusters registry above -- see that comment.
-            - name: OLS_CLUSTERS_JSON
-              value: {{ $acmeOlsClusters | toJson | quote }}
             - name: A2A_USE_LEGACY
               value: {{ .Values.a2a.useLegacy | quote }}
-            - name: OLS_A2A_MODE
-              value: {{ .Values.a2a.olsMode | quote }}
             - name: A2A_REQUEST_TIMEOUT
               value: {{ .Values.a2a.requestTimeout | quote }}
             - name: A2A_PUBLIC_HOST

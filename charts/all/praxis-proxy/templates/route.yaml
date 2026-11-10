@@ -1,6 +1,6 @@
 {{- if .Values.route.enabled }}
 {{- /*
-host is derived from global.clusterBaseDomain (openshift-lightspeed.apps.<base>)
+host is derived from global.clusterBaseDomain (praxis-proxy.apps.<base>)
 when not explicitly set -- see _helpers.tpl's effectiveRouteHost; the derivation
 fails loud if the anchor is unresolvable, replacing the old non-empty guard.
 */}}

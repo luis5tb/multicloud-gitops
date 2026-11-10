@@ -1,6 +1,14 @@
 #!/bin/bash
 # MAS A2A Blueprint Setup Script
 #
+# NOTE (Task A, PLAN-lightspeed-hub-migration.md): the OLS investigation
+# backend was removed from this repo, so this script now emits
+# NON-INVESTIGATION blueprints (orchestrator + Ask Red Hat, plus an optional
+# HITL approval gate). The LIVE blueprint pinned in
+# variants/standalone/values-standalone.yaml (a2a.blueprintId) still contains
+# its OLS investigation nodes and is deliberately unchanged -- replacing it
+# is the separate runtime cutover (G3) in that plan.
+#
 # Correct Architecture:
 # 1. Register LLM resource → get LLM_RID
 # 2. Register Orchestrator Node (referencing LLM_RID) → get ORCHESTRATOR_RID
@@ -89,77 +97,33 @@ mas_api_upsert_resource() {
 }
 
 CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-bm-cluster.e2e.bos.redhat.com}"
-
-# X-OLS-Cluster id -- single source of truth. acme, praxis and OLS all *consume*
-# the authored key of global.olsClusters; only acme_agent.cluster_registry
-# .derive_cluster_id ever generates one (see AGENTS.md "mirror any change" and
-# charts/all/openshift-lightspeed-config/templates/_helpers.tpl). Reconstructing
-# the id here from CLUSTER_DOMAIN drifted from that key whenever the API host was
-# not api.<domain>, the port was not 6443, the host had uppercase, or the id
-# needed truncation -- a mismatch Praxis fail-closes into HTTP 404, silently
-# losing OLS delegation. Read the authored registry key instead; allow CLUSTER_ID
-# to override; fall back to reconstruction only if the registry cannot be read.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STANDALONE_VALUES="${STANDALONE_VALUES:-$SCRIPT_DIR/variants/standalone/values-standalone.yaml}"
-if [ -z "${CLUSTER_ID:-}" ] && [ -f "$STANDALONE_VALUES" ]; then
-  _ols_cluster_ids="$(awk '
-    /^  olsClusters:[[:space:]]*$/ { inblock=1; next }
-    inblock && /^  [^[:space:]]/ { inblock=0 }
-    inblock && /^    [^[:space:]].*:[[:space:]]*$/ { k=$1; sub(/:$/,"",k); print k }
-  ' "$STANDALONE_VALUES")"
-  _ols_count="$(printf '%s' "$_ols_cluster_ids" | grep -c .)"
-  if [ "$_ols_count" -eq 1 ]; then
-    CLUSTER_ID="$_ols_cluster_ids"
-  elif [ "$_ols_count" -gt 1 ]; then
-    echo "ERROR: multiple global.olsClusters entries in $STANDALONE_VALUES;" >&2
-    echo "set CLUSTER_ID to the intended X-OLS-Cluster key (one of):" >&2
-    printf '  %s\n' $_ols_cluster_ids >&2
-    exit 1
-  fi
-fi
-if [ -z "${CLUSTER_ID:-}" ]; then
-  CLUSTER_ID="api-$(echo "$CLUSTER_DOMAIN" | sed 's/\./-/g')-6443"
-  echo "WARNING: could not read global.olsClusters from $STANDALONE_VALUES;" >&2
-  echo "falling back to reconstructed CLUSTER_ID=$CLUSTER_ID -- verify it matches the authored registry key." >&2
-fi
 ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/ask/v1/a2a}"
 
 # Shared by the registered orchestrator resource and the blueprint node. Ask
 # Red Hat's A2A node has an empty bearer_token so MAS can use the inbound
 # execution-context credential; do not place a token in this blueprint.
 #
-# LIVE FINDING (2026-10-22, bm-cluster): with only the "mandatory header"
-# bullet below and the planning LLM at temperature 0.7, Gemini emitted the
-# routing header name as X_OLS_Cluster (underscores) in 3 of 5 delegations.
-# MAS forwards work-item headers verbatim on the outbound A2A POST, Praxis
-# matches the X-OLS-Cluster header name exactly (fail-closed, no default
-# route), so every misspelling became "no route matched path=/a2a" -> HTTP
-# 404 and the delegation was silently lost. Models habitually normalize
-# hyphenated keys to underscores in dict/JSON-valued tool arguments, so the
-# prompt now states the spelling rule explicitly (with the wrong form named)
-# and the LLM registers at temperature 0. If this still proves unreliable,
-# the durable fix is in the MAS image: canonicalize the header name when
-# building the outbound request (see UPSTREAM_CONTRIBUTIONS.md), or set it
-# statically on the a2a_agent_node instead of via model tool args.
+# HISTORICAL LIVE FINDING (2026-10-22, bm-cluster, kept for the record -- the
+# live blueprint pinned in values-standalone still depends on it): with only
+# a "mandatory header" bullet and the planning LLM at temperature 0.7, Gemini
+# emitted the X-OLS-Cluster routing header name as X_OLS_Cluster (underscores)
+# in 3 of 5 delegations, which Praxis fail-closed into HTTP 404, silently
+# losing the delegation. That is why the LLM resources register at
+# temperature 0. The OLS removal (Task A) drops the header from the emitted
+# prompt below, but the temperature-0 pinning stays: model-generated
+# tool-argument spelling is still load-bearing for any future header-based
+# routing (see UPSTREAM_CONTRIBUTIONS.md for the durable in-MAS fix).
 ORCHESTRATOR_SYSTEM_MESSAGE=$(cat <<EOF
-You are an OpenShift investigation and Red Hat knowledge router. For every request, decide whether to use the OLS Investigator, Ask Red Hat, or both before finalizing.
-
-AVAILABLE CLUSTER:
-- ${CLUSTER_DOMAIN} → ${CLUSTER_ID}
+You are a Red Hat knowledge router. For every request, decide whether to delegate to Ask Red Hat or answer directly, then finalize.
 
 AVAILABLE AGENTS:
-- OLS Investigator: authoritative live inspection of the configured cluster, including current state, resources, events, errors, and troubleshooting.
-- Ask Red Hat: Red Hat documentation, product information, and guidance. Use it when the request matches a capability advertised in the Ask Red Hat Agent Card. Treat that card's skill names and descriptions as the supported scope; do not invent skills or assume Ask Red Hat can inspect the live cluster.
+- Ask Red Hat: Red Hat documentation, product information, and guidance. Use it when the request matches a capability advertised in the Ask Red Hat Agent Card. Treat that card's skill names and descriptions as the supported scope; do not invent skills or assume Ask Red Hat can inspect a live cluster.
 
 ROUTING:
-- For questions that require current cluster facts, deployed configuration, or live troubleshooting, delegate to the OLS Investigator.
 - For documentation, product questions, how-to guidance, or other topics covered by an advertised Ask Red Hat Agent Card skill, delegate to Ask Red Hat.
-- If the user needs both live cluster findings and documentation or product guidance to interpret them, delegate to both agents in separate tasks. After each response, decide whether the other agent is still needed; do not finalize until every selected agent has responded.
-- For OLS calls, always use delegate_task and set data to {"headers": {"X-OLS-Cluster": "${CLUSTER_ID}"}}. This header is mandatory for every OLS delegation.
-- Copy the header name character for character: X-OLS-Cluster (uppercase, single hyphens). The name X_OLS_Cluster (underscores) or any other spelling is invalid: the gateway matches the header name literally, ignores a misspelled one, and rejects the request with HTTP 404, losing the entire delegation.
-- For Ask Red Hat calls, use the Ask Red Hat node and do not add the X-OLS-Cluster header.
+- If the request needs live cluster inspection or troubleshooting, state plainly that no cluster-investigation agent is currently available, then answer with documentation-based guidance from Ask Red Hat where possible.
 
-Synthesize the selected agents' results into one answer. Distinguish observed cluster facts from documentation-based guidance, and do not present documentation as evidence of the cluster's current state.
+Synthesize the agent's results into one answer. Distinguish documentation-based guidance from observed facts, and do not present documentation as evidence of any cluster's current state.
 EOF
 )
 
@@ -169,8 +133,8 @@ EOF
 # arguments do not survive the endpoint's OpenAI translation, so the
 # orchestrator can never build a plan (empty plan / unterminated-string errors).
 # Gemini returns proper OpenAI-style tool_calls. Vertex uses the ADC creds
-# mounted into the worker (charts/all/mao/mas-worker vertexCreds -> the same
-# Vault key OLS uses), so no api_key is needed here.
+# mounted into the worker (charts/all/mao/mas-worker vertexCreds), so no
+# api_key is needed here.
 LLM_PROVIDER="${LLM_PROVIDER:-openai}"
 VERTEX_PROJECT="${VERTEX_PROJECT:-redhat-marketplace-dev}"
 VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
@@ -341,31 +305,6 @@ if [ "$IS_MULTI_CLUSTER" == "true" ]; then
   echo "   ✅ Router Condition RID: $COND_RID"
 fi
 
-# 1c. Register the live-cluster investigator for multi-cluster blueprints.
-if [ "$IS_MULTI_CLUSTER" == "true" ]; then
-  echo ""
-  echo "1c. Registering OpenShift Lightspeed A2A Agent Node..."
-  A2A_PAYLOAD='{
-      "category": "nodes",
-      "type": "a2a_agent_node",
-      "name": "OpenShift Lightspeed Agent",
-      "config": {
-        "base_url": "https://openshift-lightspeed.apps.'"${CLUSTER_DOMAIN}"'/a2a",
-        "bearer_token": "",
-        "verify_ssl": true
-      }
-    }'
-  A2A_RESPONSE=$(mas_api_upsert_resource "$A2A_PAYLOAD")
-
-  A2A_RID=$(echo "$A2A_RESPONSE" | jq -r '.rid // empty')
-  if [ -z "$A2A_RID" ]; then
-    A2A_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
-      -H "Authorization: Bearer ${MAS_TOKEN}" \
-      | jq -r '.resources[]? | select(.name == "OpenShift Lightspeed Agent") | .rid' | head -1)
-  fi
-  echo "   ✅ OLS A2A Agent RID: $A2A_RID"
-fi
-
 # Register Ask Red Hat for both blueprint types. The empty bearer_token leaves
 # authentication to the MAS execution context instead of storing a static token.
 echo ""
@@ -516,9 +455,9 @@ elif [ "$IS_MULTI_CLUSTER" == "true" ]; then
   echo "Creating multi-cluster blueprint..."
 
   cat > /tmp/mas-blueprint.yaml <<EOF
-description: Multi-cluster OpenShift investigation and Red Hat knowledge with intelligent routing and feedback loop
+description: Red Hat knowledge with intelligent routing and feedback loop
 
-name: Multi-Cluster Investigation and Ask Red Hat Blueprint
+name: Ask Red Hat Orchestrated Blueprint
 
 conditions:
   # External ref to the saved router_direct condition (registered in step 1b2),
@@ -554,15 +493,6 @@ ${HITL_GATE_NODE}
       system_message: |
 $(printf '%s\n' "$ORCHESTRATOR_SYSTEM_MESSAGE" | sed 's/^/        /')
 
-  - rid: ${A2A_RID}
-    name: OLS Investigator
-    type: a2a_agent_node
-    config:
-      type: a2a_agent_node
-      base_url: "https://openshift-lightspeed.apps.${CLUSTER_DOMAIN}/a2a"
-      bearer_token: ""
-      verify_ssl: true
-
   - rid: ${ASK_REDHAT_RID}
     name: Ask Red Hat
     type: a2a_agent_node
@@ -588,17 +518,12 @@ ${HITL_GATE_PLAN}
   - uid: orchestrate
     after:
       - ${ORCHESTRATE_FIRST_AFTER}
-      - investigate
       - ask_red_hat
     node: ${ORCH_RID}
     exit_condition: ${COND_RID}
     branches:
-      investigate: investigate
       ask_red_hat: ask_red_hat
       finalize: finalize
-
-  - uid: investigate
-    node: ${A2A_RID}
 
   - uid: ask_red_hat
     node: ${ASK_REDHAT_RID}
@@ -651,7 +576,6 @@ echo "Blueprint ID: $BLUEPRINT_ID"
 echo ""
 echo "Inventory Resources:"
 if [ "$IS_MULTI_CLUSTER" == "true" ]; then
-  echo "  - OLS A2A Agent RID: $A2A_RID"
   echo "  - LLM RID: $LLM_RID"
   echo "  - Orchestrator RID: $ORCH_RID"
 fi

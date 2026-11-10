@@ -29,7 +29,7 @@ all. Fails loud at render if neither is resolvable -- reached only when a
 domain-derived value is actually needed (i.e. the feature using it is enabled).
 Each derived value remains explicitly overridable per app (see the effective*
 helpers). Keep this block in sync with the identical derivation in the other
-charts (acme-agent, praxis-proxy, openshift-lightspeed-config).
+charts (acme-agent, praxis-proxy).
 */}}
 {{- define "keycloak-oidc.clusterBaseDomain" -}}
 {{- $base := .Values.global.clusterBaseDomain | default (trimPrefix "apps." (.Values.global.localClusterDomain | default "")) -}}

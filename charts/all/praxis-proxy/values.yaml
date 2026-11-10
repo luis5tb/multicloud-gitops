@@ -50,17 +50,13 @@ route:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
 
-# The routed-to backends come from .Values.global.olsClusters (the shared
-# cluster registry defined in variants/<variant>/values-<variant>.yaml under
-# global.olsClusters -- see LIGHTSPEED_DESIGN.md SS7 and
-# LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 6). Praxis reads only the map key
-# (a DNS-safe cluster ID) plus upstreamHost/upstreamPort/upstreamSNI from each
-# entry; it never reads apiURL (that field is ACME-only -- Praxis must never
-# route from caller-supplied data). This default is empty on purpose so a
-# `helm lint`/`helm template` run with no registry fails fast with a clear
-# message instead of silently rendering zero routes.
+# This chart is a generic policy-enforcing A2A gateway. It currently
+# configures NO upstream clusters: the OpenShift Lightspeed investigation
+# backend it used to front was removed (see PLAN-lightspeed-hub-migration.md
+# Task A); a future backend (Task B, lightspeed-hub) will re-introduce
+# routed upstreams. Until then Praxis serves its own agent card and
+# readiness (see files/praxis.yaml) and enforces the caller allow-list.
 global:
-  olsClusters: {}
   # Single cluster-domain anchor shared across this pattern's charts (see
   # templates/_helpers.tpl). Base domain WITHOUT the apps. prefix, e.g.
   # ocp.example.com; falls back to the framework-injected localClusterDomain
@@ -72,39 +68,6 @@ global:
   # Application's keycloak.realm). Defaults to rca.
   keycloakRealm: ""
 
-# In-cluster defaults for each global.olsClusters entry's upstream fields, so a
-# deployer only supplies the map KEY (cluster id) + apiURL per cluster. These
-# are fixed operator-managed Lightspeed app-server Service coordinates in the
-# a2a-lightspeed namespace, not cluster-domain-dependent; an entry may still
-# override any of them (e.g. a future cross-cluster backend). See
-# files/praxis.yaml.
-upstreamDefaults:
-  host: lightspeed-app-server.a2a-lightspeed.svc.cluster.local
-  port: 8443
-  sni: lightspeed-app-server.a2a-lightspeed.svc
-
-# TLS trust for the operator-managed Lightspeed app-server upstream(s). The
-# policy plugin's SSL_CERT_FILE (configured via policy.caBundleConfigMap
-# below) is a *separate* trust store used only for the Keycloak JWKS fetch;
-# it is not automatically valid for the OLS app-server's serving certificate,
-# so upstream TLS gets its own trust configuration here.
-upstreamTLS:
-  # When true, every olsClusters endpoint is dialed over HTTPS with a
-  # verified server certificate and the entry's upstreamSNI. There is
-  # currently no plaintext upstream option: every known/planned OLS
-  # app-server Service is HTTPS-only (operator-managed), so this is not
-  # exposed as a per-cluster toggle.
-  enabled: true
-  # This chart creates a ConfigMap annotated
-  # `service.beta.openshift.io/inject-cabundle: "true"` so the in-cluster
-  # OpenShift service-ca-operator injects the current serving CA bundle
-  # (key `service-ca.crt`) with no manual sync job. That only establishes
-  # trust for Services in *this same* OpenShift cluster -- it cannot trust a
-  # future cross-cluster OLS entry (see chart README and
-  # LIGHTSPEED_DESIGN.md SS7 "Multi-cluster session safety"). A
-  # future cross-cluster entry needs a distributed/synced CA source similar
-  # to policy.caBundleSync below, not this annotation.
-
 identity:
   keycloak:
     # Derived from global.clusterBaseDomain + global.keycloakRealm when empty
@@ -112,10 +75,14 @@ identity:
     # templates/_helpers.tpl's effectiveIssuerUrl. Set explicitly only to
     # override that derivation.
     issuerUrl: ""
-    # Must match keycloak.lightspeedA2aAudience in charts/all/keycloak-oidc --
-    # the custom inbound audience ACME's token carries and OpenShift
-    # Lightspeed's own A2A validator independently checks again downstream.
-    audience: lightspeed-a2a
+    # Inbound audience expected on local-Keycloak tokens. Must be set to
+    # whichever audience this gateway's callers' tokens actually carry; there
+    # is no default because the audience belongs to the backend contract, not
+    # this chart. Used for the local Keycloak issuer in both modes: alone in
+    # single-issuer mode (identity.oidcIssuers empty), and for the local
+    # Keycloak entry the chart appends alongside identity.oidcIssuers in
+    # multi-issuer mode (the chart fails loud if it is empty in either mode).
+    audience: ""
   # Multi-issuer OIDC configuration for validating tokens from multiple trusted
   # identity providers. When oidcIssuers is non-empty, Praxis validates tokens
   # from ANY of the listed issuers (the list keycloak entry above is ignored).
@@ -125,19 +92,18 @@ identity:
     # - name: red-hat-sso-prod
     #   issuerUrl: https://sso.redhat.com/auth/realms/redhat-external
     #   jwksUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-    #   audience: openshift-lightspeed
+    #   audience: api.ask_red_hat
     # - name: red-hat-sso-stage
     #   issuerUrl: https://sso.stage.redhat.com/auth/realms/redhat-external
     #   jwksUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-    #   audience: openshift-lightspeed
+    #   audience: api.ask_red_hat
 
 policy:
   # When true (default), Praxis runs its policy filter: it validates the caller
   # JWT (trusted issuers/JWKS) and enforces the `allowedCallers` azp allow-list
   # before routing. Set false to run Praxis as a pure router/load-balancer (no
   # token verification, no azp gate) -- only do this when a downstream boundary
-  # validates the token instead (e.g. OpenShift Lightspeed's own multi-issuer
-  # inbound OIDC + its Keycloak token exchange). Disabling this also skips the
+  # validates the token instead. Disabling this also skips the
   # enforcementTest Job (it asserts Praxis DENIES, which cannot hold when the
   # policy filter is off). See the chart README and agents/AUTHENTICATION.md.
   enabled: true
@@ -261,32 +227,15 @@ dnsIPv4Only:
       cpu: 100m
       memory: 128Mi
 
-# Static agent card configuration for MAS and multi-cluster routing.
-# When enabled, Praxis returns its own agent card (with Praxis as the rpc_url)
-# through the static_response filter instead of proxying /.well-known/agent-card.json to the first cluster.
-# This ensures MAS and other A2A clients send requests to Praxis, which then
-# routes to the correct OLS backend based on X-OLS-Cluster header.
-#
-# The defaults below match OLS's typical agent card. Override in
-# variants/standalone/values-standalone.yaml for multi-cluster deployments.
+# Static agent card served by Praxis at the A2A discovery paths. The card is
+# generic by design: this gateway currently fronts no investigation backend
+# (see the global comment above), so it only advertises itself. rpcUrl is
+# derived from the Praxis Route when empty. Override name/description in the
+# variant when a backend with real skills is introduced.
 agentCard:
-  enabled: false
-  # Agent name (shown to clients). Defaults to match OLS.
-  name: "OpenShift Lightspeed"
-  # Agent description
-  description: "AI assistant for investigating and troubleshooting OpenShift clusters"
-  # Praxis's own RPC URL (must point to Praxis, not OLS).
-  # This is the key field: it ensures clients call Praxis, not OLS directly.
-  # Empty derives https://openshift-lightspeed.apps.<clusterBaseDomain>/a2a
+  enabled: true
+  name: "praxis-a2a-gateway"
+  description: "Policy-enforcing A2A gateway. No agent backend is currently registered behind it."
+  # Empty derives https://praxis-proxy.apps.<clusterBaseDomain>/a2a
   rpcUrl: ""
-  # Agent version
   version: "1.0.0"
-  # Agent skills - capabilities exposed to orchestrators.
-  # Defaults match OLS's investigation and diagnostic capabilities.
-  skills:
-    - name: "investigate"
-      description: "Investigate OpenShift cluster issues using kubectl and cluster APIs"
-      tags: ["investigation", "troubleshooting", "kubernetes"]
-    - name: "diagnose"
-      description: "Diagnose pod failures, resource issues, and configuration problems"
-      tags: ["diagnostics", "debugging"]

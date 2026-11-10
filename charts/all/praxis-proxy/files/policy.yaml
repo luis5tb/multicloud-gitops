@@ -71,11 +71,9 @@ plugins:
       claim_mapper: keycloak
 
 routes:
-  # The A2A discovery document is public by design. Its RPC URL still points
-  # at the public Praxis Route, never directly at an internal OLS Service.
-  # This path is cluster-neutral: it is not gated by X-OLS-Cluster (see
-  # files/praxis.yaml's router filter and its documented single-cluster
-  # caveat for which backend currently answers it).
+  # The A2A discovery document is public by design. Its RPC URL points
+  # at the public Praxis Route; the card itself is served by the
+  # static_response filter in files/praxis.yaml.
   - http:
       path: /.well-known/agent-card.json
       method: GET
@@ -93,10 +91,8 @@ routes:
       pre_invocation:
         - "allow"
 
-  # Readiness is routed through to the backend OLS instance the router
-  # selects for this path (see files/praxis.yaml) so the proxy is not marked
-  # ready while the application, Keycloak, or the workload identity socket is
-  # unavailable.
+  # Readiness is answered by the proxy itself via a static_response filter
+  # (see files/praxis.yaml) so the path must stay public.
   - http:
       path: /readiness
       method: GET
@@ -107,20 +103,17 @@ routes:
   # Catch-all: every other HTTP request requires a valid Keycloak client
   # token and an explicit allow-list match. The earlier exact routes take
   # priority. This authentication/authorization step runs in the `policy`
-  # filter, which is ordered strictly before the `router`/`load_balancer`
-  # filters in files/praxis.yaml's filter_chain -- a request denied here
-  # never reaches the per-cluster X-OLS-Cluster routing logic, let alone an
-  # upstream.
+  # filter, which is ordered strictly before the `router` filter in
+  # files/praxis.yaml's filter_chain -- a request denied here never
+  # reaches the router, let alone an upstream.
   #
-  # NOTE: this allow-list matches the caller only (claim.azp), not the
-  # requested X-OLS-Cluster. Core's APL `http:` route selector documented
-  # here accepts only path/path_prefix/method -- not headers (see
+  # NOTE: this allow-list matches the caller only (claim.azp). Core's APL
+  # `http:` route selector documented here accepts only path/path_prefix/
+  # method -- not headers (see
   # https://github.com/praxis-proxy/policy/blob/v0.4.0/docs/content/http-routing.md:
   # "Anything other than path, path_prefix, and method in that map is a load
-  # error") -- so per-cluster target enforcement is Core router's job
-  # (files/praxis.yaml), not this policy document's. When a second caller is
-  # introduced, build a caller x cluster allow-list there instead of here;
-  # see LIGHTSPEED_DESIGN.md SS7.
+  # error") -- so per-target enforcement beyond path matching is Core
+  # router's job (files/praxis.yaml), not this policy document's.
   #
   # CORRECTED (empirically, against the pinned image -- see the long comment
   # on the jwt-client plugin's `role` field above):

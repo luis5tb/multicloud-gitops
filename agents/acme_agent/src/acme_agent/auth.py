@@ -18,7 +18,6 @@ from pathlib import Path
 
 import httpx
 
-from .cluster_context import ClusterIdMissingError, get_cluster_id
 from .config import env_bool
 
 logger = logging.getLogger(__name__)
@@ -54,14 +53,9 @@ def _tls_context_trusting(ca_bundle: str) -> ssl.SSLContext:
     return context
 
 
-# The routing header name is a frozen interface decision shared with Praxis
-# and the OLS cluster registry; see LIGHTSPEED_DESIGN.md.
-OLS_CLUSTER_HEADER = "X-OLS-Cluster"
-
-# Correlation id header stamped on outbound JSON-RPC calls. OLS reads the same
-# header in a2a_auth.py and echoes the value into its per-request audit line,
-# so an acme-side "dispatched" record and OLS's "did X on behalf of acme-agent"
-# record share one id and can be joined across the two services.
+# Correlation id header stamped on outbound JSON-RPC calls, so an acme-side
+# "dispatched" record can be joined with the downstream service's own records
+# for the same request.
 REQUEST_ID_HEADER = "X-Request-Id"
 
 # Request-scoped IdP selection headers. They are accepted only from the
@@ -348,17 +342,15 @@ class DownstreamAuth:
             data["scope"] = self.settings.redhat_scope
 
         request_id = _outbound_request_id.get() or "-"
-        cluster = get_cluster_id() or ""
         action = f'"mint Red Hat SSO {environment} agent Token A"'
         try:
             response = await self._token_client.post(configured.token_url, data=data)
             if response.is_error:
                 error_detail = _oauth_error_detail(response)
                 logger.info(
-                    "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                    "acme_audit request_id=%s actor=acme-agent "
                     "action=%s outcome=error status=%s error=%s",
                     request_id,
-                    cluster,
                     action,
                     response.status_code,
                     error_detail,
@@ -375,30 +367,26 @@ class DownstreamAuth:
                 )
         except httpx.HTTPStatusError as error:
             logger.info(
-                "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                "acme_audit request_id=%s actor=acme-agent "
                 "action=%s outcome=error status=%s",
                 request_id,
-                cluster,
                 action,
                 error.response.status_code,
             )
             raise
         except Exception:
             logger.info(
-                "acme_audit request_id=%s actor=acme-agent cluster=%s "
-                "action=%s outcome=error",
+                "acme_audit request_id=%s actor=acme-agent action=%s outcome=error",
                 request_id,
-                cluster,
                 action,
             )
             raise
         expires_in = int(payload.get("expires_in", 300))
         self._store_token(("redhat", environment, "agent"), token, expires_in)
         logger.info(
-            "acme_audit request_id=%s actor=acme-agent cluster=%s "
+            "acme_audit request_id=%s actor=acme-agent "
             "action=%s outcome=ok expires_in=%s token=%s",
             request_id,
-            cluster,
             action,
             expires_in,
             token_fingerprint(token),
@@ -479,7 +467,6 @@ class DownstreamAuth:
             )
 
         request_id = _outbound_request_id.get() or "-"
-        cluster = get_cluster_id() or ""
         try:
             response = await self._token_client.post(
                 self.settings.token_url, data=data, auth=auth
@@ -493,30 +480,26 @@ class DownstreamAuth:
                 )
         except httpx.HTTPStatusError as error:
             logger.info(
-                "acme_audit request_id=%s actor=acme-agent cluster=%s "
+                "acme_audit request_id=%s actor=acme-agent "
                 "action=%s outcome=error status=%s",
                 request_id,
-                cluster,
                 '"mint Keycloak Token A"',
                 error.response.status_code,
             )
             raise
         except Exception:
             logger.info(
-                "acme_audit request_id=%s actor=acme-agent cluster=%s "
-                "action=%s outcome=error",
+                "acme_audit request_id=%s actor=acme-agent action=%s outcome=error",
                 request_id,
-                cluster,
                 '"mint Keycloak Token A"',
             )
             raise
         expires_in = int(payload.get("expires_in", 300))
         self._store_token(("keycloak", "", ""), token, expires_in)
         logger.info(
-            "acme_audit request_id=%s actor=acme-agent cluster=%s "
+            "acme_audit request_id=%s actor=acme-agent "
             "action=%s outcome=ok expires_in=%s token=%s",
             request_id,
-            cluster,
             '"mint Keycloak Token A"',
             expires_in,
             token_fingerprint(token),
@@ -818,44 +801,6 @@ class AuthSelectionMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
-async def add_cluster_header(request: httpx.Request) -> None:
-    """Attach the invocation-scoped ``X-OLS-Cluster`` routing header.
-
-    Registered as a second ``httpx`` request event hook alongside
-    ``DownstreamAuth.add_auth`` (see ``agent.py``), so the existing
-    Keycloak/SPIFFE bearer logic above is untouched; this only adds the
-    routing header ACME must also send.
-
-    The header is added only to authenticated JSON-RPC calls (HTTP POST),
-    never to the public, unauthenticated agent-card fetch (HTTP GET): the
-    card -- advertising the single Praxis HTTPS origin -- must stay
-    discoverable before a cluster is ever selected. Its value comes from
-    ``cluster_context``, a ``contextvars.ContextVar`` bound by
-    ``routing.ClusterRoutingMiddleware`` for the lifetime of the inbound
-    request that triggered this downstream RPC, so concurrent conversations
-    targeting different clusters never share a value: there is no
-    process-global mutable header on the shared ``httpx.AsyncClient``.
-
-    Raises:
-        ClusterIdMissingError: if a JSON-RPC POST would otherwise go out
-            with no validated cluster id bound to this invocation. This
-            should be unreachable -- the routing middleware rejects any
-            message that fails validation before the agent runs -- but
-            this hook fails closed rather than ever send an unrouted or
-            wrongly-defaulted authenticated RPC.
-    """
-
-    if request.method != "POST":
-        return
-    cluster_id = get_cluster_id()
-    if not cluster_id:
-        raise ClusterIdMissingError(
-            "refusing to send an authenticated A2A RPC with no validated "
-            f"{OLS_CLUSTER_HEADER} id bound to this invocation"
-        )
-    request.headers[OLS_CLUSTER_HEADER] = cluster_id
-
-
 async def stamp_request_id(request: httpx.Request) -> None:
     """Stamp ``X-Request-Id`` on outbound JSON-RPC POSTs (no audit line).
 
@@ -879,7 +824,7 @@ async def log_dispatch_audit(request: httpx.Request) -> None:
     """Emit the outbound ``acme_audit`` dispatch line after auth attaches.
 
     Registered last in the httpx hook chain (see ``agent.py``) so chronological
-    order is: stamp id → mint Token A (if needed) → cluster header → dispatch.
+    order is: stamp id → mint Token A (if needed) → dispatch.
     """
 
     if request.method != "POST":
@@ -905,11 +850,10 @@ async def log_dispatch_audit(request: httpx.Request) -> None:
         else "minted"
     )
     logger.info(
-        "acme_audit request_id=%s actor=acme-agent cluster=%s "
+        "acme_audit request_id=%s actor=acme-agent "
         "action=%s outcome=sent token=%s source=%s exp=%s",
         request_id,
-        get_cluster_id() or "",
-        '"dispatch A2A query to OLS"',
+        '"dispatch A2A query"',
         token_fingerprint(token),
         source,
         token_exp_unverified(token) or "-",

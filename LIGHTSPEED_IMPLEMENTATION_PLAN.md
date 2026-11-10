@@ -1,7 +1,11 @@
 # Implementation plan: OpenShift Lightspeed pattern
 
-**Status:** implemented; kept as a record of the phased task breakdown carried
-out. Companion to **`LIGHTSPEED_DESIGN.md`** (the "why" / design). This
+**Status: HISTORICAL.** The OpenShift Lightspeed backend this plan built was
+**removed** from this repo (`PLAN-lightspeed-hub-migration.md`, Task A); its
+replacement (lightspeed-hub) is Task B of that plan. This document is kept
+as the record of what was executed and for teardown/rollback context -- do
+not execute it against the current branch. Companion to
+**`LIGHTSPEED_DESIGN.md`** (the "why" / design). This
 document is the **"how"**: ordered, self-contained tasks an implementing agent
 executed one at a time. Where this doc says "see MP §N" ("MP" = the design
 doc, `LIGHTSPEED_DESIGN.md`, by its original working title), read that section

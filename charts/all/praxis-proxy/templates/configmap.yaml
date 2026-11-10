@@ -13,8 +13,11 @@ shape before it ever reaches that template.
 {{- fail (printf "policy.allowedCallers entries must be safe Keycloak client IDs (letters, digits, '.', '_', '-' only); got %q" .) }}
 {{- end }}
 {{- end }}
-{{- if empty .Values.global.olsClusters }}
-{{- fail "global.olsClusters must contain at least one registered cluster; see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 6" }}
+{{- if and .Values.policy.enabled (not .Values.identity.oidcIssuers) (not .Values.identity.keycloak.audience) }}
+{{- fail "identity.keycloak.audience must be set when policy.enabled is true and identity.oidcIssuers is empty (single-issuer mode): name the audience this gateway's callers' Keycloak tokens carry" }}
+{{- end }}
+{{- if and .Values.policy.enabled .Values.identity.oidcIssuers (not .Values.identity.keycloak.audience) }}
+{{- fail "identity.keycloak.audience must be set when policy.enabled is true and identity.oidcIssuers is non-empty (multi-issuer mode): the chart appends the local Keycloak issuer to the trusted issuers and that entry would carry an empty audience" }}
 {{- end }}
 {{- if and .Values.policy.caBundleSync.enabled (not .Values.policy.caBundleConfigMap.name) }}
 {{- fail "policy.caBundleConfigMap.name is required when policy.caBundleSync.enabled is true" }}

@@ -19,18 +19,24 @@ VARIANT = REPO_ROOT / "variants/standalone/values-standalone.yaml"
 )
 def test_multi_oidc_policy_embeds_valid_yaml() -> None:
     helm_args = ["helm", "template", "praxis-proxy", str(CHART), "-f", str(VARIANT)]
+    # The chart appends the local Keycloak issuer to the trusted issuers in
+    # multi-issuer mode too, and fails loud when its audience is empty -- so
+    # any valid multi-issuer render must also set the local audience.
+    helm_args.extend(
+        ["--set", "identity.keycloak.audience=mas-a2a"]
+    )
     issuers = [
         {
             "name": "red-hat-sso-prod",
             "issuerUrl": "https://sso.redhat.com/auth/realms/redhat-external",
             "jwksUrl": "https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs",
-            "audience": "openshift-lightspeed",
+            "audience": "api.ask_red_hat",
         },
         {
             "name": "red-hat-sso-stage",
             "issuerUrl": "https://sso.stage.redhat.com/auth/realms/redhat-external",
             "jwksUrl": "https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs",
-            "audience": "openshift-lightspeed",
+            "audience": "api.ask_red_hat",
         },
     ]
     for index, issuer in enumerate(issuers):
@@ -60,3 +66,4 @@ def test_multi_oidc_policy_embeds_valid_yaml() -> None:
         issuers[1]["issuerUrl"],
         local_issuer,
     ]
+    assert trusted_issuers[-1]["audiences"] == ["mas-a2a"]

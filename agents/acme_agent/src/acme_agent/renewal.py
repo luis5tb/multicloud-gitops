@@ -2,7 +2,7 @@
 
 ACME authenticates downstream calls with its own workload token (Token A).
 Long-running downstream work (for example the MAS orchestrator delegating to
-OpenShift Lightspeed) can outlive that token. A downstream agent then either
+a specialist agent) can outlive that token. A downstream agent then either
 rejects the request with HTTP 401, or pauses its task in
 ``TASK_STATE_AUTH_REQUIRED`` and waits for the caller to send a follow-up
 message on the same task, authenticated with a fresh token.
@@ -34,7 +34,7 @@ from .auth import CapturedAuth, DownstreamAuth, token_fingerprint
 
 logger = logging.getLogger(__name__)
 
-# Text of the follow-up message. Agents that implement renewal (MAS, OLS)
+# Text of the follow-up message. Agents that implement renewal (MAS)
 # ignore the content: the fresh Authorization header is the renewal.
 RENEWAL_MESSAGE_TEXT = "Fresh credentials are attached to this request. Continue the task."
 

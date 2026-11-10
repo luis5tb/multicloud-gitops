@@ -17,8 +17,8 @@ Scenarios (see docs in scripts/README.md):
                     next step, and continues once a fresh token is sent.
 
 Approval and expiry-in-mas need a blueprint with an approval gate before the
-OLS step (``setup-mas-blueprint.sh multi-cluster-hitl``) and a prompt that
-makes MAS delegate to OLS, including the target cluster API URL.
+long-running specialist step (``setup-mas-blueprint.sh multi-cluster-hitl``)
+and a prompt that makes MAS run a long-running specialist workflow.
 
 Example:
 
@@ -290,7 +290,7 @@ def main() -> int:
     parser.add_argument("--mas-url", required=True, help="MAS A2A base URL (no /a2a/jsonrpc)")
     parser.add_argument("--scenario", choices=[*SCENARIOS, "all"], default="all")
     parser.add_argument("--prompt", required=True,
-                        help="Request that makes MAS delegate to OLS (include the cluster URL)")
+                        help="Request that makes MAS run a long-running specialist workflow")
     parser.add_argument("--token-cmd", default=DEFAULT_TOKEN_CMD,
                         help="Command printing a fresh Token A (default: mint inside ACME)")
     parser.add_argument("--provider", choices=["keycloak", "redhat"], default="keycloak",

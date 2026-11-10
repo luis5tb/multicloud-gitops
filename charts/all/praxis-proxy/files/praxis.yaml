@@ -1,10 +1,5 @@
-{{- if empty .Values.global.olsClusters }}
-{{- fail "global.olsClusters must contain at least one registered cluster; see LIGHTSPEED_IMPLEMENTATION_PLAN.md Phase 6" }}
-{{- end }}
-{{- $sortedIds := keys .Values.global.olsClusters | sortAlpha }}
-{{- $primaryId := first $sortedIds }}
 listeners:
-  - name: ols-a2a
+  - name: a2a
     address: "0.0.0.0:{{ .Values.service.port }}"
     filter_chains: [authorization-and-routing]
 
@@ -34,8 +29,14 @@ filter_chains:
       # Create TWO static_response filter instances (each with one condition) so
       # Praxis serves the same card at both paths - multiple when: conditions in
       # one filter may require ALL to match (AND), not ANY (OR).
-      {{- $rpcUrl := .Values.agentCard.rpcUrl | default (printf "https://openshift-lightspeed.%s/a2a" (include "praxis-proxy.appsDomain" .)) }}
-      {{- $agentCard := dict "name" "openshift-lightspeed" "description" (.Values.agentCard.description | default "OpenShift Lightspeed: investigates and answers questions about this OpenShift cluster using the cluster's own MCP tools. At most 1024 tasks may be in flight, and the most recent 1024 terminal task results are retained. Task state and idle context bindings are process-local; older terminal results and context continuations may be forgotten. Use a single-replica deployment until durable A2A storage is available.") "supportedInterfaces" (list (dict "url" $rpcUrl "protocolBinding" "JSONRPC" "protocolVersion" "1.0")) "version" (.Values.agentCard.version | default "1.0.0") "capabilities" (dict "streaming" true "pushNotifications" false "extensions" (list (dict "uri" "https://openshift.io/ols/a2a/extensions/query-mode/v1" "description" "Selects the OLS query mode for a message." "params" (dict "modes" (list "ask" "troubleshooting") "metadataKey" "ols_mode" "defaultMode" "ask")))) "defaultInputModes" (list "text/plain") "defaultOutputModes" (list "text/plain") "skills" (list (dict "id" "ask" "name" "Ask OpenShift Lightspeed" "description" "Answer general questions about OpenShift and related Red Hat products. This is the default mode; select it with message metadata ols_mode=ask." "tags" (list "openshift" "ask")) (dict "id" "troubleshooting" "name" "Troubleshoot OpenShift issues" "description" "Diagnose live issues in the OpenShift cluster this service is configured for, using that cluster's own MCP tools. Select it with message metadata ols_mode=troubleshooting." "tags" (list "openshift" "troubleshooting" "diagnostics"))) "url" $rpcUrl }}
+      #
+      # The card is deliberately generic: this chart no longer fronts an
+      # investigation backend, so it advertises only the gateway itself. A
+      # future backend chart (see PLAN-lightspeed-hub-migration.md Task B)
+      # should override agentCard.description in the variant, or replace this
+      # card with a proxied one once there is a backend to proxy to.
+      {{- $rpcUrl := .Values.agentCard.rpcUrl | default (printf "https://%s/a2a" (include "praxis-proxy.effectiveRouteHost" .)) }}
+      {{- $agentCard := dict "name" .Values.agentCard.name "description" .Values.agentCard.description "supportedInterfaces" (list (dict "url" $rpcUrl "protocolBinding" "JSONRPC" "protocolVersion" "1.0")) "version" .Values.agentCard.version "capabilities" (dict "streaming" true "pushNotifications" false) "defaultInputModes" (list "text/plain") "defaultOutputModes" (list "text/plain") "url" $rpcUrl }}
       - filter: static_response
         conditions:
           - when:
@@ -59,85 +60,42 @@ filter_chains:
         body: {{ $agentCard | toJson | quote }}
       {{- end }}
 
-      - filter: router
-        routes:
-          # The A2A discovery document and readiness probe are public (see
-          # policy.yaml) and are not selected by X-OLS-Cluster. Exact-path
-          # routes always outrank the header-matched path_prefix routes
-          # below regardless of declaration order (Core router: "exact path
-          # outranks a prefix"), so these two are safe to list first.
-          {{- if not .Values.agentCard.enabled }}
-          # Dynamic agent card (single-cluster): proxy to first OLS cluster.
-          # KNOWN GAP for multi-cluster: the registry has no "primary"/display
-          # concept, so there is no principled way to pick which OLS instance
-          # answers an unauthenticated, cluster-neutral card request. This
-          # picks the lexically first registry key ("{{ $primaryId }}").
-          # For multi-cluster, enable agentCard.enabled instead.
-          - path: /.well-known/agent-card.json
-            cluster: ols-{{ $primaryId }}
-          {{- end }}
-          - path: /readiness
-            cluster: ols-{{ $primaryId }}
-          {{- range $id, $cfg := .Values.global.olsClusters }}
-          # Exact allow-listed X-OLS-Cluster match for registered cluster
-          # "{{ $id }}". Core's router (routes[].headers, exact value match,
-          # confirmed identical in Core v0.7.0 -- what this pinned ai:0.4.1
-          # image embeds -- and Core v0.7.2 docs) rejects with HTTP 404 any
-          # request whose header is absent, holds an unregistered value, or
-          # otherwise matches no route below: there is no default/catch-all
-          # cluster and no fallback to another entry. Verified empirically
-          # against the pinned image; see chart README "Header routing".
-          #
-          # CAVEAT (verify before trusting multi-valued headers): Core's
-          # header matcher (crates/filter .../router/matching.rs
-          # `headers_match`) checks *all* values of a repeated header with
-          # OR semantics -- `get_all(key).any(|v| v == required_value)`. A
-          # request smuggling two X-OLS-Cluster values, one legitimate and
-          # one not, still matches this route if *any* value equals
-          # "{{ $id }}". There is no router config knob to instead reject a
-          # multi-valued header outright; this is an upstream gap this
-          # chart's configuration cannot close on its own. See chart README.
-          - path_prefix: /
-            headers:
-              X-OLS-Cluster: {{ $id | quote }}
-            cluster: ols-{{ $id }}
-          {{- end }}
+      # Readiness is answered by the proxy itself (200) rather than routed to
+      # a backend: this chart currently configures no upstream clusters, so
+      # there is nothing else to health-check. The startup/liveness probes
+      # already cover process health via the loopback admin listener; this
+      # only proves the main listener and filter chain are serving. When a
+      # backend is (re)introduced, consider routing this to it again so the
+      # proxy is not marked ready while the backend is down.
+      - filter: static_response
+        conditions:
+          - when:
+              path: /readiness
+              methods: [GET]
+        status: 200
+        body: "ok"
 
-      - filter: load_balancer
-        clusters:
-          {{- range $id, $cfg := .Values.global.olsClusters }}
-          - name: ols-{{ $id }}
-            endpoints:
-              - "{{ $cfg.upstreamHost | default $.Values.upstreamDefaults.host }}:{{ $cfg.upstreamPort | default $.Values.upstreamDefaults.port }}"
-            {{- if $.Values.upstreamTLS.enabled }}
-            # The operator-managed Lightspeed app-server Service is HTTPS
-            # only. `tls.ca.ca_path` points at the OpenShift service-ca
-            # bundle this chart requests via an inject-cabundle ConfigMap
-            # (see templates/upstream-ca-configmap.yaml); it is a different
-            # trust store from the policy plugin's Keycloak-JWKS CA bundle.
-            # This schema (clusters[].tls.{sni,verify,ca.ca_path}) is
-            # identical between Core v0.7.0 (what ai:0.4.1 embeds) and
-            # v0.7.2 per upstream docs; verified structurally against the
-            # pinned binary with --validate, see chart README.
-            tls:
-              sni: {{ $cfg.upstreamSNI | default $.Values.upstreamDefaults.sni | quote }}
-              verify: true
-              ca:
-                ca_path: /etc/praxis/upstream-ca/ca-bundle.crt
-            {{- end }}
-          {{- end }}
+      # No upstream clusters are configured: with no load_balancer filter,
+      # every request that survives the policy filter's catch-all (i.e.
+      # allow-listed callers hitting any path other than the public discovery
+      # and readiness routes above) falls through the router to a 404.
+      # UNCONFIRMED GUESS: whether the pinned Praxis image accepts a router
+      # filter with an empty routes list has not been validated against a
+      # live deployment of this no-backend configuration -- verify on the
+      # next cluster rollout and, if it rejects an empty list, remove the
+      # router filter entirely (the static_response filters above can serve
+      # every route this gateway currently answers).
+      - filter: router
+        routes: []
 
 admin:
   # Kept on loopback: only container-local health probes can access it.
   address: "127.0.0.1:9901"
 
-# Praxis currently requires both opt-ins for its static in-cluster OLS
-# upstream(s): allow_private_endpoints for config-load-time validation of the
-# load_balancer cluster endpoints, and allow_private_upstreams for the
-# runtime connection check. These flags do not configure policy-engine
-# callouts. Keep every upstream fixed in this chart (sourced only from the
-# operator-controlled global.olsClusters registry, never from a caller
-# header or URL) and restrict OLS ingress with NetworkPolicy in its chart.
+# Praxis requires these opt-ins for static in-cluster upstreams. No upstream
+# clusters are currently configured (see the router filter above), so these
+# only matter if/when one is added back; they do not configure policy-engine
+# callouts.
 insecure_options:
   allow_private_endpoints: true
   allow_private_upstreams: true

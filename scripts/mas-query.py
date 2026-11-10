@@ -516,7 +516,6 @@ def message_params(text: str, output: Output | None = None) -> dict:
         "messageId": uuid.uuid4().hex,
         "role": "ROLE_USER",
         "parts": [{"text": text}],
-        "metadata": {"ols_mode": os.getenv("OLS_A2A_MODE", "troubleshooting")},
     }
     if output:
         message.update(taskId=output.task_id, contextId=output.context_id)

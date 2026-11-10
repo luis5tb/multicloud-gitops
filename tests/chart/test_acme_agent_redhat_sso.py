@@ -34,8 +34,6 @@ def test_redhat_sso_agent_credentials_render() -> None:
             "--set",
             "a2a.remoteAgents[0].endpoint=https://downstream.example.test",
             "--set",
-            "global.olsClusters.downstream-example-test.apiURL=https://downstream.example.test",
-            "--set",
             "auth.redhatSso.enabled=true",
             "--set",
             "auth.redhatSso.production.tokenUrl=https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token",

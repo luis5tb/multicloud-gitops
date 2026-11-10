@@ -2,6 +2,11 @@
 
 This guide explains how to configure the Validated Pattern to support tokens from multiple OIDC issuers (Red Hat SSO Production, Red Hat SSO Stage, and the local Keycloak).
 
+> **Note:** the OpenShift Lightspeed (OLS) backend was removed from this repo
+> (`PLAN-lightspeed-hub-migration.md`, Task A). Any OLS-specific blocks
+> mentioned in this guide are historical; the Praxis, Keycloak, and MAS
+> sections remain current.
+
 ## Architecture Overview
 
 ```

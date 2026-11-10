@@ -17,13 +17,18 @@ not the focus of this work).
 
 This branch's actual payload is an **agentic Red Hat assistance pattern**: a
 chat agent (ACME, built on Google's ADK) delegates Red Hat-related questions
-to the MAO workflow. MAO can use Ask Red Hat for product, project, and
-documentation guidance, OpenShift Lightspeed (OLS) for cluster investigation,
-or both. OLS uses MCP tools to query the live cluster -- with the caller's
-identity propagated end-to-end through Keycloak + SPIFFE + an RFC 8693 token
-exchange, so the resulting RBAC check is attributed to the real caller, not to
-OLS's own service account. A Praxis Policy Engine gateway sits in front of OLS
-enforcing the caller allow-list.
+to the MAO workflow, which uses Ask Red Hat for product, project, and
+documentation guidance. The caller's identity is propagated end-to-end
+through Keycloak + SPIFFE, behind a Praxis Policy Engine gateway enforcing
+the caller allow-list.
+
+> **Status change (Task A, `PLAN-lightspeed-hub-migration.md`):** the
+> OpenShift Lightspeed (OLS) investigation backend and RHOAI were removed
+> from this branch. Everything below that describes OLS, the
+> `X-OLS-Cluster` routing, the RFC 8693 `openshift-mcp` exchange, the
+> `openshift-lightspeed-config` chart, `appServerPatch`, or `lightspeedRbac`
+> is kept as the historical record (and teardown/rollback context); its
+> replacement (lightspeed-hub) is Task B of that plan.
 
 This replaces an earlier "RCA agent" + OPA-based pattern that lived in this
 same repo; you may still see comments/leftovers referencing "RCA" or a
@@ -36,8 +41,9 @@ Application).
   Keep it in sync with reality; it's been wrong before (see "Hard-won
   lessons" below) and a stale walkthrough actively misleads the next
   deployer.
-- `LIGHTSPEED_DESIGN.md` -- the design doc this pattern was built from.
-  Written entirely from research/documentation, **before any live cluster
+- `LIGHTSPEED_DESIGN.md` -- HISTORICAL: the design doc for the removed OLS
+  backend (see the status note above). Written entirely from
+  research/documentation, **before any live cluster
   existed to test against** -- full of explicit "UNCONFIRMED GUESS"
   markers. Treat it as a hypothesis record, not ground truth; cross-check
   anything it asserts against the actual installed operator/CRD/cluster
@@ -45,8 +51,8 @@ Application).
   actually confirmed something live.
 - `variants/standalone/values-standalone.yaml` -- **the only place
   cluster-specific values belong.** Trust domain, issuer URLs, image refs,
-  the `global.olsClusters` registry, OLM Subscription channel/source, RBAC
-  namespace scope -- all of it. Never hardcode a real cluster's hostname or
+  OLM Subscription channel/source -- all of it. Never hardcode a real
+  cluster's hostname or
   trust domain into a chart template or default `values.yaml`; those stay
   generic/empty/placeholder so the chart works on any cluster.
 - `values-secret.yaml.template` -- Vault-backed secrets (via External
@@ -54,41 +60,37 @@ Application).
 - `charts/all/<name>/` -- one Helm chart per ArgoCD Application (mostly).
   Each has its own `README.md` with chart-specific caveats -- read it before
   touching that chart.
-  - `keycloak-oidc` -- the `rca` realm (5 clients, SPIFFE federation,
-    `groups` mappers), least-privilege MCP RBAC
-    (`templates/lightspeed-mcp-rbac.yaml`), and the OpenShift Native OIDC
+  - `keycloak-oidc` -- the `rca` realm (3 clients, SPIFFE federation,
+    `groups` mappers) and the OpenShift Native OIDC
     `Authentication/cluster` resource.
-  - `praxis-proxy` -- the policy-enforcing gateway in front of OLS. Routes
-    by `X-OLS-Cluster` header; validates the caller's JWT and `azp`
+  - `praxis-proxy` -- the policy-enforcing A2A gateway. Validates the
+    caller's JWT and `azp`
     allow-list via the pinned `ghcr.io/praxis-proxy/ai` image (alpha
-    upstream software with documented quirks -- see its README).
-  - `openshift-lightspeed-config` -- the `OLSConfig` CR plus the
-    `appServerPatch` bridge (see "Core architecture decisions" below).
+    upstream software with documented quirks -- see its README). It
+    currently fronts no upstream (see the status note above).
   - `acme-agent` -- deploys the agent built from `agents/acme_agent/`.
   - `mao/mas-a2a` -- optional, separately authenticated inbound MAS A2A
     endpoint for a persisted orchestrator blueprint; its Application is
     registered but the chart renders no resources until explicitly enabled.
-    Other `mao/*` and `rhoai-config` charts serve the demo/platform stack.
+    Other `mao/*` charts serve the demo/platform stack.
 - `agents/acme_agent/` -- the ACME agent's Python source (ADK-based A2A
   client). `agents/AUTHENTICATION.md` is the authoritative, detailed
   write-up of the full per-request identity chain with real captured claim
   shapes and a substantial Troubleshooting section -- read it before
   debugging any auth failure in this flow. `agents/README.md` is a short
   index.
-- OLS A2A app-server image -- built from the external fork
-  [`luis5tb/lightspeed-service@a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)
-  (Keycloak validate → SPIFFE → RFC 8693 exchange → OLS pipeline), since
-  upstream OpenShift Lightspeed has **no real A2A support** yet (the one
-  attempt, PR #2866, was closed unmerged with zero reviews and had no
-  auth/identity story -- don't assume a future upstream version adds this
-  for free). Build/push steps live in the top-level `README.md` Phase 0;
-  this pattern no longer vendors that tree.
 - `vendor/praxis-ai/` -- untracked, reference-only checkout of Praxis's
   source, used only while writing APL policy syntax. The deployed
   `praxis-proxy` chart pins a public upstream image; this directory is not
   built from and does not need to exist for a deployment to work.
 
 ## Core architecture decisions (don't relitigate these without reason)
+
+> Note: the OLS-specific decisions below (identity-chain Token A/B exchange,
+> Praxis-as-OLS-allow-list, `global.olsClusters`, `appServerPatch`,
+> `lightspeedRbac`) are historical since the Task A removal -- kept because
+> the reasoning and live findings behind them still apply to the
+> replacement backend design (Task B).
 
 - **The identity chain is the point.** ACME authenticates to Keycloak as
   itself (SPIFFE JWT-SVID, `client_credentials`), gets "Token A", sends it
@@ -166,6 +168,11 @@ clusterGroup file as Helm values does not enable its Application settings.
 Local render lesson: Praxis multi-OIDC output is YAML nested inside a ConfigMap
 string. Helm whitespace trimming once joined the last external JWKS URL to the
 local issuer item; parse `data.policy.yaml` itself, not only the outer Helm YAML.
+
+Local browser lesson: `docs/lightspeed-hub-plan.html` passed HTML nesting checks
+but rendered three Mermaid error diagrams in Chrome because message/note labels
+contained statement-separating semicolons; validate actual SVG rendering with the
+pinned Mermaid runtime, not just HTML syntax.
 
 Live ACME logging finding (2026-10-29): uvicorn's default log config only
 configures the `uvicorn.*` loggers, so every `acme_audit` INFO record was

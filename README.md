@@ -26,17 +26,27 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
 
 ### Phase 0 — Before touching the cluster
 
-1. Build and push the two images the ACME/OLS investigation flow needs that
-   are not published upstream. Praxis itself isn't built from this repo --
+> **Status change (Task A, `PLAN-lightspeed-hub-migration.md`):** the
+> OpenShift Lightspeed (OLS) investigation backend and RHOAI have been
+> **removed** from this repo (`charts/all/openshift-lightspeed-config/`,
+> `charts/all/rhoai-config/`, the `a2a-lightspeed` namespace, the
+> `lightspeed-operator` subscription, and all `appServerPatch` overrides).
+> Everything in this README that mentions OLS, the `a2a-split` Lightspeed
+> image, `X-OLS-Cluster` routing, or the `openshift-lightspeed-config`
+> chart is **historical** -- kept as the record of how the pre-removal
+> deployment was built, and for the teardown/rollback context in the
+> migration plan. The replacement investigation backend (lightspeed-hub) is
+> Task B in that plan and is not built yet. ACME now routes directly to MAS
+> A2A; Praxis remains deployed as a policy gateway with no upstream.
+
+1. Build and push the image the ACME flow needs that is
+   not published upstream. Praxis itself isn't built from this repo --
    it pulls a pinned
    upstream image (see its own version caveats below). ACME is built from
-   `agents/acme_agent/` here. The A2A-enabled OpenShift Lightspeed
-   app-server image is built from the external fork
-   [`luis5tb/lightspeed-service`](https://github.com/luis5tb/lightspeed-service)
-   on branch [`a2a-split`](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)
-   (tip at time of writing: `4d85f430`, which separates reusable OIDC
-   authentication, A2A transport, and optional token exchange)
-   -- this pattern no longer vendors that tree.
+   `agents/acme_agent/` here. (Historical: this step also used to build the
+   A2A-enabled OpenShift Lightspeed app-server image from the external fork
+   `luis5tb/lightspeed-service@a2a-split`; it is no longer deployed by this
+   repo -- see the banner above.)
 
     ```bash
     export QUAY_ORG=<your-quay-org>
@@ -47,101 +57,27 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     podman build -f agents/acme_agent/Containerfile \
       -t quay.io/${QUAY_ORG}/acme-agent:${ACME_TAG} agents/acme_agent
     podman push quay.io/${QUAY_ORG}/acme-agent:${ACME_TAG}
-
-    # --- OLS + A2A (from luis5tb/lightspeed-service@a2a-split) ---
-    # Clone beside this repo (or wherever you prefer); pin a SHA for
-    # reproducibility if you want an immutable image tag.
-    git clone --branch a2a-split --single-branch \
-      https://github.com/luis5tb/lightspeed-service.git /tmp/opencode/lightspeed-service-a2a-split
-    cd /tmp/opencode/lightspeed-service-a2a-split
-    export OLS_TAG=$(git rev-parse --short HEAD)
-
-    # Prefer UBI base images so the build does not need a RHEL
-    # entitlement (registry.redhat.io/rhel9/python-312 requires one for
-    # `dnf install`). Same Python 3.12 line the Containerfile defaults to.
-    podman build -f Containerfile \
-      --build-arg BUILDER_BASE_IMAGE=registry.access.redhat.com/ubi9/python-312:9.6 \
-      --build-arg RUNTIME_BASE_IMAGE=registry.access.redhat.com/ubi9/python-312-minimal:9.6 \
-      -t quay.io/${QUAY_ORG}/openshift-lightspeed:${OLS_TAG} .
-    podman push quay.io/${QUAY_ORG}/openshift-lightspeed:${OLS_TAG}
-    cd -
     ```
-
-    The OpenShift Lightspeed Operator picks the app-server image via its own
-    `--service-image` startup flag, not an `OLSConfig` field, and has no CRD
-    field for the `A2A_*` environment variables the A2A-enabled image needs
-    either. `charts/all/openshift-lightspeed-config`'s `appServerPatch`
-    (disabled by default) is a **temporary** bridge for both: it patches the
-    operator-managed app-server Deployment directly, after the fact, with
-    this image and the required `A2A_*` settings (cluster ID, public RPC URL,
-    and the Keycloak/SPIFFE exchange settings) --
-    see that chart's README.md ("Temporary A2A bridge") for how to set it,
-    and why it also scales the operator itself to 0 replicas first (a
-    periodic re-assert against the operator's own reconcile loop turned out
-    to be a losing fight -- confirmed live). Delete it once the operator/
-    OLSConfig CRD natively supports a custom service image and A2A
-    configuration.
-
-    **Important for `a2a-split`:** upstream A2A token exchange is optional
-    and defaults to disabled. This pattern must enable it explicitly alongside
-    OIDC inbound validation; otherwise OLS sends the caller's original token
-    to MCP instead of exchanging it for an `openshift-mcp`-audience token.
-    The image must also include the Keycloak 26.4 exchange fix that sends
-    external tokens as `subject_token_type=access_token` with the external
-    issuer URL in `subject_issuer`; the older `650f5486` image rewrites the
-    token type to `jwt` and Keycloak rejects the exchange.
-    OLS now uses its configured OIDC authentication module for both A2A and
-    the stock REST API; clients of `/v1/*` that previously used OpenShift
-    ServiceAccount tokens must be retested with OIDC credentials. Praxis
-    enforces the `azp` caller allow-list **only when `policy.enabled: true`**;
-    the `standalone` variant sets `policy.enabled: false`, so Praxis is a pure
-    router and **OLS is the validating boundary** — its multi-issuer inbound
-    OIDC (local Keycloak **plus** Red Hat SSO prod/stage via
-    `appServerPatch.a2a.oidcIssuers`) validates the caller, then the Keycloak
-    exchange re-validates. OLS has no separate A2A `azp` allow-list. See
-    [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) ("Praxis policy mode"). The OIDC module
-    validates HTTPS issuer discovery/JWKS with **HTTPX/certifi roots** by
-    default; the exchange-specific
-    `A2A_KEYCLOAK_CA_BUNDLE` does not add trust for inbound OIDC validation.
-    A private Keycloak Route CA requires `SSL_CERT_FILE` to point to a bundle
-    containing **both** public roots and the private CA. Adding it only to
-    the OS trust store is not sufficient for HTTPX's default certifi context.
-    The standalone override enables `appServerPatch.oidcTrust.enabled`: the
-    bridge mounts the synced managed-ingress CA Secret under `/etc/certs`, and
-    the `a2a-split` runner rebuilds its operator-provided `SSL_CERT_FILE`
-    bundle from public roots plus sibling certificates. The patch Job fails
-    before pausing the operator if that writable path is absent on the
-    installed release; verify it before cutover. The CA-sync CronJob restarts
-    the app-server when the synced CA changes so the startup bundle refreshes
-    (see the OLS chart README).
-
     **Multi-OIDC Support:** To accept tokens from multiple OIDC issuers (e.g.,
     Red Hat SSO production, Red Hat SSO stage, and the local Keycloak), see
     [`MULTI_OIDC_CONFIGURATION.md`](MULTI_OIDC_CONFIGURATION.md) for detailed
-    configuration instructions. This configures Praxis, OLS, and Keycloak to
-    validate tokens from multiple trusted issuers while still performing token
-    exchange through the local Keycloak instance. Example configuration is in
+    configuration instructions. This configures Praxis and Keycloak to
+    validate tokens from multiple trusted issuers.
+    Example configuration is in
     [`MULTI_OIDC_EXAMPLE.yaml`](MULTI_OIDC_EXAMPLE.yaml).
 
 2. Replace the `acme-agent` application's `image.repository`/`image.tag`
-   **and** `openshift-lightspeed-config`'s `appServerPatch.image.repository`/
-   `appServerPatch.image.tag` overrides in
-   `variants/standalone/values-standalone.yaml` with the images you just
+   overrides in
+   `variants/standalone/values-standalone.yaml` with the image you just
    pushed. **These are not empty placeholders** -- they point to a
-   specific prior deployment's personal `quay.io` account, and the OLS tag
-   is the new source SHA, not proof that its image has been published;
+   specific prior deployment's personal `quay.io` account;
    do not assume a filled-in-looking value is already correct for your
    deployment. `praxis-proxy` needs no image edit for
    now -- it pins `ghcr.io/praxis-proxy/ai:0.4.1` by digest in
    `charts/all/praxis-proxy/values.yaml`. That image is alpha/prerelease
    upstream software and this integration isn't a Red Hat-supported Praxis
-   distribution; a newer Praxis Core release (v0.7.2) adds the header-based
-   routing and per-upstream TLS this pattern needs, but as of this writing no
-   published `praxis-proxy/ai` image embeds it yet -- see
-   `LIGHTSPEED_DESIGN.md` section 7 before bumping `image.tag`
-   yourself. `openshift-lightspeed-config`'s own `OLSConfig` doesn't carry an
-   image reference at all; see step 1 above for how the custom OLS image is
-   actually wired in (`appServerPatch`, a temporary post-reconcile patch).
+   distribution; see `LIGHTSPEED_DESIGN.md` section 7 (historical) before
+   bumping `image.tag` yourself.
 
 3. Confirm the branch you're deploying from is what's pushed and what the
    new cluster's ArgoCD Application will track:
@@ -193,6 +129,7 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
     oc get packagemanifest lightspeed-operator -o jsonpath='{.status.channels[*].name}{"\n"}{.status.defaultChannel}{"\n"}' -n openshift-marketplace
     # After the first sync, approve the pending InstallPlan so the
     # operator installs:
+    # (historical: OLS backend removed -- see PLAN-lightspeed-hub-migration.md Task A)
     oc -n a2a-lightspeed patch installplan "$(oc -n a2a-lightspeed get installplan -o jsonpath='{.items[0].metadata.name}')" --type merge -p '{"spec":{"approved":true}}'
 
     make validate-prereq
@@ -243,7 +180,7 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
 
     What you still set by hand:
 
-    - `global.olsClusters` (top of `values-standalone.yaml`, shared by `acme-agent`,
+    - `global.olsClusters` (historical; OLS backend removed -- see PLAN-lightspeed-hub-migration.md Task A) (top of `values-standalone.yaml`, shared by `acme-agent`,
       `praxis-proxy`, and `openshift-lightspeed-config`) → one entry per cluster,
       needing only its **KEY** (the `X-OLS-Cluster` id: lowercase host+port with
       `.`/`:` → `-`; see `agents/acme_agent/src/acme_agent/cluster_registry.py`)
@@ -253,7 +190,7 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
       `upstreamHost`/`upstreamPort`/`upstreamSNI` now default to the
       operator-managed app-server Service (override per entry only for a
       cross-cluster backend).
-    - `openshift-lightspeed-config` → `appServerPatch.a2a.clusterId` = the registry
+    - `openshift-lightspeed-config` (historical; chart removed) → `appServerPatch.a2a.clusterId` = the registry
       KEY above that this app-server serves (kept explicit so it stays
       unambiguous with multiple clusters; validated against the registry), plus
       `appServerPatch.image.repository`/`tag` once Phase 0 step 1's image is pushed.
@@ -268,8 +205,8 @@ Deploy from whatever branch carries this pattern's commits in your fork/remote
       match the *actual* Service Account the installed Lightspeed Operator creates
       for its app-server (default guess: `a2a-lightspeed`/`lightspeed-app-server`).
     - Leave `openshiftOIDC.enabled` `"false"` until Phase 3 regardless.
-    - `keycloak-oidc` → `lightspeedRbac.namespaces` = the real namespace(s) on your cluster you want OLS's MCP investigation scoped to (e.g. `lightspeedRbac.namespaces[0]`). Left unset, this is an intentional no-op -- the chart's own default is an empty list, which renders zero Role/RoleBinding resources (acme-agent gets no MCP access anywhere, not a broken deployment) until you set this. There is no "all namespaces" default: if you explicitly want cluster-wide investigation scope (e.g. a sandbox/demo cluster, not a real environment), set `lightspeedRbac.allNamespaces: "true"` instead -- this renders a single ClusterRole/ClusterRoleBinding granting every caller in `lightspeedRbac.groupName` read access to pods/events in *every* namespace, a real widening of blast radius, not just a convenience toggle; see `charts/all/keycloak-oidc/values.yaml`'s comment on it before enabling.
-    - `keycloak-oidc` → the default grant above (`pods`/`events` only) is the safe least-privilege starting point, but MCP's generic investigation tools (`resources_list`, `list_metrics`) aren't limited to pods -- they can ask about any resource kind, and each new kind hits a fresh RBAC gap one at a time. Two further opt-in, off-by-default toggles exist for a sandbox/demo cluster that wants broad investigation coverage without chasing individual resource kinds: `lightspeedRbac.useBuiltinViewRole: "true"` (binds OpenShift's built-in `view` ClusterRole -- read access to nearly everything except Secrets and RBAC objects) and `lightspeedRbac.grantMonitoringView: "true"` (additionally binds `cluster-monitoring-view`, needed separately for cluster/pod metrics since those sit behind OpenShift monitoring's own auth proxy, not the core API server). Both are real widenings of blast radius, documented in detail in `charts/all/keycloak-oidc/values.yaml` and `charts/all/keycloak-oidc/README.md`; for anything resembling a real environment, prefer the narrow default plus explicit `lightspeedRbac.extraRules` for only the resource kinds actually needed.
+    - `keycloak-oidc` → `lightspeedRbac.namespaces` (historical; OLS backend removed -- see PLAN-lightspeed-hub-migration.md Task A) = the real namespace(s) on your cluster you want OLS's MCP investigation scoped to (e.g. `lightspeedRbac.namespaces[0]`). Left unset, this is an intentional no-op -- the chart's own default is an empty list, which renders zero Role/RoleBinding resources (acme-agent gets no MCP access anywhere, not a broken deployment) until you set this. There is no "all namespaces" default: if you explicitly want cluster-wide investigation scope (e.g. a sandbox/demo cluster, not a real environment), set `lightspeedRbac.allNamespaces: "true"` instead -- this renders a single ClusterRole/ClusterRoleBinding granting every caller in `lightspeedRbac.groupName` read access to pods/events in *every* namespace, a real widening of blast radius, not just a convenience toggle; see `charts/all/keycloak-oidc/values.yaml`'s comment on it before enabling.
+    - `keycloak-oidc` → (historical; OLS backend removed) the default grant above (`pods`/`events` only) is the safe least-privilege starting point, but MCP's generic investigation tools (`resources_list`, `list_metrics`) aren't limited to pods -- they can ask about any resource kind, and each new kind hits a fresh RBAC gap one at a time. Two further opt-in, off-by-default toggles exist for a sandbox/demo cluster that wants broad investigation coverage without chasing individual resource kinds: `lightspeedRbac.useBuiltinViewRole: "true"` (binds OpenShift's built-in `view` ClusterRole -- read access to nearly everything except Secrets and RBAC objects) and `lightspeedRbac.grantMonitoringView: "true"` (additionally binds `cluster-monitoring-view`, needed separately for cluster/pod metrics since those sit behind OpenShift monitoring's own auth proxy, not the core API server). Both are real widenings of blast radius, documented in detail in `charts/all/keycloak-oidc/values.yaml` and `charts/all/keycloak-oidc/README.md`; for anything resembling a real environment, prefer the narrow default plus explicit `lightspeedRbac.extraRules` for only the resource kinds actually needed.
 
 7. Edit `variants/standalone/values-standalone.yaml`, replacing the
    placeholders above with the real values.
@@ -645,7 +582,7 @@ acme-agent:
     - name: a2a.remoteAgents[0].name
       value: mas_orchestrator
     - name: a2a.remoteAgents[0].description
-      value: "MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat and OpenShift cluster investigation through OpenShift Lightspeed (OLS). Use for all Red Hat-related requests, including non-OpenShift questions; MAO selects the appropriate specialist(s)."
+      value: "MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat. Use for all Red Hat-related requests; MAO selects the appropriate specialist(s)."
     - name: a2a.remoteAgents[0].endpoint
       # Must equal the MAS A2A base URL from Step 4 (MAS_A2A_URL), which is the
       # same value as mao-a2a's a2a.publicBaseUrl. With route.host unset, the
@@ -732,7 +669,12 @@ oc get secret keycloak-admin-user -n keycloak-system -o jsonpath='{.data.passwor
 Open `$KEYCLOAK_URL` and select the `rca` realm to inspect the clients,
 groups, and identity provider `keycloak-realm-import.yaml` declares.
 
-## OpenShift Lightspeed
+## OpenShift Lightspeed (HISTORICAL -- removed)
+
+> The OLS backend described in this section was removed from this repo (see
+> the Phase 0 banner and `PLAN-lightspeed-hub-migration.md` Task A). The text
+> below is kept as the historical record of the pre-removal deployment; none
+> of it applies to a fresh install of this branch.
 
 ACME delegates OpenShift questions and incident investigations to OpenShift
 Lightspeed, deployed via the OpenShift Lightspeed Operator and configured by

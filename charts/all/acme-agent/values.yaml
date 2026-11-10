@@ -33,31 +33,8 @@ a2a:
   publicHost: acme-agent
   publicPort: 8080
   publicProtocol: http
-  # Stamped onto outbound A2A messages as metadata.ols_mode for the OLS
-  # executor (ask | troubleshooting). OLS defaults to ask when absent; this
-  # pattern's investigation flow needs troubleshooting. Override via
-  # OLS_A2A_MODE on the Deployment.
-  olsMode: troubleshooting
 
-# Shared cluster-selection registry (see LIGHTSPEED_DESIGN.md SS7).
-# ACME and Praxis render their allow-lists from this ONE map -- it is not
-# forked into a chart-specific copy here. ACME only ever uses each entry's
-# `apiURL` (see acme_agent.cluster_registry for the canonicalization/
-# id-derivation algorithm; each key must equal the id that algorithm derives
-# for its own apiURL value); it never sees or uses the upstreamHost/
-# upstreamPort/upstreamSNI fields Praxis alone consumes. The actual content
-# is supplied by the pattern's shared values file (the whole
-# variants/<clusterGroup>/values-<clusterGroup>.yaml is loaded as a Helm
-# values layer for every application -- see charts/all/praxis-proxy/values.yaml
-# for the sibling declaration); this default is just the documented shape.
-#
-# Example:
-#   global:
-#     olsClusters:
-#       api-bm-cluster-e2e-bos-redhat-com-6443:
-#         apiURL: https://api.bm-cluster.e2e.bos.redhat.com:6443
 global:
-  olsClusters: {}
   # Single cluster-domain anchor shared across this pattern's charts (see
   # templates/_helpers.tpl). Base domain WITHOUT the apps. prefix, e.g.
   # ocp.example.com; falls back to the framework-injected localClusterDomain
@@ -169,7 +146,7 @@ auth:
     defaultEnvironment: production
     tokenType: agent
     # Red Hat SSO clients commonly control token audience through OAuth scope.
-    # The downstream MAS/OLS configuration in this pattern accepts
+    # The downstream MAS configuration in this pattern accepts
     # api.ask_red_hat; openid is also required so Keycloak 26.4 can call the
     # issuer's userinfo endpoint during RFC 8693 token exchange. Override only
     # if your SSO client registration differs.

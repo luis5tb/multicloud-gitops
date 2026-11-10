@@ -198,7 +198,12 @@ class MasA2AChartTests(unittest.TestCase):
             "--set-string", "image.repository=registry.invalid/mas-api",
             "--set-string", "image.tag=0123456789ab",
         )
-        for audience in ("openshift", "openshift-mcp", "lightspeed-a2a"):
+        for audience in (
+            "openshift",
+            "openshift-mcp",
+            "lightspeed-a2a",
+            "lightspeed-hub-a2a",
+        ):
             with self.subTest(audience=audience):
                 result = helm_template(
                     "charts/all/mao/mas-a2a",

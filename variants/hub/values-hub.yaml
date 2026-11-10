@@ -22,7 +22,6 @@ clusterGroup:
       channel: stable-v1
   argoProjects:
     - hub
-    - openshift-ai
   applications:
     acm:
       name: acm

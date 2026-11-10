@@ -8,8 +8,7 @@ from the same HTTP service.
 The exposed `acme_agent` is a local ADK coordinator agent. Its configured
 `RemoteA2aAgent` children are downstream peers, not the public entrypoint. In
 the standalone deployment, ACME delegates Red Hat-related questions to the MAO
-workflow, which selects Ask Red Hat for product/project/documentation guidance,
-OpenShift Lightspeed (OLS) for cluster investigation, or both. ACME must not
+workflow, which selects the specialist agent(s) that can answer. ACME must not
 reject a question just because it is not explicitly about OpenShift or does not
 include a cluster URL; MAO owns specialist selection and cluster validation.
 
@@ -25,16 +24,14 @@ answer stream straight to the caller.
 sub-agent down to a single return value -- under `message/stream` that emits
 nothing until the entire investigation finishes, starving long runs. We do
 **not** set `mode="task"` (that needs ADK's `finish_task` handshake, which
-the downstream OpenShift Lightspeed A2A endpoint does not implement);
+the downstream A2A endpoint does not implement);
 the default mode streams events and treats stream end /
 `TASK_STATE_COMPLETED` as completion. See `agents/AUTHENTICATION.md` for
 the identity chain on each delegated call.
 
 The current ACME → MAO deployment does not validate a cluster URL at ACME's
-entrypoint. MAO selects and validates the target cluster and adds
-`X-OLS-Cluster` on its call to Praxis. The old `ClusterRoutingMiddleware` and
-cluster registry remain in the source for the direct ACME → Praxis → OLS path,
-but are intentionally not wired into the deployed app.
+entrypoint. MAO selects and validates the target cluster for its own
+downstream calls. ACME forwards the user's request verbatim.
 
 ## Project layout
 
@@ -43,10 +40,8 @@ agents/acme_agent/
 ├── src/acme_agent/
 │   ├── agent.py            # Local ADK router, remote sub-agents, A2A/HTTP app
 │   ├── auth.py             # Keycloak client_credentials + SPIFFE/ZTO + audit
-│   ├── cluster_context.py  # Per-invocation X-OLS-Cluster ContextVar
-│   ├── cluster_registry.py # Allow-list + cluster-id derivation
 │   ├── config.py           # Environment configuration helpers
-│   ├── routing.py          # ClusterRoutingMiddleware (pre-ADK gate)
+│   ├── routing_prompt.py   # Router system instruction
 │   └── ui.py               # Small browser client
 ├── Containerfile
 ├── pyproject.toml
@@ -136,10 +131,10 @@ python -m pytest
 
 ## Authentication for OpenShift
 
-ACME authenticates **as itself** to call OpenShift Lightspeed through Praxis.
-That grant is Keycloak **client_credentials** (Token A). ACME does **not**
-perform the RFC 8693 token exchange -- OLS's A2A endpoint does that later
-(subject_token=Token A → Token B for MCP). See `agents/AUTHENTICATION.md`.
+ACME authenticates **as itself** to call the downstream A2A agents. That
+grant is Keycloak **client_credentials** (Token A). ACME does **not** perform
+any token exchange -- downstream services validate Token A themselves. See
+`agents/AUTHENTICATION.md`.
 
 The application supports three downstream authentication modes:
 
@@ -163,7 +158,7 @@ Non-UI A2A clients can make the same per-request choice with:
 
 The selection is bound to the inbound request with a `ContextVar`; it chooses
 which configured ACME client credential mints Token A and is never forwarded as
-an authorization claim. Downstream MAS, Praxis, and OLS still independently
+an authorization claim. Downstream MAS and Praxis still independently
 validate the resulting JWT.
 
 For the OpenShift deployment, configure `keycloak` and set
@@ -249,7 +244,7 @@ production/stage client IDs and client secrets from Vault. See
 `values-secret.yaml.template` for the corresponding optional Vault entries.
 
 The Red Hat SSO client must be allowed to obtain the downstream audience used
-by MAS/OLS (`api.ask_red_hat` by default). Add the resulting
+by MAS (`api.ask_red_hat` by default). Add the resulting
 client-credentials principal (`sub` or `user_id`, not the client ID) to MAS
 A2A's `a2a.allowedPrincipals`; MAS remains the inbound allow-list boundary.
 
@@ -277,7 +272,7 @@ The UI keeps one conversation per browser tab: it sends the A2A `contextId`
 returned by the first answer with every later message. ACME's ADK server uses
 the `contextId` as its session ID, and ADK's `RemoteA2aAgent` then continues
 the same downstream MAS context, so follow-up questions can refer to earlier
-answers (MAS also passes its thread to OpenShift Lightspeed as one context).
+answers (MAS also passes its thread to its specialist agents as one context).
 "New conversation" starts over, and so does switching the identity provider or
 Red Hat SSO environment, because a downstream conversation belongs to one
 principal. ACME's sessions are in memory: a restarted ACME pod starts a fresh
@@ -289,8 +284,8 @@ makes the next message in that conversation fail as busy until it finishes.
 
 Downstream work can outlive Token A. A downstream A2A agent then either
 answers HTTP 401, or pauses its task in `TASK_STATE_AUTH_REQUIRED` and waits
-for a follow-up message on that task carrying a fresh token. MAS and OpenShift
-Lightspeed both behave this way. ACME's HTTP client renews transparently
+for a follow-up message on that task carrying a fresh token. MAS behaves this
+way. ACME's HTTP client renews transparently
 (`renewal.py`): it mints a new Token A for the same identity provider and
 environment the request started with, resends the request (401) or sends the
 follow-up on the paused task, and splices the new response in place of the
@@ -430,13 +425,13 @@ acme-agent:
       value: quay.io/<your-quay-org>/acme-agent
     - name: image.tag
       value: <immutable-tag>
-    # The MAO A2A Route. MAO chooses Ask Red Hat and/or OLS for each request;
+    # The MAO A2A Route. MAO chooses its specialist agent(s) for each request;
     # google-adk's RemoteA2aAgent requires https (or loopback) for any agent
     # card it fetches. A single downstream agent is still a one-item list.
     - name: a2a.remoteAgents[0].name
       value: mas_orchestrator
     - name: a2a.remoteAgents[0].description
-      value: MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat and OpenShift cluster investigation through OpenShift Lightspeed (OLS). Use for all Red Hat-related requests, including non-OpenShift questions; MAO selects the appropriate specialist(s).
+      value: MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat. Use for all Red Hat-related requests, including non-OpenShift questions; MAO selects the appropriate specialist(s).
     - name: a2a.remoteAgents[0].endpoint
       value: https://<mao-a2a-route>
     - name: auth.mode

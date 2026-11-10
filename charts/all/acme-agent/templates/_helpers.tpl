@@ -113,17 +113,17 @@ previous default and keeping the generic chart render anchor-free.
 {{- end -}}
 
 {{- define "acme-agent.publicA2AHost" -}}
-{{- printf "openshift-lightspeed.%s" (include "acme-agent.appsDomain" .) -}}
+{{- printf "praxis-proxy.%s" (include "acme-agent.appsDomain" .) -}}
 {{- end -}}
 
 {{/*
 Projects a2a.remoteAgents, filling any entry whose endpoint is empty with the
-derived public Praxis URL (https://openshift-lightspeed.apps.<base> -- the
+derived public Praxis URL (https://praxis-proxy.apps.<base> -- the
 agent-card origin, NOT the /a2a JSON-RPC path). ADK fetches
 /.well-known/agent-card.json from this origin; the card then advertises the
-OLS POST /a2a rpc url. Lets the clustergroup override omit the domain-bearing
-endpoint and supply only name/description. Returns the JSON array consumed as
-REMOTE_A2A_AGENTS_JSON.
+gateway's POST /a2a rpc url. Lets the clustergroup override omit the
+domain-bearing endpoint and supply only name/description. Returns the JSON
+array consumed as REMOTE_A2A_AGENTS_JSON.
 */}}
 {{- define "acme-agent.remoteAgentsJSON" -}}
 {{- $root := . -}}

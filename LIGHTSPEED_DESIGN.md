@@ -1,6 +1,11 @@
 # Design: OpenShift Lightspeed replaces `rca-agent` + `openshift-mcp-server`
 
-**Status:** implemented. This document records the design rationale, security
+**Status: HISTORICAL.** The OpenShift Lightspeed backend this document
+designs was **removed** from this repo (`PLAN-lightspeed-hub-migration.md`,
+Task A); its replacement (lightspeed-hub) is Task B of that plan. This
+document is kept as the design record and for the teardown/rollback context
+in the migration plan -- do not follow it as a deployment guide for the
+current branch. This document records the design rationale, security
 analysis, and verified upstream research behind the OpenShift Lightspeed
 pattern -- see [`LIGHTSPEED_IMPLEMENTATION_PLAN.md`](LIGHTSPEED_IMPLEMENTATION_PLAN.md)
 for the phased task breakdown that was carried out against this design.

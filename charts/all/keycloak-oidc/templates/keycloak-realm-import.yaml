@@ -9,14 +9,14 @@
 {{- if not .Values.keycloak.masA2aAudience }}
 {{- fail "keycloak.masA2aAudience must be set to a dedicated non-empty audience for the MAS inbound A2A client" }}
 {{- end }}
-{{- if or (eq .Values.keycloak.masA2aAudience "openshift") (eq .Values.keycloak.masA2aAudience .Values.keycloak.lightspeedA2aAudience) (eq .Values.keycloak.masA2aAudience .Values.keycloak.mcpAudienceClientId) }}
-{{- fail "keycloak.masA2aAudience must be distinct from openshift, lightspeedA2aAudience, and mcpAudienceClientId" }}
+{{- if or (eq .Values.keycloak.masA2aAudience "openshift") (eq .Values.keycloak.masA2aAudience .Values.keycloak.masApiAudience) }}
+{{- fail "keycloak.masA2aAudience must be distinct from openshift and masApiAudience" }}
 {{- end }}
 {{- if not .Values.keycloak.masApiAudience }}
 {{- fail "keycloak.masApiAudience must be set to a dedicated non-empty audience for the MAS API" }}
 {{- end }}
-{{- if or (eq .Values.keycloak.masApiAudience "openshift") (eq .Values.keycloak.masApiAudience .Values.keycloak.masA2aAudience) (eq .Values.keycloak.masApiAudience .Values.keycloak.lightspeedA2aAudience) (eq .Values.keycloak.masApiAudience .Values.keycloak.mcpAudienceClientId) }}
-{{- fail "keycloak.masApiAudience must be distinct from openshift, masA2aAudience, lightspeedA2aAudience, and mcpAudienceClientId" }}
+{{- if or (eq .Values.keycloak.masApiAudience "openshift") (eq .Values.keycloak.masApiAudience .Values.keycloak.masA2aAudience) }}
+{{- fail "keycloak.masApiAudience must be distinct from openshift and masA2aAudience" }}
 {{- end }}
 {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
 {{- /*
@@ -123,8 +123,8 @@ spec:
           # Distinct resource audience for the separately deployed MAS A2A
           # endpoint. This mapper on openshift-cli is for human callers; the
           # acme-agent client also receives the same audience mapper below.
-          # Do not reuse Lightspeed's lightspeed-a2a audience or the
-          # openshift-mcp API-server audience. Existing realms are not
+          # Do not reuse the openshift API-server audience. Existing realms
+          # are not reconciled after this one-shot import; see the Keycloak chart
           # reconciled after this one-shot import; see the Keycloak chart
           # README for the manual existing-realm step.
           - name: mas-a2a-audience
@@ -143,94 +143,12 @@ spec:
             config:
               included.custom.audience: {{ .Values.keycloak.masApiAudience | quote }}
               access.token.claim: "true"
-      # Confidential client that exists only as a valid `audience` target for
-      # lightspeed-mcp's token exchange below -- it never itself
-      # authenticates to Keycloak. The operator-managed OpenShift MCP server
-      # forwards the resulting token straight to the OpenShift API server
-      # (cluster_auth_mode=passthrough), so this client id must also be in
-      # openshiftOIDC.extraAudiences or the API server rejects every MCP call
-      # even though the exchange itself succeeds.
-      - clientId: {{ .Values.keycloak.mcpAudienceClientId | quote }}
-        name: {{ .Values.keycloak.mcpAudienceClientName | quote }}
-        enabled: true
-        protocol: openid-connect
-        publicClient: false
-        standardFlowEnabled: false
-        directAccessGrantsEnabled: false
-        serviceAccountsEnabled: false
-      # Confidential client the OpenShift Lightspeed A2A integration uses to
-      # exchange the caller's token for one scoped to OpenShift MCP. See
-      # LIGHTSPEED_DESIGN.md's "How Token B is issued" section.
-      #
-      # Authenticates via Keycloak's federated client authentication (see
-      # https://www.keycloak.org/2026/01/federated-client-authentication)
-      # against the "spiffe" identity provider below, using the OpenShift
-      # Lightspeed Operator's app-server workload's own SPIRE JWT-SVID as
-      # client_assertion -- no static secret. standard.token.exchange.enabled
-      # and the openshift-mcp-audience protocol mapper are both required for
-      # the RFC 8693 exchange itself: Keycloak's standard (V2) token exchange
-      # requires the exchanging client to opt in, and the `audience` request
-      # parameter only ever filters audiences already resolvable from the
-      # client's own protocol mappers.
-      - clientId: {{ .Values.keycloak.lightspeedMcpClientId | quote }}
-        name: {{ .Values.keycloak.lightspeedMcpClientName | quote }}
-        enabled: true
-        protocol: openid-connect
-        publicClient: false
-        standardFlowEnabled: false
-        directAccessGrantsEnabled: false
-        serviceAccountsEnabled: false
-        {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
-        clientAuthenticatorType: federated-jwt
-        {{- end }}
-        attributes:
-          {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
-          jwt.credential.issuer: {{ .Values.keycloak.spiffeIdentityProvider.alias | quote }}
-          jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" (include "keycloak-oidc.effectiveTrustDomain" .) .Values.keycloak.lightspeedWorkload.namespace .Values.keycloak.lightspeedWorkload.serviceAccount | quote }}
-          {{- end }}
-          standard.token.exchange.enabled: "true"
-        protocolMappers:
-          - name: {{ printf "%s-audience" .Values.keycloak.mcpAudienceClientId }}
-            protocol: openid-connect
-            protocolMapper: oidc-audience-mapper
-            config:
-              included.client.audience: {{ .Values.keycloak.mcpAudienceClientId | quote }}
-              access.token.claim: "true"
-          # Which protocol mappers apply to a minted token is governed by the
-          # client authenticating that specific request -- for this exchange,
-          # that's lightspeed-mcp, not acme-agent. Without this, Token B for
-          # the Lightspeed path carries no groups claim at all and RBAC/the
-          # namespace-scoping ValidatingAdmissionPolicy have nothing to key
-          # on. Confirm against a real exchanged token before relying on it
-          # (see agents/AUTHENTICATION.md's token-exchange walkthrough and
-          # this chart's README "End-to-end verification" section).
-          - name: groups
-            protocol: openid-connect
-            protocolMapper: oidc-group-membership-mapper
-            config:
-              claim.name: groups
-              full.path: "false"
-              access.token.claim: "true"
-              id.token.claim: "true"
-              userinfo.token.claim: "true"
       # Confidential client used by acme-agent's client-credentials call.
       #
-      # Authenticates via the same federated client authentication/"spiffe"
-      # identity provider as the exchanging clients above, using acme-agent's
-      # own SPIRE JWT-SVID. The audience mappers exist because the token this
-      # client mints has to satisfy two independent checks, of two different
-      # kinds:
-      #   - OpenShift Lightspeed's own inbound audience check needs
-      #     keycloak.lightspeedA2aAudience. This is a plain custom string
-      #     (included.custom.audience below) -- it isn't a real client and is
-      #     deliberately decoupled from the openshift-cli login client's
-      #     identity, which it has nothing to do with (nothing in Keycloak
-      #     requires this one to be a client).
-      #   - Keycloak's standard token exchange requires the *subject_token*
-      #     passed to it to already carry the exchanging client
-      #     (lightspeed-mcp) as an audience -- this one genuinely must be a
-      #     real client (included.client.audience below), since that's a
-      #     requirement of the token-exchange grant itself, not our own check.
+      # Authenticates via the federated client authentication/"spiffe"
+      # identity provider above, using acme-agent's own SPIRE JWT-SVID. The
+      # MAS audience mapper exists so the token this client mints satisfies
+      # MAS's inbound A2A audience check.
       - clientId: {{ .Values.keycloak.acmeClientId | quote }}
         name: {{ .Values.keycloak.acmeClientName | quote }}
         enabled: true
@@ -254,39 +172,18 @@ spec:
           {{- end }}
         {{- end }}
         protocolMappers:
-          # Lightspeed A2A inbound audience -- a plain custom string, no
-          # backing client. Only Lightspeed's own A2A handler checks this
-          # value; Keycloak has no requirement that it name a real client.
-          - name: {{ printf "%s-audience" .Values.keycloak.lightspeedA2aAudience }}
-            protocol: openid-connect
-            protocolMapper: oidc-audience-mapper
-            config:
-              included.custom.audience: {{ .Values.keycloak.lightspeedA2aAudience | quote }}
-              access.token.claim: "true"
           # MAS validates its inbound A2A calls against a dedicated audience.
-          # Put that audience on ACME's client-credentials token too, so the
-          # same Token A can pass MAS validation and then be forwarded to
-          # Praxis/OLS (which independently check lightspeed-a2a).
+          # Put that audience on ACME's client-credentials token so Token A
+          # can pass MAS validation.
           - name: {{ printf "%s-audience" .Values.keycloak.masA2aAudience }}
             protocol: openid-connect
             protocolMapper: oidc-audience-mapper
             config:
               included.custom.audience: {{ .Values.keycloak.masA2aAudience | quote }}
               access.token.claim: "true"
-          # Needed so the token this client mints already carries
-          # lightspeed-mcp as an audience -- a precondition of Keycloak's
-          # standard token exchange, same reasoning as the mcpClientId
-          # mapper above, just for the lightspeed-mcp exchanging client.
-          - name: {{ printf "%s-audience" .Values.keycloak.lightspeedMcpClientId }}
-            protocol: openid-connect
-            protocolMapper: oidc-audience-mapper
-            config:
-              included.client.audience: {{ .Values.keycloak.lightspeedMcpClientId | quote }}
-              access.token.claim: "true"
-          # Without this, the token this client mints (and, unchanged, the
-          # token lightspeed-mcp exchanges it for -- see AUTHENTICATION.md)
-          # carries no groups claim at all, so lightspeed-mcp-rbac.yaml's
-          # Role/RoleBinding have nothing to key on for calls attributed to
+          # Without this, the token this client mints carries no groups
+          # claim at all, so group-based authorization on downstream
+          # consumers has nothing to key on for calls attributed to
           # acme-agent.
           - name: groups
             protocol: openid-connect
@@ -363,7 +260,7 @@ spec:
           - {{ printf "/%s" .Values.keycloak.adminGroupName | quote }}
       {{- end }}
     {{- if or .Values.keycloak.spiffeIdentityProvider.enabled .Values.keycloak.externalOidcProviders }}
-    # Backs the two confidential agent clients' federated-jwt authentication
+    # Backs the acme-agent confidential client's federated-jwt authentication
     # above. Config key names are this Keycloak build's actual internal
     # field names (verified against the running server), not the field
     # labels shown in the Admin Console -- "issuer" holds the SPIFFE trust

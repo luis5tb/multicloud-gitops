@@ -25,7 +25,10 @@ praxis-proxy:
         audience: api.ask_red_hat
 
 # =============================================================================
-# 2. OPENSHIFT LIGHTSPEED CONFIG - OLS Multi-Issuer Validation
+# HISTORICAL example (pre-OLS-removal): the openshift-lightspeed-config
+# application and its OLS multi-issuer validation no longer exist in this
+# repo (PLAN-lightspeed-hub-migration.md, Task A). Kept for reference only;
+# the Praxis and MAS A2A blocks below remain valid patterns.
 # =============================================================================
 # Add this under the openshift-lightspeed-config application overrides
 # OLS will validate tokens from ALL listed issuers plus local Keycloak

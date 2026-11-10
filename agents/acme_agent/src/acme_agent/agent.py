@@ -26,7 +26,6 @@ from .auth import (
     stamp_request_id,
 )
 from .config import agent_card_url, remote_agents_from_env
-from .ols_mode import ols_mode_remote_agent_config
 from .renewal import CredentialRenewingTransport
 from .routing_prompt import ROUTER_INSTRUCTION
 from .ui import UI_HTML
@@ -50,7 +49,7 @@ def _configure_logging() -> None:
     if not package_logger.handlers:
         handler = logging.StreamHandler()
         # A real timestamp matters: every other hop in this pattern (MAS,
-        # Praxis, OLS, MCP) logs one, and scripts/monitor.sh orders its
+        # Praxis) logs one, and scripts/monitor.sh orders its
         # cards by the pod's own clock. Without it, ACME cards can only
         # be stamped with the monitor's receipt time (~), which arrives
         # in arbitrary order relative to the other pipelines.
@@ -73,11 +72,10 @@ AUTH = DownstreamAuth()
 # line; then auth, then the dispatch acme_audit. stamp / log only touch
 # POSTs -- never the public unauthenticated agent-card GET.
 #
-# ACME no longer attaches X-OLS-Cluster. Cluster selection has moved
-# downstream to the MAS A2A orchestrator, which validates the target cluster
-# and sets X-OLS-Cluster on its own outbound call to Praxis. ACME just
-# authenticates (Token A) and forwards the user's request verbatim, so the
-# add_cluster_header hook is intentionally not registered here.
+# ACME does not select or validate a target cluster: cluster selection is
+# owned by the MAS A2A orchestrator, which validates the target cluster on
+# its own outbound calls. ACME just authenticates (Token A) and forwards
+# the user's request verbatim.
 #
 # The transport renews Token A transparently when a downstream agent answers
 # HTTP 401 or pauses its task in TASK_STATE_AUTH_REQUIRED (see renewal.py).
@@ -106,11 +104,6 @@ USE_LEGACY = os.getenv("A2A_USE_LEGACY", "false").strip().lower() in {
     "on",
 }
 
-# Shared across every downstream RemoteA2aAgent: stamps ols_mode=troubleshooting
-# (or OLS_A2A_MODE) on outbound A2A messages. OLS defaults to ask when the
-# metadata key is absent; this pattern's investigation flow needs troubleshooting.
-_OLS_MODE_CONFIG = ols_mode_remote_agent_config()
-
 remote_agents = [
     RemoteA2aAgent(
         name=remote.name,
@@ -119,7 +112,6 @@ remote_agents = [
         httpx_client=HTTP_CLIENT,
         timeout=AUTH.settings.timeout,
         use_legacy=USE_LEGACY,
-        config=_OLS_MODE_CONFIG,
     )
     for remote in remote_agents_from_env()
 ]
@@ -146,21 +138,22 @@ def _model() -> LiteLlm:
 # A2A orchestrator now owns target-cluster selection). ADK's RemoteA2aAgent calls the
 # remote with message/stream and yields each remote event (TaskStatusUpdate /
 # TaskArtifactUpdate / Message) incrementally; as a sub_agent those events
-# propagate through THIS agent's own A2A message/stream response, so OpenShift
-# Lightspeed's per-iteration progress and its answer stream straight to the
-# caller as they happen.
+# propagate through THIS agent's own A2A message/stream response, so the
+# downstream agent's per-iteration progress and its answer stream straight to
+# the caller as they happen.
 #
 # AgentTool was used here before, but AgentTool.run_async buffers the sub-agent
 # down to a single return value -- under message/stream that emits nothing until
 # the entire investigation finishes, starving the connection on long
 # troubleshooting runs (the client's idle connection then gets cut). sub_agents
-# also means the final answer is OLS's streamed output delivered directly, not
-# re-emitted by this LLM, so it is never truncated or wrapped in a {"result":...}
-# envelope. We do NOT set mode="task" (that needs ADK's finish_task handshake,
-# which the OLS A2A endpoint does not implement);
-# the default mode streams events and treats stream end / TASK_STATE_COMPLETED
-# as completion. (A PlanReActPlanner can be added to stream the router's own
-# reasoning too; left out for now to validate sub_agents streaming on its own.)
+# also means the final answer is the downstream agent's streamed output
+# delivered directly, not re-emitted by this LLM, so it is never truncated or
+# wrapped in a {"result":...} envelope. We do NOT set mode="task" (that needs
+# ADK's finish_task handshake, which the downstream A2A endpoint does not
+# implement); the default mode streams events and treats stream end /
+# TASK_STATE_COMPLETED as completion. (A PlanReActPlanner can be added to
+# stream the router's own reasoning too; left out for now to validate
+# sub_agents streaming on its own.)
 root_agent = Agent(
     model=_model(),
     name=os.getenv("AGENT_NAME", "acme_agent"),
@@ -218,10 +211,8 @@ _adk_app.routes.extend(
     ]
 )
 
-# ACME no longer gates inbound requests on a target-cluster URL: that
-# enforcement moved to the MAS A2A orchestrator, which validates the cluster
-# and sets X-OLS-Cluster on its downstream call to Praxis. The ADK app is
-# therefore served directly. The cluster-routing middleware (routing.py) and
-# registry (cluster_registry.py) are retained for the direct
-# ACME -> Praxis -> OLS path but intentionally not wired in here.
+# ACME does not gate inbound requests on a target-cluster URL: that
+# enforcement lives in the MAS A2A orchestrator, which validates the target
+# cluster on its own downstream calls. The ADK app is therefore served
+# directly.
 a2a_app = AuthSelectionMiddleware(_adk_app, AUTH.settings)

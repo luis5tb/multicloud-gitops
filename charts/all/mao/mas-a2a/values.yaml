@@ -137,7 +137,7 @@ identity:
   #   oidcIssuers:
   #     - issuer_url: https://sso.redhat.com/auth/realms/redhat-external
   #       jwks_url: https://sso.redhat.com/.../certs
-  #       audience: openshift-lightspeed
+  #       audience: api.ask_red_hat
   #       username_claim: preferred_username  # optional
   oidcIssuers: []
   oidcVerifySsl: true

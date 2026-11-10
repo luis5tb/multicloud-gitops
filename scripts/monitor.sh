@@ -3,8 +3,7 @@
 # Tracks the caller's token through every stage of the agentic chain:
 #
 #   acme-agent ─Token A─▶ MAO A2A endpoint ─Token A─▶ MAS orchestrator
-#     ─Token A─▶ praxis ─Token A─▶ OLS A2A ─exchange: Token B─▶
-#     openshift mcp ─Token B─▶ OCP API server (RBAC)
+#     ─Token A─▶ praxis (routing) / Ask Red Hat
 #
 # Usage:
 #   bash scripts/monitor.sh                # live stream (all tailable hops)
@@ -12,18 +11,16 @@
 #   bash scripts/monitor.sh --mas          # MAO A2A endpoint only (mao ns)
 #   bash scripts/monitor.sh --worker       # MAS orchestrator (Temporal worker)
 #   bash scripts/monitor.sh --praxis       # Praxis only
-#   bash scripts/monitor.sh --ols          # OLS A2A app-server only
-#   bash scripts/monitor.sh --mcp          # OpenShift MCP only
 #   bash scripts/monitor.sh --api          # OCP API server token rejects
 #   bash scripts/monitor.sh --join         # all hops except --api (default)
 #   bash scripts/monitor.sh --since 10m    # oc --since (default: 0s = now)
 #   REQUEST_ID=abc123 bash scripts/monitor.sh --join  # filter one request
 #
 # Unlike agentic-partners-integration/scripts/monitor.sh this uses `oc logs`
-# (no Docker/Postgres audit_events). ACME and OLS emit structured audit lines
-# (acme_audit / a2a_audit); the MAS (uie-mas-hosted), Praxis, OLS-internal
-# and MCP-server patterns were confirmed against live logs on bm-cluster
-# (2026-10-23 and 2026-10-26, mas image a80e09316564) -- see the comments in
+# (no Docker/Postgres audit_events). ACME emits structured audit lines
+# (acme_audit); the MAS (uie-mas-hosted) and Praxis patterns were confirmed
+# against live logs on bm-cluster (2026-10-23 and 2026-10-26, mas image
+# a80e09316564) -- see the comments in
 # parse_line and scripts/README.md for the routine-noise exclusions and the
 # request_id caveats. Tokens are never printed by design — audit lines and
 # cards carry only short SHA-256 fingerprints (fp:…) that identify a token
@@ -50,9 +47,7 @@ while [[ $# -gt 0 ]]; do
     --acme)   MODE=acme; shift ;;
     --mas)    MODE=mas; shift ;;
     --worker) MODE=worker; shift ;;
-    --ols)    MODE=ols; shift ;;
     --praxis) MODE=praxis; shift ;;
-    --mcp)    MODE=mcp; shift ;;
     --api)    MODE=api; shift ;;
     --join)   MODE=join; shift ;;
     --since)
@@ -88,7 +83,6 @@ N=$'\033[0m'
 # ── namespaces / selectors (from values-standalone + chart labels) ────────────
 NS_ACME="${NS_ACME:-acme-agent}"
 NS_PRAXIS="${NS_PRAXIS:-praxis-proxy}"
-NS_OLS="${NS_OLS:-a2a-lightspeed}"
 NS_MAS="${NS_MAS:-mao}"
 NS_WORKER="${NS_WORKER:-mao}"
 # Needs cluster-admin to read; not part of the default join for that reason.
@@ -96,10 +90,6 @@ NS_API="${NS_API:-openshift-kube-apiserver}"
 
 SEL_ACME="${SEL_ACME:-app.kubernetes.io/name=acme-agent}"
 SEL_PRAXIS="${SEL_PRAXIS:-app.kubernetes.io/name=praxis-proxy}"
-# Verified live: oc get pods -n a2a-lightspeed --show-labels
-SEL_OLS="${SEL_OLS:-app.kubernetes.io/component=application-server}"
-# Chart-confirmed MCP labels (AUTHENTICATION.md's component=mcp-server may be stale)
-SEL_MCP="${SEL_MCP:-app=openshift-mcp-server}"
 # Verified live (bm-cluster): charts/all/mao render app.kubernetes.io/name=<chart>.
 # mas-a2a renders no pods at all until a2a.enabled=true -- a missing hop is
 # skipped with a warning.
@@ -131,76 +121,54 @@ require_oc() {
 print_diagram() {
   clear 2>/dev/null || true
   cat << 'DIAGRAM'
-══════════════════════════════════════════════════════════════════════════════
-  IDENTITY FLOW MONITOR — ACME · MAS · Praxis · OLS · Keycloak · MCP · API
-══════════════════════════════════════════════════════════════════════════════
+═══════════════════════════════════════════════════════════════════════════════
+  IDENTITY FLOW MONITOR — ACME · MAS · Praxis · Keycloak
+═══════════════════════════════════════════════════════════════════════════════
 
   Full request (one chat message; standalone Phase-3 routing):
 
   [Browser / ACME UI]  ← unauthenticated Route (lab assumption)
-       │  A2A message/send  (must include apiURL from global.olsClusters)
+       │  A2A message/send
        ▼
   ┌─ ACME-AGENT ────────────────────────────────────────────────────────────┐
-  │  1. ClusterRoutingMiddleware — allow-list / derive X-OLS-Cluster id     │
-  │  2. LiteLLM (static LITELLM_API_KEY) — route to mas_orchestrator        │
-  │  3. MINT TOKEN A —                                                      │
+  │  1. LiteLLM (static LITELLM_API_KEY) — route to mas_orchestrator        │
+  │  2. MINT TOKEN A —                                                      │
   │     · Keycloak: SPIFFE JWT-SVID → client_credentials                    │
-  │       azp=acme-agent  aud=[mas-a2a, lightspeed-a2a]  groups=acme-…-rca  │
+  │       azp=acme-agent  aud=mas-a2a  groups=acme-…-rca                    │
   │     · or Red Hat SSO prod/stage agent token (aud=api.ask_red_hat)       │
-  │  4. POST to MAO A2A endpoint  Authorization: Bearer TOKEN A             │
+  │  3. POST to MAO A2A endpoint  Authorization: Bearer TOKEN A             │
   │     → logs acme_audit … outcome=sent token=fp:… source=…               │
-  │  4b. On 401 / TASK_STATE_AUTH_REQUIRED: mint fresh Token A, resend     │
+  │  3b. On 401 / TASK_STATE_AUTH_REQUIRED: mint fresh Token A, resend     │
   │     → logs acme_audit … "renew Token A" renewed_from=fp:… token=fp:…   │
   └─────────────────────────────────────────────────────────────────────────┘
        ▼  TOKEN A (unchanged)
   ┌─ MAO A2A ENDPOINT (mao/mas-a2a) ────────────────────────────────────────┐
-  │  5. Validate TOKEN A — multi-issuer OIDC: Keycloak aud=mas-a2a,         │
+  │  4. Validate TOKEN A — multi-issuer OIDC: Keycloak aud=mas-a2a,         │
   │     Red Hat SSO prod/stage aud=api.ask_red_hat (sig/iss/exp/aud)        │
-  │  6. Principal allow-list: sub ∈ a2a.allowedPrincipals (else 401/403)    │
-  │  7. NO exchange — Token A kept in RunContext.credentials (passthrough)  │
+  │  5. Principal allow-list: sub ∈ a2a.allowedPrincipals (else 401/403)    │
+  │  6. NO exchange — Token A kept in RunContext.credentials (passthrough)  │
   └─────────────────────────────────────────────────────────────────────────┘
        ▼  TOKEN A (unchanged)
   ┌─ MAS ORCHESTRATOR (mao/mas-worker via Temporal) ────────────────────────┐
-  │  8. Blueprint run — LLM plans: Ask Red Hat vs OLS Investigator vs both  │
-  │  9. Outbound A2A with RunContext.auth_token = TOKEN A:                  │
-  │     · OLS via Praxis — X-OLS-Cluster must be spelled EXACTLY            │
-  │       (X_OLS_Cluster underscores → Praxis 404, delegation lost)         │
-  │     · Ask Red Hat direct (access.stage.redhat.com), no routing header   │
+  │  7. Blueprint run — LLM plans which specialist agent(s) to call         │
+  │  8. Outbound A2A with RunContext.auth_token = TOKEN A:                  │
+  │     · downstream agents via Praxis (routing)                            │
+  │     · Ask Red Hat direct (access.stage.redhat.com)                      │
   └─────────────────────────────────────────────────────────────────────────┘
        ▼  TOKEN A (unchanged)
   ┌─ PRAXIS-PROXY ──────────────────────────────────────────────────────────┐
-  │ 10. Policy filter: validate TOKEN A + azp allow-list (else deny)        │
-  │     Route by X-OLS-Cluster → OLS upstream (fail-closed, no default)     │
+  │  9. Policy filter: validate TOKEN A + azp allow-list (else deny)        │
+  │     Route to the configured downstream backend (fail-closed)            │
   │     (raise logLevel / RUST_LOG for routing + JWT detail)                │
-  └─────────────────────────────────────────────────────────────────────────┘
-       ▼  TOKEN A (unchanged)
-  ┌─ OLS A2A (lightspeed-app-server) ───────────────────────────────────────┐
-  │ 11. Validate TOKEN A (multi-issuer OIDC + X-OLS-Cluster binding)        │
-  │ 12. EXCHANGE — Keycloak RFC 8693 (subject_token=TOKEN A, OLS SPIFFE)    │
-  │     → TOKEN B: azp=lightspeed-mcp  aud=openshift-mcp  sub unchanged     │
-  │ 13. MCP tool calls carry TOKEN B                                        │
-  │     → logs a2a_audit … on_behalf_of=<Token A azp> outcome=ok|error      │
-  └─────────────────────────────────────────────────────────────────────────┘
-       ▼  TOKEN B (Token A never reaches MCP or the API server)
-  ┌─ OPENSHIFT MCP (openshift-mcp-server) ──────────────────────────────────┐
-  │ 14. require_oauth=true + passthrough — MCP does no authz of its own     │
-  └─────────────────────────────────────────────────────────────────────────┘
-       ▼  TOKEN B (forwarded unmodified)
-  ┌─ OCP API SERVER (RBAC — final authority) ───────────────────────────────┐
-  │ 15. OIDC-validate TOKEN B (cached JWKS), claimMappings                  │
-  │     groups=acme-agent-rca → Group keycloak:acme-agent-rca               │
-  │ 16. RBAC allow|deny — not tailable by default; watch MCP/API DENY cards │
-  │     or run --api (cluster-admin), then confirm the group's rights:      │
-  │     oc auth can-i get pods --as-group=keycloak:acme-agent-rca -n <ns>   │
   └─────────────────────────────────────────────────────────────────────────┘
 
   Join one request:
     REQUEST_ID=<id> bash scripts/monitor.sh
-    (per-hop ids only: MAS and OLS mint their own request ids -- see
+    (per-hop ids only: MAS mints its own request ids -- see
      scripts/README.md "Correlating hops" for time-window correlation)
 
-  Legend:  dispatch   mint/exchange   mas/ols   praxis/jwt   mcp/api   fail
-──────────────────────────────────────────────────────────────────────────────
+  Legend:  dispatch   mint   mas   praxis/jwt   fail
+───────────────────────────────────────────────────────────────────────────────
 DIAGRAM
 }
 
@@ -243,9 +211,8 @@ parse_line() {
 
   # ── ACME structured audit ───────────────────────────────────────────────
   if [[ "$line" == *"acme_audit "* ]]; then
-    local rid cluster action outcome token source renewed_from reason token_exp
+    local rid action outcome token source renewed_from reason token_exp
     rid=$(grep -oP 'request_id=\K[^ ]+' <<<"$line" || true)
-    cluster=$(grep -oP 'cluster=\K[^ ]+' <<<"$line" || true)
     action=$(grep -oP 'action=\K("[^"]*"|[^ ]+)' <<<"$line" || true)
     outcome=$(grep -oP 'outcome=\K[^ ]+' <<<"$line" || true)
     token=$(grep -oP ' token=\K\S+' <<<"$line" || true)
@@ -279,7 +246,6 @@ parse_line() {
       printf "\n${M}┌─ ${label} [${ts}]${N}\n"
       printf "${M}│${N} ${D}CREATOR : ${creator}${N}\n"
       printf "${M}│${N} request_id : ${W}${rid}${N}\n"
-      printf "${M}│${N} cluster    : ${cluster}\n"
       printf "${M}│${N} token      : ${W}${token}${N}\n"
       printf "${M}│${N} action     : ${action}\n"
       printf "${M}│${N} outcome    : ${st_color}${outcome}${N}\n"
@@ -291,26 +257,10 @@ parse_line() {
       return 0
     fi
 
-    if [[ "$outcome" == "denied" ]] || [[ "$action" == *'reject unregistered'* ]]; then
-      local detail
-      detail=$(grep -oP 'detail="\K[^"]+' <<<"$line" || true)
-      printf "\n${R}┌─ CLUSTER ALLOW-LIST REJECT [${ts}]${N}\n"
-      printf "${R}│${N} ${D}GATE : ClusterRoutingMiddleware (before ADK / Keycloak)${N}\n"
-      printf "${R}│${N} request_id : ${W}${rid}${N}\n"
-      printf "${R}│${N} detail     : %s\n" "$detail"
-      printf "${R}└─ no Token A mint, no MAS/Praxis/OLS call${N}\n"
-      return 0
-    fi
-
     printf "\n${C}┌─ ACME DISPATCH [${ts}]${N}\n"
     printf "${C}│${N} ${D}CREATOR : Keycloak or Red Hat SSO (Token A)${N}\n"
-    printf "${C}│${N} ${D}NEXT    : MAO A2A endpoint (Phase 3) · Praxis→OLS (Phase 1)${N}\n"
+    printf "${C}│${N} ${D}NEXT    : MAO A2A endpoint (MAS orchestrator)${N}\n"
     printf "${C}│${N} request_id : ${W}${rid}${N}\n"
-    if [[ -n "$cluster" ]]; then
-      printf "${C}│${N} cluster    : ${W}${cluster}${N}\n"
-    else
-      printf "${C}│${N} cluster    : ${D}(none — MAS selects the target cluster)${N}\n"
-    fi
     if [[ -n "$token" ]]; then
       if [[ "$source" == "pasted_override" ]]; then
         printf "${C}│${N} token      : ${Y}${token}${N} ${Y}(UI-pasted override — not a minted Token A)${N}\n"
@@ -331,117 +281,13 @@ parse_line() {
     fi
     printf "${C}│${N} action     : ${action}\n"
     printf "${C}│${N} outcome    : ${G}${outcome}${N}\n"
-    printf "${C}└─ → follow Token A: mas-a2a validation → orchestrator → a2a_audit${N}\n"
+    printf "${C}└─ → follow Token A: mas-a2a validation → orchestrator${N}\n"
     # Remember what went out (state file — followers run in separate
     # pipelines, so shell globals do not cross hops): the MAS TOKEN
     # REJECTED card uses this to say whether the refused bearer was a
     # pasted override.
     printf 'dispatch_source=%s\ndispatch_fp=%s\n' "$source" "$token" > "$STATE_FILE" 2>/dev/null || true
     return 0
-  fi
-
-  # ── OLS structured audit (inbound validate + RFC 8693 exchange) ──────────
-  # CONFIRMED LIVE (bm-cluster, 2026-10-23): a2a_audit carries one line per
-  # request whose action names the audited step -- "exchange MCP credentials"
-  # when the exchange itself is the event (observed on its failure; the
-  # known SSO openid-scope / groups-mapper failures surface here), and
-  # "dispatched MCP-grounded query" once the query went out with Token B.
-  # A successful exchange therefore shows as the dispatch line -- the card
-  # spells the Token A → Token B step out either way.
-  if [[ "$line" == *"a2a_audit "* ]]; then
-    local rid actor obo sub cluster action outcome task
-    local oc_color icon title
-    rid=$(grep -oP 'request_id=\K[^ ]+' <<<"$line" || true)
-    actor=$(grep -oP 'actor=\K[^ ]+' <<<"$line" || true)
-    obo=$(grep -oP 'on_behalf_of=\K[^ ]+' <<<"$line" || true)
-    sub=$(grep -oP 'subject=\K[^ ]+' <<<"$line" || true)
-    cluster=$(grep -oP 'cluster=\K[^ ]+' <<<"$line" || true)
-    action=$(grep -oP 'action=\K("[^"]*"|[^ ]+)' <<<"$line" || true)
-    outcome=$(grep -oP 'outcome=\K[^ ]+' <<<"$line" || true)
-    task=$(grep -oP 'task=\K[^ ]+' <<<"$line" || true)
-    oc_color="$G"
-    icon="ok"
-    if [[ "$outcome" != "ok" && "$outcome" != "sent" ]]; then
-      oc_color="$R"
-      icon="fail"
-    fi
-    if [[ "$action" == *'exchange'* ]]; then
-      printf "\n${M}┌─ OLS TOKEN EXCHANGE [${ts}] ${oc_color}${icon}${N}\n"
-      printf "${M}│${N} ${D}ACTOR   : ${actor} (authenticates the exchange as lightspeed-mcp)${N}\n"
-      printf "${M}│${N} ${D}OBO     : ${obo} (Token A azp)${N}\n"
-      printf "${M}│${N} ${D}SUBJECT : ${sub}${N}\n"
-      printf "${M}│${N} request_id : ${W}${rid}${N}\n"
-      printf "${M}│${N} cluster    : ${cluster}\n"
-      printf "${M}│${N} task       : ${D}${task}${N}\n"
-      printf "${M}│${N} outcome    : ${oc_color}${outcome}${N}\n"
-      printf "${M}└─ RFC 8693: Token A → Token B (azp=lightspeed-mcp, aud=openshift-mcp, sub unchanged)${N}\n"
-      if [[ "$outcome" != "ok" ]]; then
-        printf "${M}   see agents/AUTHENTICATION.md — known exchange failures: SSO scope,${N}\n"
-        printf "${M}   subject_issuer, groups mapper, subject_token_type${N}\n"
-      fi
-      return 0
-    fi
-    printf "\n${M}┌─ OLS A2A [${ts}] ${oc_color}${icon}${N}\n"
-    printf "${M}│${N} ${D}ACTOR   : ${actor} (RFC 8693 exchange client)${N}\n"
-    printf "${M}│${N} ${D}OBO     : ${obo} (Token A azp)${N}\n"
-    printf "${M}│${N} ${D}SUBJECT : ${sub}${N}\n"
-    printf "${M}│${N} request_id : ${W}${rid}${N}\n"
-    printf "${M}│${N} cluster    : ${cluster}\n"
-    printf "${M}│${N} task       : ${D}${task}${N}\n"
-    printf "${M}│${N} action     : ${action}\n"
-    printf "${M}│${N} outcome    : ${oc_color}${outcome}${N}\n"
-    printf "${M}│${N} EXCHANGE   : Token A → Token B (RFC 8693) preceded this dispatch${N}\n"
-    printf "${M}└─ Token B (azp=lightspeed-mcp, aud=openshift-mcp) carried the MCP query${N}\n"
-    return 0
-  fi
-
-  # ── OLS internals: validation, the exchange grant, the MCP tool loop ─────
-  # CONFIRMED LIVE (bm-cluster, 2026-10-26): OLS's httpx client logs every
-  # outbound request -- the Keycloak token-endpoint POST below IS the RFC
-  # 8693 Token B mint, and the MCP session/tool-loop lines are Token B being
-  # spent. Unmatched lines fall through to the generic failure matcher.
-  if [[ "$src" == "ols" ]]; then
-    if grep -q 'User ID: ' <<<"$line"; then
-      local o_uid
-      o_uid=$(grep -oP 'User ID: \K\S+' <<<"$line" || true)
-      printf "\n${G}┌─ OLS CALLER VALIDATED [${ts}]${N}\n"
-      printf "${G}│${N} ${D}User ID: ${o_uid} — Token A validated (multi-issuer OIDC)${N}\n"
-      printf "${G}└─ this subject becomes the RFC 8693 exchange subject${N}\n"
-      return 0
-    fi
-    if grep -q 'HTTP Request: POST' <<<"$line" && grep -q 'protocol/openid-connect/token' <<<"$line"; then
-      local x_status x_color
-      x_status=$(grep -oP '"HTTP/1\.1 \K[0-9]+' <<<"$line" || true)
-      x_color="$G"
-      [[ "$x_status" != "200" ]] && x_color="$R"
-      printf "\n${M}┌─ OLS TOKEN EXCHANGE [${ts}] ${x_color}${x_status}${N}\n"
-      printf "${M}│${N} ${D}Keycloak token endpoint — RFC 8693 grant (subject_token=Token A)${N}\n"
-      printf "${M}└─ 200 = Token B minted (azp=lightspeed-mcp, aud=openshift-mcp, sub unchanged)${N}\n"
-      return 0
-    fi
-    if grep -q 'Received session ID:' <<<"$line"; then
-      local mcpsid
-      mcpsid=$(grep -oP 'Received session ID: \K\S+' <<<"$line" || true)
-      # The MCP pod logs the same session as "server session connected" —
-      # card it once (the OLS side carries the Token B context).
-      if grep -q "^mcp_session=${mcpsid}\$" "$STATE_FILE" 2>/dev/null; then
-        return 0
-      fi
-      printf 'mcp_session=%s\n' "$mcpsid" >> "$STATE_FILE" 2>/dev/null || true
-      printf "\n${M}┌─ OLS → MCP SESSION [${ts}]${N}\n"
-      printf "${M}│${N} ${D}session_id=${mcpsid} — MCP connection opened with Token B${N}\n"
-      printf "${M}└─ tool calls follow on this session; API-server RBAC decides on Token B${N}\n"
-      return 0
-    fi
-    if grep -q 'Tool loop iteration' <<<"$line"; then
-      local loop
-      loop=$(grep -oP 'Tool loop iteration \K\S+ outcome=\S+' <<<"$line" || true)
-      loop="${loop%.}"
-      printf "\n${D}┌─ OLS TOOL LOOP [${ts}]${N}\n"
-      printf "${D}│${N} ${D}${loop} — MCP tools executing with Token B${N}\n"
-      printf "${D}└─${N}\n"
-      return 0
-    fi
   fi
 
   # ── MAO A2A endpoint: Token A validation + principal allow-list ──────────
@@ -550,21 +396,6 @@ parse_line() {
     if [[ "$w_content" =~ ^[[:space:]] ]]; then
       return 0
     fi
-    # Live trap: the planning LLM emits X_OLS_Cluster (underscores) in
-    # workplan tool args; Praxis matches the header name exactly and can
-    # fail-close into HTTP 404. WARNING, not a hard failure: observed live
-    # (2026-10-29) a delegation carrying the underscore spelling that still
-    # reached OLS — MAS can normalize or retry it. Treat this card as "check
-    # what follows": a PRAXIS NO ROUTE / MAS DELEGATION LOST confirms the
-    # trap; an OLS CALLER VALIDATED card means it recovered.
-    if grep -q 'X_OLS_Cluster' <<<"$line" && grep -q 'tool.execute' <<<"$line"; then
-      printf "\n${Y}┌─ MISSPELLED ROUTING HEADER? [${ts}]${N}\n"
-      printf "${Y}│${N} ${D}X_OLS_Cluster (underscores) in a delegation's tool args${N}\n"
-      printf "${Y}│${N} %s\n" "$(trunc "$line" 160)"
-      printf "${Y}└─ only a failure if PRAXIS NO ROUTE follows — OLS CALLER VALIDATED${N}\n"
-      printf "${Y}   means the delegation recovered (normalized or retried)${N}\n"
-      return 0
-    fi
     # The Token A passthrough itself: a2a_agent_node with an empty
     # bearer_token reads the caller's token from the run context.
     if [[ "$line" == *"using user auth token"* ]]; then
@@ -584,7 +415,7 @@ parse_line() {
       printf "\n${Y}┌─ MAS OUTBOUND A2A [${ts}]${N}\n"
       printf "${Y}│${N} ${D}agent=${t_agent}  auth=${t_auth}${N}\n"
       printf "${Y}│${N} ${D}url=${t_url}${N}\n"
-      printf "${Y}└─ OLS goes via Praxis (needs X-OLS-Cluster) · Ask Red Hat is direct${N}\n"
+      printf "${Y}└─ routed agents go via Praxis · Ask Red Hat is direct${N}\n"
       return 0
     fi
     if [[ "$line" == *"a2a.delegated"* ]]; then
@@ -592,20 +423,16 @@ parse_line() {
       d_node=$(grep -oP "'node_uid': '\K[^']+" <<<"$line" || true)
       printf "\n${Y}┌─ MAS DELEGATED [${ts}]${N}\n"
       printf "${Y}│${N} ${D}node_uid=${d_node} — work item dispatched to the remote agent${N}\n"
-      printf "${Y}└─ logs at stream completion — line up with PRAXIS ROUTE / OLS A2A by timestamp${N}\n"
+      printf "${Y}└─ logs at stream completion — line up with PRAXIS ROUTE by timestamp${N}\n"
       return 0
     fi
-    # Card only the tool.execute line that carries tool_args (the header the
-    # LLM chose); MAS also logs the bare tool name and phase-timing tables,
-    # which would duplicate this card several times per delegation.
+    # Card only the tool.execute line that carries tool_args (the routing
+    # decision the LLM made); MAS also logs the bare tool name and
+    # phase-timing tables, which would duplicate this card several times per
+    # delegation.
     if [[ "$line" == *"workplan.plan_and_delegate"* ]] && [[ "$line" == *"tool_args"* ]]; then
-      local w_cluster
-      w_cluster=$(grep -oP "'X-OLS-Cluster': '\K[^']+" <<<"$line" || true)
       printf "\n${Y}┌─ ORCHESTRATOR PLAN [${ts}]${N}\n"
-      printf "${Y}│${N} ${D}workplan.plan_and_delegate — LLM routes Ask Red Hat vs OLS${N}\n"
-      if [[ -n "$w_cluster" ]]; then
-        printf "${Y}│${N} ${D}X-OLS-Cluster=${w_cluster} (spelled correctly)${N}\n"
-      fi
+      printf "${Y}│${N} ${D}workplan.plan_and_delegate — LLM routes to its specialist agents${N}\n"
       printf "${Y}└─ Token A stays in the run context for every delegated work item${N}\n"
       return 0
     fi
@@ -618,10 +445,10 @@ parse_line() {
     fi
     if grep -qiE '(no route matched|http[^0-9]*404|status[^0-9]*404|404 not found)' <<<"$line"; then
       printf "\n${R}┌─ MAS DELEGATION LOST (404) [${ts}]${N}\n"
-      printf "${R}│${N} ${D}outbound A2A rejected — usually Praxis fail-closed on the${N}\n"
-      printf "${R}│${N} ${D}X-OLS-Cluster header (missing/unknown/misspelled)${N}\n"
+      printf "${R}│${N} ${D}outbound A2A rejected — usually Praxis fail-closed on${N}\n"
+      printf "${R}│${N} ${D}an unknown route or unallow-listed caller${N}\n"
       printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
-      printf "${R}└─ Token A was fine; the routing header was not${N}\n"
+      printf "${R}└─ Token A was fine; the routing decision was not${N}\n"
       return 0
     fi
     # The orchestrator's planning LLM has its own static credential (Vertex
@@ -645,13 +472,13 @@ parse_line() {
     return 0
   fi
 
-  # ── OCP API server: Token B OIDC rejects (needs --api + cluster-admin) ───
+  # ── OCP API server: bearer-token OIDC rejects (needs --api + cluster-admin) ─
   if [[ "$src" == "api" ]]; then
     if grep -qiE 'unable to authenticate|invalid bearer token|oidc' <<<"$line"; then
       printf "\n${R}┌─ API TOKEN REJECT [${ts}]${N}\n"
-      printf "${R}│${N} ${D}the API server's OIDC authenticator rejected a bearer (Token B)${N}\n"
+      printf "${R}│${N} ${D}the API server's OIDC authenticator rejected a bearer token${N}\n"
       printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
-      printf "${R}└─ check Authentication audiences incl. openshift-mcp + issuer/JWKS${N}\n"
+      printf "${R}└─ check Authentication audiences + issuer/JWKS${N}\n"
       return 0
     fi
     if grep -qiE 'forbidden' <<<"$line"; then
@@ -663,9 +490,9 @@ parse_line() {
     return 0
   fi
 
-  # ── Auth / exchange failures (any hop) ───────────────────────────────────
-  if grep -qE 'A2A inbound token rejected|A2A token exchange failed|A2A request rejected|A2A query failed|SpiffeIdentityError|A2AWorkloadIdentityError|ClusterURLError|CERTIFICATE_VERIFY_FAILED' <<<"$line"; then
-    printf "\n${R}┌─ AUTH/EXCHANGE FAILURE [${ts}] (${src})${N}\n"
+  # ── Auth failures (any hop) ─────────────────────────────────────────────
+  if grep -qE 'A2A inbound token rejected|A2A request rejected|A2A query failed|SpiffeIdentityError|CERTIFICATE_VERIFY_FAILED' <<<"$line"; then
+    printf "\n${R}┌─ AUTH FAILURE [${ts}] (${src})${N}\n"
     printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
     printf "${R}└─ see agents/AUTHENTICATION.md Troubleshooting${N}\n"
     return 0
@@ -693,10 +520,10 @@ parse_line() {
     fi
     if grep -q 'no route matched' <<<"$line"; then
       printf "\n${Y}┌─ PRAXIS NO ROUTE [${ts}]${N}\n"
-      printf "${Y}│${N} ${D}X-OLS-Cluster missing/unknown — or misspelled by the orchestrator${N}\n"
-      printf "${Y}│${N} ${D}LLM (X_OLS_Cluster) — and Praxis fail-closes (no default backend)${N}\n"
+      printf "${Y}│${N} ${D}no backend matched this request — Praxis fail-closes (no default${N}\n"
+      printf "${Y}│${N} ${D}backend)${N}\n"
       printf "${Y}│${N} %s\n" "$(trunc "$line" 160)"
-      printf "${Y}└─ Token A was forwarded but never reached an OLS backend${N}\n"
+      printf "${Y}└─ Token A was forwarded but never reached a downstream backend${N}\n"
       return 0
     fi
     if grep -q 'route matched' <<<"$line"; then
@@ -720,7 +547,7 @@ parse_line() {
           printf "${R}│${N} ${D}policy filter denied — caller JWT invalid, or its azp is not${N}\n"
           printf "${R}│${N} ${D}in policy.allowedCallers (acme-agent + Red Hat SSO client)${N}\n"
         else
-          printf "${R}│${N} ${D}filter=${p_filter} — request denied before any OLS backend${N}\n"
+          printf "${R}│${N} ${D}filter=${p_filter} — request denied before any downstream backend${N}\n"
         fi
         printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
         printf "${R}└─${N}\n"
@@ -734,37 +561,6 @@ parse_line() {
       return 0
     fi
     # Quiet by default when logLevel is empty — skip noise
-    return 0
-  fi
-
-  # ── MCP hop (passthrough — real authz is the API server on Token B) ──────
-  # CONFIRMED LIVE (bm-cluster, 2026-10-26): the operator-managed MCP server
-  # is a Go binary logging klog-style lifecycle lines only — no tool names at
-  # default verbosity. The tool-call detail lives on the OLS side
-  # (OLS → MCP SESSION / OLS TOOL LOOP cards); here the session lines show
-  # Token B being accepted.
-  if [[ "$src" == "mcp" ]]; then
-    if grep -qiE '401|403|unauthorized|forbidden' <<<"$line" || grep -qE '(^|\] )E[0-9]{4} ' <<<"$line"; then
-      printf "\n${Y}┌─ MCP/API DENY [${ts}]${N}\n"
-      printf "${Y}│${N} ${D}MCP is passthrough; this is API-server RBAC/OIDC on Token B${N}\n"
-      printf "${Y}│${N} %s\n" "$(trunc "$line" 160)"
-      printf "${Y}└─ confirm the mapped group's rights:${N}\n"
-      printf "${Y}   oc auth can-i get pods --as-group=keycloak:acme-agent-rca -n <namespace>${N}\n"
-      return 0
-    fi
-    if grep -q 'server session connected' <<<"$line"; then
-      local s_id
-      s_id=$(grep -oP 'session_id="\K[^"]+' <<<"$line" || true)
-      # OLS logs the same session via "Received session ID:" — card it once.
-      if [[ -n "$s_id" ]] && grep -q "^mcp_session=${s_id}\$" "$STATE_FILE" 2>/dev/null; then
-        return 0
-      fi
-      [[ -n "$s_id" ]] && printf 'mcp_session=%s\n' "$s_id" >> "$STATE_FILE" 2>/dev/null || true
-      printf "\n${G}┌─ MCP SESSION [${ts}]${N}\n"
-      printf "${G}│${N} ${D}session_id=${s_id} — MCP accepted the Token B session${N}\n"
-      printf "${G}└─ require_oauth passed; the API server's RBAC is the authority${N}\n"
-      return 0
-    fi
     return 0
   fi
 }
@@ -796,7 +592,7 @@ echo -e "${D}since=${SINCE}  mode=${MODE}  request_id filter=${FILTER_REQ:-none}
 echo -e "${D}Tokens are never printed; each card names the token stage it observed.${N}"
 echo -e "${D}Tip: for Praxis JWT/routing detail set praxis-proxy logLevel (RUST_LOG), e.g.${N}"
 echo -e "${D}  info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug${N}"
-echo -e "${D}Tip: Keycloak Admin → Realm Events filtered by clients acme-agent, lightspeed-mcp${N}"
+echo -e "${D}Tip: Keycloak Admin → Realm Events filtered by client acme-agent${N}"
 echo -e "${D}Tip: final RBAC hop — confirm the mapped group (needs cluster-admin):${N}"
 echo -e "${D}  oc auth can-i get pods --as-group=keycloak:acme-agent-rca -n <namespace>${N}"
 echo -e "${D}Tip: bash scripts/monitor.sh --api also tails the API server's token rejects${N}"
@@ -807,19 +603,15 @@ case "$MODE" in
   acme)   follow acme   "$NS_ACME"   "$SEL_ACME" ;;
   mas)    follow mas    "$NS_MAS"    "$SEL_MAS" ;;
   worker) follow worker "$NS_WORKER" "$SEL_WORKER" ;;
-  ols)    follow ols    "$NS_OLS"    "$SEL_OLS" ;;
   praxis) follow praxis "$NS_PRAXIS" "$SEL_PRAXIS" ;;
-  mcp)    follow mcp    "$NS_OLS"    "$SEL_MCP" ;;
   api)    follow api    "$NS_API"    "$SEL_API" ;;
   join|all)
     # --api is deliberately not in the default join: it needs cluster-admin
-    # and the API hop is normally observed via MCP/API DENY cards instead.
+    # and the API hop is normally observed via downstream deny cards instead.
     follow acme   "$NS_ACME"   "$SEL_ACME"   &
     follow mas    "$NS_MAS"    "$SEL_MAS"    &
     follow worker "$NS_WORKER" "$SEL_WORKER" &
-    follow ols    "$NS_OLS"    "$SEL_OLS"    &
     follow praxis "$NS_PRAXIS" "$SEL_PRAXIS" &
-    follow mcp    "$NS_OLS"    "$SEL_MCP"    &
     wait
     ;;
 esac

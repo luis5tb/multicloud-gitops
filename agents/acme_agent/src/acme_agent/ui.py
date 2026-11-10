@@ -42,8 +42,7 @@ UI_HTML = r"""<!doctype html>
   <h1>ACME A2A agent</h1>
   <div id="status">Requests are forwarded to the configured downstream A2A agent.
     Messages in one conversation share context, so later questions can refer to
-    earlier answers. Name the target OpenShift cluster API URL
-    (e.g. https://api.example.com:6443) at least once per conversation.</div>
+    earlier answers.</div>
   <div class="conversation">
     <span id="conversation-label">New conversation</span>
     <button type="button" id="new-conversation">New conversation</button>
@@ -72,7 +71,7 @@ UI_HTML = r"""<!doctype html>
   </div>
   <main id="messages" aria-live="polite"></main>
   <form id="chat-form">
-    <textarea id="prompt" required placeholder="e.g. https://api.example.com:6443 -- then your request..."></textarea>
+    <textarea id="prompt" required placeholder="Type your request..."></textarea>
     <button type="submit">Send</button>
   </form>
   <script id="auth-options" type="application/json">__AUTH_OPTIONS_JSON__</script>
@@ -289,7 +288,7 @@ UI_HTML = r"""<!doctype html>
 
       // The answer comes from exactly one authoritative source, tried in
       // priority order, so the same text is never duplicated across
-      // sources (OLS, for example, puts the identical final text in both
+      // sources (some agents put the identical final text in both
       // status.message and artifacts).
       const answerParts = [];
       if (task.status && task.status.message) collectParts(task.status.message, ignored, answerParts);
@@ -353,7 +352,7 @@ UI_HTML = r"""<!doctype html>
     //   * flattened a2a JSON (what ADK's to_a2a / the acme server emit):
     //       {kind:"status-update", status:{message:{parts:[...]}}, final:...}
     //       {kind:"artifact-update", artifact:{parts:[...]}, append:bool, lastChunk:bool}
-    //   * nested proto (what OLS's hand-rolled endpoint emits):
+    //   * nested proto (what a hand-rolled endpoint may emit):
     //       {statusUpdate:{status:{message:...}}}  {artifactUpdate:{artifact:...}}
     // Both are handled. The final answer is the "answer" artifact: a terminal
     // artifact-update (append:false) carries the whole text, and the terminal

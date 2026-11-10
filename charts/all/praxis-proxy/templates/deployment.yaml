@@ -123,11 +123,6 @@ spec:
               mountPath: /etc/praxis/ca-bundle
               readOnly: true
             {{- end }}
-            {{- if .Values.upstreamTLS.enabled }}
-            - name: upstream-ca-bundle
-              mountPath: /etc/praxis/upstream-ca
-              readOnly: true
-            {{- end }}
         {{- if .Values.dnsIPv4Only.enabled }}
         - name: dns-ipv4only
           image: {{ required "praxis-proxy: dnsIPv4Only.image is required when dnsIPv4Only.enabled" .Values.dnsIPv4Only.image | quote }}
@@ -173,13 +168,5 @@ spec:
             name: {{ .Values.policy.caBundleConfigMap.name }}
             items:
               - key: {{ .Values.policy.caBundleConfigMap.key }}
-                path: ca-bundle.crt
-        {{- end }}
-        {{- if .Values.upstreamTLS.enabled }}
-        - name: upstream-ca-bundle
-          configMap:
-            name: {{ include "praxis-proxy.fullname" . }}-upstream-ca
-            items:
-              - key: service-ca.crt
                 path: ca-bundle.crt
         {{- end }}

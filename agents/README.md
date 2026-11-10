@@ -3,18 +3,11 @@
 This directory contains agents that can be deployed with the multicloud GitOps
 pattern. [`acme_agent`](./acme_agent/) is the public A2A coordinator: it
 delegates each request to the MAO workflow, which selects the appropriate
-specialists (Ask Red Hat and/or OpenShift Lightspeed) and owns target-cluster
-selection and validation. OpenShift Lightspeed answers questions and
-investigates cluster incidents using its OpenShift MCP tools.
-
-OpenShift Lightspeed itself is deployed via the OpenShift Lightspeed Operator
-(see `charts/all/openshift-lightspeed-config/`) and an A2A-enabled image built
-from the external [`a2a-split` fork](https://github.com/luis5tb/lightspeed-service/tree/a2a-split)
--- there is no agent source directory for it under this path.
+specialist agents and owns target-cluster selection and validation.
 
 See [`AUTHENTICATION.md`](./AUTHENTICATION.md) for the full per-request
-authentication flow from the ACME agent's UI through to OpenShift Lightspeed's
-exchanged, MCP-scoped request.
+authentication flow from the ACME agent's UI through to the downstream
+services.
 
 The optional inbound MAS A2A service is a separate, dormant application with
 its own Keycloak audience and exact caller allow-list. Its trust path and HITL

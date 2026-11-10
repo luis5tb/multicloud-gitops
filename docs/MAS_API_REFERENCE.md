@@ -25,7 +25,7 @@ Quick reference for the actual MAS API endpoints discovered through testing.
 
 **Response Field**: `rid` (not `resource_id` or `id`)
 
-**Example** - Register OLS A2A Agent:
+**Example** - Register an A2A Agent (the OLS investigation agent this used to reference was removed from this pattern):
 ```bash
 curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
   -H "Authorization: Bearer ${MAS_TOKEN}" \
@@ -33,9 +33,9 @@ curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
   -d '{
     "category": "nodes",
     "type": "a2a_agent_node",
-    "name": "OpenShift Lightspeed Agent",
+    "name": "Ask Red Hat",
     "config": {
-      "base_url": "https://openshift-lightspeed.apps.example.com/a2a",
+      "base_url": "https://access.stage.redhat.com/api/ask/v1/a2a",
       "bearer_token": "",
       "verify_ssl": true
     }
@@ -241,7 +241,7 @@ ORCH_RID=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
     "config": {
       "type": "orchestrator_node",
       "llm": "'"${LLM_RID}"'",
-      "system_message": "You are a multi-cluster router. Delegate to OLS agent."
+      "system_message": "You are a knowledge router. Delegate to the Ask Red Hat agent."
     }
   }' | jq -r '.rid')
 
@@ -254,9 +254,9 @@ A2A_RID=$(curl -s -X POST "${MAS_API_URL}/api/resources/resource.save" \
   -d '{
     "category": "nodes",
     "type": "a2a_agent_node",
-    "name": "OLS Agent",
+    "name": "Ask Red Hat",
     "config": {
-      "base_url": "https://openshift-lightspeed.apps.'"${CLUSTER_DOMAIN}"'/a2a",
+      "base_url": "https://access.stage.redhat.com/api/ask/v1/a2a",
       "bearer_token": "",
       "verify_ssl": true
     }
@@ -266,7 +266,7 @@ echo "A2A Agent RID: $A2A_RID"
 
 # 4. Create blueprint - nodes use inventory RIDs + inline config
 cat > /tmp/blueprint.yaml <<YAML
-name: Multi-Cluster OLS Blueprint
+name: Ask Red Hat Orchestrated Blueprint
 
 conditions:
   - rid: router_condition
@@ -288,14 +288,14 @@ nodes:
     config:
       type: orchestrator_node
       llm: "${LLM_RID}"
-      system_message: "Multi-cluster router"
+      system_message: "Knowledge router"
 
   - rid: ${A2A_RID}
-    name: Investigator
+    name: Ask Red Hat
     type: a2a_agent_node
     config:
       type: a2a_agent_node
-      base_url: "https://openshift-lightspeed.apps.${CLUSTER_DOMAIN}/a2a"
+      base_url: "https://access.stage.redhat.com/api/ask/v1/a2a"
       bearer_token: ""
       verify_ssl: true
 

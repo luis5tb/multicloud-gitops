@@ -2,91 +2,43 @@
 
 This chart deploys the [Praxis AI proxy](https://github.com/praxis-proxy/ai)
 with its embedded [Praxis Policy Engine (PPE)](https://github.com/praxis-proxy/policy)
-in front of one or more per-cluster OpenShift Lightspeed (OLS) app-servers. The
-public OpenShift Route targets this proxy; the proxy validates the inbound
-Keycloak access token, authorizes the caller with native APL, and then routes
-to the OLS backend selected by an exact `X-OLS-Cluster` header match -- see
-"Header routing" below. See `LIGHTSPEED_DESIGN.md` SS7 and
-`LIGHTSPEED_IMPLEMENTATION_PLAN.md` Phase 6 for the full design and rollout
-plan this chart implements.
+as a public, policy-enforcing A2A gateway. The public OpenShift Route targets
+this proxy; the proxy validates the inbound Keycloak/external-SSO access
+token, authorizes the caller with native APL, serves its own A2A discovery
+card, and answers readiness itself.
 
-The OLS app-server (and its operator-managed MCP backend) independently
-validates the Keycloak token again and performs its own RFC 8693 token
-exchange. This is intentional defense in depth; this chart does not make that
-decision for it. Restrict OLS ingress to Praxis via the OLS chart's own
-NetworkPolicy so callers cannot bypass this gateway's APL policy through the
-internal Service.
+> Historical note: this chart previously routed per-request to OpenShift
+> Lightspeed (OLS) app-servers selected by an `X-OLS-Cluster` header, with
+> one router route and one `load_balancer` cluster per entry in a shared
+> `global.olsClusters` registry. The OLS backend was removed
+> (`PLAN-lightspeed-hub-migration.md` Task A), so the chart currently
+> configures **no upstream clusters**: everything else (policy filter,
+> allow-list enforcement check, discovery card, readiness) is unchanged, and
+> a future backend (Task B, lightspeed-hub) will re-introduce routed
+> upstreams. The "Validation evidence" section below records the live
+> findings from the routing era and is kept as historical reference.
 
-## Cluster registry and header routing
+## Static agent card
 
-`files/praxis.yaml` renders one Core `router` route and one `load_balancer`
-cluster per entry in `.Values.global.olsClusters` (the shared registry
-populated in `variants/<variant>/values-<variant>.yaml`; see the frozen
-interface in the implementation plan). Each route matches `X-OLS-Cluster`
-**exactly** against that entry's map key and forwards only to that entry's
-`upstreamHost:upstreamPort` over HTTPS with `upstreamSNI` and a verified
-server certificate -- never to a caller-supplied URL, and never `apiURL`
-(that field exists only for ACME's own validation and must never reach
-Praxis). Each entry's `upstreamHost`/`upstreamPort`/`upstreamSNI` default to
-the operator-managed Lightspeed app-server Service in the `a2a-lightspeed`
-namespace (`upstreamDefaults` in `values.yaml`), so a registry entry normally
-needs only its map KEY + `apiURL`; set the upstream fields explicitly only for
-a cross-cluster backend whose Service coordinates differ. Core's `routes[].headers` exact-match syntax and
-`clusters[].tls.{sni,verify,ca.ca_path}` schema are identical between Core
-v0.7.0 (embedded in the pinned `ai:0.4.1` image) and the v0.7.2 docs cited
-below, and were validated structurally with `--validate` and live-tested with
-two fake HTTPS backends against the real pinned binary (see "Validation
-evidence").
-
-On an absent, unregistered, or otherwise non-matching `X-OLS-Cluster` value,
-Core's router rejects with a plain **HTTP 404** and forwards nothing -- there
-is no default/catch-all cluster (confirmed by reading
-`crates/filter/src/builtins/http/traffic_management/router/mod.rs` at the
-`v0.7.0` tag and reproduced live against the pinned image).
-
-**Known gap -- duplicate headers are not rejected.** Core's header matcher
-(`router/matching.rs::headers_match`) checks *all* values of a repeated
-header with OR semantics: a request carrying two `X-OLS-Cluster` values, one
-legitimate and one not, still matches if *any* value equals the route's id.
-There is no router config knob to instead reject a multi-valued header
-outright; this chart's configuration cannot close this gap on its own.
-Reproduced live: a request with `X-OLS-Cluster: bogus-id` and
-`X-OLS-Cluster: cluster-a` both present routed successfully to `cluster-a`.
-If this matters before ACME's own header-setting code is trusted to never
-duplicate the header, it needs an upstream fix or a pre-router guard this
-pinned image does not otherwise provide.
-
-**Known gap -- public-path backend selection with 2+ clusters.** The
-unauthenticated `/.well-known/agent-card.json` and `/readiness` routes
-(see "Policy behavior") need exactly one upstream, but the registry has no
-"primary" concept. This chart picks the lexically first registry key. This is
-fine for the single currently-registered cluster but needs a real decision
-before a second `olsClusters` entry is registered -- see
-`LIGHTSPEED_DESIGN.md` SS7 ("Multi-cluster session safety").
-
-## Static agent card for multi-cluster routing
-
-When `agentCard.enabled` is `true`, Praxis serves its own static agent card
-(rendered from `values.yaml` defaults or explicit overrides) through the
-`static_response` filter instead of proxying `/.well-known/agent-card.json` to
-the first cluster's OLS. The card's critical field is `rpc_url`: it points to
-Praxis's own public endpoint (auto-derived from `global.clusterBaseDomain` as
-`https://openshift-lightspeed.apps.<base>/a2a` when not explicitly set),
-ensuring A2A clients (like the MAS orchestrator) call Praxis with the
-`X-OLS-Cluster` header instead of bypassing Praxis by calling an OLS Route
-directly. The filter runs after the policy filter, whose explicit public-path
-rule allows agent-card discovery without a bearer token.
+When `agentCard.enabled` is `true` (the default), Praxis serves its own
+static agent card through the `static_response` filter at both
+`/.well-known/agent-card.json` and `/a2a/.well-known/agent-card.json` (MAS
+A2A validation looks in both places depending on the configured base URL).
+The card's critical field is `rpc_url`: it points to Praxis's own public
+endpoint (auto-derived from `global.clusterBaseDomain` as
+`https://praxis-proxy.apps.<base>/a2a` when not explicitly set), ensuring
+A2A clients (like the MAS orchestrator) call Praxis rather than any
+internal Service. The filter runs after the policy filter, whose explicit
+public-path rule allows agent-card discovery without a bearer token.
 
 **Why this matters:** The A2A SDK (`client.py`) uses the agent card's
-`rpc_url` for all actual calls, not the `base_url` initially provided. If
-Praxis proxied to the first OLS cluster's agent card, MAS would receive that
-cluster's OLS Route as the `rpc_url` and send every subsequent request there,
-bypassing Praxis's multi-cluster routing logic entirely.
+`rpc_url` for all actual calls, not the `base_url` initially provided.
 
 **Configuration:**
 - `agentCard.enabled: true` activates the feature.
-- `agentCard.name`, `description`, `version`, and `skills` default to match
-  OLS's typical agent card; override only to diverge from those defaults.
+- `agentCard.name`, `description`, and `version` default to a generic
+  gateway card (no skills -- there is no agent backend behind it); override
+  in the variant when a real backend is registered.
 - `agentCard.rpcUrl` auto-derives from `global.clusterBaseDomain`; override
   only for a non-standard Praxis Route hostname.
 - The chart renders the card JSON into a conditional `static_response` filter
@@ -94,11 +46,6 @@ bypassing Praxis's multi-cluster routing logic entirely.
   cluster for the card. This is compatible with the pinned
   `ghcr.io/praxis-proxy/ai:0.4.1` image, whose embedded Praxis Core 0.7.0
   rejects `static_files` as an unknown load-balancer cluster field.
-
-**When to enable:** For single-cluster deployments, leave this disabled -- the
-dynamic proxy to OLS works fine. Enable it when adding a second `olsClusters`
-entry or when deploying MAS orchestrator that needs to route to multiple
-clusters via the `X-OLS-Cluster` header.
 
 ### Static card configuration failure
 
@@ -109,32 +56,26 @@ strict cluster schema does not support that field. Keep static card serving on
 the built-in `static_response` filter as rendered by this chart; do not model
 files as load-balancer clusters.
 
-## Upstream TLS trust
+### Readiness
 
-The operator-managed `lightspeed-app-server` Service is HTTPS-only. This
-chart's policy-plugin `SSL_CERT_FILE` (see "Keycloak CA bundle" below) is a
-**separate** trust store used only for the Keycloak JWKS fetch -- it is not
-automatically valid for the OLS app-server's serving certificate. When
-`upstreamTLS.enabled` (default `true`), this chart instead creates its own
-ConfigMap annotated `service.beta.openshift.io/inject-cabundle: "true"`; the
-in-cluster OpenShift service-ca-operator injects the current serving CA
-bundle into it with no sync Job/CronJob needed, and every registered
-cluster's `load_balancer` entry trusts it via `tls.ca.ca_path`. This only
-establishes trust for Services in *this same* OpenShift cluster: a future
-cross-cluster `olsClusters` entry needs a distributed/synced CA source (for
-example, something closer to the `policy.caBundleSync` mechanism below), not
-this annotation. This chart also does not force a Deployment rollout on CA
-rotation (unlike `policy.caBundleSync`'s CronJob+checksum pattern) -- a known,
-accepted gap for this pass given OpenShift's service-ca rotates far less
-often than the ingress CA that mechanism targets.
+`GET /readiness` (public, like the discovery paths) is answered by a
+`static_response` filter returning 200 -- with no upstream clusters
+configured there is no backend health to check. The startup/liveness probes
+cover process health via the loopback admin listener. When a routed backend
+is (re-)introduced, consider routing this path to it again so the proxy is
+not marked ready while the backend is down (see the note in
+`files/praxis.yaml`).
 
-If a cluster entry points at an external OLS Route but this chart still trusts
-the service-ca bundle, expect an upstream TLS failure such as
-`invalid peer certificate: UnknownIssuer`: the Route certificate is signed by
-the cluster ingress CA, not the service-ca. For same-cluster OLS, leave
-`upstreamHost`/`upstreamPort`/`upstreamSNI` unset so Praxis uses the internal
-HTTPS Service and service-ca. For a remote cluster, configure a trusted CA
-bundle for that Route rather than disabling certificate verification.
+### No-backends router caveat (UNCONFIRMED GUESS)
+
+The rendered `praxis.yaml` keeps a `router` filter with an empty `routes`
+list so allow-listed callers hitting any non-public path fall through to a
+clean 404 rather than a config-load error. Whether the pinned Praxis image
+accepts an empty routes list has **not** been validated against a live
+deployment of this no-backend configuration -- verify on the next cluster
+rollout; if the image rejects it, remove the router filter entirely (the
+static_response filters can serve every route this gateway currently
+answers).
 
 ## Policy behavior
 
@@ -143,7 +84,7 @@ Praxis `policy` filter at process startup. The `identity/jwt` plugin validates
 `Authorization` against the configured Keycloak issuer, JWKS endpoint, and
 configured audience. `policy.allowedCallers` defaults to the explicit
 allow-list `[acme-agent]`; an absent identity, a different client, or a
-policy/JWKS failure does not reach any OLS backend.
+policy/JWKS failure never reaches the router.
 
 For multi-issuer validation, set `identity.oidcIssuers` with each external
 issuer URL, JWKS URL, and expected token audience. The chart also appends the
@@ -182,8 +123,8 @@ chart (see `agents/AUTHENTICATION.md` for the live investigation):
    `net.ipv4.ip_unprivileged_port_start=53` (accepted by OpenShift's
    restricted-v2 SCC). In-cluster names still resolve (non-AAAA queries are
    forwarded unchanged). Validated live from the Praxis pod: the default
-   resolver returns A+AAAA, the sidecar returns A only, and the OLS Service name
-   still resolves.
+   resolver returns A+AAAA, the sidecar returns A only, and in-cluster
+   Service names still resolve.
 
 Also add every non-`acme-agent` caller's `azp` to `policy.allowedCallers` — e.g.
 the UI's Red Hat SSO client — or the `azp` allow-list will `deny` it even though
@@ -267,37 +208,37 @@ It runs in two tiers, by what credentials are available:
   `policy.caBundleConfigMap.name` is set, that bundle is mounted so TLS to the
   Keycloak Route verifies.
 
-Two unauthenticated HTTP paths are intentionally forwarded (see "Known gap --
-public-path backend selection" above for which backend answers them):
+Two unauthenticated HTTP paths are intentionally served without a token
+(see "Static agent card" and "Readiness" above):
 
-- `GET /.well-known/agent-card.json` serves A2A discovery. The card must
-  advertise the public Praxis Route, not an internal OLS Service.
-- `GET /readiness` lets the proxy readiness probe verify both the gateway
-  and the selected OLS backend's readiness -- this is the external fork
-  `luis5tb/lightspeed-service@a2a-split`'s `ols/app/endpoints/health.py`
-  real `readiness_probe_get_method` route (no `/v1` prefix), confirmed
-  against that source. This path was originally `/health/ready`, copied
+- `GET /.well-known/agent-card.json` (and its `/a2a/`-prefixed twin) serves
+  A2A discovery. The card advertises the public Praxis Route, never an
+  internal Service.
+- `GET /readiness` lets the proxy readiness probe verify the gateway is
+  serving; with no backend configured it is answered by the proxy itself.
+  (Historical note: when this chart fronted OLS, this path proxied the
+  backend's `readiness_probe_get_method` route from the external fork
+  `luis5tb/lightspeed-service@a2a-split` -- no `/v1` prefix, confirmed
+  against that source. The path was originally `/health/ready`, copied
   from the prior RCA-era chart without verification against the actual
-  OLS service -- confirmed broken (404) against a live backend
-  and fixed here.
+  service -- confirmed broken (404) against a live backend and fixed then.)
 
 All other paths, including the A2A RPC endpoint, hit the authenticated
-catch-all route and then the per-cluster header-routing rules in
-`files/praxis.yaml`. The `policy` filter runs strictly before `router`/
-`load_balancer` in the filter chain, so a denied request is never forwarded
-to any upstream.
+catch-all route; with no upstream clusters configured, a request that
+survives the policy filter falls through the empty router to a 404. The
+`policy` filter runs strictly before `router` in the filter chain, so a
+denied request is never forwarded to any upstream.
 
 ## Configuration
 
 Set `identity.keycloak.issuerUrl` to the exact token issuer and `route.host` to
-the public A2A hostname. Populate `.Values.global.olsClusters` (normally via
-the shared `variants/<variant>/values-<variant>.yaml` registry, not a
-chart-local override) with one entry per registered OLS cluster; Praxis reads
-only the map key plus `upstreamHost`/`upstreamPort`/`upstreamSNI` from each
-entry and never `apiURL`. The OLS application's own chart should restrict
-ingress to this proxy via NetworkPolicy. Keep the proxy and each OLS instance
-reachable on the documented Service DNS name; the upstream hostname/port come
-only from the registry, never from caller input.
+the public A2A hostname (both derive from `global.clusterBaseDomain` by
+default). In single-issuer mode (`identity.oidcIssuers` empty),
+`identity.keycloak.audience` must name the audience this gateway's callers'
+Keycloak tokens carry -- the chart `fail`s loudly when it is empty. There is
+currently no per-cluster registry and no routed upstream: when a backend is
+re-introduced (Task B of the migration plan), its Service coordinates and
+TLS trust must come from operator-controlled values, never caller input.
 
 The pinned Praxis AI 0.4.1 build only provides the filter-wide
 `allow_private_idp` option, exposed as `policy.allowPrivateIdp` here. It is
@@ -325,10 +266,11 @@ sync disabled and use the image's normal trust store.
 Praxis 0.4.1 currently requires both `insecure_options.allow_private_endpoints`
 (config-load-time validation of the load_balancer cluster endpoints) and
 `insecure_options.allow_private_upstreams` (the runtime connection check) for
-these static in-cluster upstreams. Those are broad private-address opt-ins, so
-this chart keeps every destination fixed (sourced only from
-`global.olsClusters`) and relies on each OLS instance's own NetworkPolicy for
-ingress isolation. Do not use these flags to proxy user-supplied destinations.
+static in-cluster upstreams. Those are broad private-address opt-ins; no
+upstream clusters are currently configured, and when one is re-introduced
+its destination must stay fixed and operator-controlled (never a
+caller-supplied URL). Do not use these flags to proxy user-supplied
+destinations.
 
 ## Checks and diagnostics
 
@@ -338,19 +280,19 @@ helm template praxis-proxy charts/all/praxis-proxy \
   -f values-global.yaml -f variants/standalone/values-standalone.yaml
 ```
 
-`global.olsClusters` must contain at least one entry (the chart `fail`s
-loudly otherwise); a bare `helm lint charts/all/praxis-proxy` with no
-registry values file is expected to fail for this reason.
+In single-issuer mode (`identity.oidcIssuers` empty) with
+`policy.enabled=true`, `identity.keycloak.audience` must be set (the chart
+`fail`s loudly otherwise); a bare `helm lint charts/all/praxis-proxy` with
+no values file is expected to fail for this reason.
 
 At runtime, inspect the rendered policy and proxy logs with:
 
 ```bash
 oc get configmap praxis-proxy -n praxis-proxy -o yaml
 oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy
-oc get networkpolicy -n a2a-lightspeed -o yaml
 ```
 
-**Per-cluster routing/request counts, without changing any log level at
+**Routing/request counts, without changing any log level at
 all**: confirmed live that the admin port (`127.0.0.1:9901`, loopback-only,
 not exposed outside the pod) serves a Prometheus-format `/metrics` endpoint
 with per-cluster counters -- the quickest way to confirm a request actually
@@ -375,7 +317,7 @@ with everything, e.g. `info,praxis_filter=debug,praxis_policy_plugin_identity_jw
 applies to the whole binary. Not meant to stay at `debug` indefinitely on a
 real environment -- see its comment in `values.yaml`.
 
-### Validation evidence (T6.1-T6.3, 2026-10-01)
+### Validation evidence (T6.1-T6.3, 2026-10-01 -- historical, from the routing era)
 
 Rendered this chart's `praxis.yaml`/`policy.yaml` for one and two
 `global.olsClusters` entries, validated the result against the real pinned

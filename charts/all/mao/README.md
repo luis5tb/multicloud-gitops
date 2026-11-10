@@ -39,8 +39,11 @@ to start without them. `runCredentials` in each chart creates its own Secret
 `global/mao-run-credentials` (see `values-secret.yaml.template`), and each
 chart refuses to render without a Secret name. The worker's `credentialRenewal` settings
 bound how long a task waits in `TASK_STATE_AUTH_REQUIRED` for the caller to
-send a fresh token; keep the timeout below OpenShift Lightspeed's
-`appServerPatch.a2a.authRequiredTimeoutSeconds`. `hitl.approvalCollection` and
+send a fresh token; keep it below the downstream agent's own
+auth-required timeout. (Historical note: this was previously capped by
+OpenShift Lightspeed's `appServerPatch.a2a.authRequiredTimeoutSeconds`; that
+backend has been removed -- see
+`PLAN-lightspeed-hub-migration.md` Task A.) `hitl.approvalCollection` and
 `credentialRenewal.collection` must match across the charts that set them.
 
 The source repository also contains a Vault Secrets Operator chart. It is not

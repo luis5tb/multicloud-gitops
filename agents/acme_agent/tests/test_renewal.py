@@ -108,7 +108,6 @@ def _send_body(method: str = "SendStreamingMessage") -> dict[str, Any]:
                 "messageId": "user-msg-1",
                 "role": "ROLE_USER",
                 "parts": [{"text": "Investigate the cluster"}],
-                "metadata": {"ols_mode": "troubleshooting"},
             }
         },
     }
@@ -151,7 +150,7 @@ def test_stream_pause_is_renewed_and_spliced(monkeypatch: pytest.MonkeyPatch) ->
     downstream = Downstream(
         _sse(
             _status("task-1", "TASK_STATE_WORKING"),
-            _status("task-1", "TASK_STATE_AUTH_REQUIRED", "OLS needs fresh credentials"),
+            _status("task-1", "TASK_STATE_AUTH_REQUIRED", "MAS needs fresh credentials"),
         ),
         _sse(_status("task-1", "TASK_STATE_COMPLETED", "All checks passed")),
     )
@@ -173,7 +172,7 @@ def test_stream_pause_is_renewed_and_spliced(monkeypatch: pytest.MonkeyPatch) ->
     assert message["role"] == "ROLE_USER"
     assert message["parts"] == [{"text": RENEWAL_MESSAGE_TEXT}]
     assert message["messageId"] != "user-msg-1"
-    assert message["metadata"] == {"ols_mode": "troubleshooting"}
+    assert "metadata" not in message
     assert downstream.requests[1].headers["X-Request-Id"] == "rid-1"
 
 

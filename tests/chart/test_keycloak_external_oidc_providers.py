@@ -125,7 +125,7 @@ def test_external_oidc_providers_for_token_exchange() -> None:
     assert sso_prod["config"]["clientId"] == "red-hat-prod-client"
     assert sso_prod["config"]["isAccessTokenJWT"] == "true"
     assert sso_prod["config"]["tokenExchangeEnabled"] == "true", (
-        "allowTokenExchange must be true for OLS to exchange Red Hat SSO tokens"
+        "allowTokenExchange must be true for Keycloak to exchange Red Hat SSO tokens"
     )
 
     # Verify Red Hat SSO Stage

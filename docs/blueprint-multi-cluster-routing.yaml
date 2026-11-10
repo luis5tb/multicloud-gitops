@@ -1,6 +1,8 @@
 description: |
-  Multi-cluster OpenShift investigation routing via Praxis proxy.
-
+  HISTORICAL (pre-OLS-removal): multi-cluster OpenShift investigation
+  routing via the Praxis proxy. The OLS backend was removed
+  (PLAN-lightspeed-hub-migration.md Task A); the live blueprint pinned in
+  values-standalone still matches this shape until the runtime cutover (G3).
   The orchestrator analyzes the user's question to determine which cluster
   they're asking about, then delegates to Praxis with the X-OLS-Cluster header
   to route to the correct OLS backend.

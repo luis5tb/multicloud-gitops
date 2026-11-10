@@ -118,8 +118,9 @@ is on by default; only set `keycloakVerifySsl: false` for a controlled
 non-production test.
 
 The chart rejects known OpenShift/OLS/MCP audiences (`openshift`,
-`openshift-mcp`, `lightspeed-a2a`, `lightspeed-mcp`, `openshift-cli`, and
-`openshift-console`) as the MAS A2A audience, including when one appears among
+`openshift-mcp`, `lightspeed-a2a`, `lightspeed-hub-a2a`, `lightspeed-mcp`,
+`openshift-cli`, and `openshift-console`) as the MAS A2A audience, including
+when one appears among
 comma-delimited values. Add organization-specific reserved equivalents with
 `identity.forbiddenAudiences`; do not add a caller's real audience until it has
 been confirmed from an authorized token's decoded claims.
