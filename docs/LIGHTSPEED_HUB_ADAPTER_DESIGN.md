@@ -37,6 +37,17 @@ projects status and artifacts back onto the A2A task. It also owns the
 run-token Secret lifecycle (`ls-run-token-{runUID}`) that repo C's gateway
 credential mode consumes.
 
+**Where the source lives.** In the lightspeed-hub repo, branch `a2a`, as an
+optional component: the nested Go module `a2a-adapter/` (binary
+`cmd/hub-a2a-adapter`, packages `internal/{auth,config,run,server,store,watch}`),
+built by that repo's `*-a2a-adapter` Makefile targets and deployed by its
+`config/a2a-adapter/` kustomize component (kept out of its `config/default`,
+mirroring the mas-api / OLS-a2a-extension precedent of an optional component
+of its host repo). It originally grew in this repo as `hub-adapter/`
+(commits 2f172c3e..3f0bc2c3) and was relocated; this design doc remains the
+authoritative design, and the gitops chart remains the validated-pattern
+deployment.
+
 **Placement.** An **internal-only Service**, reachable only through Praxis —
 exactly the boundary OLS used to occupy (plan `:459-464`). Reasons:
 
@@ -658,6 +669,16 @@ cluster-specific values go, per `docs/ARCHITECTURE.md:52-57`):
   repo B and repo C images: the adapter changes on A2A/auth cadence; repo C
   changes on sandbox/execution cadence; pinning them together would force
   lockstep upgrades (plan `:649-652`).
+- **Source of the image**: the lightspeed-hub repo, branch `a2a` — the
+  adapter lives there as the nested module `a2a-adapter/` and its image is
+  built by `make image-a2a-adapter` (Dockerfile target `a2a-adapter`,
+  UBI9 go-toolset with `strictfipsruntime`, mirroring the repo's operator
+  image). Until that build is published to a registry, this chart's image
+  value stays a placeholder (`quay.io/example/lightspeed-hub-adapter`) —
+  pin the published digest/tag in the variant when it lands. The
+  `a2a-support` api module the adapter `replace`s is vendored into the
+  image build context by that target; a published api-module version
+  replaces the replace before any registry build outside this workspace.
 - Repo C image: pin the `a2a-support` build; rollback image = the upstream
   `spoke-sa`-mode image (byte-identical behavior when the new ConfigMap keys
   are absent — `gateway-credential-mode.md:43-45` — so rollback is: flip the
