@@ -1,0 +1,38 @@
+{{- range $key, $cfg := .Values.spokeGateways }}
+{{- $name := include "praxis-proxy.spokeGatewayName" $key }}
+{{- $gatewayLabels := dict "praxis-proxy.spoke-gateway" $key }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "praxis-proxy.labels" $ | nindent 4 }}
+    {{- toYaml $gatewayLabels | nindent 4 }}
+  annotations:
+    # OpenShift service-serving certificate: service-ca-operator issues and
+    # rotates a TLS cert/key (tls.crt/tls.key) for this Service's DNS name
+    # into the named Secret. This is the cert the sandbox verifies with the
+    # service CA delivered via the praxis-spoke-service-ca ConfigMap and the
+    # spoke-ca-sync bridge Secret (see spoke-gateway-configmap.yaml and the
+    # chart README UNCONFIRMED GUESS #6). The gateway's listener config
+    # mounts the same Secret.
+    service.beta.openshift.io/serving-cert-secret-name: {{ $name }}-serving-cert
+spec:
+  # Internal only. The plan forbids public gateway Routes: no Route is ever
+  # rendered for a spoke gateway (the chart's public Route targets only the
+  # main praxis-proxy Service).
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "praxis-proxy.name" $ }}
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    {{- toYaml $gatewayLabels | nindent 4 }}
+  ports:
+    # Port/namespace/naming match repo C's generated sandbox kubeconfig
+    # convention: https://{{ $name }}.praxis-proxy.svc.cluster.local:8443
+    # (same namespace as the main praxis-proxy Service).
+    - name: https
+      port: 8443
+      targetPort: https
+      protocol: TCP
+{{- end }}

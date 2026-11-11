@@ -56,6 +56,33 @@ Each derived value stays explicitly overridable per app.
 {{- end -}}
 {{- end }}
 
+{{/*
+Spoke gateways (Phase 2 B1, proposed). Per-cluster entries are the keys of
+the spokeGateways map, which is PURELY per-spoke (literally {} by default);
+shared cross-spoke settings live in the top-level spokeGatewayConfig block
+(exchangeClient, networkPolicy, servingCA). No reserved sibling keys are
+skipped anywhere: a spoke named like a former reserved key renders (or
+fails validation) as a spoke.
+*/}}
+
+{{- define "praxis-proxy.spokeGatewayName" -}}
+{{- printf "praxis-spoke-%s" . -}}
+{{- end -}}
+
+{{/*
+Per-spoke validation + shared derived values. Sits in its own template file
+(spoke-gateway-configmap.yaml) so it only runs when gateways are configured.
+This helper returns the Keycloak token endpoint for the exchange, derived
+from the effective issuer URL when not explicitly overridden.
+*/}}
+{{- define "praxis-proxy.spokeExchangeTokenUrl" -}}
+{{- if .Values.spokeGatewayConfig.exchangeClient.tokenUrl -}}
+{{- .Values.spokeGatewayConfig.exchangeClient.tokenUrl -}}
+{{- else -}}
+{{- printf "%s/protocol/openid-connect/token" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "praxis-proxy.caSyncPodSpec" -}}
 serviceAccountName: {{ include "praxis-proxy.fullname" . }}-ca-sync
 securityContext:
@@ -107,5 +134,62 @@ volumes:
   - name: sync-script
     configMap:
       name: {{ include "praxis-proxy.fullname" . }}-ca-sync-script
+      defaultMode: 0444
+{{- end }}
+
+{{/*
+Serving-CA sync bridge (B1): repo C's gatewayCASecret expects a Secret with
+key ca.crt (controller/agenticrun/gateway.go), but the service CA only
+arrives via a ConfigMap (inject-cabundle, key service-ca.crt). This pod
+spec runs the stdlib-only Python copier; the bootstrap Job and CronJob in
+spoke-ca-sync-{job,cronjob}.yaml include it. The Secret itself is created
+by the job (not rendered as a manifest, so Argo never fights the job's
+writes).
+*/}}
+{{- define "praxis-proxy.spokeCaSyncPodSpec" -}}
+serviceAccountName: {{ include "praxis-proxy.fullname" . }}-spoke-ca-sync
+securityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+restartPolicy: Never
+containers:
+  - name: sync-service-ca
+    image: {{ .Values.spokeGatewayConfig.servingCA.image | quote }}
+    imagePullPolicy: IfNotPresent
+    command: ["python3", "-B", "/opt/app-root/src/sync_service_ca.py"]
+    env:
+      - name: SOURCE_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: SOURCE_CONFIGMAP
+        value: {{ .Values.spokeGatewayConfig.servingCA.sourceConfigMap | quote }}
+      - name: SOURCE_KEY
+        value: {{ .Values.spokeGatewayConfig.servingCA.sourceKey | quote }}
+      - name: TARGET_NAMESPACE
+        value: {{ .Values.spokeGatewayConfig.servingCA.targetNamespace | default .Release.Namespace | quote }}
+      - name: TARGET_SECRET
+        value: {{ .Values.spokeGatewayConfig.servingCA.secretName | quote }}
+      - name: TARGET_KEY
+        value: {{ .Values.spokeGatewayConfig.servingCA.secretKey | quote }}
+      - name: PYTHONDONTWRITEBYTECODE
+        value: "1"
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+    resources:
+      {{- toYaml .Values.spokeGatewayConfig.servingCA.resources | nindent 6 }}
+    volumeMounts:
+      - name: sync-script
+        mountPath: /opt/app-root/src/sync_service_ca.py
+        subPath: sync_service_ca.py
+        readOnly: true
+volumes:
+  - name: sync-script
+    configMap:
+      name: {{ include "praxis-proxy.fullname" . }}-spoke-ca-sync-script
       defaultMode: 0444
 {{- end }}

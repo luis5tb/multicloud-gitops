@@ -28,6 +28,20 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- fail "keycloak.spiffeIdentityProvider.bundleEndpoint must be set when keycloak.spiffeIdentityProvider.enabled is true (the SPIRE OIDC discovery provider JWKS endpoint)" }}
 {{- end }}
 {{- end }}
+{{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
+{{- $exchanger := .Values.keycloak.spokeGatewayExchanger }}
+{{- if not $exchanger.vaultKey }}
+{{- fail "keycloak.spokeGatewayExchanger.vaultKey is required when keycloak.spokeGatewayExchanger.enabled is true (Vault path holding the exchanger client's secret)" }}
+{{- end }}
+{{- if not $exchanger.clientId }}
+{{- fail "keycloak.spokeGatewayExchanger.clientId must be set when keycloak.spokeGatewayExchanger.enabled is true" }}
+{{- end }}
+{{- range $aud := $exchanger.spokeAudiences }}
+{{- if or (not (kindIs "string" .)) (not .) }}
+{{- fail "keycloak.spokeGatewayExchanger.spokeAudiences entries must be non-empty strings (per-spoke Keycloak audiences matching each spoke gateway's exchangeAudience)" }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: k8s.keycloak.org/v2alpha1
 kind: KeycloakRealmImport
 metadata:
@@ -40,8 +54,17 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   keycloakCRName: {{ .Values.keycloak.name }}
-  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials }}
+  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled }}
   placeholders:
+    {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
+    # Resolves $(PRAXIS_SPOKE_EXCHANGER_SECRET) below into the spoke
+    # gateway exchanger client's secret (Vault-backed, see
+    # spoke-gateway-exchanger-secret.yaml).
+    PRAXIS_SPOKE_EXCHANGER_SECRET:
+      secret:
+        name: {{ .Values.keycloak.spokeGatewayExchanger.secretName }}
+        key: client-secret
+    {{- end }}
     {{- range $index, $provider := .Values.keycloak.externalOidcProviders }}
     {{- $credentials := default dict $provider.credentials }}
     {{- if or $credentials.vaultKey $credentials.existingSecretName }}
@@ -194,6 +217,68 @@ spec:
               access.token.claim: "true"
               id.token.claim: "true"
               userinfo.token.claim: "true"
+          {{- if and .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.spokeGatewayExchanger.subjectTokenAudienceMapper }}
+          # PHASE 2 B1 (PROPOSED): RFC 8693 exchange prerequisite (b) --
+          # the SUBJECT token (A) must already carry the exchanging client
+          # as an audience; the `audience` request parameter only ever
+          # narrows, never adds. This puts the exchanger's client ID on
+          # acme-agent's client-credentials tokens so the spoke gateway
+          # can exchange them. UNCONFIRMED GUESS: adds an audience to every
+          # Token A; verify no audience-sensitive validator (MAS, Praxis
+          # allow-list) rejects the extra audience. One-shot realm import
+          # only -- existing realms need the mapper added manually.
+          - name: praxis-spoke-exchanger-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ .Values.keycloak.spokeGatewayExchanger.clientId | quote }}
+              access.token.claim: "true"
+          {{- end }}
+      {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
+      # PHASE 2 B1 (PROPOSED): confidential client the per-spoke Praxis
+      # spoke-gateways authenticate as when exchanging Token A for a
+      # spoke-audience Token U (RFC 8693). Secret is Vault-backed via the
+      # placeholder above (spoke-gateway-exchanger-secret.yaml materializes
+      # it in both keycloak.namespace and the praxis-proxy namespace).
+      # UNCONFIRMED GUESS: the exact mapper/attribute set needed for
+      # internal->internal exchange on this Keycloak build -- standard
+      # token exchange requires standard.token.exchange.enabled on the
+      # exchanging client (attribute below); whether mappers on this
+      # client also apply to EXCHANGED tokens (vs only client-credentials
+      # tokens) depends on live Keycloak behavior. Caveats recorded in
+      # PLAN-lightspeed-hub-migration.md: the subject token must already
+      # carry this client as audience (see the acme-agent mapper above);
+      # omit client_id for SVID client-assertion flows (a SPIFFE sub never
+      # equals a Keycloak client_id); after the exchange azp becomes this
+      # client, so downstream policy must key on sub/groups and record azp
+      # as provenance only. One-shot realm import only -- existing realms
+      # need this client created manually (see chart README).
+      - clientId: {{ .Values.keycloak.spokeGatewayExchanger.clientId | quote }}
+        name: {{ .Values.keycloak.spokeGatewayExchanger.clientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        secret: $(PRAXIS_SPOKE_EXCHANGER_SECRET)
+        attributes:
+          standard.token.exchange.enabled: "true"
+        {{- with .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
+        protocolMappers:
+          {{- range $aud := . }}
+          # One per registered spoke: the audience the exchanged Token U
+          # carries for that spoke's API server. UNCONFIRMED GUESS: see the
+          # values.yaml spokeAudiences comment.
+          - name: {{ printf "%s-audience" $aud | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ $aud | quote }}
+              access.token.claim: "true"
+          {{- end }}
+        {{- end }}
+      {{- end }}
       # Confidential client registered as the web console's OIDC platform
       # client when openshiftOIDC.enabled is true.
       #

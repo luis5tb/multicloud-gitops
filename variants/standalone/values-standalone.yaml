@@ -265,6 +265,26 @@ clusterGroup:
           value: "true"
         - name: keycloak.externalOidcProviders[1].hardcodedGroups[0]
           value: acme-agent-rca
+        # PHASE 2 B1 (PROPOSED, DISABLED): Keycloak prerequisites for the
+        # per-spoke Praxis spoke-gateways' RFC 8693 A->U exchange. Keep
+        # commented out until the pending spikes pass (Praxis kube-API
+        # pass-through; oauth delegator on the pinned image) -- see
+        # PLAN-lightspeed-hub-migration.md "B1 wiring"/"Keycloak exchange
+        # prerequisites" and charts/all/praxis-proxy/README.md "Spoke
+        # gateways (B1, proposed)". Requires the Vault entry below in
+        # values-secret.yaml.template (praxis-spoke-gateway) to exist
+        # first. One-shot realm import only: on this cluster, whose realm
+        # already imported, the client and mappers must be created
+        # manually in the Admin Console (see charts/all/keycloak-oidc
+        # README).
+        # - name: keycloak.spokeGatewayExchanger.enabled
+        #   value: "true"
+        # - name: keycloak.spokeGatewayExchanger.vaultKey
+        #   value: secret/data/global/praxis-spoke-gateway
+        # One entry per registered spoke, matching each spoke gateway's
+        # exchangeAudience:
+        # - name: keycloak.spokeGatewayExchanger.spokeAudiences[0]
+        #   value: praxis-spoke-example-spoke
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
@@ -382,6 +402,48 @@ clusterGroup:
           value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: identity.oidcIssuers[1].audience
           value: api.ask_red_hat
+        # PHASE 2 B1 (PROPOSED, DISABLED): per-spoke Praxis spoke-gateways.
+        # Everything below stays commented out until the two pending spikes
+        # pass against a live deployment -- (1) whether the pinned Praxis
+        # image (ghcr.io/praxis-proxy/ai:0.4.1 / praxis-policy 0.3.1) can
+        # pass through the Kubernetes API at all (watch/exec/websocket
+        # upgrades), and (2) whether it supports the oauth delegator
+        # (RFC 8693 A->U exchange; the recipes documenting it are from PPE
+        # 0.4.x). See PLAN-lightspeed-hub-migration.md "B1 wiring" and
+        # charts/all/praxis-proxy/README.md "Spoke gateways (B1,
+        # proposed)" for the full UNCONFIRMED GUESS list. Uncomment and
+        # duplicate per registered spoke; example.test placeholders only:
+        # - name: spokeGateways.example-spoke.remoteAPIServer
+        #   value: https://api.example-spoke.example.test:6443
+        # - name: spokeGateways.example-spoke.exchangeAudience
+        #   value: praxis-spoke-example-spoke
+        # Reference an existing Secret in the praxis-proxy namespace
+        # holding the spoke API server's CA bundle (key ca.crt by
+        # default); create it from the spoke's API CA -- never commit the
+        # real CA to this repo.
+        # - name: spokeGateways.example-spoke.remoteCACert.secretName
+        #   value: praxis-spoke-example-spoke-api-ca
+        # Shared cross-spoke settings live in spokeGatewayConfig (NOT
+        # under spokeGateways, which is purely per-spoke).
+        # exchangeClient.clientId/secretName and the derived token URL
+        # default correctly (praxis-spoke-gateway / praxis-spoke-gateway-client,
+        # <keycloak-issuer>/protocol/openid-connect/token); override only
+        # to diverge.
+        # - name: spokeGatewayConfig.exchangeClient.clientId
+        #   value: praxis-spoke-gateway
+        # The sandbox namespaces allowed to reach the gateways' 8443
+        # listeners: [mao] is a PLACEHOLDER (design-doc open question Q4 --
+        # where repo C's sandboxes run is undecided); it is a
+        # mandatory-override value, not a correct default.
+        # - name: spokeGatewayConfig.networkPolicy.ingressFromNamespaces[0]
+        #   value: <repo C sandbox namespace>
+        # Serving-CA bridge: repo C's gatewayCASecret expects a Secret
+        # (key ca.crt) in ITS OPERATOR NAMESPACE -- targetNamespace MUST
+        # be set to that namespace here, and repo C's config must name the
+        # same secretName (default praxis-spoke-gateway-ca). The sync
+        # job/CronJob keeps it current across service-CA rotation.
+        # - name: spokeGatewayConfig.servingCA.targetNamespace
+        #   value: <repo C operator namespace>
     acme-agent:
       name: acme-agent
       namespace: acme-agent

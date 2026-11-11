@@ -1,0 +1,33 @@
+{{- /*
+CronJob keeping the serving-CA Secret current (B1): the OpenShift service
+CA rotates (roughly every two years, with an overlap window), and the
+inject-cabundle ConfigMap is only refreshed in place -- the Secret copy
+would otherwise go stale and sandbox kubeconfigs would stop verifying the
+gateway's serving cert. Default schedule hourly (see values.yaml).
+*/}}
+{{- if gt (len .Values.spokeGateways) 0 }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-spoke-ca-sync
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  schedule: {{ .Values.spokeGatewayConfig.servingCA.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 180
+      template:
+        metadata:
+          labels:
+            {{- include "praxis-proxy.labels" . | nindent 12 }}
+        spec:
+{{ include "praxis-proxy.spokeCaSyncPodSpec" . | nindent 10 }}
+{{- end }}

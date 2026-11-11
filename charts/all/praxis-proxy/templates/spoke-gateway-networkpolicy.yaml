@@ -1,0 +1,82 @@
+{{- $np := .Values.spokeGatewayConfig.networkPolicy }}
+{{- if and $np.enabled (gt (len .Values.spokeGateways) 0) }}
+{{- range $key, $cfg := .Values.spokeGateways }}
+{{- $name := include "praxis-proxy.spokeGatewayName" $key }}
+{{- $u := urlParse ($cfg.remoteAPIServer | toString) }}
+{{- $hostPort := $u.host | toString }}
+{{- $port := "443" }}
+{{- if contains ":" $hostPort }}
+{{- $port = index (splitList ":" $hostPort) 1 }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "praxis-proxy.labels" $ | nindent 4 }}
+    praxis-proxy.spoke-gateway: {{ $key | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "praxis-proxy.name" $ }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      praxis-proxy.spoke-gateway: {{ $key | quote }}
+  policyTypes:
+    - Ingress
+    - Egress
+  # Gate sandbox ingress at the gateway: only pods in the configured
+  # sandbox namespaces may reach this gateway's 8443 listener. Nothing
+  # else in- or outside the namespace can talk to it (no Route exists).
+  ingress:
+    - from:
+        {{- range $ns := $np.ingressFromNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $ns | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8443
+  # BEST-EFFORT only (see chart README "Spoke gateways (B1, proposed)"):
+  # plain Kubernetes NetworkPolicies cannot match on FQDNs, so the remote
+  # spoke API / Keycloak IdP+token endpoint / JWKS egress below is
+  # port-scoped rather than destination-scoped. FQDN-aware enforcement of
+  # "its registered remote API, IdP/JWKS and DNS needs" needs CNI egress
+  # facilities (EgressFirewall/EgressFirewallPolicy, an egress router)
+  # beyond ordinary NetworkPolicy hostname rules -- this is exactly what
+  # PLAN-lightspeed-hub-migration.md records for B1.
+  egress:
+    # Cluster DNS (name resolution for the remote API host, IdP and JWKS).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+          podSelector:
+            matchLabels:
+              dns.operator.openshift.io/daemonset-dns: default
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HTTPS to the fixed remote spoke API, the Keycloak token endpoint and
+    # the JWKS URL. Remote kube API servers listen on 6443 (or whatever
+    # port this spoke's remoteAPIServer URL carries -- parsed at render
+    # time, same parse as the gateway config's load_balancer endpoint),
+    # so BOTH that port and 443 (Keycloak/JWKS) must be allowed: an
+    # egress rule allowing only 443 silently blackholes the remote API
+    # leg. Destination restriction beyond the port needs CNI facilities
+    # (see above); the remote is additionally pinned by the gateway
+    # config (fixed operator-configured endpoint, verified CA/SNI) and by
+    # the exchange audience.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: {{ $port }}
+{{- end }}
+{{- end }}

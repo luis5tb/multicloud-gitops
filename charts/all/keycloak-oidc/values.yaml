@@ -179,6 +179,63 @@ keycloak:
   # mint tokens for the MAS API without reusing the inbound A2A audience.
   masApiAudience: mas-api
 
+  # PHASE 2 B1 (PROPOSED, disabled by default): confidential client +
+  # audience mappers for the per-spoke Praxis spoke-gateways' RFC 8693
+  # token exchange (charts/all/praxis-proxy's spokeGateways; see
+  # PLAN-lightspeed-hub-migration.md "B1 wiring" and "Keycloak exchange
+  # prerequisites"). The spoke gateway (PPE) authenticates as this client
+  # with its own client secret and exchanges the caller's Token A for a
+  # spoke-audience Token U before forwarding to the fixed remote API.
+  # This is proposed integration, NOT confirmed support: whether the
+  # pinned Praxis image (praxis-policy 0.3.1) supports the oauth
+  # delegator at all is UNVERIFIED (its recipes are documented for PPE
+  # 0.4.x) -- see charts/all/praxis-proxy/README.md "Spoke gateways
+  # (B1, proposed)".
+  spokeGatewayExchanger:
+    enabled: false
+    # Confidential client ID. Must match
+    # charts/all/praxis-proxy's spokeGatewayConfig.exchangeClient.clientId.
+    clientId: praxis-spoke-gateway
+    clientName: Praxis spoke-gateway token exchanger
+    # Vault path holding the client secret (property
+    # vaultProperty below), following the same Vault-backed
+    # ExternalSecret pattern as consoleClientSecretVaultKey. The secret is
+    # materialized into BOTH keycloak.namespace (for the realm import's
+    # placeholder substitution) and targetNamespace (where the spoke
+    # gateway pods read it) -- see spoke-gateway-exchanger-secret.yaml.
+    # Required when enabled.
+    vaultKey: ""
+    vaultProperty: praxis-spoke-gateway-client-secret
+    # Namespace the gateway-facing copy of the client-secret Secret lands
+    # in. Must be the praxis-proxy Application's namespace and match
+    # charts/all/praxis-proxy's
+    # spokeGatewayConfig.exchangeClient.secretName target namespace.
+    targetNamespace: praxis-proxy
+    # Name of the Secret materialized in both namespaces (keys: client-id,
+    # client-secret). Must match charts/all/praxis-proxy's
+    # spokeGatewayConfig.exchangeClient.secretName.
+    secretName: praxis-spoke-gateway-client
+    # Per-spoke Keycloak audiences for the exchanged Token U -- one entry
+    # per registered spoke, each matching the spoke gateway's
+    # exchangeAudience. Rendered as one oidc-audience-mapper per entry on
+    # the exchanger client. UNCONFIRMED GUESS: the exact mapper set needed
+    # for exchanged tokens to carry each spoke audience depends on live
+    # Keycloak behavior (whether mappers on the exchanging client apply to
+    # RFC 8693-exchanged tokens, or whether the audience must instead ride
+    # the subject token) -- validate against a live realm before relying
+    # on it.
+    spokeAudiences: []
+    #   - praxis-spoke-east
+    # Adds an audience mapper putting the exchanger's client ID on the
+    # acme-agent client's tokens (Token A). Per the plan's documented
+    # Keycloak exchange prerequisite (b), the SUBJECT token must already
+    # carry the exchanging client as an audience -- the `audience`
+    # request parameter only ever narrows, never adds. UNCONFIRMED GUESS:
+    # this changes Token A for every consumer of the acme-agent client;
+    # verify no audience-sensitive validator rejects the extra audience
+    # before enabling.
+    subjectTokenAudienceMapper: true
+
 openshiftOIDC:
   enabled: false
   providerName: keycloak

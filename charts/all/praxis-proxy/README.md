@@ -349,6 +349,147 @@ Keycloak list item onto one line, making the embedded policy invalid YAML.
 No prior test parsed the rendered `ConfigMap.data.policy.yaml`; the new chart
 test does so to keep this from recurring.
 
+## Spoke gateways (B1, proposed)
+
+`spokeGateways` renders one internal, TLS-serving Praxis gateway per
+registered spoke cluster (Phase 2 B1 of
+`PLAN-lightspeed-hub-migration.md`). The map is **empty by default** (nothing
+renders); the wiring below is a **proposed integration, not confirmed
+support**. It exists so the repo-A deployment side of B1 can be reviewed and
+spiked before anything is enabled.
+
+What each entry creates (all named `praxis-spoke-<cluster>`, same pinned
+image as the main gateway, in this chart's namespace):
+
+- a **Deployment** running the pinned Praxis image with a per-spoke config:
+  listener serving TLS on 8443, a route matching all paths forwarding to the
+  FIXED `remoteAPIServer` over new HTTPS (remote CA + SNI verified), and an
+  oauth delegator exchanging the inbound Token A for a `exchangeAudience`
+  Token U using PPE's own confidential client identity before forwarding
+  (internal credential/routing headers stripped on forward);
+- an **internal-only Service** on 8443 with an OpenShift service-serving
+  certificate (`service.beta.openshift.io/serving-cert-secret-name`). The URL
+  matches repo C's generated sandbox-kubeconfig convention:
+  `https://praxis-spoke-<cluster>.praxis-proxy.svc.cluster.local:8443`.
+  **No Route is ever rendered** for a spoke gateway (the plan forbids public
+  gateway Routes; the chart's public Route targets only the main Service);
+- a `praxis-spoke-service-ca` ConfigMap (`service.beta.openshift.io/
+  inject-cabundle: "true"`) carrying the service-serving CA bundle the
+  sandbox must trust for the gateway's serving cert, **plus a
+  ConfigMap→Secret sync bridge** (one-shot bootstrap Job + CronJob + RBAC +
+  stdlib-only Python script, `spoke-ca-sync-*.yaml`) copying that bundle
+  into the Secret repo C's `gatewayCASecret` names — see UNCONFIRMED
+  GUESS #6 below;
+- a per-spoke **NetworkPolicy** (best-effort; see below).
+
+The remote spoke API CA is mounted from the referenced
+`remoteCACert.secretName`/`configMapName` + `key`; a dangling reference
+leaves the pod unschedulable (fail closed). PPE's exchanger client identity
+(`spokeGatewayConfig.exchangeClient`) and its Keycloak prerequisites live in
+`charts/all/keycloak-oidc` (`keycloak.spokeGatewayExchanger`) — the
+Vault-backed secret is materialized into this namespace by that chart's
+`spoke-gateway-exchanger-secret.yaml`.
+
+The `spokeGateways` map is **purely per-spoke** (literally `{}` by default):
+shared cross-spoke settings (`exchangeClient`, `networkPolicy`, `servingCA`)
+live in the separate top-level `spokeGatewayConfig` block, so a spoke
+literally named `exchangeClient` or `networkPolicy` renders — or fails
+validation, e.g. the DNS-label check rejects the uppercase `P` — as a spoke;
+nothing is silently dropped as a "reserved" sibling key.
+
+Per the plan, B1 changes only the sandbox execution path; it never rewrites
+`SpokeCluster.spec.apiServer` or any standing management kubeconfig.
+
+### UNCONFIRMED GUESSes (validate live before enabling)
+
+The pinned image is `ghcr.io/praxis-proxy/ai:0.4.1`, whose `Cargo.lock`
+resolves `praxis-policy` (PPE) to **0.3.1**; the delegation recipes
+documenting the oauth delegator are from **PPE 0.4.x**. Nothing below has
+been validated against the pinned image:
+
+1. **Oauth delegator (the central gate).** Whether the pinned image ships an
+   oauth delegator filter at all, and its exact config schema
+   (`token_url`/`client_id`/`client_secret.env`/`audience`/
+   `replace_authorization`/`strip_headers` are proposed field names, not
+   deployable Praxis syntax). If absent, the fallback is the adapter-side
+   exchange (Phase 2 option A) and the delegator filter must be removed.
+2. **Kube-API pass-through.** Whether the pinned Praxis can proxy the
+   Kubernetes API at all: arbitrary paths, list/watch streaming, exec and
+   websocket upgrades. The router is built for tool/A2A calls; this is the
+   pending kube-API-proxy spike. If it fails, B1 is off and option A stands.
+3. **TLS-serving listener.** Whether `listeners[].tls.{cert_path,key_path}`
+   is the right schema for a TLS-terminating listener on this image
+   (the main gateway is plain HTTP behind an edge-terminating Route, so this
+   chart has no previously-validated serving-TLS syntax). Fallback: front
+   the plain listener with a TLS-terminating sidecar serving the same
+   service-serving Secret.
+4. **Header stripping.** Whether the proposed `strip_headers` form exists;
+   the exact field for removing internal credential/routing metadata
+   (`X-OLS-Cluster`, `X-Forwarded-*`, `Forwarded`) on forward must be
+   confirmed.
+5. **Keycloak mapper set.** Whether mappers on the *exchanging* client apply
+   to RFC 8693-exchanged tokens (vs only client-credentials tokens), and
+   whether the subject-token audience mapper on the acme-agent client is
+   accepted by every audience-sensitive validator of Token A. See
+   `charts/all/keycloak-oidc`'s `keycloak.spokeGatewayExchanger` comments
+   for the plan-recorded caveats: `standard.token.exchange.enabled` on the
+   exchanging client; the subject token must already carry the exchanger as
+   audience (the `audience` request parameter only narrows, never adds);
+   omit `client_id` for SVID client-assertion flows; after the exchange
+   `azp` becomes the exchanger, so policy must key on `sub`/groups and
+   record `azp` as provenance only.
+6. **Service-CA bundle delivery (bridge shipped; mechanism validated by
+   contract reading, not live).** The `inject-cabundle` ConfigMap
+   (`praxis-spoke-service-ca`, key `service-ca.crt`) is the standard
+   in-namespace source for the service-serving CA bundle — but repo C
+   (lightspeed-agentic-operator, `a2a-support`) requires a **Secret with
+   key `ca.crt`** for its `gatewayCASecret`
+   (`controller/agenticrun/gateway.go` mounts it as the sandbox
+   kubeconfig's certificate-authority; `pkg/configuration/config.go`
+   fails closed without the name). The chart therefore ships a
+   ConfigMap→Secret sync bridge (`spoke-ca-sync-*.yaml`, mirroring the
+   repo's historical keycloak-ca-sync pattern and this chart's own
+   `policy.caBundleSync`): a one-shot bootstrap Job copies the bundle
+   into the Secret named by `spokeGatewayConfig.servingCA.secretName`
+   (default `praxis-spoke-gateway-ca`, key `ca.crt`), and a CronJob
+   (default hourly) keeps it current — the OpenShift service CA
+   **rotates** (roughly every two years, with an overlap window) and the
+   Secret copy would otherwise go stale, making sandbox kubeconfigs
+   reject the gateway's serving cert after rotation. The Secret is
+   created by the job, deliberately NOT rendered as a chart manifest
+   (Argo would otherwise fight the job's writes). Repo C consumes the
+   Secret from its **operator namespace**, so in the standalone variant
+   `spokeGatewayConfig.servingCA.targetNamespace` MUST be set to that
+   namespace (default is this chart's namespace; the sync job's RBAC is
+   rendered there accordingly). Still unvalidated end-to-end: the exact
+   `service-ca.crt` key contents and repo C's mount against a live
+   sandbox kubeconfig. Fallback: the kubeconfig can instead point at the
+   pod's projected serving-cert Secret CA if repo C prefers.
+7. **Empty-router acceptance.** The per-spoke config keeps the same
+   structure as the main gateway but with a non-empty routes list, so the
+   main gateway's own empty-routes caveat (see above) does not apply here —
+   but the *combined* filter chain (policy + oauth-delegator +
+   static_response + router + load_balancer) has never been loaded by the
+   pinned binary.
+
+### NetworkPolicy limits
+
+The per-spoke NetworkPolicy restricts ingress to the configured sandbox
+namespaces (`spokeGatewayConfig.networkPolicy.ingressFromNamespaces`; the
+`mao` default is a PLACEHOLDER tied to design-doc open question Q4 — where
+repo C's sandboxes run is undecided, so it is a mandatory-override value,
+not a correct default) on 8443, and egress to cluster DNS plus TCP 443
+(Keycloak/JWKS) plus the spoke's own **remote API port, parsed at render
+time from `remoteAPIServer`** (typically 6443 — remote kube API servers do
+not listen on 443, so an egress rule allowing only 443 silently
+blackholes the remote API leg). **Plain Kubernetes NetworkPolicies cannot
+match on FQDNs**, so that egress is port-scoped
+only: FQDN-aware enforcement of "its registered remote API, IdP/JWKS and DNS
+needs" needs CNI egress facilities (EgressFirewall/EgressFirewallPolicy, an
+egress router) beyond ordinary NetworkPolicy hostname rules — this is
+exactly what the plan records for B1. The remote is additionally pinned by
+the gateway's fixed operator-configured endpoint and verified CA/SNI.
+
 ## Upstream maturity and pinning
 
 This Pattern currently pins the `0.4.1` upstream release by its image digest

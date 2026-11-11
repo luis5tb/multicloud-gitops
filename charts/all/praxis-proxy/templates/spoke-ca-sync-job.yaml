@@ -1,0 +1,27 @@
+{{- /*
+One-shot bootstrap for the serving-CA sync bridge (B1): copies the
+inject-cabundle service-CA into repo C's gatewayCASecret Secret before
+sandbox pods need it. The Secret itself is NOT rendered by the chart (the
+job creates it; Argo never fights the job's writes).
+*/}}
+{{- if gt (len .Values.spokeGateways) 0 }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "praxis-proxy.fullname" . }}-spoke-ca-bootstrap
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        {{- include "praxis-proxy.labels" . | nindent 8 }}
+    spec:
+{{ include "praxis-proxy.spokeCaSyncPodSpec" . | nindent 6 }}
+{{- end }}

@@ -227,6 +227,160 @@ dnsIPv4Only:
       cpu: 100m
       memory: 128Mi
 
+# PHASE 2 B1 (PROPOSED, not confirmed support): per-spoke Praxis
+# spoke-gateways -- internal, TLS-serving proxy endpoints that forward the
+# sandbox kube-API path to one FIXED registered remote cluster API each,
+# exchanging the inbound caller token (A) for a spoke-audience token (U)
+# with PPE's own confidential Keycloak client identity before forwarding.
+# See PLAN-lightspeed-hub-migration.md "B1 wiring" and
+# "PPE behavior and the two TLS legs", and the chart README section
+# "Spoke gateways (B1, proposed)".
+#
+# DISABLED BY DEFAULT (empty map renders nothing). This is a proposed
+# integration, not confirmed support in the pinned image
+# (ghcr.io/praxis-proxy/ai:0.4.1, whose Cargo.lock resolves praxis-policy
+# to 0.3.1): whether that pinned image supports the oauth delegator
+# (RFC 8693 token exchange) and kube-API pass-through (watch/exec/websocket
+# upgrades) is UNVERIFIED -- the delegation recipes documenting the oauth
+# delegator are from PPE 0.4.x. Do not enable until the two pending spikes
+# (Praxis kube-API-proxy pass-through; oauth delegator on the pinned image)
+# pass against a live deployment. Every UNCONFIRMED GUESS is listed in the
+# chart README.
+#
+# Map keyed by target-cluster name (a DNS label: lowercase alphanumerics
+# and '-'; it is embedded in resource names and in the Service DNS name
+# repo C's generated sandbox kubeconfig points at, e.g.
+# https://praxis-spoke-<name>.praxis-proxy.svc.cluster.local:8443 --
+# keep it in sync with repo C's config template). The map is PURELY
+# per-spoke: shared cross-spoke settings live in spokeGatewayConfig
+# below, so a spoke literally named "exchangeClient" or "networkPolicy"
+# renders (or fails validation) as a spoke -- it is never silently
+# dropped as a reserved key. Each entry:
+#
+#   remoteAPIServer  (required) https URL of the remote cluster's API
+#                    server, e.g. https://api.<spoke-domain>:6443. The
+#                    gateway dials this FIXED host over new HTTPS,
+#                    verifying the remote CA and SNI. Never caller input.
+#                    The URL's port (parsed at render time) is also what
+#                    the per-spoke egress NetworkPolicy allows, alongside
+#                    TCP 443 (Keycloak/JWKS) and cluster DNS.
+#   exchangeAudience (required) per-spoke Keycloak audience minted onto the
+#                    exchanged token U (must have a matching audience
+#                    mapper in charts/all/keycloak-oidc's
+#                    keycloak.spokeGatewayExchanger.spokeAudiences).
+#   remoteCACert     (required) reference to an existing Secret or
+#                    ConfigMap in THIS namespace holding the spoke API
+#                    server's CA bundle -- the pattern the chart used for
+#                    its (since-removed) upstream CA: a plain Secret or
+#                    ConfigMap referenced by name and key, which must
+#                    already exist (the Deployment fails closed if the
+#                    reference is dangling). The in-cluster
+#                    inject-cabundle annotation CANNOT be used here: it
+#                    only trusts Services in this same cluster, not a
+#                    remote spoke's API CA (see historical
+#                    upstream-ca-configmap.yaml, removed with Task A).
+#                      secretName: name of an existing Secret
+#                      configMapName: name of an existing ConfigMap
+#                      key: key inside it holding the CA bundle
+#                           (default ca.crt)
+#                    Exactly one of secretName/configMapName is required.
+#   replicas         (optional, default 1) per-spoke gateway replicas.
+spokeGateways: {}
+  #  example-spoke:
+  #    remoteAPIServer: "https://api.example-spoke.example.test:6443"
+  #    exchangeAudience: "praxis-spoke-example-spoke"
+  #    remoteCACert:
+  #      secretName: praxis-spoke-example-spoke-api-ca
+  #      key: ca.crt
+  #    replicas: 1
+
+# Shared spoke-gateway settings (apply to every entry in spokeGateways;
+# kept OUT of that map so it stays purely per-spoke). Nothing here
+# renders while spokeGateways is empty.
+spokeGatewayConfig:
+  # PPE's own exchanger client identity, shared by every spoke gateway
+  # (the exchange is performed by the gateway, not the sandbox). The
+  # client and its Vault-backed secret are created by
+  # charts/all/keycloak-oidc (keycloak.spokeGatewayExchanger) -- the
+  # ExternalSecret lands in this namespace as this Secret name.
+  exchangeClient:
+    # Client ID of the confidential Keycloak client the gateway
+    # authenticates as when exchanging A for U.
+    clientId: praxis-spoke-gateway
+    # Secret (in this namespace) holding the exchanger's client secret
+    # under secretKey. Created by charts/all/keycloak-oidc's
+    # spoke-gateway-exchanger-secret.yaml when
+    # keycloak.spokeGatewayExchanger.enabled is true.
+    secretName: praxis-spoke-gateway-client
+    secretKey: client-secret
+    # Keycloak token endpoint used for the exchange. Empty derives
+    # <issuer>/protocol/openid-connect/token from
+    # identity.keycloak.issuerUrl (i.e. from global.clusterBaseDomain);
+    # override only to diverge.
+    tokenUrl: ""
+  # Best-effort NetworkPolicy hardening per gateway pod (rendered once per
+  # spoke-gateway entry). Plain Kubernetes NetworkPolicies cannot match on
+  # FQDNs: the remote API / IdP / JWKS egress rule below is port-scoped
+  # only (TCP 443 plus the spoke's own parsed remote API port, to
+  # anywhere), and real FQDN-aware enforcement needs CNI egress
+  # facilities (EgressFirewall/FirewallPolicy, egress routers) --
+  # exactly what PLAN-lightspeed-hub-migration.md records. Egress to the
+  # cluster DNS (openshift-dns) is allowed for name resolution.
+  networkPolicy:
+    enabled: true
+    # Namespaces allowed to reach the gateway's 8443 listener (the
+    # sandbox pods repo C creates). The [mao] default is a PLACEHOLDER
+    # tied to design-doc open question Q4 (where repo C's sandboxes run
+    # is undecided -- repo C currently runs them in its operator
+    # namespace): it is a mandatory-override value, not a correct
+    # default. Set it to repo C's actual sandbox namespace(s) in
+    # variants/standalone/values-standalone.yaml before enabling.
+    ingressFromNamespaces:
+      - mao
+  # Serving-CA delivery bridge to repo C (lightspeed-agentic-operator,
+  # a2a-support): repo C's `gatewayCASecret` expects a SECRET with key
+  # `ca.crt` (controller/agenticrun/gateway.go mounts it as the
+  # kubeconfig's certificate-authority), but OpenShift's
+  # service-ca-operator only injects the serving-CA bundle into a
+  # CONFIGMAP key (`service-ca.crt`). This bridge mirrors the repo's
+  # historical CA-sync shape (one-shot bootstrap Job + CronJob + RBAC +
+  # stdlib-only Python script) copying the praxis-spoke-service-ca
+  # ConfigMap bundle into the Secret named below. The Secret is created
+  # and rotated by the sync job (NOT rendered as a manifest, so Argo
+  # never fights the job's writes). The OpenShift service CA ROTATES
+  # (roughly every two years, with overlap); the CronJob keeps the
+  # Secret current so repo C sandboxes keep verifying the gateway's
+  # serving cert across rotation.
+  servingCA:
+    # Target Secret name. Must equal repo C's `gateway-ca-secret`
+    # configuration value (what values-standalone passes to repo C).
+    secretName: praxis-spoke-gateway-ca
+    # Key inside the target Secret (repo C's contract: ca.crt).
+    secretKey: ca.crt
+    # Namespace the sync job writes the Secret into. Empty (default)
+    # writes into this chart's namespace. NOTE: repo C consumes the
+    # Secret from the OPERATOR namespace where its controller runs --
+    # in the standalone variant this MUST be set to repo C's operator
+    # namespace (the sync job's RBAC is rendered there accordingly).
+    targetNamespace: ""
+    # Source ConfigMap (in this chart's namespace) carrying the
+    # inject-cabundle serving-CA bundle.
+    sourceConfigMap: praxis-spoke-service-ca
+    sourceKey: service-ca.crt
+    # How often the CronJob re-syncs the bundle (service-CA rotation
+    # and re-injection are not instantaneous; hourly is cheap and keeps
+    # the Secret well within the rotation overlap window).
+    schedule: "0 * * * *"
+    # Image for the sync Job (Python stdlib only -- no extra deps).
+    image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
 # Static agent card served by Praxis at the A2A discovery paths. The card is
 # generic by design: this gateway currently fronts no investigation backend
 # (see the global comment above), so it only advertises itself. rpcUrl is

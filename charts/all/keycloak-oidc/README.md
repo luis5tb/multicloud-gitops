@@ -500,6 +500,7 @@ Keycloak operator does not continuously reconcile edits made after import.
 
 ### Console shows an invalid redirect URI after enabling OIDC
 
+
 On a live cluster, the console route and Keycloak issuer both returned HTTP
 200, the operators reported Available, and `KeycloakRealmImport/rca` reported
 Done. Yet browser login failed: Keycloak logged `LOGIN_ERROR` with
@@ -523,3 +524,37 @@ the same thing by hand in the Keycloak Admin Console: Clients →
 `openshift-console` → Settings → Valid redirect URIs, add the exact
 `https://<console-route>/auth/callback` value and save. Then retry console
 login; if it still fails, check Keycloak events for a different error.
+
+## Spoke-gateway token exchanger (B1, proposed)
+
+`keycloak.spokeGatewayExchanger` (disabled by default) renders the Keycloak
+prerequisites for the per-spoke Praxis spoke-gateways' RFC 8693 token
+exchange (`charts/all/praxis-proxy`'s `spokeGateways`; see
+`PLAN-lightspeed-hub-migration.md` "B1 wiring" and the praxis-proxy chart
+README's UNCONFIRMED GUESS list). When enabled it adds to the realm import:
+
+- a confidential client (`praxis-spoke-gateway` by default) with
+  `standard.token.exchange.enabled: "true"` and a Vault-backed secret
+  (`vaultKey`), materialized into both `keycloak.namespace` (realm-import
+  placeholder) and `targetNamespace` (`praxis-proxy`, where the gateway
+  pods read it) via `spoke-gateway-exchanger-secret.yaml`;
+- one audience mapper per `spokeAudiences` entry on that client (the
+  per-spoke audiences for exchanged Token U);
+- optionally (`subjectTokenAudienceMapper`, default true) an audience mapper
+  on the **acme-agent** client putting the exchanger's client ID on Token A
+  -- per the plan's documented exchange prerequisite, the subject token must
+  already carry the exchanging client as an audience; the `audience`
+  request parameter only ever narrows, never adds.
+
+Caveats recorded from the plan: omit `client_id` for SVID
+client-assertion flows (a SPIFFE `sub` never equals a Keycloak `client_id`);
+after an exchange `sub` is preserved but **`azp` becomes the exchanger**, so
+hub/spoke policy must key on `sub`/groups and record `azp` as provenance
+only. Whether mappers on the exchanging client apply to *exchanged* tokens
+is an UNCONFIRMED GUESS -- validate against a live realm.
+
+**One-shot realm import.** Like everything in `keycloak-realm-import.yaml`,
+these changes only apply when the realm is first created. On the standalone
+cluster, whose realm already imported, the client, secret, and mappers must
+be created manually in the Admin Console (or the realm re-imported) when B1
+is enabled; the realm-secrets-reconciler does not re-assert them.
