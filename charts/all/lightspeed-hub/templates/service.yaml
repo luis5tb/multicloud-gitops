@@ -9,6 +9,15 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "lightspeed-hub.fullname" . }}
+  {{- if .Values.adapter.tls.enabled }}
+  annotations:
+    # OpenShift's service-ca operator mints and rotates the adapter's TLS
+    # serving cert (tls.crt/tls.key) into this Secret; the Deployment
+    # mounts it for --tls-cert-file/--tls-key-file. Required because
+    # praxis-proxy's a2aUpstream hop connects over TLS and verifies the
+    # service-serving CA. UNCONFIRMED (live cluster): actual issuance.
+    service.beta.openshift.io/serving-cert-secret-name: {{ include "lightspeed-hub.servingCertSecretName" . }}
+  {{- end }}
   labels:
     {{- include "lightspeed-hub.labels" . | nindent 4 }}
 spec:
@@ -17,9 +26,9 @@ spec:
   # one; see the chart README ("Why no Route").
   type: {{ .Values.service.type }}
   ports:
-    - name: http
+    - name: {{ include "lightspeed-hub.portName" . }}
       port: {{ .Values.service.port }}
-      targetPort: http
+      targetPort: {{ include "lightspeed-hub.portName" . }}
       protocol: TCP
   selector:
     {{- include "lightspeed-hub.selectorLabels" . | nindent 4 }}

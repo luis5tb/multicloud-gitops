@@ -12,7 +12,7 @@ rules:
   # Run-token Secret writer + terminal-run cleanup (design doc §5.2/§5.5).
   # create/get/update for the write/renew path, DELETE for the §5.5
   # terminal-run Secret cleanup and the run-deletion cleanup (M3, now
-  # implemented: hub-adapter internal/server/watch.go Sweep/RunDeleted).
+  # implemented: a2a-adapter internal/server/watch.go Sweep/RunDeleted).
   # Namespace isolation is the real boundary (no wildcard resourceNames
   # prefix exists for ls-run-token-*): no other Secrets should live in the
   # run namespace.
@@ -23,7 +23,7 @@ rules:
   # reconciled against the M3 implementation: get/list/watch for reads and
   # informers, plus UPDATE for exactly one write -- persisting the §6.4
   # pause counter as the a2a.lightspeed.io/credential-pauses annotation
-  # (hub-adapter internal/server/watch.go persistPauseCount). The adapter
+  # (a2a-adapter internal/server/watch.go persistPauseCount). The adapter
   # NEVER writes agenticruns/status or conditions (design §6.1) -- the
   # status subresource grant was dropped accordingly.
   - apiGroups: ["agentic.openshift.io"]

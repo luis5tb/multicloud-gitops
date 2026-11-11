@@ -558,3 +558,61 @@ these changes only apply when the realm is first created. On the standalone
 cluster, whose realm already imported, the client, secret, and mappers must
 be created manually in the Admin Console (or the realm re-imported) when B1
 is enabled; the realm-secrets-reconciler does not re-assert them.
+
+## Hub A2A adapter token exchanger (Task B / Phase 1, disabled)
+
+`keycloak.hubExchange` (disabled by default) renders the H-side Keycloak
+prerequisites for the hub A2A adapter's A→H token exchange
+(`charts/all/lightspeed-hub`'s `adapter.keycloak.clientId`; see
+`PLAN-lightspeed-hub-migration.md` Phase 1 "First exchange" and
+`docs/lightspeed-hub-plan.html` s3). On this leg the **adapter** performs
+the exchange — Praxis validates Token A and routes only (see
+charts/all/praxis-proxy's `a2aUpstream.exchangeAtPraxis` for why the
+Praxis-side exchange is unsupported). When enabled it adds to the realm
+import:
+
+- a confidential client (`lightspeed-hub-adapter` by default, must equal
+  the lightspeed-hub chart's `adapter.keycloak.clientId`) with
+  `standard.token.exchange.enabled: "true"` and a Vault-backed secret
+  (`vaultKey`), materialized into both `keycloak.namespace` (realm-import
+  placeholder) and `targetNamespace` (`lightspeed-hub`, where the adapter
+  reads it as `adapter.keycloak.clientSecretSecret.name`) via
+  `hub-exchange-secret.yaml`;
+- an audience mapper putting `hubAudience` (must equal the lightspeed-hub
+  chart's `adapter.hubAudience`) on the exchanged Token H;
+- group-membership protocol mappers (`groupMappers`, default true) so
+  **exchanged** tokens (H) carry the principal's Keycloak groups while
+  minted Token A stays groupless — the plan's Phase 1 contract ("separate
+  mint/exchange client scopes and group mappers so initial A omits groups
+  while H/U include them"). Note the existing `groups` mapper on the
+  acme-agent client predates that contract; today's live Token A still
+  carries `acme-agent-rca`. Reaching the plan's groupless-A target means
+  moving that mapper off the mint path too — deliberately NOT done here
+  (it would change every live consumer of Token A) and marked as part of
+  the same live-realm spike;
+- optionally (`subjectTokenAudienceMapper`, default true) an audience
+  mapper on the **acme-agent** client putting the exchanger's client ID on
+  Token A (RFC 8693 prerequisite (b): the subject token must already carry
+  the exchanging client as an audience).
+
+**Audience distinctness is fail-guarded:** `hubAudience` must be distinct
+from `openshift`, `masA2aAudience`, `masApiAudience`, the exchanger's own
+client ID, and every `spokeGatewayExchanger.spokeAudiences` entry — a
+collision would make a token minted for one consumer silently valid for
+another.
+
+**UNCONFIRMED GUESS (plan spike item #5):** whether mappers on the
+exchanger client apply to RFC 8693-*exchanged* tokens on this Keycloak
+build must be validated against a live realm before relying on H carrying
+the hub audience and groups. **Claim-map note:** if a Praxis policy ever
+inspects H's groups, PPE's `keycloak` claim_mapper preset maps *realm
+roles*, not groups — an explicit claim_map entry would be needed; nothing
+on this leg reads H's groups at Praxis (the hub API's OIDC group mapping
+does).
+
+**One-shot realm import.** Like everything in
+`keycloak-realm-import.yaml`, these changes only apply when the realm is
+first created. On the standalone cluster, whose realm already imported,
+the client, secret, and mappers must be created manually in the Admin
+Console when this is enabled; the realm-secrets-reconciler does not
+re-assert them.

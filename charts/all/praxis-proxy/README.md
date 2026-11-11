@@ -538,6 +538,90 @@ egress router) beyond ordinary NetworkPolicy hostname rules — this is
 exactly what the plan records for B1. The remote is additionally pinned by
 the gateway's fixed operator-configured endpoint and verified CA/SNI.
 
+## A2A upstream (Task B request leg)
+
+`a2aUpstream` (disabled by default; **empty by default renders nothing and
+the default render is byte-identical to the pre-block one** — pinned by
+`tests/chart/test_praxis_a2a_upstream.py`) is the front-door hop of the
+lightspeed-hub request leg (leg 2; `docs/lightspeed-hub-plan.html` s3
+"Praxis stays the front door"): the main gateway forwards A2A traffic to
+the hub A2A adapter (charts/all/lightspeed-hub) instead of answering 404.
+
+**Design decision (settled for this leg):** Praxis VALIDATES Token A
+(the existing JWT + `claim.azp` allow-list policy, unchanged) and ROUTES;
+the **ADAPTER performs the A→H exchange** with its M1 exchanger. The
+Praxis-side exchange is documented as `a2aUpstream.exchangeAtPraxis` but
+**fails the render loudly** when set to true: front-door delegation
+replaces the outbound Authorization header with H, hiding Token A from
+the adapter — which needs A for the run leg (the A→U spoke exchange), and
+the pinned image (ai:0.4.1 / praxis-policy 0.3.1) has no protected-A
+handoff mechanism (PPE's assertions can only project validated identity
+slots, never the raw bearer, onto a header). See
+`PLAN-lightspeed-hub-migration.md` "Protected A handoff is required, not
+deferred". Fail-loudly-honest was chosen over rendering the spoke-gateway
+delegator pattern half-wired: a delegator that silently destroys the run
+leg's subject token is worse than no delegator.
+
+When enabled, `files/praxis.yaml` gains (inside one `{{- if }}` — the
+disabled render keeps the historical no-router bytes):
+
+- **Router caller×target rules, not APL** — APL `http:` route selectors
+  accept path/path_prefix/method only (documented in `files/policy.yaml`),
+  so the target header is validated by the router: one route per
+  **registered spoke** (`spokeGateways` map keys — the allow-list IS the
+  spoke map; a caller may only target spokes that have gateways). A
+  missing or unregistered target header matches no route → Core answers
+  404 (the behavior verified live during the pre-Task-A routing era; see
+  "Header routing" history above). Enabling `a2aUpstream` with an empty
+  `spokeGateways` map **fails the render loudly** — a front door with an
+  empty allow-list would route nothing while looking configured.
+  `a2aUpstream.enabled` with `policy.enabled=false` also fails the
+  render: the leg's design is "Praxis stays the front door".
+- **One fixed upstream cluster** `hub-adapter` — the adapter's
+  internal-only Service (`a2aUpstream.service/namespace/port`, default
+  the lightspeed-hub chart's Service), reached over HTTPS with
+  service-CA verification (the chart renders an inject-cabundle
+  ConfigMap, `praxis-hub-adapter-ca`, and mounts it — same mechanism as
+  the spoke gateways). The target header is deliberately NOT stripped:
+  the adapter resolves `spec.targetCluster` from it after the router has
+  validated it.
+
+### VERIFIED-UNFIXABLE on the pinned image: multi-valued target headers
+
+The plan (adapter-scope item 5) requires rejecting
+duplicate/multi-valued target headers because the router OR-matches
+repeated values. **No built-in filter on the pinned image can do this**,
+source-confirmed 2026-11 against Core v0.7.0 (the exact Core embedded in
+ai:0.4.1):
+
+- router `headers_match` (crates/filter/.../router/matching.rs):
+  `get_all(key).any(|v| v == val)` — OR across a repeated header's
+  values;
+- guardrails `scan_header_values`:
+  `get_all(...).find_map(...)` — same OR shape;
+- the `headers` filter has add/set/remove only, no reject form.
+
+So a request smuggling two target headers, one registered and one not,
+still matches the registered route. Compensating controls (both REQUIRED
+before enabling): the **adapter** must reject duplicate/multi-valued
+target headers (it sees the raw header lines and can count them), and the
+server-side admission policy + run-creators RBAC
+(charts/all/lightspeed-hub) bound what a smuggled request can achieve.
+Re-check this gap when the image is next bumped.
+
+### Open items before enabling
+
+1. **Adapter TLS serving (UNCONFIRMED GUESS):** the upstream cluster
+   verifies TLS with the service CA on port 8443, but the adapter
+   currently binds plain HTTP (`--listen`, design §1) and no TLS-serving
+   flags are confirmed in the hub-adapter build. Wire/confirm the adapter
+   side first (see the lightspeed-hub README's cross-chart contract).
+2. The multi-valued-header compensating controls above (adapter-side
+   rejection + admission policy configured).
+3. The lightspeed-hub chart itself is still a disabled M4 skeleton
+   (placeholder images) — enabling this leg front-doors a backend that
+   does not run yet.
+
 ## Upstream maturity and pinning
 
 This Pattern currently pins the `0.4.1` upstream release by its image digest

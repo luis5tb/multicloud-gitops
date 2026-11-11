@@ -123,6 +123,13 @@ spec:
               mountPath: /etc/praxis/ca-bundle
               readOnly: true
             {{- end }}
+            {{- if .Values.a2aUpstream.enabled }}
+            # Hub-adapter upstream service-CA bundle (Task B request leg):
+            # what the hub-adapter cluster's tls.ca.ca_path points at.
+            - name: hub-adapter-ca
+              mountPath: /etc/praxis/hub-adapter-ca
+              readOnly: true
+            {{- end }}
         {{- if .Values.dnsIPv4Only.enabled }}
         - name: dns-ipv4only
           image: {{ required "praxis-proxy: dnsIPv4Only.image is required when dnsIPv4Only.enabled" .Values.dnsIPv4Only.image | quote }}
@@ -169,4 +176,12 @@ spec:
             items:
               - key: {{ .Values.policy.caBundleConfigMap.key }}
                 path: ca-bundle.crt
+        {{- end }}
+        {{- if .Values.a2aUpstream.enabled }}
+        - name: hub-adapter-ca
+          configMap:
+            name: praxis-hub-adapter-ca
+            items:
+              - key: service-ca.crt
+                path: service-ca.crt
         {{- end }}

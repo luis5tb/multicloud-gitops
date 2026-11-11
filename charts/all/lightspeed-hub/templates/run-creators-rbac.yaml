@@ -1,0 +1,57 @@
+{{- if .Values.enabled }}
+{{- if .Values.adapter.hubRunCreatorsGroup }}
+{{- $runNamespace := include "lightspeed-hub.runNamespace" . }}
+# "Only the configured group can create AgenticRuns" -- the RBAC half of
+# the Phase 1 run-creation gate (PLAN-lightspeed-hub-migration.md Phase 1
+# RBAC goal). The adapter presents the EXCHANGED Token H to the hub kube
+# API when POSTing agenticruns; Kubernetes authenticates H's mapped
+# principal and groups, and THIS RoleBinding is what lets a member of the
+# configured group create runs at all. Everyone else -- including holders
+# of otherwise-valid H tokens -- is denied at the API server, server-side
+# of (and independent from) the Praxis caller x target rules.
+#
+# Scope note: this gates run CREATION itself; the admission policy
+# (admission-policy.yaml) additionally restricts WHICH targetCluster a
+# given principal may set on the runs it can create. Both are required:
+# kube create-permission alone does not restrict spec.targetCluster, and
+# direct kube callers bypass Praxis entirely (design doc section 4.3).
+#
+# The subject is the Kubernetes GROUP NAME as the hub API maps it from
+# H's groups claim -- with the default OpenShift OIDC group mapping
+# (openshiftOIDC.groupsPrefix "keycloak:" in charts/all/keycloak-oidc)
+# that is "keycloak:<Keycloak group>", e.g. keycloak:acme-agent-rca for
+# the group keycloak-oidc's hubExchange group mappers put on H.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-run-creators
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+rules:
+  # CREATE only, by design: creation is the gated act. Reads/writes of
+  # runs belong to the adapter SA (run-token-writer-rbac.yaml) and the
+  # controller; approval decisions are patched as the caller via separate
+  # hub-side wiring. Do not widen this without revisiting the Phase 1
+  # "only the configured group can create runs" goal.
+  - apiGroups: ["agentic.openshift.io"]
+    resources: ["agenticruns"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-run-creators
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+subjects:
+  - kind: Group
+    name: {{ .Values.adapter.hubRunCreatorsGroup | quote }}
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "lightspeed-hub.fullname" . }}-run-creators
+{{- end }}
+{{- end }}

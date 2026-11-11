@@ -16,6 +16,10 @@ shape before it ever reaches that template.
 {{- if and .Values.policy.enabled (not .Values.identity.oidcIssuers) (not .Values.identity.keycloak.audience) }}
 {{- fail "identity.keycloak.audience must be set when policy.enabled is true and identity.oidcIssuers is empty (single-issuer mode): name the audience this gateway's callers' Keycloak tokens carry" }}
 {{- end }}
+{{- /* a2aUpstream (Task B request leg) render-time validation: target
+      allow-list = spokeGateways keys, exchangeAtPraxis unsupported, header
+      name shape, policy must stay on. See _helpers.tpl. */}}
+{{- include "praxis-proxy.a2aUpstreamValidation" . }}
 {{- if and .Values.policy.enabled .Values.identity.oidcIssuers (not .Values.identity.keycloak.audience) }}
 {{- fail "identity.keycloak.audience must be set when policy.enabled is true and identity.oidcIssuers is non-empty (multi-issuer mode): the chart appends the local Keycloak issuer to the trusted issuers and that entry would carry an empty audience" }}
 {{- end }}

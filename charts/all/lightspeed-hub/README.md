@@ -18,11 +18,12 @@ each one is a slot the M1-M3 outputs must fill before activation.
 
 | Template | What it is |
 | --- | --- |
-| `deployment.yaml` | Adapter Deployment (placeholder image; REAL adapter flags — `hub-adapter/internal/config/config.go` is the source of truth) |
+| `deployment.yaml` | Adapter Deployment (placeholder image; REAL adapter flags — the adapter's `internal/config/config.go` in the lightspeed-hub repo, branch `a2a`, nested module `a2a-adapter/`, is the source of truth) |
 | `service.yaml` | Internal-only ClusterIP Service — **no Route, ever** |
 | `serviceaccount.yaml` | Dedicated adapter ServiceAccount |
 | `networkpolicy.yaml` | Ingress admitting only the praxis-proxy namespace |
 | `run-token-writer-rbac.yaml` | Role/RoleBinding for the `ls-run-token-*` Secret writer + watch grants (design §5.2; verbs reconciled against the M3 adapter) |
+| `run-creators-rbac.yaml` | "Only the configured group can create AgenticRuns": Role (create on `agenticruns`) + Group RoleBinding when `adapter.hubRunCreatorsGroup` is set |
 | `admission-policy.yaml` | ValidatingAdmissionPolicy + binding + param ConfigMap for requester×target authorization (design §4.3) |
 | `agentic-operator.yaml` | Repo C operator Deployment + `lightspeed-agentic-configuration` ConfigMap + operator SA |
 
@@ -50,7 +51,7 @@ namespace on a live install (Q4) — confirm before activation.
 - **Writer (this chart):** the adapter SA gets a Role in the run namespace
   granting `create/get/update/delete` on Secrets — `delete` is the §5.5
   terminal-run Secret cleanup grant, now implemented (M3:
-  `hub-adapter/internal/server/watch.go` `Sweep`/`RunDeleted`). No
+  `a2a-adapter/internal/server/watch.go` `Sweep`/`RunDeleted`). No
   wildcard `resourceNames` prefix exists for `ls-run-token-*`, so
   namespace isolation is the real boundary.
 - **Reader (cross-repo):** repo C's operator SA reads the Secrets by name
@@ -63,7 +64,7 @@ namespace on a live install (Q4) — confirm before activation.
 ### Adapter RBAC, reconciled against the M3 implementation
 
 The verb list in `run-token-writer-rbac.yaml` is derived from what the
-built adapter actually does (hub-adapter README "RBAC notes"):
+built adapter actually does (a2a-adapter README "RBAC notes" in the lightspeed-hub repo, branch `a2a`):
 
 | Resource | Verbs | Why |
 | --- | --- | --- |
@@ -76,7 +77,79 @@ built adapter actually does (hub-adapter README "RBAC notes"):
 Escalation checks for CI (`oc auth can-i` probes, design §8.1 item 2) are an
 M4 hardening item — not yet wired.
 
+## Run-creators RBAC ("only the configured group can create AgenticRuns")
+
+`run-creators-rbac.yaml` (rendered only when `adapter.hubRunCreatorsGroup`
+is set) binds that Kubernetes group to a Role granting **`create`** — and
+only `create` — on `agenticruns` in the run namespace. This is the
+server-side, API-enforced half of the Phase 1 RBAC goal: the adapter
+presents the **exchanged Token H** when POSTing runs, Kubernetes
+authenticates H's mapped groups, and this binding decides whether run
+creation is possible at all. With the value empty (default) nothing
+renders, which — together with the deny-all admission policy — keeps run
+creation fully closed.
+
+Two boundaries to keep straight:
+
+- **This gates creation itself; the admission policy gates *which*
+  target.** `admissionPolicy` (below) restricts `spec.targetCluster` per
+  principal; kube create-permission alone cannot do that, and direct kube
+  callers bypass Praxis entirely — both controls are required.
+- The subject is the group name **as the hub API maps it** from H's
+  `groups` claim: with the default OpenShift OIDC mapping
+  (`openshiftOIDC.groupsPrefix: "keycloak:"` in charts/all/keycloak-oidc)
+  that is `keycloak:<Keycloak group>`, e.g. `keycloak:acme-agent-rca` for
+  the group the keycloak-oidc `hubExchange` mappers put on H.
+
+## Cross-chart contract (request leg / leg 2, all disabled by default)
+
+The request leg — MAS → Praxis → this chart's adapter — spans three
+charts. These values must line up across them (placeholder defaults shown;
+the variant is where real values land):
+
+| Contract item | praxis-proxy | lightspeed-hub | keycloak-oidc |
+| --- | --- | --- | --- |
+| Target header | `a2aUpstream.targetHeader: X-Hub-Cluster` | `adapter.targetHeader` (adapter `--target-header`) | — |
+| Adapter Service | `a2aUpstream.service/namespace/port` (default `lightspeed-hub`/`lightspeed-hub`/`8443`) | this chart's Service (`service.port` 8443, TLS via service-serving cert — see `adapter.tls`) | — |
+| Hub audience | — | `adapter.hubAudience` (adapter `--hub-audience`) | `keycloak.hubExchange.hubAudience` |
+| Exchange client | — | `adapter.keycloak.clientId` + `clientSecretSecret.name` | `keycloak.hubExchange.clientId` + `secretName` |
+| Allowed targets | `spokeGateways` keys (the caller×target allow-list IS the spoke map) | `admissionPolicy.allowTargets` values (server-side) | — |
+| Run-creators group | — | `adapter.hubRunCreatorsGroup` | the group carried on H via `hubExchange.groupMappers` |
+
+Design decision settled for this leg (see praxis-proxy's
+`a2aUpstream` values comment): **Praxis validates Token A + routes +
+enforces caller×target; the ADAPTER performs the A→H exchange** with its
+M1 exchanger. Praxis-side exchange (`a2aUpstream.exchangeAtPraxis`) is
+documented but unsupported — it fails the render loudly — because
+front-door delegation would replace the outbound Authorization with H and
+hide Token A from the adapter, which needs A for the run leg (no
+protected-A handoff exists on the pinned Praxis image).
+
+**Praxis→adapter TLS (implemented; live issuance UNCONFIRMED):** the
+adapter now serves TLS (a2a-adapter `--tls-cert-file`/`--tls-key-file`,
+which its `config.Validate` requires to be set together or both empty).
+This chart's default (`adapter.tls.enabled=true`, port 8443) wires it to
+an OpenShift service-serving cert: the Service carries
+`service.beta.openshift.io/serving-cert-secret-name`, and the Deployment
+mounts the minted Secret (`tls.crt`/`tls.key`) for the two flags — the
+shape praxis-proxy's `a2aUpstream` expects (TLS on 8443, verified
+against the service-serving CA). Remaining UNCONFIRMED: live-cluster
+confirmation that the service-ca operator actually issues the cert for
+this Service (the annotation is standard OpenShift, but issuance has not
+been observed on a live install). `adapter.tls.enabled=false` (plain
+HTTP, both flags omitted) is a **local dev only** override. The
+NetworkPolicy (praxis-proxy namespace only) remains the in-cluster
+compensating control.
+
+**Duplicate target headers:** the pinned Praxis router OR-matches
+repeated header values (source-verified against Core v0.7.0 — see
+praxis-proxy's `files/praxis.yaml` comment), so the gateway cannot reject
+a multi-valued target header. The ADAPTER must reject
+duplicate/multi-valued target headers itself (plan adapter-scope item 5),
+and the admission policy gates what a smuggled request achieves anyway.
+
 ## Admission policy (design §4.3) — SKELETON, deny-all default
+
 
 Gateway enforcement is bypassable (direct kube callers skip Praxis), so a
 ValidatingAdmissionPolicy gates CREATE/UPDATE of `agenticruns`, validating
@@ -144,7 +217,7 @@ decision.
 ## Adapter Deployment contract (reconciled M4)
 
 The adapter container runs with the **real flags** from
-`hub-adapter/internal/config/config.go` (the source of truth — do not
+`a2a-adapter/internal/config/config.go` (the source of truth — do not
 rename one side without the other):
 
 - `--listen=:<adapter.port>`, `--namespace=<run namespace>`,
@@ -201,7 +274,10 @@ Remaining slots to fill before enabling (resolved items were struck from
 this register in the M4 reconciliation pass):
 
 1. **Adapter image** — `quay.io/example/lightspeed-hub-adapter:placeholder`
-   (M1-M3 build; pin digest/exact quoted tag in the variant).
+   (the adapter source now lives in the lightspeed-hub repo, branch `a2a`,
+   nested module `a2a-adapter/`, built by its `make image-a2a-adapter`;
+   pin the published digest/exact quoted tag in the variant when that
+   build lands in a registry).
 2. **Run namespace** — Q4: confirm on a live repo C `a2a-support` install
    that sandboxes/runs share the operator namespace.
 3. **Target header name** — `X-Hub-Cluster` is the design doc's proposal,

@@ -1,0 +1,27 @@
+{{- /*
+TASK B REQUEST LEG (a2aUpstream, disabled by default). The service-serving
+CA bundle the main gateway's hub-adapter upstream cluster verifies TLS
+with (files/praxis.yaml's load_balancer cluster, ca_path
+/etc/praxis/hub-adapter-ca/service-ca.crt). Same mechanism as the spoke
+gateways' praxis-spoke-service-ca ConfigMap: OpenShift's
+service-ca-operator injects the current cluster service-serving CA bundle
+into this ConfigMap's `service-ca.crt` key, and the Deployment mounts it
+read-only. This only renders when a2aUpstream.enabled is true, so the
+default (disabled) render is unchanged.
+*/}}
+{{- if .Values.a2aUpstream.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: praxis-hub-adapter-ca
+  labels:
+    {{- include "praxis-proxy.labels" . | nindent 4 }}
+  annotations:
+    # OpenShift service-ca-operator injects the cluster's current
+    # service-serving CA bundle into the `service-ca.crt` key. This is the
+    # CA that issued the hub adapter Service's serving certificate (the
+    # adapter-side counterpart of the spoke gateways' serving certs -- see
+    # the UNCONFIRMED GUESS in files/praxis.yaml about the adapter's
+    # TLS-serving flags before enabling).
+    service.beta.openshift.io/inject-cabundle: "true"
+{{- end }}

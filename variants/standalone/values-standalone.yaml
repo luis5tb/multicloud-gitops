@@ -286,6 +286,30 @@ clusterGroup:
         # exchangeAudience:
         # - name: keycloak.spokeGatewayExchanger.spokeAudiences[0]
         #   value: praxis-spoke-example-spoke
+        # TASK B / PHASE 1 H-SIDE WIRING (DISABLED): Keycloak prerequisites
+        # for the hub A2A adapter's A->H exchange (charts/all/lightspeed-hub
+        # adapter.keycloak.clientId; the ADAPTER performs the exchange --
+        # see the a2aUpstream block under praxis-proxy above). Requires a
+        # Vault entry (lightspeed-hub-adapter) in values-secret.yaml.template
+        # first. One-shot realm import only: on this cluster, whose realm
+        # already imported, the client and mappers must be created manually
+        # in the Admin Console (see charts/all/keycloak-oidc README). The
+        # hubAudience must equal the lightspeed-hub chart's
+        # adapter.hubAudience and stay distinct from every other audience.
+        # - name: keycloak.hubExchange.enabled
+        #   value: "true"
+        # - name: keycloak.hubExchange.vaultKey
+        #   value: secret/data/global/lightspeed-hub-adapter
+        # - name: keycloak.hubExchange.hubAudience
+        #   value: lightspeed-hub-a2a
+        # The lightspeed-hub chart's adapter.keycloak.clientId /
+        # clientSecretSecret.name defaults are EMPTY -- the variant's
+        # commented values there must line up with this chart's
+        # hubExchange defaults (clientId lightspeed-hub-adapter,
+        # secretName lightspeed-hub-adapter-client); override only to
+        # diverge. Whether the group mappers apply to EXCHANGED tokens is
+        # an UNCONFIRMED GUESS (plan spike item #5) -- validate on a live
+        # realm before relying on H carrying groups.
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
@@ -438,6 +462,39 @@ clusterGroup:
         # mandatory-override value, not a correct default.
         # - name: spokeGatewayConfig.networkPolicy.ingressFromNamespaces[0]
         #   value: <repo C sandbox namespace>
+        # TASK B REQUEST LEG (leg 2; DISABLED -- everything commented).
+        # Front-door hop: forward the main gateway's A2A traffic to the hub
+        # A2A adapter (charts/all/lightspeed-hub). DESIGN: Praxis validates
+        # Token A + enforces caller x target (the allow-list IS the
+        # spokeGateways keys above); the ADAPTER performs the A->H exchange.
+        # Do NOT enable until the lightspeed-hub chart itself is enabled
+        # AND its README's cross-chart contract open items close (adapter
+        # TLS serving on 8443 with a service-serving cert; adapter-side
+        # duplicate-target-header rejection -- the pinned Praxis router
+        # OR-matches repeated header values and cannot reject them; see
+        # charts/all/praxis-proxy/README.md "A2A upstream"). Requires at
+        # least one spokeGateways entry (fails the render loudly
+        # otherwise) and policy.enabled=true (already set above).
+        # - name: a2aUpstream.enabled
+        #   value: "true"
+        # Defaults line up with the lightspeed-hub chart's adapter Service
+        # (lightspeed-hub.lightspeed-hub.svc.cluster.local:8443) and its
+        # adapter.targetHeader (X-Hub-Cluster, the adapter's
+        # --target-header flag); override only to diverge:
+        # - name: a2aUpstream.service
+        #   value: lightspeed-hub
+        # - name: a2aUpstream.namespace
+        #   value: lightspeed-hub
+        # - name: a2aUpstream.port
+        #   value: "8443"
+        # - name: a2aUpstream.targetHeader
+        #   value: X-Hub-Cluster
+        # NOT SUPPORTED (render fails loudly): Praxis-side A->H exchange.
+        # Blocked on the pinned image by the protected-A handoff (it would
+        # hide Token A from the adapter, which needs A for the run leg) --
+        # see charts/all/praxis-proxy/values.yaml a2aUpstream comment.
+        # - name: a2aUpstream.exchangeAtPraxis
+        #   value: "false"
         # Serving-CA bridge: repo C's gatewayCASecret expects a Secret
         # (key ca.crt) in ITS OPERATOR NAMESPACE -- targetNamespace MUST
         # be set to that namespace here, and repo C's config must name the
@@ -811,6 +868,21 @@ clusterGroup:
         # allowed targetCluster names):
         # - name: admissionPolicy.allowTargets.keycloak\:acme-agent-rca[0]
         #   value: example-spoke
+        # "Only the configured group can create AgenticRuns" (Phase 1 RBAC
+        # goal; DISABLED while empty): the Kubernetes group (as the hub API
+        # maps it from Token H's groups claim -- with the default OIDC
+        # groupsPrefix, keycloak:<Keycloak group>) bound to a Role granting
+        # create on agenticruns in the run namespace. This gates creation
+        # itself; the admission policy above additionally restricts WHICH
+        # targetCluster. Must name a group the keycloak-oidc hubExchange
+        # mappers actually put on H:
+        # - name: adapter.hubRunCreatorsGroup
+        #   value: keycloak:acme-agent-rca
+        # Cross-chart contract (request leg): adapter.targetHeader must equal
+        # praxis-proxy's a2aUpstream.targetHeader (X-Hub-Cluster default
+        # both sides); adapter.hubAudience must equal keycloak-oidc's
+        # keycloak.hubExchange.hubAudience -- see this chart's README
+        # "Cross-chart contract".
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null

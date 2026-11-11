@@ -6,12 +6,12 @@
 {{- fail "adapter.keycloak.issuerUrl (or global.clusterBaseDomain / global.localClusterDomain to derive it) is required when the chart is enabled" }}
 {{- end }}
 {{- if .Values.adapter.svid.enabled }}
-{{/* SVID mode mirrors hub-adapter's config.Validate / NewTokenExchanger
+{{/* SVID mode mirrors the adapter's config.Validate (a2a-adapter module, lightspeed-hub repo) / NewTokenExchanger
      exclusivity: client auth is EITHER a confidential client OR a SPIFFE
      JWT-SVID -- a client_id present alongside an SVID source is rejected
      by the adapter at startup (client_id is not sent in SVID mode). */}}
 {{- if .Values.adapter.keycloak.clientId }}
-{{- fail "adapter.keycloak.clientId must be EMPTY when adapter.svid.enabled=true: the adapter omits client_id in SVID mode and rejects the combination at startup (see hub-adapter internal/auth/exchange.go)" }}
+{{- fail "adapter.keycloak.clientId must be EMPTY when adapter.svid.enabled=true: the adapter omits client_id in SVID mode and rejects the combination at startup (see a2a-adapter internal/auth/exchange.go)" }}
 {{- end }}
 {{- else }}
 {{- if not .Values.adapter.keycloak.clientId }}
@@ -60,15 +60,15 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           # PLACEHOLDER image: quay.io/example/lightspeed-hub-adapter:placeholder
-          # pending the hub-adapter build (M1-M3). Pin an immutable digest or
+          # pending a published adapter build (source: lightspeed-hub repo, branch a2a). Pin an immutable digest or
           # exact quoted tag in the variant before enabling.
           image: {{ include "lightspeed-hub.adapterImage" . | quote }}
           imagePullPolicy: {{ .Values.adapter.image.pullPolicy }}
           ports:
-            - name: http
+            - name: {{ include "lightspeed-hub.portName" . }}
               containerPort: {{ .Values.adapter.port }}
               protocol: TCP
-          # REAL adapter flags (hub-adapter/internal/config/config.go is the
+          # REAL adapter flags (a2a-adapter/internal/config/config.go is the
           # source of truth; reconciled in the M4 pass against the built
           # M1-M3 binary). The client SECRET rides the env
           # KEYCLOAK_CLIENT_SECRET (the flag's documented env fallback);
@@ -103,6 +103,13 @@ spec:
             - --max-credential-pauses={{ .Values.adapter.maxCredentialPauses }}
             - --terminal-cleanup-grace={{ .Values.adapter.terminalCleanupGrace }}
             - --sweep-interval={{ .Values.adapter.sweepInterval }}
+            {{- if .Values.adapter.tls.enabled }}
+            # TLS serving from the service-serving cert minted by the
+            # Service annotation (see service.yaml / adapter.tls): both
+            # flags together or neither, per the adapter's config.Validate.
+            - --tls-cert-file={{ .Values.adapter.tls.certFile }}
+            - --tls-key-file={{ .Values.adapter.tls.keyFile }}
+            {{- end }}
           env:
             {{- if not .Values.adapter.svid.enabled }}
             - name: KEYCLOAK_CLIENT_SECRET
@@ -120,18 +127,54 @@ spec:
             - name: SPIFFE_SOCKET
               value: {{ .Values.adapter.svid.socketPath | quote }}
             {{- end }}
-          {{- with .Values.livenessProbe }}
+          {{- if .Values.adapter.tls.enabled }}
+          # Service-serving cert (tls.crt/tls.key, service-ca-rotated) for
+          # --tls-cert-file/--tls-key-file; the Service annotation mints
+          # it. Omitted entirely in the plain-HTTP local-dev override.
+          volumeMounts:
+            - name: serving-cert
+              mountPath: {{ dir .Values.adapter.tls.certFile }}
+              readOnly: true
+          {{- end }}
+          # Probes: path + timings come from values; the port NAME and
+          # scheme are derived from adapter.tls so they can never drift
+          # from the container port (HTTPS against the serving cert when
+          # TLS is enabled, plain HTTP in the local-dev override).
           livenessProbe:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          {{- with .Values.readinessProbe }}
+            httpGet:
+              path: {{ .Values.livenessProbe.httpGet.path }}
+              port: {{ include "lightspeed-hub.portName" . }}
+              {{- if .Values.adapter.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
           readinessProbe:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            httpGet:
+              path: {{ .Values.readinessProbe.httpGet.path }}
+              port: {{ include "lightspeed-hub.portName" . }}
+              {{- if .Values.adapter.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
           {{- with .Values.adapter.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if .Values.adapter.tls.enabled }}
+      # Service-serving cert for --tls-cert-file/--tls-key-file; minted and
+      # rotated by the service-ca operator via the Service annotation.
+      # Omitted entirely in the plain-HTTP local-dev override.
+      volumes:
+        - name: serving-cert
+          secret:
+            secretName: {{ include "lightspeed-hub.servingCertSecretName" . }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

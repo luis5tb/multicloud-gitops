@@ -42,6 +42,36 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if .Values.keycloak.hubExchange.enabled }}
+{{- $hub := .Values.keycloak.hubExchange }}
+{{- if not $hub.vaultKey }}
+{{- fail "keycloak.hubExchange.vaultKey is required when keycloak.hubExchange.enabled is true (Vault path holding the adapter exchange client's secret)" }}
+{{- end }}
+{{- if not $hub.clientId }}
+{{- fail "keycloak.hubExchange.clientId must be set when keycloak.hubExchange.enabled is true" }}
+{{- end }}
+{{- if not $hub.hubAudience }}
+{{- fail "keycloak.hubExchange.hubAudience is required when keycloak.hubExchange.enabled is true: it is the audience of the exchanged Token H (must equal charts/all/lightspeed-hub's adapter.hubAudience)" }}
+{{- end }}
+{{- /* Audience-distinctness fail-guards: the hub audience names a distinct
+      consumer (the hub kube API path via the adapter), so it must never
+      collide with the platform audience, the MAS audiences, or any spoke
+      exchange audience -- a collision would make a token minted for one
+      consumer silently valid for another. */}}
+{{- if or (eq $hub.hubAudience "openshift") (eq $hub.hubAudience .Values.keycloak.masA2aAudience) (eq $hub.hubAudience .Values.keycloak.masApiAudience) }}
+{{- fail "keycloak.hubExchange.hubAudience must be distinct from openshift, keycloak.masA2aAudience and keycloak.masApiAudience" }}
+{{- end }}
+{{- if eq $hub.hubAudience $hub.clientId }}
+{{- fail "keycloak.hubExchange.hubAudience must be distinct from keycloak.hubExchange.clientId (the client ID is itself minted as a Token A audience by subjectTokenAudienceMapper)" }}
+{{- end }}
+{{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
+{{- range $aud := .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
+{{- if eq $aud $hub.hubAudience }}
+{{- fail "keycloak.hubExchange.hubAudience must be distinct from every keycloak.spokeGatewayExchanger.spokeAudiences entry (spoke vs hub audiences name different consumers)" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: k8s.keycloak.org/v2alpha1
 kind: KeycloakRealmImport
 metadata:
@@ -54,7 +84,7 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   keycloakCRName: {{ .Values.keycloak.name }}
-  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled }}
+  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.hubExchange.enabled }}
   placeholders:
     {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
     # Resolves $(PRAXIS_SPOKE_EXCHANGER_SECRET) below into the spoke
@@ -63,6 +93,14 @@ spec:
     PRAXIS_SPOKE_EXCHANGER_SECRET:
       secret:
         name: {{ .Values.keycloak.spokeGatewayExchanger.secretName }}
+        key: client-secret
+    {{- end }}
+    {{- if .Values.keycloak.hubExchange.enabled }}
+    # Resolves $(HUB_EXCHANGE_SECRET) below into the hub adapter's
+    # exchange client secret (Vault-backed, see hub-exchange-secret.yaml).
+    HUB_EXCHANGE_SECRET:
+      secret:
+        name: {{ .Values.keycloak.hubExchange.secretName }}
         key: client-secret
     {{- end }}
     {{- range $index, $provider := .Values.keycloak.externalOidcProviders }}
@@ -234,6 +272,21 @@ spec:
               included.custom.audience: {{ .Values.keycloak.spokeGatewayExchanger.clientId | quote }}
               access.token.claim: "true"
           {{- end }}
+          {{- if and .Values.keycloak.hubExchange.enabled .Values.keycloak.hubExchange.subjectTokenAudienceMapper }}
+          # TASK B / PHASE 1: RFC 8693 exchange prerequisite (b) for the
+          # A->H exchange -- the SUBJECT token (A) must already carry the
+          # exchanging client (the hub adapter) as an audience. UNCONFIRMED
+          # GUESS: adds an audience to every Token A; verify no
+          # audience-sensitive validator (MAS, Praxis allow-list) rejects
+          # the extra audience. One-shot realm import only -- existing
+          # realms need this mapper added manually.
+          - name: hub-exchanger-audience
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ .Values.keycloak.hubExchange.clientId | quote }}
+              access.token.claim: "true"
+          {{- end }}
       {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
       # PHASE 2 B1 (PROPOSED): confidential client the per-spoke Praxis
       # spoke-gateways authenticate as when exchanging Token A for a
@@ -278,6 +331,61 @@ spec:
               access.token.claim: "true"
           {{- end }}
         {{- end }}
+      {{- end }}
+      {{- if .Values.keycloak.hubExchange.enabled }}
+      # TASK B / PHASE 1: confidential client the hub A2A adapter
+      # (charts/all/lightspeed-hub) authenticates as when exchanging the
+      # caller's Token A for the hub-audience Token H (RFC 8693). Secret is
+      # Vault-backed via the placeholder above (hub-exchange-secret.yaml
+      # materializes it in both keycloak.namespace and the lightspeed-hub
+      # namespace). UNCONFIRMED GUESS: the exact mapper/attribute set
+      # needed for internal->internal exchange on this Keycloak build --
+      # standard.token.exchange.enabled is required on the exchanging
+      # client, and whether the mappers below apply to EXCHANGED tokens
+      # (vs only client-credentials tokens) needs live validation (plan
+      # spike item #5, see values.yaml hubExchange.groupMappers). After
+      # the exchange azp becomes this client, so downstream policy must
+      # key on sub/groups and record azp as provenance only. One-shot
+      # realm import only -- existing realms need this client created
+      # manually (see chart README).
+      - clientId: {{ .Values.keycloak.hubExchange.clientId | quote }}
+        name: {{ .Values.keycloak.hubExchange.clientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: true
+        secret: $(HUB_EXCHANGE_SECRET)
+        attributes:
+          standard.token.exchange.enabled: "true"
+        protocolMappers:
+          # The hub audience on the exchanged Token H (must equal
+          # charts/all/lightspeed-hub's adapter.hubAudience).
+          - name: {{ printf "%s-audience" .Values.keycloak.hubExchange.hubAudience | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ .Values.keycloak.hubExchange.hubAudience | quote }}
+              access.token.claim: "true"
+          {{- if .Values.keycloak.hubExchange.groupMappers }}
+          # Group protocol mapper so the EXCHANGED Token H carries the
+          # principal's Keycloak groups (which the hub API's OIDC group
+          # mapping + RoleBindings consume), while minted Token A stays
+          # groupless. UNCONFIRMED GUESS: whether this mapper applies to
+          # RFC 8693-exchanged tokens on this Keycloak build (plan spike
+          # item #5) -- validate against a live realm before relying on
+          # it (see values.yaml hubExchange.groupMappers).
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            config:
+              claim.name: groups
+              full.path: "false"
+              access.token.claim: "true"
+              id.token.claim: "true"
+              userinfo.token.claim: "true"
+          {{- end }}
       {{- end }}
       # Confidential client registered as the web console's OIDC platform
       # client when openshiftOIDC.enabled is true.

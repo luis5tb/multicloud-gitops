@@ -93,6 +93,81 @@ filter_chains:
       # routes, e.g. when the Task B lightspeed-hub backend lands; the
       # static_response filters above already serve every route this gateway
       # currently answers.
+      {{- if .Values.a2aUpstream.enabled }}
+      # TASK B REQUEST LEG (a2aUpstream.enabled): the router comes back,
+      # with REAL (non-empty) routes this time -- one per registered spoke.
+      # The comment above stays accurate for the default (disabled) render.
+      #
+      # Caller x target enforcement lives HERE, in the router, not in APL:
+      # policy.yaml's `http:` route selectors accept only path/path_prefix/
+      # method (documented in that file), so the target header can only be
+      # validated by the router's exact header matching. Each route below
+      # requires the target header to be PRESENT with EXACTLY one registered
+      # spoke value; a request whose header is absent or holds an unregistered
+      # value matches no route and Core answers 404 (verified live during the
+      # pre-Task-A routing era; see chart README "Header routing").
+      #
+      # VERIFIED-UNFIXABLE ON THE PINNED IMAGE (2026-11, source-confirmed
+      # against Core v0.7.0 -- the exact Core embedded in the pinned
+      # ghcr.io/praxis-proxy/ai:0.4.1): a MULTI-VALUED target header cannot
+      # be rejected here. Core's router header matcher
+      # (crates/filter/.../router/matching.rs `headers_match`) uses
+      # `get_all(key).any(|v| v == val)` -- OR semantics across a repeated
+      # header's values -- so a request smuggling two target headers, one
+      # registered and one not, still matches the registered route. The
+      # same OR shape is in guardrails' `scan_header_values`
+      # (`get_all(...).find_map(...)`), and the `headers` filter has no
+      # reject form, so NO built-in filter on this image can count header
+      # occurrences. Compensating controls (both REQUIRED before enabling):
+      # the ADAPTER must reject duplicate/multi-valued target headers (plan
+      # adapter-scope item 5 -- the adapter sees the raw header lines and
+      # CAN count them), and the server-side admission policy +
+      # run-creators RBAC (charts/all/lightspeed-hub) bound what a smuggled
+      # request can achieve anyway. Re-check this gap on the next image bump.
+      - filter: router
+        routes:
+          {{- range $spoke := keys .Values.spokeGateways | sortAlpha }}
+          # Exact allow-listed target-header match for registered spoke
+          # "{{ $spoke }}". The allow-list IS the spokeGateways map: a
+          # caller may only target spokes that have gateways.
+          - path_prefix: /
+            headers:
+              {{ $.Values.a2aUpstream.targetHeader }}: {{ $spoke | quote }}
+            cluster: hub-adapter
+          {{- end }}
+
+      # Single fixed upstream: the hub A2A adapter's internal-only Service
+      # (never a caller-supplied URL or header). Same TLS mechanism as the
+      # spoke gateways: verify with the OpenShift service-serving CA bundle
+      # injected into the praxis-hub-adapter-ca ConfigMap
+      # (templates/a2a-upstream-ca-configmap.yaml). The
+      # clusters[].tls.{sni,verify,ca.ca_path} schema is the one
+      # byte-for-byte confirmed between Core v0.7.0 (what the pinned
+      # ai:0.4.1 embeds) and v0.7.2 and validated live during the routing
+      # era (see chart README "Validation evidence").
+      #
+      # The adapter now SERVES TLS (implemented: --tls-cert-file/
+      # --tls-key-file wired to an OpenShift service-serving cert by the
+      # lightspeed-hub chart and the a2a-adapter kustomize component,
+      # port 8443). Remaining UNCONFIRMED: live service-cert issuance
+      # for the adapter Service -- see the lightspeed-hub chart README's
+      # cross-chart contract.
+      #
+      # The target header is deliberately NOT stripped before forwarding:
+      # the adapter resolves the AgenticRun's spec.targetCluster from it
+      # (its --target-header flag), after the router above has already
+      # validated it against the registered spokes.
+      - filter: load_balancer
+        clusters:
+          - name: hub-adapter
+            endpoints:
+              - {{ include "praxis-proxy.a2aUpstreamEndpoint" . | quote }}
+            tls:
+              sni: {{ include "praxis-proxy.a2aUpstreamHost" . | quote }}
+              verify: true
+              ca:
+                ca_path: /etc/praxis/hub-adapter-ca/service-ca.crt
+      {{- end }}
 
 admin:
   # Kept on loopback: only container-local health probes can access it.

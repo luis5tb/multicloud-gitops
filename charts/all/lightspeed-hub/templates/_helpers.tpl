@@ -94,3 +94,23 @@ when neither is available.
 {{- printf "%s:%s" .Values.agenticOperator.image.repository .Values.agenticOperator.image.tag -}}
 {{- end }}
 {{- end }}
+
+{{/*
+Adapter serving-cert Secret name: the value of the Service annotation
+service.beta.openshift.io/serving-cert-secret-name, into which OpenShift's
+service-ca operator mints/rotates the adapter's TLS serving cert
+(tls.crt/tls.key). Empty adapter.tls.servingCertSecretName means
+<fullname>-serving-cert.
+*/}}
+{{- define "lightspeed-hub.servingCertSecretName" -}}
+{{- default (printf "%s-serving-cert" (include "lightspeed-hub.fullname" .)) .Values.adapter.tls.servingCertSecretName -}}
+{{- end }}
+
+{{/*
+Adapter port NAME (container port + Service targetPort): https when
+adapter.tls.enabled (the default, production shape), http for the
+plain-HTTP local-dev override.
+*/}}
+{{- define "lightspeed-hub.portName" -}}
+{{- if .Values.adapter.tls.enabled -}}https{{- else -}}http{{- end -}}
+{{- end }}

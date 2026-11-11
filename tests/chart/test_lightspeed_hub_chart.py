@@ -145,9 +145,11 @@ def test_run_token_writer_role_verbs() -> None:
 )
 def test_adapter_deployment_carries_real_flags() -> None:
     """The Deployment args are the adapter's REAL flags
-    (hub-adapter/internal/config/config.go is the source of truth), not
+    (lightspeed-hub repo, branch a2a, nested module
+    a2a-adapter/internal/config/config.go is the source of truth), not
     placeholder env vars; the client secret rides KEYCLOAK_CLIENT_SECRET
-    via secretKeyRef."""
+    via secretKeyRef; TLS serving is wired to the service-serving cert
+    (adapter.tls, default enabled)."""
     rendered = _helm(*ENABLE_SETS)
     docs = _resources(rendered.stdout)
     dep = next(
@@ -159,7 +161,7 @@ def test_adapter_deployment_carries_real_flags() -> None:
     assert args, "adapter container must carry flag args"
 
     required_flags = [
-        "--listen=:8080",
+        "--listen=:8443",
         "--namespace=default",
         "--hub-audience=lightspeed-hub-a2a",
         "--target-header=X-Hub-Cluster",
@@ -173,6 +175,10 @@ def test_adapter_deployment_carries_real_flags() -> None:
         "--max-credential-pauses=3",
         "--terminal-cleanup-grace=1m",
         "--sweep-interval=5s",
+        # TLS serving (production shape): both flags, pointing at the
+        # mounted service-serving cert.
+        "--tls-cert-file=/etc/a2a-adapter/tls/tls.crt",
+        "--tls-key-file=/etc/a2a-adapter/tls/tls.key",
     ]
     for flag in required_flags:
         assert flag in args, f"missing adapter flag {flag}"
@@ -193,13 +199,92 @@ def test_adapter_deployment_carries_real_flags() -> None:
         "key": "client-secret",
     }
 
+    # TLS shape: container port named https on 8443, the serving-cert
+    # Secret mounted read-only at the flag paths, probes HTTPS.
+    port = container["ports"][0]
+    assert port == {"name": "https", "containerPort": 8443, "protocol": "TCP"}
+    mounts = container["volumeMounts"]
+    assert mounts == [
+        {"name": "serving-cert", "mountPath": "/etc/a2a-adapter/tls", "readOnly": True}
+    ]
+    volumes = dep["spec"]["template"]["spec"]["volumes"]
+    assert volumes == [
+        {"name": "serving-cert", "secret": {"secretName": "lightspeed-hub-serving-cert"}}
+    ]
+    for probe in ("livenessProbe", "readinessProbe"):
+        assert container[probe]["httpGet"]["path"] == "/healthz"
+        assert container[probe]["httpGet"]["port"] == "https"
+        assert container[probe]["httpGet"]["scheme"] == "HTTPS"
+
     # The old placeholder env names are gone entirely.
     rendered_text = rendered.stdout
     assert "HUB_ADAPTER_" not in rendered_text
 
-    # Probes hit the adapter's real unauthenticated /healthz.
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_adapter_tls_disabled_is_plain_http_dev_shape() -> None:
+    """adapter.tls.enabled=false (LOCAL DEV ONLY override): no TLS flags,
+    no serving-cert annotation/mount/volume, port named http, plain-HTTP
+    probes."""
+    rendered = _helm(*ENABLE_SETS, "--set", "adapter.tls.enabled=false")
+    docs = _resources(rendered.stdout)
+    dep = next(
+        d for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub"
+    )
+    pod_spec = dep["spec"]["template"]["spec"]
+    container = pod_spec["containers"][0]
+    args = container["args"]
+    assert not [a for a in args if a.startswith("--tls-")]
+    assert container["ports"][0]["name"] == "http"
+    assert "volumeMounts" not in container
+    assert "volumes" not in pod_spec
     for probe in ("livenessProbe", "readinessProbe"):
-        assert container[probe]["httpGet"]["path"] == "/healthz"
+        http_get = container[probe]["httpGet"]
+        assert http_get["port"] == "http"
+        assert "scheme" not in http_get
+
+    svc = next(d for d in docs if d["kind"] == "Service")
+    assert "annotations" not in svc["metadata"]
+    assert svc["spec"]["ports"] == [
+        {"name": "http", "port": 8443, "targetPort": "http", "protocol": "TCP"}
+    ]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_adapter_service_carries_serving_cert_annotation() -> None:
+    """The Service annotation mints the serving cert the Deployment
+    mounts: name defaults to <fullname>-serving-cert and is overridable."""
+    rendered = _helm(*ENABLE_SETS)
+    docs = _resources(rendered.stdout)
+    svc = next(d for d in docs if d["kind"] == "Service")
+    assert svc["metadata"]["annotations"] == {
+        "service.beta.openshift.io/serving-cert-secret-name": "lightspeed-hub-serving-cert"
+    }
+    assert svc["spec"]["ports"] == [
+        {"name": "https", "port": 8443, "targetPort": "https", "protocol": "TCP"}
+    ]
+
+    rendered_named = _helm(
+        *ENABLE_SETS,
+        "--set", "adapter.tls.servingCertSecretName=my-cert",
+    )
+    docs_named = _resources(rendered_named.stdout)
+    svc_named = next(d for d in docs_named if d["kind"] == "Service")
+    assert svc_named["metadata"]["annotations"] == {
+        "service.beta.openshift.io/serving-cert-secret-name": "my-cert"
+    }
+    dep_named = next(
+        d for d in docs_named
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub"
+    )
+    assert dep_named["spec"]["template"]["spec"]["volumes"] == [
+        {"name": "serving-cert", "secret": {"secretName": "my-cert"}}
+    ]
 
 
 @pytest.mark.skipif(
@@ -254,7 +339,7 @@ def test_network_policy_admits_only_praxis_namespace() -> None:
                     }
                 }
             ],
-            "ports": [{"protocol": "TCP", "port": 8080}],
+            "ports": [{"protocol": "TCP", "port": 8443}],
         }
     ]
 
@@ -374,3 +459,56 @@ def test_variant_registers_disabled_application() -> None:
     assert app["argoProject"] == "hub"
     overrides = {o["name"]: o["value"] for o in app["overrides"]}
     assert overrides["enabled"] == "false"
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_run_creators_rbac_gates_agenticrun_creation() -> None:
+    """hubRunCreatorsGroup binds a Group to create-on-agenticruns only.
+
+    "Only the configured group can create AgenticRuns" (Phase 1 RBAC
+    goal): the value names the Kubernetes group as the hub API maps it
+    from Token H's groups claim (e.g. keycloak:acme-agent-rca with the
+    default OIDC groupsPrefix). Empty (default) renders nothing -- already
+    pinned by test_enabled_render_has_expected_resources's exact Role /
+    RoleBinding name lists.
+    """
+    rendered = _helm(
+        *ENABLE_SETS,
+        "--set", "adapter.hubRunCreatorsGroup=keycloak:acme-agent-rca",
+    )
+    docs = _resources(rendered.stdout)
+
+    role = next(
+        d for d in docs
+        if d["kind"] == "Role" and d["metadata"]["name"] == "lightspeed-hub-run-creators"
+    )
+    # CREATE only, by design: creation is the gated act. The admission
+    # policy (not RBAC) restricts WHICH targetCluster.
+    assert role["rules"] == [
+        {
+            "apiGroups": ["agentic.openshift.io"],
+            "resources": ["agenticruns"],
+            "verbs": ["create"],
+        }
+    ]
+
+    binding = next(
+        d for d in docs
+        if d["kind"] == "RoleBinding"
+        and d["metadata"]["name"] == "lightspeed-hub-run-creators"
+    )
+    assert binding["subjects"] == [
+        {
+            "kind": "Group",
+            "name": "keycloak:acme-agent-rca",
+            "apiGroup": "rbac.authorization.k8s.io",
+        }
+    ]
+    assert binding["roleRef"]["kind"] == "Role"
+    assert binding["roleRef"]["name"] == "lightspeed-hub-run-creators"
+
+    # Both land in the run namespace (the chart's release namespace here).
+    run_ns = role["metadata"]["namespace"]
+    assert binding["metadata"]["namespace"] == run_ns

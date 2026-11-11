@@ -236,6 +236,77 @@ keycloak:
     # before enabling.
     subjectTokenAudienceMapper: true
 
+  # TASK B / PHASE 1 H-SIDE WIRING (DISABLED BY DEFAULT): Keycloak
+  # prerequisites for the hub A2A adapter's A->H token exchange
+  # (charts/all/lightspeed-hub's adapter.keycloak.clientId; see
+  # PLAN-lightspeed-hub-migration.md Phase 1 "First exchange" and
+  # docs/lightspeed-hub-plan.html s3). DESIGN DECISION on this leg: the
+  # ADAPTER performs the exchange (Praxis validates Token A and routes
+  # only -- see charts/all/praxis-proxy's a2aUpstream.exchangeAtPraxis).
+  #
+  # This block mints the adapter's confidential exchange client, the hub
+  # audience on exchanged Token H, and the group mappers that put the
+  # principal's Keycloak groups on H. One-shot realm import only: on a
+  # realm that already imported (like this branch's live cluster), the
+  # client and mappers must be created manually in the Admin Console (see
+  # the chart README).
+  hubExchange:
+    enabled: false
+    # Confidential client ID. Must match charts/all/lightspeed-hub's
+    # adapter.keycloak.clientId (the adapter's --keycloak-client-id).
+    clientId: lightspeed-hub-adapter
+    clientName: lightspeed-hub A2A adapter token exchanger
+    # Vault path holding the client secret (property vaultProperty below),
+    # following the same Vault-backed ExternalSecret pattern as the spoke
+    # exchanger. The secret is materialized into BOTH keycloak.namespace
+    # (realm-import placeholder) and targetNamespace (the adapter's
+    # namespace, where the adapter reads it as
+    # adapter.keycloak.clientSecretSecret.name). Required when enabled.
+    vaultKey: ""
+    vaultProperty: lightspeed-hub-adapter-client-secret
+    # Namespace the adapter-facing copy of the client-secret Secret lands
+    # in: the lightspeed-hub Application's namespace. Must match
+    # charts/all/lightspeed-hub's namespace / clientSecretSecret reference.
+    targetNamespace: lightspeed-hub
+    # Name of the Secret materialized in both namespaces (keys: client-id,
+    # client-secret). Must match charts/all/lightspeed-hub's
+    # adapter.keycloak.clientSecretSecret.name.
+    secretName: lightspeed-hub-adapter-client
+    # Hub audience minted onto the EXCHANGED Token H. Must equal
+    # charts/all/lightspeed-hub's adapter.hubAudience, and must stay
+    # distinct from every other audience in this realm (fail-guarded in
+    # keycloak-realm-import.yaml). Required when enabled.
+    hubAudience: ""
+    # Group protocol mappers so EXCHANGED tokens (H) carry the principal's
+    # Keycloak groups while minted A stays groupless (the plan's Phase 1
+    # contract: "separate mint/exchange client scopes and group mappers so
+    # initial A omits groups while H/U include them").
+    #
+    # UNCONFIRMED GUESS (plan spike item #5): whether mappers on THIS
+    # client apply to RFC 8693-EXCHANGED tokens depends on live Keycloak
+    # behavior (standard.token.exchange.enabled is set below; whether the
+    # exchange response runs the target client's protocol mappers must be
+    # validated against a live realm before relying on it). If they do
+    # not, the groups must ride the subject token's client scope instead
+    # -- which conflicts with groupless A, so resolve the spike before
+    # enabling.
+    #
+    # CLAIM_MAP NOTE (if Praxis policy ever inspects H's groups): PPE's
+    # "keycloak" claim_mapper preset maps REALM ROLES, not groups -- an
+    # explicit claim_map entry would be needed to surface a groups claim
+    # into the policy bag (see charts/all/praxis-proxy/files/policy.yaml
+    # and the PPE cmf-extensions docs). Nothing on this leg reads H's
+    # groups at Praxis; the hub API's OIDC group mapping does.
+    groupMappers: true
+    # RFC 8693 prerequisite (b), same as the spoke exchanger's: the
+    # SUBJECT token (A) must already carry the exchanging client as an
+    # audience (the `audience` request parameter only ever narrows, never
+    # adds). When true, adds an audience mapper putting this client's ID
+    # on the acme-agent client's tokens (Token A). UNCONFIRMED GUESS: adds
+    # an audience to every Token A; verify no audience-sensitive validator
+    # (MAS, Praxis allow-list) rejects the extra audience before enabling.
+    subjectTokenAudienceMapper: true
+
 openshiftOIDC:
   enabled: false
   providerName: keycloak

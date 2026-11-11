@@ -382,6 +382,70 @@ spokeGatewayConfig:
         cpu: 100m
         memory: 128Mi
 
+# TASK B / lightspeed-hub REQUEST LEG (leg 2 of the architecture; see
+# docs/lightspeed-hub-plan.html s3 "Praxis stays the front door"). DISABLED
+# BY DEFAULT: while disabled, the main gateway keeps its NO-UPSTREAM shape
+# (see the long comment in files/praxis.yaml) and this block renders
+# nothing -- the disabled render is byte-identical to the pre-block one
+# (pinned by tests/chart/test_praxis_a2a_upstream.py).
+#
+# DESIGN DECISION (settled for this leg): when enabled, Praxis VALIDATES
+# Token A (JWT + azp allow-list, unchanged), ROUTES to the hub A2A adapter,
+# and ENFORCES caller x target; the ADAPTER (charts/all/lightspeed-hub)
+# performs the A->H exchange with its M1 exchanger. Praxis does NOT
+# exchange on this leg -- see exchangeAtPraxis below for why that option
+# is documented but unsupported.
+#
+# When enabled, the main gateway's praxis.yaml gains a router filter with
+# one route per REGISTERED spoke (the spokeGateways map keys: a caller may
+# only target spokes that have gateways) plus a hub-adapter upstream
+# cluster reached over HTTPS with service-CA verification (same mechanism
+# as the spoke gateways: an inject-cabundle ConfigMap the chart renders
+# when this is enabled). Requests whose target header is absent or holds
+# an unregistered value match no route and are answered 404 by Core --
+# the exact behavior verified live during the pre-Task-A routing era (see
+# chart README "Header routing").
+a2aUpstream:
+  enabled: false
+  # Adapter Service to forward to. Defaults are the lightspeed-hub chart's
+  # internal-only adapter Service (charts/all/lightspeed-hub renders a
+  # ClusterIP Service named <fullname>, default lightspeed-hub, in its own
+  # namespace). Override only to diverge; keep in sync with that chart's
+  # fullnameOverride / namespace if they change.
+  service: lightspeed-hub
+  namespace: lightspeed-hub
+  # Port on the adapter Service Praxis connects to. The adapter serves
+  # TLS on 8443 (implemented: --tls-cert-file/--tls-key-file wired to an
+  # OpenShift service-serving cert via the Service's
+  # service.beta.openshift.io/serving-cert-secret-name annotation, in both
+  # the lightspeed-hub chart and the a2a-adapter kustomize component).
+  # Remaining UNCONFIRMED: live service-cert issuance on the target
+  # cluster -- see the note in files/praxis.yaml and the lightspeed-hub
+  # chart README's cross-chart contract.
+  # (quoted: an unquoted all-digit scalar renders as a float in Helm and
+  # would corrupt the endpoint string)
+  port: "8443"
+  # Deterministic target header (design doc section 4.2): the header whose
+  # VALUE selects the target spoke. Must equal the lightspeed-hub chart's
+  # adapter.targetHeader (the adapter's --target-header flag) -- the
+  # router validates it against the registered spokes and the adapter
+  # resolves the AgenticRun's spec.targetCluster from it. The model never
+  # constructs this header name.
+  targetHeader: X-Hub-Cluster
+  # NOT SUPPORTED (fails the render loudly when true). Would move the
+  # A->H exchange from the adapter onto the main gateway (the spoke-
+  # gateway pattern's delegator/oauth plugin + delegate() step). Blocked
+  # on the pinned image by the protected-A handoff: front-door delegation
+  # REPLACES the outbound Authorization header with H, which hides Token A
+  # from the adapter -- but the adapter NEEDS A for the deferred run leg
+  # (the A->U spoke exchange; see PLAN-lightspeed-hub-migration.md
+  # "Protected A handoff is required, not deferred"). No mechanism on
+  # ghcr.io/praxis-proxy/ai:0.4.1 delivers A alongside H to the upstream
+  # (PPE 0.3.1's assertions: block can only project validated identity
+  # slots, never the raw bearer, onto a header). Do not enable until that
+  # exists AND the image is bumped past the documented role:client defect.
+  exchangeAtPraxis: false
+
 # Static agent card served by Praxis at the A2A discovery paths. The card is
 # generic by design: this gateway currently fronts no investigation backend
 # (see the global comment above), so it only advertises itself. rpcUrl is

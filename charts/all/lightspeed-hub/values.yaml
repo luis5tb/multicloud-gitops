@@ -2,7 +2,7 @@
 # (docs/LIGHTSPEED_HUB_ADAPTER_DESIGN.md, Task B) and the
 # lightspeed-agentic-operator (repo C, branch a2a-support) stack it drives.
 # The Go adapter is being built in parallel (M1-M3); every adapter env var,
-# image and flag below is a PLACEHOLDER pending hub-adapter's final contract.
+# image and flag below is a PLACEHOLDER pending the adapter's final contract (source: lightspeed-hub repo, branch a2a, module a2a-adapter).
 # Nothing renders while enabled=false -- the pattern can carry the chart
 # dormant, exactly like charts/all/mao/mas-a2a's a2a.enabled gating.
 #
@@ -48,12 +48,14 @@ podLabels: {}
 
 service:
   # Internal-only ClusterIP Service (design §1: reachable only through
-  # Praxis; NO Route is rendered by this chart, ever).
+  # Praxis; NO Route is rendered by this chart, ever). Port 8443: the
+  # adapter serves TLS by default (adapter.tls below), matching
+  # praxis-proxy's a2aUpstream.port default.
   type: ClusterIP
-  port: 8080
+  port: 8443
 
 adapter:
-  # PLACEHOLDER image pending the hub-adapter build (M1-M3). The final pin
+  # PLACEHOLDER image pending a published adapter build (source: lightspeed-hub repo, branch a2a). The final pin
   # must be an immutable digest or exact tag, QUOTED in the variant (the
   # all-digit-tag/scientific-notation trap -- see docs/ARCHITECTURE.md).
   # The adapter gets its OWN image, separate from repo B / repo C images
@@ -64,9 +66,32 @@ adapter:
     digest: ""
     pullPolicy: IfNotPresent
 
-  # Listen port of the A2A server (flag --listen; the adapter binds
-  # ":<port>", plain HTTP -- TLS terminates at Praxis/mesh, design §1).
-  port: 8080
+  # Listen port of the A2A server (flag --listen). With adapter.tls
+  # enabled (the default) this is the TLS port; praxis-proxy's
+  # a2aUpstream connects here over TLS.
+  port: 8443
+
+  # TLS serving (adapter flags --tls-cert-file/--tls-key-file; the
+  # adapter's config.Validate requires both set together or both empty).
+  # PRODUCTION SHAPE (default, enabled): the Service carries
+  # service.beta.openshift.io/serving-cert-secret-name so OpenShift's
+  # service-ca operator mints and rotates a serving cert (tls.crt/tls.key)
+  # into servingCertSecretName; the Deployment mounts that Secret and
+  # passes certFile/keyFile as the two flags. This is required because
+  # praxis-proxy's a2aUpstream hop connects over TLS and verifies the
+  # service-serving CA. UNCONFIRMED (live-cluster only): that the
+  # service-ca operator actually issues the cert for this Service on the
+  # target cluster -- the annotation is standard OpenShift but issuance
+  # has not yet been observed on a live install.
+  # enabled=false = plain HTTP (both flags OMITTED entirely): LOCAL DEV
+  # ONLY (e.g. a port-forward to a locally-run adapter); never use behind
+  # Praxis on a real cluster. servingCertSecretName empty means
+  # <fullname>-serving-cert.
+  tls:
+    enabled: true
+    servingCertSecretName: ""
+    certFile: /etc/a2a-adapter/tls/tls.crt
+    keyFile: /etc/a2a-adapter/tls/tls.key
 
   # spec.analysis.agent on created runs (flag --run-agent). "default" is
   # the AgenticRun CRD's own documented default agent.
@@ -74,7 +99,7 @@ adapter:
 
   # M3 bounds (design §2.3/§5.5/§6.4), as Go duration strings -- the
   # defaults mirror the adapter's flag defaults exactly
-  # (hub-adapter/internal/config/config.go); override only with reason.
+  # (a2a-adapter/internal/config/config.go); override only with reason.
   clockSkew: 30s            # grace after exp in the pre-start Token A check
   streamDeadline: 30m       # wall-clock bound on message/stream
   renewalTimeout: 15m       # per-pause auth-required window (§6.4)
@@ -101,6 +126,17 @@ adapter:
   # concurrent praxis work. UNCONFIRMED GUESS: "X-Hub-Cluster" is the design
   # doc's proposal, not a confirmed final name.
   targetHeader: X-Hub-Cluster
+
+  # "Only the configured group can create AgenticRuns" (Phase 1 RBAC goal):
+  # the Kubernetes GROUP (as the hub API maps it from the exchanged Token
+  # H's groups claim -- with the default OIDC groupsPrefix, "keycloak:<
+  # Keycloak group>", e.g. keycloak:acme-agent-rca) bound to a Role
+  # granting create on agenticruns in the run namespace. Empty (default)
+  # renders no RoleBinding, which together with the deny-all admission
+  # policy keeps run creation fully closed. This gates creation itself;
+  # the admission policy additionally restricts WHICH targetCluster --
+  # see templates/run-creators-rbac.yaml.
+  hubRunCreatorsGroup: ""
 
   keycloak:
     # Issuer the adapter validates Token A against / exchanges A->H at.
@@ -135,7 +171,7 @@ adapter:
 
   # Agent-card fields (design §2.1; flags --card-*). The name default is
   # aligned with the ADAPTER FLAG DEFAULT "lightspeed-hub"
-  # (hub-adapter/internal/config/config.go) -- do not diverge the two
+  # (a2a-adapter/internal/config/config.go) -- do not diverge the two
   # without changing both. url is the Praxis-fronted origin callers use
   # (empty = the adapter serves the card without a URL).
   agentCard:
@@ -169,7 +205,7 @@ networkPolicy:
 # Run-token Secret writer RBAC (design §5.2). The adapter SA gets a Role in
 # the run namespace ONLY, granting create/get/update/delete on secrets --
 # delete is the §5.5 terminal-run Secret cleanup grant (M3: implemented in
-# hub-adapter internal/server/watch.go). Namespace isolation is the real
+# a2a-adapter internal/server/watch.go). Namespace isolation is the real
 # boundary: no other Secrets should live in the run namespace. The READER
 # side is repo C's operator SA in the lightspeed-agentic-operator repo
 # (cross-repo: it reads by name, gateway.go, and needs no grant from this
@@ -277,12 +313,13 @@ securityContext:
 
 # Probe paths are the adapter's real GET /healthz (unauthenticated 200;
 # safe: internal-only Service behind the NetworkPolicy, which admits only
-# the praxis-proxy namespace -- see hub-adapter README "Plain HTTP
-# listener" / HealthHandler).
+# the praxis-proxy namespace -- see the a2a-adapter README (lightspeed-hub repo, branch `a2a`) "TLS serving"
+# / HealthHandler). The probe PORT NAME and SCHEME are derived by the chart
+# from adapter.tls.enabled (https + HTTPS when TLS is on) and are therefore
+# NOT set here; only the path and the timing fields are.
 livenessProbe:
   httpGet:
     path: /healthz
-    port: http
   initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 5
@@ -291,7 +328,6 @@ livenessProbe:
 readinessProbe:
   httpGet:
     path: /healthz
-    port: http
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 5

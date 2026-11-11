@@ -89,6 +89,53 @@ credentials in transit (mirrors the remoteAPIServer https-only check above).
 {{- end -}}
 {{- end -}}
 
+{{/*
+A2A upstream (Task B request leg, disabled by default). Derived host and
+endpoint for the hub adapter Service, plus the render-time validation that
+gates the whole feature: the target allow-list IS the spokeGateways map,
+so enabling the front door with no registered spokes would forward nothing
+while looking configured -- fail loudly instead. Validation lives here so
+any template touching a2aUpstream (configmap.yaml via files/praxis.yaml,
+the CA ConfigMap, the Deployment mount) triggers it.
+*/}}
+
+{{- define "praxis-proxy.a2aUpstreamHost" -}}
+{{- printf "%s.%s.svc.cluster.local" .Values.a2aUpstream.service .Values.a2aUpstream.namespace -}}
+{{- end -}}
+
+{{- define "praxis-proxy.a2aUpstreamEndpoint" -}}
+{{- printf "%s:%s" (include "praxis-proxy.a2aUpstreamHost" .) (.Values.a2aUpstream.port | toString) -}}
+{{- end -}}
+
+{{- define "praxis-proxy.a2aUpstreamValidation" -}}
+{{- if .Values.a2aUpstream.exchangeAtPraxis -}}
+{{- fail "a2aUpstream.exchangeAtPraxis=true is NOT SUPPORTED on this leg: the ADAPTER performs the A->H exchange (see a2aUpstream's values.yaml comment). Front-door delegation would replace the outbound Authorization with H and hide Token A from the adapter, which needs A for the run leg; the pinned image (ghcr.io/praxis-proxy/ai:0.4.1 / praxis-policy 0.3.1) has no protected-A handoff mechanism (PLAN-lightspeed-hub-migration.md \"Protected A handoff is required, not deferred\")" -}}
+{{- end -}}
+{{- if .Values.a2aUpstream.enabled -}}
+{{- if not .Values.a2aUpstream.targetHeader -}}
+{{- fail "a2aUpstream.targetHeader is required when a2aUpstream.enabled is true (must match the lightspeed-hub chart's adapter.targetHeader / the adapter's --target-header flag)" -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9-]+$" .Values.a2aUpstream.targetHeader) -}}
+{{- fail (printf "a2aUpstream.targetHeader %q must be a valid HTTP header name (letters, digits, '-' only)" .Values.a2aUpstream.targetHeader) -}}
+{{- end -}}
+{{- if empty .Values.spokeGateways -}}
+{{- fail "a2aUpstream.enabled requires at least one spokeGateways entry: the caller x target allow-list IS the spokeGateways map (a caller may only target spokes that have gateways), so an enabled front door with no registered spokes would route nothing while looking configured" -}}
+{{- end -}}
+{{- if not .Values.a2aUpstream.service -}}
+{{- fail "a2aUpstream.service is required when a2aUpstream.enabled is true" -}}
+{{- end -}}
+{{- if not .Values.a2aUpstream.namespace -}}
+{{- fail "a2aUpstream.namespace is required when a2aUpstream.enabled is true" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9]+$" (.Values.a2aUpstream.port | toString)) -}}
+{{- fail (printf "a2aUpstream.port must be numeric, got %q" (.Values.a2aUpstream.port | toString)) -}}
+{{- end -}}
+{{- if not .Values.policy.enabled -}}
+{{- fail "a2aUpstream.enabled requires policy.enabled=true: this leg's design is \"Praxis stays the front door\" (validate Token A + azp allow-list BEFORE routing to the adapter); forwarding A2A traffic to the adapter without validation would move the front door, not keep it" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "praxis-proxy.caSyncPodSpec" -}}
 serviceAccountName: {{ include "praxis-proxy.fullname" . }}-ca-sync
 securityContext:
