@@ -1,12 +1,14 @@
 """Regression tests for the per-spoke Praxis spoke-gateways (Phase 2 B1).
 
-B1 is a PROPOSED integration, disabled by default: the spokeGateways map in
-charts/all/praxis-proxy is empty unless explicitly set, and the Keycloak
-exchanger client in charts/all/keycloak-oidc is behind
-keycloak.spokeGatewayExchanger.enabled. These tests pin both the
+B1 is disabled by default: the spokeGateways map in charts/all/praxis-proxy
+is empty unless explicitly set, and the Keycloak exchanger client in
+charts/all/keycloak-oidc is behind keycloak.spokeGatewayExchanger.enabled.
+The Praxis-side syntax (delegator plugin + delegate() step, tls.certificates
+listener, headers filter, kube-API pass-through) was verified at runtime on
+the pinned image locally (podman + mock IdP); these tests pin both the
 disabled-by-default behavior and the rendered shape of one enabled entry
-(including the serving-CA ConfigMap->Secret sync bridge and the egress
-NetworkPolicy's parsed remote API port).
+(the verified delegator/TLS/headers schemas, the serving-CA ConfigMap->
+Secret sync bridge, and the egress NetworkPolicy's parsed remote API port).
 """
 
 from __future__ import annotations
@@ -183,6 +185,19 @@ def test_spoke_gateway_entry_renders_expected_resources() -> None:
     cm = next(d for d in configmaps if d["metadata"]["name"] == "praxis-spoke-east")
     config = yaml.safe_load(cm["data"]["praxis.yaml"])
     assert config["listeners"][0]["address"] == "0.0.0.0:8443"
+    # VERIFIED TLS schema: certs live under tls.certificates[], NOT
+    # tls.{cert_path,key_path} (the old proposed form does not parse on
+    # the pinned image).
+    tls = config["listeners"][0]["tls"]
+    assert tls == {
+        "certificates": [
+            {
+                "cert_path": "/etc/praxis/serving-cert/tls.crt",
+                "key_path": "/etc/praxis/serving-cert/tls.key",
+            }
+        ]
+    }
+    assert "cert_path" not in tls and "key_path" not in tls
     filters = config["filter_chains"][0]["filters"]
     lb = next(f for f in filters if f["filter"] == "load_balancer")
     assert lb["clusters"] == [
@@ -198,12 +213,61 @@ def test_spoke_gateway_entry_renders_expected_resources() -> None:
     ]
     router = next(f for f in filters if f["filter"] == "router")
     assert router["routes"] == [{"path_prefix": "/", "cluster": "spoke-api"}]
-    delegator = next(f for f in filters if f["filter"] == "oauth-delegator")
-    assert delegator["audience"] == "praxis-spoke-east"
+    # VERIFIED header stripping: Core `headers` filter with request_remove
+    # (there is no strip_headers field on the pinned image).
+    headers = next(f for f in filters if f["filter"] == "headers")
+    for h in ("X-OLS-Cluster", "X-Forwarded-For", "Forwarded"):
+        assert h in headers["request_remove"]
+    # No filter may carry the old (nonexistent-on-this-image) strip_headers
+    # field -- the headers filter's request_remove is the verified form.
+    assert all("strip_headers" not in f for f in filters)
+    # The delegator is NOT a Core filter on the pinned image: no
+    # oauth-delegator filter may appear in the filter chain.
+    assert not any(f["filter"] == "oauth-delegator" for f in filters)
+
     # policy.yaml is re-rendered per spoke from the same file as the public
-    # gateway, so it must parse as valid YAML.
+    # gateway, so it must parse as valid YAML -- plus the B1 delegation
+    # additions (delegator plugin + delegate() step), with the VERIFIED
+    # kind/hooks/capabilities schema.
     policy = yaml.safe_load(cm["data"]["policy.yaml"])
-    assert policy["plugins"][0]["kind"] == "identity/jwt"
+    plugins = {p["name"]: p for p in policy["plugins"]}
+    assert plugins["jwt-client"]["kind"] == "identity/jwt"
+    # The jwt resolver must keep perform_http (JWKS fetches) -- the
+    # delegator needs it too, and so does the resolver for the exchange
+    # flow to work end-to-end.
+    assert "perform_http" in plugins["jwt-client"]["capabilities"]
+    delegator = plugins["spoke-delegator"]
+    assert delegator["kind"] == "delegator/oauth"
+    assert delegator["hooks"] == ["token.delegate"]
+    assert sorted(delegator["capabilities"]) == [
+        "perform_http",
+        "read_inbound_credentials",
+        "write_delegated_tokens",
+    ]
+    dconf = delegator["config"]
+    assert dconf["token_endpoint"].startswith("https://"), (
+        "token_endpoint must be https in prod (insecure_http is dev-only)"
+    )
+    assert dconf["token_endpoint"].endswith(
+        "/protocol/openid-connect/token"
+    )
+    assert dconf["client_id"] == "praxis-spoke-gateway"
+    assert dconf["client_secret_source"] == {
+        "kind": "env_var",
+        "name": "PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET",
+    }
+    assert "insecure_http" not in dconf
+    # delegate() rides the catch-all route's pre_invocation (after the azp
+    # allow-list conjunct), pointing at the fixed spoke-api cluster and
+    # the per-spoke exchange audience.
+    catchall = policy["routes"][-1]
+    assert catchall["authentication"] == {"steps": ["jwt-client"]}
+    pre = catchall["authorization"]["pre_invocation"]
+    assert any("deny" in step for step in pre)
+    assert (
+        "delegate(spoke-delegator, target: spoke-api, "
+        "audience: praxis-spoke-east)" in pre
+    )
 
     # NetworkPolicy: ingress only from the configured sandbox namespaces on
     # 8443; egress limited to DNS + HTTPS 443 (Keycloak/JWKS) + the remote
@@ -224,6 +288,34 @@ def test_spoke_gateway_entry_renders_expected_resources() -> None:
     assert {"protocol": "TCP", "port": 443} in egress_ports
     assert {"protocol": "TCP", "port": 6443} in egress_ports, (
         "egress must allow the parsed remote API port, not just 443"
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_spoke_delegation_not_leaked_into_main_gateway() -> None:
+    """Enabling spokes must not change the PUBLIC gateway's config.
+
+    The delegator plugin and delegate() step are injected into the spoke's
+    policy.yaml via a deep-copied Values tree; the main gateway renders the
+    same files/policy.yaml without them. The main praxis.yaml must also
+    stay router-free (an empty-routes router is a fatal load error on the
+    pinned image).
+    """
+    rendered = _helm(CHART, "--set", "identity.keycloak.audience=mas-a2a", *SPOKE_SETS)
+    docs = _resources(rendered.stdout)
+    main_cm = next(
+        d for d in docs
+        if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "praxis-proxy"
+    )
+    policy = yaml.safe_load(main_cm["data"]["policy.yaml"])
+    assert [p["name"] for p in policy["plugins"]] == ["jwt-client"]
+    assert "delegate(" not in main_cm["data"]["policy.yaml"]
+    config = yaml.safe_load(main_cm["data"]["praxis.yaml"])
+    assert not any(
+        f.get("filter") == "router"
+        for f in config["filter_chains"][0]["filters"]
     )
 
 
@@ -294,6 +386,19 @@ def test_spoke_gateway_missing_required_fields_fail_loudly() -> None:
     )
     assert result.returncode != 0
     assert "must be an https:// URL" in result.stderr
+
+    # The exchange client's token endpoint is under the same https-only
+    # rule as remoteAPIServer: it carries the client secret and the
+    # exchanged token in transit.
+    result = _helm(
+        CHART,
+        "--set", "identity.keycloak.audience=mas-a2a",
+        "--set", "spokeGatewayConfig.exchangeClient.tokenUrl=http://keycloak.example.test/realms/rca/protocol/openid-connect/token",
+        *SPOKE_SETS,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "spokeGatewayConfig.exchangeClient.tokenUrl must be an https:// URL" in result.stderr
 
 
 @pytest.mark.skipif(

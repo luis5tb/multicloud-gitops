@@ -73,10 +73,16 @@ fails validation) as a spoke.
 Per-spoke validation + shared derived values. Sits in its own template file
 (spoke-gateway-configmap.yaml) so it only runs when gateways are configured.
 This helper returns the Keycloak token endpoint for the exchange, derived
-from the effective issuer URL when not explicitly overridden.
+from the effective issuer URL when not explicitly overridden. An explicitly
+overridden tokenUrl must be https:// — the endpoint carries the exchange
+client's secret and the exchanged token U, so a plaintext leg would expose
+credentials in transit (mirrors the remoteAPIServer https-only check above).
 */}}
 {{- define "praxis-proxy.spokeExchangeTokenUrl" -}}
 {{- if .Values.spokeGatewayConfig.exchangeClient.tokenUrl -}}
+{{- if not (hasPrefix "https://" .Values.spokeGatewayConfig.exchangeClient.tokenUrl) -}}
+{{- fail (printf "spokeGatewayConfig.exchangeClient.tokenUrl must be an https:// URL, got %q: the token endpoint carries the exchange client secret and the exchanged token in transit (see the remoteAPIServer https-only rule)" .Values.spokeGatewayConfig.exchangeClient.tokenUrl) -}}
+{{- end -}}
 {{- .Values.spokeGatewayConfig.exchangeClient.tokenUrl -}}
 {{- else -}}
 {{- printf "%s/protocol/openid-connect/token" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) -}}

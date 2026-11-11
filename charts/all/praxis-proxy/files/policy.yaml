@@ -70,6 +70,61 @@ plugins:
         {{ end }}
       claim_mapper: keycloak
 
+{{- if .Values.__spokeDelegation }}
+  # B1 spoke-gateway ONLY (never rendered for the public gateway: the flag
+  # is injected solely by templates/spoke-gateway-configmap.yaml). Schema
+  # VERIFIED end-to-end on the pinned image (ghcr.io/praxis-proxy/ai:0.4.1,
+  # praxis-policy 0.3.1) against a mock IdP performing RFC 8693 exchange.
+  # This is a POLICY PLUGIN, not a Core filter: the delegation is driven by
+  # the `delegate(...)` step appended to the catch-all route's
+  # pre_invocation below.
+  - name: {{ .Values.__spokeDelegation.plugin }}
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    capabilities:
+      - read_inbound_credentials
+      - write_delegated_tokens
+      - perform_http
+    config:
+      # https REQUIRED in prod (the mock-IdP spike needed
+      # insecure_http: true only because the mock listened on plain http;
+      # it is deliberately NOT set here).
+      token_endpoint: {{ include "praxis-proxy.spokeExchangeTokenUrl" . | quote }}
+      client_id: {{ .Values.spokeGatewayConfig.exchangeClient.clientId | quote }}
+      # The secret comes from the env var the spoke Deployment already
+      # injects (spoke-gateway-deployment.yaml, from the ExternalSecret
+      # created by charts/all/keycloak-oidc). Client authentication at the
+      # token endpoint is HTTP Basic client_id:client_secret (verified
+      # empirically), NOT a body parameter.
+      client_secret_source:
+        kind: env_var
+        name: PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET
+      # Optional delegated-token cache (verified field names in the pinned
+      # binary; left off -- enable only after tuning for the IdP's token
+      # lifetimes, the binary refuses to cache when the staleness margin
+      # covers the whole token lifetime):
+      # cache:
+      #   max_entries: 1024
+      #   ttl_ceiling_seconds: 300
+      #   staleness:
+      #     floor_seconds: 5
+      #     fraction: 0.1
+      #     jitter_seconds: 1
+      #
+      # Empirical gotchas recorded from the spike (all reproduced against
+      # the pinned image):
+      #   * delegate() with no identity resolution raises a
+      #     `delegation_without_identity_resolution` alarm and fails -- the
+      #     route MUST keep `authentication: steps: [jwt-client]` so the
+      #     inbound bearer is resolved first.
+      #   * DelegationPayload with an empty bearer fails the delegation --
+      #     unauthenticated requests must be rejected by the authentication
+      #     step before delegate() runs (they are, here).
+      #   * BOTH the jwt resolver plugin and this delegator need the
+      #     perform_http capability (the resolver for JWKS fetches, the
+      #     delegator for the token-endpoint callout).
+{{- end }}
+
 routes:
   # The A2A discovery document is public by design. Its RPC URL points
   # at the public Praxis Route; the card itself is served by the
@@ -163,3 +218,12 @@ routes:
     authorization:
       pre_invocation:
         - {{ $conds := list }}{{ range .Values.policy.allowedCallers }}{{ $conds = append $conds (printf "claim.azp != '%s'" .) }}{{ end }}{{ printf "%s: deny('not an allow-listed caller')" (join " & " $conds) | quote }}
+        {{- if .Values.__spokeDelegation }}
+        # B1 spoke-gateway ONLY: after the azp allow-list conjunct above
+        # passes (pre_invocation steps run in sequence until one denies),
+        # exchange the inbound Token A for a spoke-audience Token U before
+        # the request is forwarded to the fixed spoke-api upstream.
+        # Verified syntax on the pinned image: delegate(<plugin>, target:
+        # <upstream cluster name>, audience: <exchange audience>).
+        - {{ printf "delegate(%s, target: %s, audience: %s)" .Values.__spokeDelegation.plugin .Values.__spokeDelegation.target .Values.__spokeDelegation.audience | quote }}
+        {{- end }}

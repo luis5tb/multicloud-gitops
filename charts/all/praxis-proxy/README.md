@@ -66,16 +66,28 @@ is (re-)introduced, consider routing this path to it again so the proxy is
 not marked ready while the backend is down (see the note in
 `files/praxis.yaml`).
 
-### No-backends router caveat (UNCONFIRMED GUESS)
+### No-backends router caveat (VERIFIED-BROKEN, fixed)
 
-The rendered `praxis.yaml` keeps a `router` filter with an empty `routes`
-list so allow-listed callers hitting any non-public path fall through to a
-clean 404 rather than a config-load error. Whether the pinned Praxis image
-accepts an empty routes list has **not** been validated against a live
-deployment of this no-backend configuration -- verify on the next cluster
-rollout; if the image rejects it, remove the router filter entirely (the
-static_response filters can serve every route this gateway currently
-answers).
+This chart previously kept a `router` filter with an empty `routes` list so
+allow-listed callers hitting any non-public path would fall through to a
+"clean 404". That was an UNCONFIRMED GUESS, and it is now **verified
+broken**: on the pinned image (`ghcr.io/praxis-proxy/ai:0.4.1`,
+praxis-policy 0.3.1) a `router` filter with `routes: []` is a **fatal
+config-load error** — the binary refuses to start, printing:
+
+```
+fatal: router: 'routes' is empty; every request would fail with 404
+```
+
+(Reproduced 2026-11 with a local `podman run` of the pinned image against
+a minimal no-upstream config; the same binary accepts the config with the
+router filter removed.) The fix, as the old guess's fallback prescribed:
+the rendered `praxis.yaml` now has **no router filter at all** — the
+`static_response` filters serve every route this gateway currently
+answers, and anything else that survives the policy filter falls off the
+end of the filter chain to Core's own 404. Re-introduce a router only
+together with real (non-empty) routes, e.g. when the Task B
+lightspeed-hub backend lands.
 
 ## Policy behavior
 
@@ -224,10 +236,11 @@ Two unauthenticated HTTP paths are intentionally served without a token
   service -- confirmed broken (404) against a live backend and fixed then.)
 
 All other paths, including the A2A RPC endpoint, hit the authenticated
-catch-all route; with no upstream clusters configured, a request that
-survives the policy filter falls through the empty router to a 404. The
-`policy` filter runs strictly before `router` in the filter chain, so a
-denied request is never forwarded to any upstream.
+catch-all route; with no upstream clusters configured and no router filter
+(see "No-backends router caveat" above), a request that survives the
+policy filter falls off the end of the filter chain to Core's own 404. The
+`policy` filter runs first in the filter chain, so a denied request is
+never forwarded to any upstream.
 
 ## Configuration
 
@@ -349,14 +362,16 @@ Keycloak list item onto one line, making the embedded policy invalid YAML.
 No prior test parsed the rendered `ConfigMap.data.policy.yaml`; the new chart
 test does so to keep this from recurring.
 
-## Spoke gateways (B1, proposed)
+## Spoke gateways (B1)
 
 `spokeGateways` renders one internal, TLS-serving Praxis gateway per
 registered spoke cluster (Phase 2 B1 of
-`PLAN-lightspeed-hub-migration.md`). The map is **empty by default** (nothing
-renders); the wiring below is a **proposed integration, not confirmed
-support**. It exists so the repo-A deployment side of B1 can be reviewed and
-spiked before anything is enabled.
+`PLAN-lightspeed-hub-migration.md`). The map is **empty by default**
+(nothing renders). The Praxis-side wiring below was **verified at runtime
+against the pinned image** (`ghcr.io/praxis-proxy/ai:0.4.1`, praxis-policy
+0.3.1) — see the register below for exactly what was and was not
+validated — but it stays disabled by default until the remaining
+real-Keycloak and live-cluster items close.
 
 What each entry creates (all named `praxis-spoke-<cluster>`, same pinned
 image as the main gateway, in this chart's namespace):
@@ -400,52 +415,83 @@ nothing is silently dropped as a "reserved" sibling key.
 Per the plan, B1 changes only the sandbox execution path; it never rewrites
 `SpokeCluster.spec.apiServer` or any standing management kubeconfig.
 
-### UNCONFIRMED GUESSes (validate live before enabling)
+### Verified/open register
 
 The pinned image is `ghcr.io/praxis-proxy/ai:0.4.1`, whose `Cargo.lock`
-resolves `praxis-policy` (PPE) to **0.3.1**; the delegation recipes
-documenting the oauth delegator are from **PPE 0.4.x**. Nothing below has
-been validated against the pinned image:
+resolves `praxis-policy` (PPE) to **0.3.1**. **Spike method (recorded
+honestly):** everything marked VERIFIED below was exercised on the *real
+pinned binary* run locally with podman, fronted by a hand-rolled **mock
+IdP** (mock JWKS + RFC 8693 token endpoint) and local echo/websocket
+upstreams — **no live cluster and no real Keycloak were involved**. That is
+runtime evidence on the exact shipped binary, but not on a deployment.
 
-1. **Oauth delegator (the central gate).** Whether the pinned image ships an
-   oauth delegator filter at all, and its exact config schema
-   (`token_url`/`client_id`/`client_secret.env`/`audience`/
-   `replace_authorization`/`strip_headers` are proposed field names, not
-   deployable Praxis syntax). If absent, the fallback is the adapter-side
-   exchange (Phase 2 option A) and the delegator filter must be removed.
-2. **Kube-API pass-through.** Whether the pinned Praxis can proxy the
-   Kubernetes API at all: arbitrary paths, list/watch streaming, exec and
-   websocket upgrades. The router is built for tool/A2A calls; this is the
-   pending kube-API-proxy spike. If it fails, B1 is off and option A stands.
-3. **TLS-serving listener.** Whether `listeners[].tls.{cert_path,key_path}`
-   is the right schema for a TLS-terminating listener on this image
-   (the main gateway is plain HTTP behind an edge-terminating Route, so this
-   chart has no previously-validated serving-TLS syntax). Fallback: front
-   the plain listener with a TLS-terminating sidecar serving the same
-   service-serving Secret.
-4. **Header stripping.** Whether the proposed `strip_headers` form exists;
-   the exact field for removing internal credential/routing metadata
-   (`X-OLS-Cluster`, `X-Forwarded-*`, `Forwarded`) on forward must be
-   confirmed.
-5. **Keycloak mapper set.** Whether mappers on the *exchanging* client apply
-   to RFC 8693-exchanged tokens (vs only client-credentials tokens), and
-   whether the subject-token audience mapper on the acme-agent client is
-   accepted by every audience-sensitive validator of Token A. See
-   `charts/all/keycloak-oidc`'s `keycloak.spokeGatewayExchanger` comments
-   for the plan-recorded caveats: `standard.token.exchange.enabled` on the
-   exchanging client; the subject token must already carry the exchanger as
-   audience (the `audience` request parameter only narrows, never adds);
-   omit `client_id` for SVID client-assertion flows; after the exchange
-   `azp` becomes the exchanger, so policy must key on `sub`/groups and
-   record `azp` as provenance only.
-6. **Service-CA bundle delivery (bridge shipped; mechanism validated by
-   contract reading, not live).** The `inject-cabundle` ConfigMap
-   (`praxis-spoke-service-ca`, key `service-ca.crt`) is the standard
-   in-namespace source for the service-serving CA bundle — but repo C
-   (lightspeed-agentic-operator, `a2a-support`) requires a **Secret with
-   key `ca.crt`** for its `gatewayCASecret`
-   (`controller/agenticrun/gateway.go` mounts it as the sandbox
-   kubeconfig's certificate-authority; `pkg/configuration/config.go`
+1. **Oauth delegator — VERIFIED-WORKS on 0.3.1.** The pinned image ships
+   `delegator/oauth` as a **policy.yaml `plugins:` entry** (not a Core
+   filter, and none of the originally-proposed filter field names
+   — `token_url`/`client_secret.env`/`audience`/
+   `replace_authorization`/`strip_headers` — exist). Verified form, now
+   rendered by the chart:
+   `kind: delegator/oauth`, `hooks: [token.delegate]`, `capabilities:
+   [read_inbound_credentials, write_delegated_tokens, perform_http]`,
+   `config: {token_endpoint, client_id, client_secret_source: {kind:
+   env_var, name: PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET}}` (an optional
+   `cache` block exists; left commented off in the chart), driven from the
+   route by `authorization.pre_invocation:
+   ["delegate(<plugin>, target: spoke-api, audience: <exchangeAudience>)"]`
+   after the `authentication: {steps: [jwt-client]}` resolver. Verified
+   end-to-end against the mock IdP (A→U exchange, Authorization replaced
+   with U upstream). **Still open: real-Keycloak behavior**, including the
+   STE v2 impersonation-only caveat and the mapper questions in item 5.
+   Empirical gotchas (all reproduced on the pinned image, recorded as
+   comments in `files/policy.yaml`): `delegate()` without identity
+   resolution raises a `delegation_without_identity_resolution` alarm and
+   fails; a `DelegationPayload` with an empty bearer fails the delegation;
+   **both** the jwt resolver plugin and the delegator need `perform_http`;
+   client authentication at the token endpoint is HTTP Basic
+   `client_id:client_secret`. The `token_endpoint` must be https in prod
+   (`insecure_http: true` is dev-only and deliberately not set).
+2. **Kube-API pass-through — VERIFIED-WORKS.** The pinned Praxis proxies
+   the Kubernetes API shape: arbitrary methods/paths/query strings,
+   incremental SSE watch streaming, websocket 101 upgrade with
+   bidirectional frames, 5MB request bodies, and `Expect: 100-continue`
+   all passed through to a test upstream. **Residual (needs a live
+   cluster):** real `kubectl exec` uses the SPDY `v1.remotecommand`
+   subprotocol (vs the websocket `v4.channel.k8s.io` subprotocol the
+   spike exercised) — validate exec against a real kube API before
+   relying on it.
+3. **TLS-serving listener — VERIFIED, with corrected schema.** The
+   originally-proposed `listeners[].tls.{cert_path,key_path}` is **wrong**;
+   the pinned image requires certs under a `certificates` list:
+   `tls: {certificates: [{cert_path: ..., key_path: ...}]}` (now rendered).
+   (Bonus, unverified but present in the binary: `client_cert_mode` +
+   `trusted_spiffe_ids` under the same `tls` block for future
+   mTLS-SPIFFE client verification.)
+4. **Header stripping — VERIFIED via the Core `headers` filter.** There is
+   no `strip_headers` field; the verified form is a Core filter
+   `filter: headers` with `request_remove: [X-OLS-Cluster,
+   X-Forwarded-For, Forwarded, ...]` (now rendered, including the
+   X-Forwarded-Host/Proto/Server variants). A `forwarded_headers` filter
+   also exists upstream if explicit forwarding is ever wanted.
+5. **Keycloak mapper set — OPEN.** Whether mappers on the *exchanging*
+   client apply to RFC 8693-exchanged tokens (vs only client-credentials
+   tokens), and whether the subject-token audience mapper on the
+   acme-agent client is accepted by every audience-sensitive validator of
+   Token A. See `charts/all/keycloak-oidc`'s
+   `keycloak.spokeGatewayExchanger` comments for the plan-recorded
+   caveats: `standard.token.exchange.enabled` on the exchanging client;
+   the subject token must already carry the exchanger as audience (the
+   `audience` request parameter only narrows, never adds); omit
+   `client_id` for SVID client-assertion flows; after the exchange `azp`
+   becomes the exchanger, so policy must key on `sub`/groups and record
+   `azp` as provenance only.
+6. **Service-CA bundle delivery — OPEN end-to-end** (bridge shipped;
+   mechanism validated by contract reading, not live). The
+   `inject-cabundle` ConfigMap (`praxis-spoke-service-ca`, key
+   `service-ca.crt`) is the standard in-namespace source for the
+   service-serving CA bundle — but repo C (lightspeed-agentic-operator,
+   `a2a-support`) requires a **Secret with key `ca.crt`** for its
+   `gatewayCASecret` (`controller/agenticrun/gateway.go` mounts it as the
+   sandbox kubeconfig's certificate-authority; `pkg/configuration/config.go`
    fails closed without the name). The chart therefore ships a
    ConfigMap→Secret sync bridge (`spoke-ca-sync-*.yaml`, mirroring the
    repo's historical keycloak-ca-sync pattern and this chart's own
@@ -465,12 +511,14 @@ been validated against the pinned image:
    `service-ca.crt` key contents and repo C's mount against a live
    sandbox kubeconfig. Fallback: the kubeconfig can instead point at the
    pod's projected serving-cert Secret CA if repo C prefers.
-7. **Empty-router acceptance.** The per-spoke config keeps the same
-   structure as the main gateway but with a non-empty routes list, so the
-   main gateway's own empty-routes caveat (see above) does not apply here —
-   but the *combined* filter chain (policy + oauth-delegator +
-   static_response + router + load_balancer) has never been loaded by the
-   pinned binary.
+7. **Combined filter chain.** The per-spoke chain actually rendered
+   (policy + headers + static_response + router + load_balancer, plus the
+   delegator plugin and delegate() step in policy.yaml) has now been
+   loaded and `--validate`d by the pinned binary against the chart's
+   rendered output; the main gateway's own empty-routes router problem is
+   closed separately (see "No-backends router caveat" above). What
+   remains is running that exact chain against a live cluster and a real
+   Keycloak.
 
 ### NetworkPolicy limits
 

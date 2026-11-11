@@ -1,11 +1,13 @@
 {{- /*
-PHASE 2 B1 (PROPOSED). Everything below is disabled by default (empty
-per-spoke map in values.yaml) and carries UNCONFIRMED GUESS notes: whether
+PHASE 2 B1. Everything below is disabled by default (empty per-spoke map
+in values.yaml). The Praxis-side syntax was VERIFIED at runtime against
 the pinned image (ghcr.io/praxis-proxy/ai:0.4.1 / praxis-policy 0.3.1)
-supports the oauth delegator (RFC 8693 exchange) and kube-API pass-through
-(watch/exec/websocket upgrades) is UNVERIFIED -- see the chart README
-section "Spoke gateways (B1, proposed)" for the full list and the exact
-live validations needed.
+locally with podman and a mock IdP -- see the chart README section
+"Spoke gateways (B1)" for the verified/open register: the delegator,
+TLS listener, header stripping and kube-API pass-through are
+VERIFIED-WORKS; real-Keycloak behavior (incl. the STE v2
+impersonation-only caveat) and the CA-sync end-to-end path remain open,
+so the feature stays off by default.
 */}}
 {{- range $key, $cfg := .Values.spokeGateways }}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $key) }}
@@ -101,75 +103,55 @@ metadata:
 data:
   praxis.yaml: |
     # Per-spoke Praxis configuration for spoke gateway "{{ $key }}"
-    # (Phase 2 B1, PROPOSED). See the chart README "Spoke gateways (B1,
-    # proposed)" for every UNCONFIRMED GUESS in this file: the pinned
-    # image (praxis-policy 0.3.1) has NOT been validated to support the
-    # TLS-serving listener schema, the oauth-delegator filter, header
-    # stripping, or kube-API pass-through (watch/exec/websocket upgrades).
+    # (Phase 2 B1). Syntax VERIFIED against the pinned image
+    # (ghcr.io/praxis-proxy/ai:0.4.1 / praxis-policy 0.3.1) via a local
+    # podman spike; see the chart README "Spoke gateways (B1)" for what
+    # was verified and what remains open (real Keycloak, live cluster).
     listeners:
       - name: spoke
         address: "0.0.0.0:8443"
-        # UNCONFIRMED GUESS: TLS-terminating listener schema (cert_path/
-        # key_path under listeners[].tls) -- proposed, not validated on the
-        # pinned image. The serving certificate is OpenShift's
-        # service-serving cert for the Service (see
-        # spoke-gateway-service.yaml's serving-cert-secret-name annotation),
-        # so the cert/key paths must match that Secret's tls.crt/tls.key.
-        # Fallback if the pinned image cannot terminate TLS on the main
-        # listener: front the plain listener with a TLS-terminating proxy
-        # sidecar serving the same Secret, keeping the Service internal.
+        # VERIFIED schema: TLS certs live under tls.certificates[] (a list
+        # of {cert_path, key_path}), NOT directly under tls -- the old
+        # tls.{cert_path,key_path} form does not parse on the pinned image.
+        # The serving certificate is OpenShift's service-serving cert for
+        # the Service (see spoke-gateway-service.yaml's
+        # serving-cert-secret-name annotation), so the paths match that
+        # Secret's tls.crt/tls.key.
+        # Future mTLS-SPIFFE (not enabled): the same tls block also accepts
+        # client_cert_mode and trusted_spiffe_ids for mutual-TLS client
+        # verification against SPIFFE IDs.
         tls:
-          cert_path: /etc/praxis/serving-cert/tls.crt
-          key_path: /etc/praxis/serving-cert/tls.key
+          certificates:
+            - cert_path: /etc/praxis/serving-cert/tls.crt
+              key_path: /etc/praxis/serving-cert/tls.key
         filter_chains: [spoke-gateway]
 
     filter_chains:
       - name: spoke-gateway
         filters:
-          # Same policy filter and same policy.yaml as the public gateway:
-          # the sandbox presents the caller's Token A (azp must be in
-          # policy.allowedCallers), validated against the same trusted
-          # issuer(s)/audience. Because A has no groups, pre-exchange
-          # policy here cannot require A.groups -- group-based decisions
-          # belong to the spoke verifying the exchanged token U.
+          # Same policy filter and same policy.yaml shape as the public
+          # gateway: the sandbox presents the caller's Token A (azp must
+          # be in policy.allowedCallers), validated against the same
+          # trusted issuer(s)/audience. Because A has no groups,
+          # pre-exchange policy here cannot require A.groups -- group-based
+          # decisions belong to the spoke verifying the exchanged token U.
+          # The A->U token exchange itself is NOT a filter: it is the
+          # delegator/oauth PLUGIN in this ConfigMap's policy.yaml (see
+          # below), driven by the delegate() step on the catch-all route.
           - filter: policy
             config_path: /etc/praxis/config/policy.yaml
             allow_private_idp: {{ $.Values.policy.allowPrivateIdp }}
             require_protocol_metadata: false
             init_timeout_secs: 30
 
-          # UNCONFIRMED GUESS (the central one): whether the pinned image
-          # (praxis-policy 0.3.1) ships the oauth delegator at all -- the
-          # recipes documenting it are from PPE 0.4.x. Proposed behavior:
-          # authenticate with PPE's own confidential client identity
-          # (client_credentials, secret from the environment), perform
-          # RFC 8693 token exchange of the inbound bearer token A for an
-          # audience-{{ $cfg.exchangeAudience }} token U, replace
-          # Authorization with U, and strip internal credential/routing
-          # metadata before forwarding. The field names below are proposed
-          # syntax, not deployable Praxis config. If the pinned image lacks
-          # the delegator, the fallback is the adapter-side exchange
-          # (Phase 2 option A) and this filter must be removed.
-          - filter: oauth-delegator
-            token_url: {{ include "praxis-proxy.spokeExchangeTokenUrl" $ | quote }}
-            client_id: {{ $.Values.spokeGatewayConfig.exchangeClient.clientId | quote }}
-            client_secret:
-              env: PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET
-            audience: {{ $cfg.exchangeAudience | quote }}
-            # Keycloak exchange caveats recorded in
-            # PLAN-lightspeed-hub-migration.md: the SUBJECT token (A) must
-            # already carry the exchanging client as an audience (the
-            # `audience` request parameter only ever narrows, never adds --
-            # keycloak.spokeGatewayExchanger.subjectTokenAudienceMapper adds
-            # the mapper on the caller client); omit client_id for SVID
-            # client-assertion flows (a SPIFFE sub never equals a Keycloak
-            # client_id); after the exchange azp becomes the exchanger, so
-            # downstream policy must key on sub/groups and record azp as
-            # provenance only.
-            replace_authorization: true
-            # Strip internal credential/routing metadata on forward.
-            # UNCONFIRMED GUESS: proposed field name/semantics.
-            strip_headers:
+          # Strip internal credential/routing metadata before forwarding.
+          # VERIFIED schema: Core's `headers` filter with request_remove
+          # (the old `strip_headers` field on the delegator does not exist
+          # on the pinned image). A `forwarded_headers` filter also exists
+          # upstream if explicit forwarding (rather than removal) of
+          # X-Forwarded-* is ever wanted.
+          - filter: headers
+            request_remove:
               - X-OLS-Cluster
               - X-Forwarded-For
               - X-Forwarded-Host
@@ -189,13 +171,14 @@ data:
             status: 200
             body: "ok"
 
-          # UNCONFIRMED GUESS: whether the pinned image can pass through
-          # the Kubernetes API (arbitrary paths, list/watch streaming, exec
-          # and websocket upgrades) at all -- the router is built for
-          # tool/A2A calls. This is the pending kube-API-proxy spike; if it
-          # fails, B1 is off and option A stands. The route matches ALL
-          # paths and forwards to ONE fixed, operator-configured remote
-          # cluster (never a caller-supplied URL or header).
+          # VERIFIED-WORKS on the pinned image: arbitrary kube-API methods,
+          # paths and query strings, incremental SSE watch streaming,
+          # websocket 101 upgrade with bidirectional frames, 5MB bodies and
+          # Expect: 100-continue all pass through (see chart README for the
+          # residual kubectl-exec SPDY subprotocol question, which needs a
+          # live cluster). The route matches ALL paths and forwards to ONE
+          # fixed, operator-configured remote cluster (never a caller-
+          # supplied URL or header).
           - filter: router
             routes:
               - path_prefix: /
@@ -231,5 +214,23 @@ data:
       allow_private_endpoints: true
       allow_private_upstreams: true
   policy.yaml: |
-{{ tpl ($.Files.Get "files/policy.yaml") $ | indent 4 }}
+{{- /*
+    The spoke's policy.yaml is the shared files/policy.yaml PLUS the B1
+    delegation additions, gated on a __spokeDelegation flag injected into a
+    deep-copied Values tree (so the PUBLIC gateway's policy.yaml -- rendered
+    from the same file without the flag -- is byte-identical to before and
+    never contains the delegator). The flag selects:
+      * the delegator/oauth plugin (kind/hooks/capabilities/config schema
+        VERIFIED on the pinned image vs a mock IdP doing RFC 8693 exchange),
+        whose client_secret_source names the env var the spoke Deployment
+        already injects (PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET);
+      * the delegate() step appended to the catch-all route's
+        pre_invocation, exchanging inbound Token A for an
+        audience-{{ $cfg.exchangeAudience }} Token U before forwarding to
+        the spoke-api cluster.
+    Empirical gotchas are recorded as comments in files/policy.yaml.
+*/}}
+{{- $spokeValues := deepCopy $.Values }}
+{{- $_ := set $spokeValues "__spokeDelegation" (dict "plugin" "spoke-delegator" "target" "spoke-api" "audience" $cfg.exchangeAudience) }}
+{{ tpl ($.Files.Get "files/policy.yaml") (dict "Values" $spokeValues "Chart" $.Chart "Release" $.Release "Template" $.Template) | indent 4 }}
 {{- end }}

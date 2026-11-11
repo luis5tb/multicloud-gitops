@@ -75,25 +75,31 @@ filter_chains:
         status: 200
         body: "ok"
 
-      # No upstream clusters are configured: with no load_balancer filter,
-      # every request that survives the policy filter's catch-all (i.e.
-      # allow-listed callers hitting any path other than the public discovery
-      # and readiness routes above) falls through the router to a 404.
-      # UNCONFIRMED GUESS: whether the pinned Praxis image accepts a router
-      # filter with an empty routes list has not been validated against a
-      # live deployment of this no-backend configuration -- verify on the
-      # next cluster rollout and, if it rejects an empty list, remove the
-      # router filter entirely (the static_response filters above can serve
-      # every route this gateway currently answers).
-      - filter: router
-        routes: []
+      # No upstream clusters are configured, so there is deliberately NO
+      # router filter at all: every request that survives the policy
+      # filter's catch-all (i.e. allow-listed callers hitting any path other
+      # than the public discovery and readiness routes above) falls off the
+      # end of the filter chain and is answered with a 404 by Core itself.
+      #
+      # VERIFIED-BROKEN (2026-11 local podman run of the pinned image
+      # ghcr.io/praxis-proxy/ai:0.4.1, praxis-policy 0.3.1): a `router`
+      # filter with `routes: []` -- the form this chart previously shipped
+      # here as a "clean 404" terminator -- is a FATAL config-load error on
+      # the pinned image:
+      #   fatal: router: 'routes' is empty; every request would fail with 404
+      # The binary refuses to start. The empty-routes caveat recorded in the
+      # chart README is therefore closed: the router filter is removed
+      # entirely. Re-introduce a router only together with real (non-empty)
+      # routes, e.g. when the Task B lightspeed-hub backend lands; the
+      # static_response filters above already serve every route this gateway
+      # currently answers.
 
 admin:
   # Kept on loopback: only container-local health probes can access it.
   address: "127.0.0.1:9901"
 
 # Praxis requires these opt-ins for static in-cluster upstreams. No upstream
-# clusters are currently configured (see the router filter above), so these
+# clusters are currently configured (see the no-router note above), so these
 # only matter if/when one is added back; they do not configure policy-engine
 # callouts.
 insecure_options:

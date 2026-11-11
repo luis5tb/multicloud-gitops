@@ -73,6 +73,14 @@ def test_static_agent_card_uses_response_filter_not_lb_cluster() -> None:
         filter_config.get("filter") == "load_balancer"
         for filter_config in filters
     )
+    # VERIFIED-BROKEN on the pinned image: a router filter with an empty
+    # routes list is a fatal config-load error ("fatal: router: 'routes'
+    # is empty; every request would fail with 404"), so the no-backend
+    # config must carry NO router filter at all.
+    assert not any(
+        filter_config.get("filter") == "router"
+        for filter_config in filters
+    ), "no-backend config must not render a router (empty routes is fatal)"
     readiness = [
         filter_config
         for filter_config in filters

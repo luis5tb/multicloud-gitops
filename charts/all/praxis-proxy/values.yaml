@@ -227,7 +227,8 @@ dnsIPv4Only:
       cpu: 100m
       memory: 128Mi
 
-# PHASE 2 B1 (PROPOSED, not confirmed support): per-spoke Praxis
+# PHASE 2 B1 (verified on the pinned image, still disabled by default):
+# per-spoke Praxis
 # spoke-gateways -- internal, TLS-serving proxy endpoints that forward the
 # sandbox kube-API path to one FIXED registered remote cluster API each,
 # exchanging the inbound caller token (A) for a spoke-audience token (U)
@@ -236,16 +237,16 @@ dnsIPv4Only:
 # "PPE behavior and the two TLS legs", and the chart README section
 # "Spoke gateways (B1, proposed)".
 #
-# DISABLED BY DEFAULT (empty map renders nothing). This is a proposed
-# integration, not confirmed support in the pinned image
-# (ghcr.io/praxis-proxy/ai:0.4.1, whose Cargo.lock resolves praxis-policy
-# to 0.3.1): whether that pinned image supports the oauth delegator
-# (RFC 8693 token exchange) and kube-API pass-through (watch/exec/websocket
-# upgrades) is UNVERIFIED -- the delegation recipes documenting the oauth
-# delegator are from PPE 0.4.x. Do not enable until the two pending spikes
-# (Praxis kube-API-proxy pass-through; oauth delegator on the pinned image)
-# pass against a live deployment. Every UNCONFIRMED GUESS is listed in the
-# chart README.
+# DISABLED BY DEFAULT (empty map renders nothing). The Praxis-side syntax
+# (delegator/oauth plugin + delegate() step, TLS-serving listener, header
+# stripping, kube-API pass-through) was VERIFIED at runtime against the
+# pinned image (ghcr.io/praxis-proxy/ai:0.4.1, whose Cargo.lock resolves
+# praxis-policy to 0.3.1) locally with podman and a mock IdP -- but real
+# Keycloak exchange behavior (incl. the STE v2 impersonation-only caveat)
+# and live-cluster behavior are still open, and the sandbox-namespace /
+# CA-sync wiring is not yet finalized. Do not enable until those close.
+# Every verified/open item is listed in the chart README's "Spoke gateways
+# (B1)" register.
 #
 # Map keyed by target-cluster name (a DNS label: lowercase alphanumerics
 # and '-'; it is embedded in resource names and in the Service DNS name

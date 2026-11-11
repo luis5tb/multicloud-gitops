@@ -79,9 +79,9 @@ spec:
               containerPort: 9901
               protocol: TCP
           # Probes use the loopback admin listener: the main listener is
-          # TLS-serving, and whether the pinned image's TLS listener (an
-          # UNCONFIRMED GUESS, see spoke-gateway-configmap.yaml) accepts a
-          # probe against 127.0.0.1 is unverified.
+          # TLS-serving (verified schema, but the admin listener keeps the
+          # probes independent of TLS/cert rotation), same as the main
+          # gateway's arrangement.
           startupProbe:
             exec:
               command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9901/healthy"]
