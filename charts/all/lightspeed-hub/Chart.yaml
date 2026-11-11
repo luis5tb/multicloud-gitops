@@ -1,0 +1,10 @@
+apiVersion: v2
+name: lightspeed-hub
+description: Hub A2A adapter (Task B) plus the lightspeed-agentic-operator stack it drives
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - a2a
+  - lightspeed-hub
+  - agentic

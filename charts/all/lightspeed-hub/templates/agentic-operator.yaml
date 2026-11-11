@@ -1,0 +1,90 @@
+{{- if .Values.enabled }}
+{{- if .Values.agenticOperator.enabled }}
+{{- $runNamespace := include "lightspeed-hub.runNamespace" . }}
+{{- if eq .Values.agenticOperator.config.sandboxCredentialMode "gateway" }}
+{{- if not .Values.agenticOperator.config.gatewayServerURLTemplate }}
+{{- fail "agenticOperator.config.gatewayServerURLTemplate is required when sandboxCredentialMode=gateway (repo C's ConfigMap load fails loudly without it -- pkg/configuration/config.go)" }}
+{{- end }}
+{{- if not .Values.agenticOperator.config.gatewayCASecret }}
+{{- fail "agenticOperator.config.gatewayCASecret is required when sandboxCredentialMode=gateway (repo C's ConfigMap load fails loudly without it -- pkg/configuration/config.go)" }}
+{{- end }}
+{{- end }}
+# The configuration ConfigMap repo C reads by well-known name
+# (pkg/configuration/constants.go: ConfigMapName). Key names are repo C's
+# contract, verbatim.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightspeed-agentic-configuration
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+data:
+  sandbox-credential-mode: {{ .Values.agenticOperator.config.sandboxCredentialMode | quote }}
+  {{- if eq .Values.agenticOperator.config.sandboxCredentialMode "gateway" }}
+  gateway-server-url-template: {{ .Values.agenticOperator.config.gatewayServerURLTemplate | quote }}
+  gateway-ca-secret: {{ .Values.agenticOperator.config.gatewayCASecret | quote }}
+  {{- end }}
+  terminal-ttl-days: {{ .Values.agenticOperator.config.terminalTTLDays | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+---
+# Operator Deployment (repo C, branch a2a-support). PLACEHOLDER: the manager
+# args below are the standard controller-runtime shape; repo C's actual
+# flags (leader election, metrics/webhook addresses) must be confirmed
+# against its config/manager kustomize before activation -- UNCONFIRMED
+# GUESS, listed in the README. Its RBAC and CRDs are NOT rendered here (see
+# README "CRD source (open decision)" and "Operator RBAC").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "lightspeed-hub.name" . }}-agentic-operator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "lightspeed-hub.name" . }}-agentic-operator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "lightspeed-hub.fullname" . }}-agentic-operator
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: manager
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # PLACEHOLDER image pending the pinned repo C a2a-support build.
+          image: {{ include "lightspeed-hub.operatorImage" . | quote }}
+          imagePullPolicy: {{ .Values.agenticOperator.image.pullPolicy }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          {{- with .Values.agenticOperator.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
+{{- end }}

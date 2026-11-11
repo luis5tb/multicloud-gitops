@@ -1,0 +1,27 @@
+{{- if .Values.enabled }}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+spec:
+  # Design doc §1: the adapter's Service gets no public Route and a
+  # NetworkPolicy admitting only the Praxis pods' namespace. Ingress-only
+  # for the skeleton; egress hardening (kube API, Keycloak, DNS) is a
+  # documented open item in the chart README.
+  policyTypes:
+    - Ingress
+  podSelector:
+    {{- include "lightspeed-hub.selectorLabels" . | nindent 4 }}
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.praxisNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.adapter.port }}
+{{- end }}
+{{- end }}

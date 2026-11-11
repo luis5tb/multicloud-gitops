@@ -1,0 +1,26 @@
+{{- if .Values.enabled }}
+{{- if not .Values.adapter.hubAudience }}
+{{- fail "adapter.hubAudience must be set when the chart is enabled" }}
+{{- end }}
+{{- if not (include "lightspeed-hub.keycloakIssuerUrl" .) }}
+{{- fail "adapter.keycloak.issuerUrl (or global.clusterBaseDomain / global.localClusterDomain to derive it) is required when the chart is enabled" }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+spec:
+  # Internal-only by design (design doc §1): the adapter is reachable ONLY
+  # through Praxis. This chart deliberately renders NO Route -- do not add
+  # one; see the chart README ("Why no Route").
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "lightspeed-hub.selectorLabels" . | nindent 4 }}
+{{- end }}

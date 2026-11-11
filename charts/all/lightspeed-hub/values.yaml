@@ -1,0 +1,302 @@
+# M4 SKELETON (DISABLED BY DEFAULT). This chart deploys the hub A2A adapter
+# (docs/LIGHTSPEED_HUB_ADAPTER_DESIGN.md, Task B) and the
+# lightspeed-agentic-operator (repo C, branch a2a-support) stack it drives.
+# The Go adapter is being built in parallel (M1-M3); every adapter env var,
+# image and flag below is a PLACEHOLDER pending hub-adapter's final contract.
+# Nothing renders while enabled=false -- the pattern can carry the chart
+# dormant, exactly like charts/all/mao/mas-a2a's a2a.enabled gating.
+#
+# Per repo convention (AGENTS.md): all defaults here are generic/empty -- no
+# real hostnames, trust domains or image pins belong in this file. Cluster-
+# specific values go in variants/standalone/values-standalone.yaml only.
+
+# Top-level gating, mirroring mas-a2a's a2a.enabled pattern: with false, the
+# chart renders NO Kubernetes resources. Flip to true only after the M1-M3
+# outputs land (real image pin, final adapter flags, confirmed run namespace).
+enabled: false
+
+global:
+  # Single cluster-domain anchor shared across this pattern's charts (see
+  # templates/_helpers.tpl). Base domain WITHOUT the apps. prefix, e.g.
+  # ocp.example.com; falls back to the framework-injected localClusterDomain
+  # (apps wildcard domain) with apps. stripped. Empty here keeps the chart
+  # generic -- the real value comes from the clustergroup values layer. The
+  # Keycloak issuer URL the adapter exchanges tokens against derives from it.
+  clusterBaseDomain: ""
+  localClusterDomain: ""
+  # Keycloak realm the issuer URL derives from (must equal the keycloak-oidc
+  # Application's keycloak.realm). Defaults to rca.
+  keycloakRealm: ""
+
+fullnameOverride: ""
+nameOverride: ""
+
+imagePullSecrets: []
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  # Dedicated SA for the adapter. The adapter must NEVER create AgenticRuns
+  # as this SA's own identity (design doc §3.3) -- it impersonates the
+  # requester's Token H; the SA exists for the run-token Secret writer role
+  # (§5.2) and controller watch permissions only.
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+service:
+  # Internal-only ClusterIP Service (design §1: reachable only through
+  # Praxis; NO Route is rendered by this chart, ever).
+  type: ClusterIP
+  port: 8080
+
+adapter:
+  # PLACEHOLDER image pending the hub-adapter build (M1-M3). The final pin
+  # must be an immutable digest or exact tag, QUOTED in the variant (the
+  # all-digit-tag/scientific-notation trap -- see docs/ARCHITECTURE.md).
+  # The adapter gets its OWN image, separate from repo B / repo C images
+  # (design §8.2: independent upgrade cadence).
+  image:
+    repository: quay.io/example/lightspeed-hub-adapter
+    tag: placeholder
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  # Listen port of the A2A server (flag --listen; the adapter binds
+  # ":<port>", plain HTTP -- TLS terminates at Praxis/mesh, design §1).
+  port: 8080
+
+  # spec.analysis.agent on created runs (flag --run-agent). "default" is
+  # the AgenticRun CRD's own documented default agent.
+  runAgent: default
+
+  # M3 bounds (design §2.3/§5.5/§6.4), as Go duration strings -- the
+  # defaults mirror the adapter's flag defaults exactly
+  # (hub-adapter/internal/config/config.go); override only with reason.
+  clockSkew: 30s            # grace after exp in the pre-start Token A check
+  streamDeadline: 30m       # wall-clock bound on message/stream
+  renewalTimeout: 15m       # per-pause auth-required window (§6.4)
+  maxCredentialPauses: 3    # total credential pauses per run (§6.4)
+  terminalCleanupGrace: 1m  # grace after terminal before the run-token Secret is deleted (§5.5)
+  sweepInterval: 5s         # watcher sweeper cadence
+
+  # Namespace where AgenticRuns, their run-token Secrets (ls-run-token-{uid})
+  # and repo C's sandbox pods live. Design §8.3: adapter + sandboxes + runs
+  # all share the operator namespace so the §5.2 writer/reader RBAC isolation
+  # is exact. Empty ("") means the chart's own release namespace (the
+  # lightspeed-hub Application namespace) -- the recommended single-namespace
+  # shape. UNCONFIRMED GUESS pending design open question Q4 (live Phase 0
+  # confirmation of where repo C actually runs sandboxes in this branch).
+  runNamespace: ""
+
+  # Hub audience of the A->H token exchange (design §3.2). REQUIRED when
+  # enabled -- no default, because the audience belongs to the Keycloak
+  # backend contract (keycloak-oidc chart work), not this chart.
+  hubAudience: ""
+
+  # Deterministic target header (design §4.2). Header name for the hub leg;
+  # the model never constructs it -- rename is chart-level, decided with the
+  # concurrent praxis work. UNCONFIRMED GUESS: "X-Hub-Cluster" is the design
+  # doc's proposal, not a confirmed final name.
+  targetHeader: X-Hub-Cluster
+
+  keycloak:
+    # Issuer the adapter validates Token A against / exchanges A->H at.
+    # issuerUrl derives from global.clusterBaseDomain + global.keycloakRealm
+    # (https://keycloak.apps.<base>/realms/<realm>) when empty; tokenUrl
+    # derives as <issuer>/protocol/openid-connect/token when empty. Override
+    # only to diverge. Both must be https -- the adapter rejects anything
+    # else at startup (credentials in transit).
+    issuerUrl: ""
+    tokenUrl: ""
+    # Confidential Keycloak client the adapter authenticates as for the
+    # A->H exchange (design §3.2 fallback placement: the adapter performs the
+    # exchange itself until/unless Praxis can -- Q3). The client and its
+    # Vault-backed secret are keycloak-oidc chart work (M1). NOT required
+    # (and must be empty) in SVID mode -- see adapter.svid below: the
+    # adapter's config.Validate makes client auth either secret OR SVID.
+    clientId: ""
+    clientSecretSecret:
+      name: ""
+      key: client-secret
+
+  # SPIFFE SVID client auth for the A->H exchange (alternative to the
+  # confidential client above; mirrors the adapter's --svid-socket flag /
+  # SPIFFE_SOCKET env). When enabled: keycloak.clientId must be empty and
+  # no clientSecretSecret is needed; the pod receives the Workload API
+  # socket path via the SPIFFE_SOCKET env (the socket itself must be
+  # provided by the cluster's SPIRE/SPIFFE deployment -- wire the volume
+  # in the variant; this chart only passes the path through).
+  svid:
+    enabled: false
+    socketPath: unix:///run/spire/sockets/agent.sock
+
+  # Agent-card fields (design §2.1; flags --card-*). The name default is
+  # aligned with the ADAPTER FLAG DEFAULT "lightspeed-hub"
+  # (hub-adapter/internal/config/config.go) -- do not diverge the two
+  # without changing both. url is the Praxis-fronted origin callers use
+  # (empty = the adapter serves the card without a URL).
+  agentCard:
+    name: lightspeed-hub
+    description: "Red Hat cluster investigation via lightspeed-hub"
+    url: ""
+    version: 0.1.0
+    protocolVersion: 0.3.0
+    skillId: cluster-investigation
+    skillName: "Red Hat cluster investigation"
+    skillDescription: "Investigate a Red Hat cluster (or spoke) via the lightspeed-hub agentic stack: analysis-only AgenticRuns with per-run requester credentials."
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# NetworkPolicy hardening: the adapter Service admits ONLY the Praxis pods'
+# namespace (design §1). Default matches the praxis-proxy Application's
+# namespace in the standalone variant. UNCONFIRMED GUESS: whether a
+# namespaceSelector alone is sufficient on the target cluster's CNI (pod
+# selector narrowing is a follow-up once praxis-proxy carries stable pod
+# labels).
+networkPolicy:
+  enabled: true
+  praxisNamespace: praxis-proxy
+
+# Run-token Secret writer RBAC (design §5.2). The adapter SA gets a Role in
+# the run namespace ONLY, granting create/get/update/delete on secrets --
+# delete is the §5.5 terminal-run Secret cleanup grant (M3: implemented in
+# hub-adapter internal/server/watch.go). Namespace isolation is the real
+# boundary: no other Secrets should live in the run namespace. The READER
+# side is repo C's operator SA in the lightspeed-agentic-operator repo
+# (cross-repo: it reads by name, gateway.go, and needs no grant from this
+# chart) -- see README.
+runTokenSecretRBAC:
+  enabled: true
+
+# Requester x target authorization admission policy (design §4.3). A
+# ValidatingAdmissionPolicy + binding (CEL, paramKind ConfigMap, mirroring
+# repo C's config/admission/agenticrun-suspension-policy.yaml pattern)
+# validating spec.targetCluster against the authenticated requester's
+# mapping on CREATE/UPDATE of agenticruns.
+#
+# SAFE DEFAULT: DENY-ALL. The exact authorization mapping (which principal
+# may target which spoke) is an OPEN DESIGN ITEM (design §4.3 / §10); until
+# admissionPolicy.allowTargets lists a principal, every create/update of an
+# AgenticRun with spec.targetCluster set is denied. A missing param ConfigMap
+# also denies (parameterNotFoundAction: Deny -- never fail open).
+#
+# Mapping shape: keys are authenticated request usernames (Token H's mapped
+# user, e.g. keycloak-oidc's OIDC username mapping) OR group names (e.g.
+# keycloak:acme-agent-rca); values are lists of allowed targetCluster names.
+# An empty map is the deny-all default.
+admissionPolicy:
+  enabled: true
+  paramConfigMapName: lightspeed-hub-target-policy
+  allowTargets: {}
+    # example (example.test placeholders only -- set real values in the
+    # variant, never here):
+    # keycloak:acme-agent-rca:
+    #   - example-spoke
+    # system:serviceaccount:lightspeed-hub:some-client:
+    #   - example-spoke
+
+# The lightspeed-agentic-operator (repo C, branch a2a-support) stack.
+# Design §8.1 item 5 / §8.3: CRDs, operator Deployment and the configuration
+# ConfigMap all land in the run namespace (one namespace shared with the
+# adapter and sandbox pods).
+agenticOperator:
+  enabled: true
+
+  # PLACEHOLDER image pending the pinned repo C a2a-support build (design
+  # §8.2). Rollback image = the upstream spoke-sa-mode image (byte-identical
+  # behavior when the gateway ConfigMap keys are absent).
+  image:
+    repository: quay.io/example/lightspeed-agentic-operator
+    tag: placeholder
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  # CRD VENDING DECISION (OPEN): the AgenticRun/Result/... CRDs are NOT
+  # rendered by this chart. Intended source: the lightspeed-agentic-operator
+  # repo's config/crd/bases (via its kustomize `make deploy` rendered into
+  # this chart, or installed by an OLM/subscription flow). Vendoring them
+  # here risks drift with the pinned operator image; leaving them out means
+  # the chart alone cannot bring up a working stack. Decision deferred to
+  # the M4 hardening pass -- see README "CRD source (open decision)".
+  crds:
+    install: false
+
+  # The configuration ConfigMap repo C reads (pkg/configuration/constants.go:
+  # ConfigMapName "lightspeed-agentic-configuration"). In gateway mode repo C
+  # fails loudly without the three keys below -- this chart mirrors that by
+  # failing at render time when they are empty.
+  config:
+    # sandbox-credential-mode: "gateway" (CredentialModeGateway) or
+    # "spoke-sa" (repo C default). Gateway mode requires the two keys below.
+    sandboxCredentialMode: gateway
+    # gateway-server-url-template: {targetCluster}-substituted URL of the
+    # hub-local spoke-facing PPE gateway the sandbox kubeconfig points at.
+    # Must match the concurrent praxis-proxy spoke-gateway Service naming,
+    # e.g. https://praxis-spoke-{targetCluster}.praxis-proxy.svc.cluster.local:8443.
+    # OWNED by the praxis implementer; referenced here (design §8.1 item 6).
+    gatewayServerURLTemplate: ""
+    # gateway-ca-secret: Secret (in THIS namespace, key ca.crt) holding the
+    # spoke gateways' serving CA. Must name the Secret the praxis-proxy
+    # chart's spokeGatewayConfig.servingCA bridge maintains (default
+    # praxis-spoke-gateway-ca) -- with its targetNamespace set to this
+    # chart's namespace.
+    gatewayCASecret: ""
+    # terminal-ttl-days (optional, repo C default 14): AgenticRun retention
+    # before TTL cleanup; A2A artifacts live exactly as long as the CRs
+    # (design §2.3).
+    terminalTTLDays: 14
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Probe paths are the adapter's real GET /healthz (unauthenticated 200;
+# safe: internal-only Service behind the NetworkPolicy, which admits only
+# the praxis-proxy namespace -- see hub-adapter README "Plain HTTP
+# listener" / HealthHandler).
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -32,6 +32,7 @@ clusterGroup:
     mao:
     acme-agent:
     praxis-proxy:
+    lightspeed-hub:
   subscriptions:
     eso:
       name: openshift-external-secrets-operator
@@ -750,6 +751,66 @@ clusterGroup:
           value: "true"
       # PHASE 1: Dormant by default (a2a.enabled=false)
       # See README.md "Phase 2: Enable MAS A2A Routing" for activation steps
+    lightspeed-hub:
+      name: lightspeed-hub
+      namespace: lightspeed-hub
+      argoProject: hub
+      path: charts/all/lightspeed-hub
+      overrides:
+        # TASK B / M4 SKELETON (DISABLED): the hub A2A adapter + repo C
+        # (lightspeed-agentic-operator, a2a-support) stack. The chart's own
+        # default is enabled=false (renders nothing); this override keeps
+        # the intent explicit here where the activation flips. Do NOT
+        # enable until the M1-M3 outputs land -- see
+        # charts/all/lightspeed-hub/README.md "PLACEHOLDER / UNCONFIRMED
+        # GUESS register" (placeholder adapter/operator images, env flag
+        # names, CRD + operator RBAC vendoring decision, admission-policy
+        # mapping). docs/LIGHTSPEED_HUB_ADAPTER_DESIGN.md is the design.
+        - name: enabled
+          value: "false"
+        # ------------------------------------------------------------------
+        # Example activation block (example.test placeholders only -- fill
+        # with real values at cutover; keep commented until then).
+        #
+        # Hub audience of the A->H token exchange (keycloak-oidc chart work
+        # in M1; must exist as an audience mapper before enabling):
+        # - name: adapter.hubAudience
+        #   value: lightspeed-hub-a2a
+        # The adapter's exchange client (created by keycloak-oidc; the
+        # client secret lands in this namespace as an ExternalSecret):
+        # - name: adapter.keycloak.clientId
+        #   value: lightspeed-hub-adapter
+        # - name: adapter.keycloak.clientSecretSecret.name
+        #   value: lightspeed-hub-adapter-client
+        # adapter.keycloak.issuerUrl/tokenUrl derive from
+        # global.clusterBaseDomain + global.keycloakRealm; override only to
+        # diverge.
+        # Adapter image pin (own pipeline, immutable digest or exact QUOTED
+        # tag -- never all-digits unquoted; see docs/ARCHITECTURE.md):
+        # - name: adapter.image.repository
+        #   value: quay.io/example/lightspeed-hub-adapter
+        # - name: adapter.image.tag
+        #   value: "0.1.0"
+        # Repo C operator image pin (a2a-support build):
+        # - name: agenticOperator.image.repository
+        #   value: quay.io/example/lightspeed-agentic-operator
+        # - name: agenticOperator.image.tag
+        #   value: "0.1.0"
+        # Gateway credential mode keys (owned by the praxis-proxy
+        # spoke-gateway implementer; gatewayServerURLTemplate must match the
+        # per-spoke gateway Service naming, gatewayCASecret must name the
+        # Secret praxis-proxy's spokeGatewayConfig.servingCA bridge
+        # maintains, with that bridge's targetNamespace set to
+        # lightspeed-hub):
+        # - name: agenticOperator.config.gatewayServerURLTemplate
+        #   value: https://praxis-spoke-{targetCluster}.praxis-proxy.svc.cluster.local:8443
+        # - name: agenticOperator.config.gatewayCASecret
+        #   value: praxis-spoke-gateway-ca
+        # Requester x target admission-policy allow-list (deny-all while
+        # empty; keys are Token H usernames or group names, values are the
+        # allowed targetCluster names):
+        # - name: admissionPolicy.allowTargets.keycloak\:acme-agent-rca[0]
+        #   value: example-spoke
   argoCD:
     resourceTrackingMethod: annotation
     resourceExclusions: null

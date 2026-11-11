@@ -1,0 +1,59 @@
+{{- if .Values.enabled }}
+{{- if .Values.runTokenSecretRBAC.enabled }}
+{{- $runNamespace := include "lightspeed-hub.runNamespace" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-run-token-writer
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+rules:
+  # Run-token Secret writer + terminal-run cleanup (design doc §5.2/§5.5).
+  # create/get/update for the write/renew path, DELETE for the §5.5
+  # terminal-run Secret cleanup and the run-deletion cleanup (M3, now
+  # implemented: hub-adapter internal/server/watch.go Sweep/RunDeleted).
+  # Namespace isolation is the real boundary (no wildcard resourceNames
+  # prefix exists for ls-run-token-*): no other Secrets should live in the
+  # run namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "delete"]
+  # Adapter watch grants in the run namespace (design doc §8.1 item 2),
+  # reconciled against the M3 implementation: get/list/watch for reads and
+  # informers, plus UPDATE for exactly one write -- persisting the §6.4
+  # pause counter as the a2a.lightspeed.io/credential-pauses annotation
+  # (hub-adapter internal/server/watch.go persistPauseCount). The adapter
+  # NEVER writes agenticruns/status or conditions (design §6.1) -- the
+  # status subresource grant was dropped accordingly.
+  - apiGroups: ["agentic.openshift.io"]
+    resources: ["agenticruns"]
+    verbs: ["get", "list", "watch", "update"]
+  # Approval DECISIONS are patched as the CALLER (Token H) -- that
+  # authorization is hub Authentication/RoleBinding wiring (keycloak-oidc
+  # chart work). The adapter SA itself only READS approvals (pending-stage
+  # derivation, internal/server/handler.go approvalDetail), so: get only.
+  - apiGroups: ["agentic.openshift.io"]
+    resources: ["agenticrunapprovals"]
+    verbs: ["get"]
+  - apiGroups: ["agentic.openshift.io"]
+    resources: ["analysisresults", "executionresults", "verificationresults", "escalationresults"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-run-token-writer
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lightspeed-hub.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "lightspeed-hub.fullname" . }}-run-token-writer
+{{- end }}
+{{- end }}

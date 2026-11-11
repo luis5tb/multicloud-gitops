@@ -1,0 +1,87 @@
+{{- if .Values.enabled }}
+{{- if .Values.admissionPolicy.enabled }}
+{{- $runNamespace := include "lightspeed-hub.runNamespace" . }}
+{{- $paramName := .Values.admissionPolicy.paramConfigMapName }}
+# Requester x target authorization for AgenticRuns (design doc §4.3).
+#
+# Gateway enforcement is bypassable: kube permission to create agenticruns
+# does not restrict spec.targetCluster, and direct kube callers skip Praxis
+# entirely. This ValidatingAdmissionPolicy is the server-side fix. It
+# mirrors repo C's own config/admission/agenticrun-suspension-policy.yaml
+# pattern (CEL + paramKind), but with a ConfigMap parameter so the
+# principal->spokes mapping is chart-managed.
+#
+# SKELETON / SAFE DEFAULT: DENY-ALL. The exact authorization mapping (which
+# principal may target which spoke) is an OPEN DESIGN ITEM (design §4.3);
+# until admissionPolicy.allowTargets lists the requester, every
+# create/update of an AgenticRun with spec.targetCluster set is denied. A
+# missing param ConfigMap also denies (parameterNotFoundAction: Deny) --
+# the policy never fails open. Keys of the param ConfigMap are authenticated
+# usernames or group names (e.g. keycloak:acme-agent-rca); values are
+# comma-separated allowed targetCluster names.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-agenticrun-target-authz
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+spec:
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  # Fail closed: an evaluation error denies the request.
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["agentic.openshift.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["agenticruns"]
+  validations:
+    # Hub runs (no spec.targetCluster) are not target-scoped: allow them;
+    # spoke runs require an explicit allow-list match on the authenticated
+    # requester's username or one of their groups.
+    - expression: >-
+        !has(object.spec.targetCluster)
+        || params.data.exists(k, k == request.userInfo.username
+          && params.data[k].split(',').exists(t, t.trim() == object.spec.targetCluster))
+        || request.userInfo.groups.exists(g,
+          params.data.exists(k, k == g
+            && params.data[k].split(',').exists(t, t.trim() == object.spec.targetCluster)))
+      messageExpression: >-
+        'AgenticRun target "' + object.spec.targetCluster + '" is not authorized for requester "'
+        + request.userInfo.username + '" (lightspeed-hub target policy: no allow-list entry matches)'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-agenticrun-target-authz
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "lightspeed-hub.fullname" . }}-agenticrun-target-authz
+  validationActions: [Deny]
+  # Scoped to the run namespace (design §8.3): AgenticRuns live only there,
+  # so the policy does not gate unrelated namespaces' runs.
+  namespace: {{ $runNamespace }}
+  paramRef:
+    name: {{ $paramName }}
+    namespace: {{ $runNamespace }}
+    # Deny when the param ConfigMap is missing -- never fail open.
+    parameterNotFoundAction: Deny
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $paramName }}
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+# Deny-all while empty (design §4.3 open item). Keys: authenticated
+# usernames or group names; values: comma-separated targetCluster names.
+data:
+  {{- range $principal, $targets := .Values.admissionPolicy.allowTargets }}
+  {{ $principal | quote }}: {{ $targets | join "," | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,147 @@
+{{- if .Values.enabled }}
+{{- if not .Values.adapter.hubAudience }}
+{{- fail "adapter.hubAudience must be set when the chart is enabled: it is the audience of the A->H token exchange (design doc §3.2) and belongs to the Keycloak backend contract, so there is no default" }}
+{{- end }}
+{{- if not (include "lightspeed-hub.keycloakIssuerUrl" .) }}
+{{- fail "adapter.keycloak.issuerUrl (or global.clusterBaseDomain / global.localClusterDomain to derive it) is required when the chart is enabled" }}
+{{- end }}
+{{- if .Values.adapter.svid.enabled }}
+{{/* SVID mode mirrors hub-adapter's config.Validate / NewTokenExchanger
+     exclusivity: client auth is EITHER a confidential client OR a SPIFFE
+     JWT-SVID -- a client_id present alongside an SVID source is rejected
+     by the adapter at startup (client_id is not sent in SVID mode). */}}
+{{- if .Values.adapter.keycloak.clientId }}
+{{- fail "adapter.keycloak.clientId must be EMPTY when adapter.svid.enabled=true: the adapter omits client_id in SVID mode and rejects the combination at startup (see hub-adapter internal/auth/exchange.go)" }}
+{{- end }}
+{{- else }}
+{{- if not .Values.adapter.keycloak.clientId }}
+{{- fail "adapter.keycloak.clientId must name the confidential Keycloak client the adapter exchanges A->H as (design doc §3.2 fallback placement, keycloak-oidc chart work in M1), or set adapter.svid.enabled=true for SPIFFE SVID client auth" }}
+{{- end }}
+{{- if not .Values.adapter.keycloak.clientSecretSecret.name }}
+{{- fail "adapter.keycloak.clientSecretSecret.name must reference the Secret (key client-secret by default) holding the exchange client's secret" }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "lightspeed-hub.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "lightspeed-hub.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "lightspeed-hub.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: adapter
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # PLACEHOLDER image: quay.io/example/lightspeed-hub-adapter:placeholder
+          # pending the hub-adapter build (M1-M3). Pin an immutable digest or
+          # exact quoted tag in the variant before enabling.
+          image: {{ include "lightspeed-hub.adapterImage" . | quote }}
+          imagePullPolicy: {{ .Values.adapter.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.adapter.port }}
+              protocol: TCP
+          # REAL adapter flags (hub-adapter/internal/config/config.go is the
+          # source of truth; reconciled in the M4 pass against the built
+          # M1-M3 binary). The client SECRET rides the env
+          # KEYCLOAK_CLIENT_SECRET (the flag's documented env fallback);
+          # SVID mode gets the Workload API socket via SPIFFE_SOCKET the
+          # same way.
+          args:
+            - --listen=:{{ .Values.adapter.port }}
+            - --namespace={{ include "lightspeed-hub.runNamespace" . }}
+            - --keycloak-issuer={{ include "lightspeed-hub.keycloakIssuerUrl" . }}
+            - --keycloak-token-endpoint={{ include "lightspeed-hub.keycloakTokenUrl" . }}
+            {{- if not .Values.adapter.svid.enabled }}
+            - --keycloak-client-id={{ .Values.adapter.keycloak.clientId }}
+            {{- end }}
+            - --hub-audience={{ .Values.adapter.hubAudience }}
+            - --target-header={{ .Values.adapter.targetHeader }}
+            - --run-agent={{ .Values.adapter.runAgent }}
+            - --card-name={{ .Values.adapter.agentCard.name }}
+            - "--card-description={{ .Values.adapter.agentCard.description }}"
+            {{- if .Values.adapter.agentCard.url }}
+            - --card-url={{ .Values.adapter.agentCard.url }}
+            {{- end }}
+            - --card-version={{ .Values.adapter.agentCard.version }}
+            - --card-protocol-version={{ .Values.adapter.agentCard.protocolVersion }}
+            - --card-skill-id={{ .Values.adapter.agentCard.skillId }}
+            - "--card-skill-name={{ .Values.adapter.agentCard.skillName }}"
+            - "--card-skill-description={{ .Values.adapter.agentCard.skillDescription }}"
+            # M3 bounds (design §2.3/§5.5/§6.4); defaults mirror the
+            # adapter's own flag defaults.
+            - --clock-skew={{ .Values.adapter.clockSkew }}
+            - --stream-deadline={{ .Values.adapter.streamDeadline }}
+            - --renewal-timeout={{ .Values.adapter.renewalTimeout }}
+            - --max-credential-pauses={{ .Values.adapter.maxCredentialPauses }}
+            - --terminal-cleanup-grace={{ .Values.adapter.terminalCleanupGrace }}
+            - --sweep-interval={{ .Values.adapter.sweepInterval }}
+          env:
+            {{- if not .Values.adapter.svid.enabled }}
+            - name: KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.adapter.keycloak.clientSecretSecret.name }}
+                  key: {{ .Values.adapter.keycloak.clientSecretSecret.key }}
+            {{- end }}
+            {{- if .Values.adapter.svid.enabled }}
+            # SPIFFE Workload API socket (the --svid-socket flag's env
+            # fallback). The socket itself must be provided to the pod by
+            # the SPIRE/SPIFFE deployment (e.g. a hostPath or CSI volume
+            # wired in the variant) -- the chart passes the path through,
+            # it does not deploy an agent.
+            - name: SPIFFE_SOCKET
+              value: {{ .Values.adapter.svid.socketPath | quote }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.adapter.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
