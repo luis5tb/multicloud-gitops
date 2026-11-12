@@ -495,6 +495,28 @@ clusterGroup:
         # see charts/all/praxis-proxy/values.yaml a2aUpstream comment.
         # - name: a2aUpstream.exchangeAtPraxis
         #   value: "false"
+        # TASK B REQUEST LEG (leg 1 -- the MAS blueprint side; DISABLED --
+        # everything commented). Once the front door above is enabled, the
+        # persisted MAS blueprint must route investigation delegations
+        # through it. Re-run setup-mas-blueprint.sh with these env vars
+        # (they are script inputs, NOT chart values -- recorded here so the
+        # cutover runbook has one place listing every knob), then pin the
+        # returned blueprintId in mao-a2a's a2a.blueprintId below (the G3
+        # cutover):
+        #   export HUB_ADAPTER_A2A_URL="https://praxis-proxy.apps.<cluster-domain>/a2a"
+        #   #   ^ the Praxis PUBLIC route (front door), never the adapter's
+        #   #     internal Service -- Praxis validates Token A and routes on
+        #   #     X-Hub-Cluster; empty (default) omits the investigation node.
+        #   export HUB_ADAPTER_AGENT_NAME="Hub Cluster Investigator"
+        #   export HUB_ADAPTER_TARGET_HEADER="X-Hub-Cluster"
+        #   #   ^ must equal a2aUpstream.targetHeader above
+        #   ./setup-mas-blueprint.sh --dry-run multi-cluster  # inspect first
+        #   ./setup-mas-blueprint.sh multi-cluster
+        # KNOWN LIMITATION (design §4.2 deviation): the header NAME is
+        # model-spelled in the delegate_task data argument (MAS has no
+        # node-config header mechanism); mitigated by temperature 0 + the
+        # prompt's exact-spelling rule. See setup-mas-blueprint.sh's header
+        # comment and charts/all/mao/mas-a2a/README.md.
         # Serving-CA bridge: repo C's gatewayCASecret expects a Secret
         # (key ca.crt) in ITS OPERATOR NAMESPACE -- targetNamespace MUST
         # be set to that namespace here, and repo C's config must name the

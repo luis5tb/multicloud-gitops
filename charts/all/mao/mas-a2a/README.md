@@ -41,6 +41,54 @@ published inbound blueprint: it is an **outbound A2A client-node example**
 (`a2a_agent_node` with a remote `base_url` and `agent_card`), not a ready
 inbound orchestrator. No fixture ID is configured by this chart.
 
+### Blueprint contents and the hub-adapter investigation node
+
+`setup-mas-blueprint.sh` (repo root) authors the blueprint this chart serves.
+By default it emits a **non-investigation** blueprint: an orchestrator that
+routes Red Hat knowledge questions to the Ask Red Hat A2A agent and answers
+"no cluster-investigation agent available" for live-cluster requests (the OLS
+investigation backend was removed; see
+`PLAN-lightspeed-hub-migration.md` Task A).
+
+Setting `HUB_ADAPTER_A2A_URL` when running the script adds the Task-B
+replacement: a `hub_investigate` plan step and an `a2a_agent_node`
+("Hub Cluster Investigator" by default, overridable via
+`HUB_ADAPTER_AGENT_NAME`) pointing at the hub A2A adapter. Rules:
+
+- **`HUB_ADAPTER_A2A_URL` must be the Praxis public route**
+  (`https://praxis-proxy.apps.<domain>/a2a` or the path your praxis-proxy
+  `a2aUpstream` exposes), **never the adapter's internal Service**. The
+  adapter is internal-only by design
+  (`docs/LIGHTSPEED_HUB_ADAPTER_DESIGN.md` §1), and MAS's delegated Token A
+  must be validated and routed by the Praxis front door. An empty value (the
+  default) omits the node entirely, preserving the non-investigation
+  blueprint — this is the enable/disable knob.
+- The node's `bearer_token` is empty, exactly like the Ask Red Hat node: MAS
+  forwards the inbound execution-context credential (Token A); no token is
+  stored in the blueprint.
+- The target cluster travels as the value of the `X-Hub-Cluster` routing
+  header inside the orchestrator's `delegate_task` `data` argument
+  (`data={"headers": {"X-Hub-Cluster": "<cluster-id>"}}`), which the
+  deployed MAS image forwards verbatim on the outbound A2A POST
+  (`a2a_agent_node` reads `task.data["headers"]`; protected headers such as
+  `Authorization` are dropped and the sealed credential wins). The header
+  name must equal praxis-proxy's `a2aUpstream.targetHeader`
+  (`HUB_ADAPTER_TARGET_HEADER`, default `X-Hub-Cluster`).
+- **Known limitation — deviation from the hub-adapter design §4.2 rule 1**
+  ("the model never constructs header names"): MAS offers no node-config
+  header mechanism (`A2AAgentNodeConfig` has no headers field), so the
+  header *name* is still model-spelled inside the `data` argument. This is
+  the same prompt-instructed mechanism the pre-Task-A blueprint used for
+  `X-OLS-Cluster`, with the same mitigation (LLM temperature 0 + an
+  exact-spelling rule in the orchestrator prompt). Misspellings fail closed
+  at Praxis (HTTP 404, delegation lost). The durable fix is deterministic
+  header injection in MAS (see `UPSTREAM_CONTRIBUTIONS.md`); until it lands,
+  watch for `X_Hub_Cluster` (underscores) in worker logs if investigations
+  intermittently vanish.
+- `--dry-run` prints the exact `blueprint.save` JSON payload (with
+  placeholder resource RIDs) without touching the MAS API — use it to
+  review the blueprint before the G3 cutover re-pins `a2a.blueprintId`.
+
 The allow-list matches the validated JWT `user_id` or `sub` claim exactly. For
 the Keycloak validator, the subject is normally the opaque Keycloak user `sub`,
 not a username, group, or email address. For a Red Hat SSO

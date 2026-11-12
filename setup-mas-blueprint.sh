@@ -2,9 +2,11 @@
 # MAS A2A Blueprint Setup Script
 #
 # NOTE (Task A, PLAN-lightspeed-hub-migration.md): the OLS investigation
-# backend was removed from this repo, so this script now emits
+# backend was removed from this repo, so by default this script emits
 # NON-INVESTIGATION blueprints (orchestrator + Ask Red Hat, plus an optional
-# HITL approval gate). The LIVE blueprint pinned in
+# HITL approval gate). Setting HUB_ADAPTER_A2A_URL (see below) additionally
+# wires the Task-B replacement: a hub-adapter investigation node reached
+# through the Praxis front door. The LIVE blueprint pinned in
 # variants/standalone/values-standalone.yaml (a2a.blueprintId) still contains
 # its OLS investigation nodes and is deliberately unchanged -- replacing it
 # is the separate runtime cutover (G3) in that plan.
@@ -19,7 +21,45 @@
 #   export LITELLM_API_KEY="your-key"
 #   export LITELLM_API_BASE="https://maas-rhdp.apps.maas.redhatworkshops.io/v1"
 #   export LITELLM_MODEL="gpt-oss-20b"
-#   ./setup-mas-blueprint.sh [simple|multi-cluster|multi-cluster-hitl]
+#   ./setup-mas-blueprint.sh [--dry-run] [simple|multi-cluster|multi-cluster-hitl]
+#
+# --dry-run skips all MAS API calls (connectivity check, resource
+# registration, blueprint save), emits the blueprint it WOULD save as the
+# exact blueprint.save JSON payload (with placeholder resource RIDs), and
+# exits 0. Useful for validating blueprint structure in tests and in the G3
+# cutover runbook before touching live inventory.
+#
+# Hub-adapter investigation node (Task B / PLAN-lightspeed-hub-migration.md
+# M2-M4 boundary; see docs/LIGHTSPEED_HUB_ADAPTER_DESIGN.md §11 "Blueprint
+# re-authoring"). Off unless HUB_ADAPTER_A2A_URL is set:
+#   HUB_ADAPTER_A2A_URL       Praxis PUBLIC A2A route
+#                             (https://praxis-proxy.apps.<domain>/a2a or the
+#                             a2aUpstream path your praxis-proxy exposes).
+#                             MUST be the Praxis front door, NOT the hub
+#                             adapter's internal Service: the adapter is
+#                             internal-only by design (design doc §1) and
+#                             MAS's delegated Token A must be validated +
+#                             routed (X-Hub-Cluster) by Praxis. Empty (the
+#                             default) omits the node and its plan step
+#                             entirely, preserving the post-Task-A
+#                             non-investigation blueprint.
+#   HUB_ADAPTER_AGENT_NAME    Display name of the investigation node
+#                             (default "Hub Cluster Investigator").
+#   HUB_ADAPTER_TARGET_HEADER Routing header Praxis matches on
+#                             (default X-Hub-Cluster; must equal
+#                             praxis-proxy a2aUpstream.targetHeader).
+#
+# The target cluster travels as the VALUE of that header inside the
+# delegate_task "data" argument (structured tool-arg data, per design §4.2 --
+# never free text in the message body). KNOWN LIMITATION, recorded deviation
+# from design §4.2 rule 1 ("the model never constructs header names"): MAS
+# offers no node-config header mechanism (A2AAgentNodeConfig has no headers
+# field), so the header NAME is still model-spelled inside the data dict and
+# forwarded verbatim by the a2a_agent_node (task.data["headers"] ->
+# set_call_headers on the deployed image). Mitigation is identical to the
+# pre-Task-A X-OLS-Cluster approach: temperature 0 + the exact-spelling rule
+# in the orchestrator prompt below. The durable fix is deterministic header
+# injection in MAS (see UPSTREAM_CONTRIBUTIONS.md).
 #
 # multi-cluster-hitl is multi-cluster plus an approval gate before the
 # orchestrator, to test human approval (TASK_STATE_INPUT_REQUIRED) and token
@@ -32,6 +72,13 @@
 #   HITL_OC_SERVER  defaults to https://api.${CLUSTER_DOMAIN}:6443
 
 set -e
+
+# --dry-run: emit the blueprint.save payload without touching the MAS API.
+DRY_RUN=false
+if [ "${1:-}" == "--dry-run" ]; then
+  DRY_RUN=true
+  shift
+fi
 
 # Configuration
 export KUBECONFIG="${KUBECONFIG:-$HOME/gitops.kubeconfig}"
@@ -99,6 +146,33 @@ mas_api_upsert_resource() {
 CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-bm-cluster.e2e.bos.redhat.com}"
 ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/ask/v1/a2a}"
 
+# Hub-adapter investigation node (see the header comment for the full
+# contract). HUB_ADAPTER_A2A_URL empty => node omitted, non-investigation
+# blueprint preserved. When set, it MUST be the Praxis public route: MAS's
+# delegated Token A is validated and routed (X-Hub-Cluster) by the Praxis
+# front door, and the adapter's own Service is internal-only (design §1).
+HUB_ADAPTER_A2A_URL="${HUB_ADAPTER_A2A_URL:-}"
+HUB_ADAPTER_AGENT_NAME="${HUB_ADAPTER_AGENT_NAME:-Hub Cluster Investigator}"
+HUB_ADAPTER_TARGET_HEADER="${HUB_ADAPTER_TARGET_HEADER:-X-Hub-Cluster}"
+
+# Blueprint type must be parsed before the orchestrator prompt below, so the
+# prompt can vary with HUB_ADAPTER_ENABLED. The hub-adapter node is only
+# wired into orchestrated (multi-cluster) blueprints; the `simple` type has
+# no orchestrator to route to it (the URL is then ignored, with a notice).
+BLUEPRINT_TYPE="${1:-simple}"
+case "$BLUEPRINT_TYPE" in
+  simple) IS_MULTI_CLUSTER=false ;;
+  multi-cluster|multi-cluster-hitl) IS_MULTI_CLUSTER=true ;;
+  *)
+    echo "❌ Unknown blueprint type '$BLUEPRINT_TYPE' (simple, multi-cluster, multi-cluster-hitl)"
+    exit 1
+    ;;
+esac
+HUB_ADAPTER_ENABLED=false
+if [ -n "$HUB_ADAPTER_A2A_URL" ] && [ "$IS_MULTI_CLUSTER" == "true" ]; then
+  HUB_ADAPTER_ENABLED=true
+fi
+
 # Shared by the registered orchestrator resource and the blueprint node. Ask
 # Red Hat's A2A node has an empty bearer_token so MAS can use the inbound
 # execution-context credential; do not place a token in this blueprint.
@@ -113,7 +187,25 @@ ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/as
 # prompt below, but the temperature-0 pinning stays: model-generated
 # tool-argument spelling is still load-bearing for any future header-based
 # routing (see UPSTREAM_CONTRIBUTIONS.md for the durable in-MAS fix).
-ORCHESTRATOR_SYSTEM_MESSAGE=$(cat <<EOF
+if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
+  ORCHESTRATOR_SYSTEM_MESSAGE=$(cat <<EOF
+You are a Red Hat knowledge router. For every request, decide whether to delegate to Ask Red Hat or the cluster investigator (or answer directly), then finalize.
+
+AVAILABLE AGENTS:
+- Ask Red Hat: Red Hat documentation, product information, and guidance. Use it when the request matches a capability advertised in the Ask Red Hat Agent Card. Treat that card's skill names and descriptions as the supported scope; do not invent skills or assume Ask Red Hat can inspect a live cluster.
+- ${HUB_ADAPTER_AGENT_NAME}: live OpenShift cluster investigation via the hub adapter. Use it when the request needs observed facts about a specific cluster's current state (health, resources, pods, logs, configuration).
+
+ROUTING:
+- For documentation, product questions, how-to guidance, or other topics covered by an advertised Ask Red Hat Agent Card skill, delegate to Ask Red Hat.
+- For live cluster inspection or troubleshooting, delegate to ${HUB_ADAPTER_AGENT_NAME}. Determine the target cluster from the user's question. When delegating, you MUST set the "data" parameter with the routing header, spelled EXACTLY "${HUB_ADAPTER_TARGET_HEADER}" (hyphens, this exact casing, never underscores):
+  data={"headers": {"${HUB_ADAPTER_TARGET_HEADER}": "<cluster-id>"}}
+  The cluster id is the target cluster's registered identifier (for example api-<hostname>-6443). If the user does not specify a cluster, ask which cluster to investigate before delegating.
+
+Synthesize the agent's results into one answer. Distinguish documentation-based guidance from observed facts, and do not present documentation as evidence of any cluster's current state.
+EOF
+)
+else
+  ORCHESTRATOR_SYSTEM_MESSAGE=$(cat <<EOF
 You are a Red Hat knowledge router. For every request, decide whether to delegate to Ask Red Hat or answer directly, then finalize.
 
 AVAILABLE AGENTS:
@@ -126,6 +218,7 @@ ROUTING:
 Synthesize the agent's results into one answer. Distinguish documentation-based guidance from observed facts, and do not present documentation as evidence of any cluster's current state.
 EOF
 )
+fi
 
 # Orchestrator LLM provider: "openai" (LiteLLM/MaaS, needs LITELLM_API_KEY) or
 # "vertex" (Gemini on Vertex via the google_genai element). Vertex is
@@ -140,16 +233,6 @@ VERTEX_PROJECT="${VERTEX_PROJECT:-redhat-marketplace-dev}"
 VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
 VERTEX_MODEL="${VERTEX_MODEL:-gemini-3.8-flash}"
 
-BLUEPRINT_TYPE="${1:-simple}"
-case "$BLUEPRINT_TYPE" in
-  simple) IS_MULTI_CLUSTER=false ;;
-  multi-cluster|multi-cluster-hitl) IS_MULTI_CLUSTER=true ;;
-  *)
-    echo "❌ Unknown blueprint type '$BLUEPRINT_TYPE' (simple, multi-cluster, multi-cluster-hitl)"
-    exit 1
-    ;;
-esac
-
 echo "========================================="
 echo "MAS A2A Blueprint Setup"
 echo "========================================="
@@ -157,27 +240,37 @@ echo "MAS API: $MAS_API_URL"
 echo "Cluster: $CLUSTER_DOMAIN"
 echo "Blueprint Type: $BLUEPRINT_TYPE"
 echo "Ask Red Hat A2A: $ASK_REDHAT_A2A_URL"
+if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
+  echo "Hub Adapter A2A: $HUB_ADAPTER_A2A_URL (agent: ${HUB_ADAPTER_AGENT_NAME}, header: ${HUB_ADAPTER_TARGET_HEADER})"
+elif [ -n "$HUB_ADAPTER_A2A_URL" ]; then
+  echo "Hub Adapter A2A: $HUB_ADAPTER_A2A_URL (IGNORED -- the ${BLUEPRINT_TYPE} blueprint has no orchestrator)"
+fi
+if [ "$DRY_RUN" == "true" ]; then
+  echo "Mode: DRY RUN (no MAS API calls; placeholder resource RIDs)"
+fi
 if [ "$MAS_API_INSECURE_TLS" = "true" ] && [ -z "$MAS_API_CA_BUNDLE" ]; then
   echo "⚠️  WARNING: MAS API TLS certificate verification is disabled."
 fi
 echo ""
 
 # Check connectivity
-echo "Testing MAS API connectivity..."
-if ! HEALTH_RESPONSE=$(mas_api_curl -sS --connect-timeout 10 --max-time 30 "${MAS_API_URL}/api/health/"); then
-  echo "❌ MAS API health request failed; see the curl error above."
-  echo "   For a private ingress CA, set MAS_API_CA_BUNDLE=/path/to/ca-bundle.crt."
-  echo "   MAS_API_INSECURE_TLS=true is available for temporary non-production testing only."
-  exit 1
+if [ "$DRY_RUN" != "true" ]; then
+  echo "Testing MAS API connectivity..."
+  if ! HEALTH_RESPONSE=$(mas_api_curl -sS --connect-timeout 10 --max-time 30 "${MAS_API_URL}/api/health/"); then
+    echo "❌ MAS API health request failed; see the curl error above."
+    echo "   For a private ingress CA, set MAS_API_CA_BUNDLE=/path/to/ca-bundle.crt."
+    echo "   MAS_API_INSECURE_TLS=true is available for temporary non-production testing only."
+    exit 1
+  fi
+  HEALTH=$(printf '%s' "$HEALTH_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
+  if [ "$HEALTH" != "ok" ]; then
+    echo "❌ MAS API health check did not return status=ok"
+    echo "   Response: $HEALTH_RESPONSE"
+    exit 1
+  fi
+  echo "✅ MAS API is healthy"
+  echo ""
 fi
-HEALTH=$(printf '%s' "$HEALTH_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
-if [ "$HEALTH" != "ok" ]; then
-  echo "❌ MAS API health check did not return status=ok"
-  echo "   Response: $HEALTH_RESPONSE"
-  exit 1
-fi
-echo "✅ MAS API is healthy"
-echo ""
 
 # ============================================================================
 # STEP 1: Register Inventory Resources
@@ -188,7 +281,7 @@ echo "STEP 1: Registering Inventory Resources"
 echo "========================================="
 echo ""
 
-if [ "$IS_MULTI_CLUSTER" == "true" ]; then
+if [ "$IS_MULTI_CLUSTER" == "true" ] && [ "$DRY_RUN" != "true" ]; then
 
   # 1a. Register LLM (Vertex/Gemini or OpenAI/LiteLLM)
   if [ "$LLM_PROVIDER" == "vertex" ]; then
@@ -303,40 +396,126 @@ if [ "$IS_MULTI_CLUSTER" == "true" ]; then
       | jq -r '.resources[]? | select(.name == "Multi-Cluster Orchestrator Router") | .rid' | head -1)
   fi
   echo "   ✅ Router Condition RID: $COND_RID"
+elif [ "$IS_MULTI_CLUSTER" == "true" ]; then
+  # Dry run: placeholder RIDs stand in for the registered inventory resources.
+  LLM_RID="dryrun-llm-rid"
+  ORCH_RID="dryrun-orchestrator-rid"
+  COND_RID="dryrun-router-condition-rid"
+  echo "   (dry run: placeholder RIDs for LLM, orchestrator, router condition)"
 fi
 
 # Register Ask Red Hat for both blueprint types. The empty bearer_token leaves
 # authentication to the MAS execution context instead of storing a static token.
 echo ""
-echo "1d. Registering Ask Red Hat A2A Agent Node..."
-ASK_REDHAT_PAYLOAD=$(jq -n \
-  --arg base_url "$ASK_REDHAT_A2A_URL" \
-  '{
-    "category": "nodes",
-    "type": "a2a_agent_node",
-    "name": "Ask Red Hat",
-    "config": {
+if [ "$DRY_RUN" == "true" ]; then
+  ASK_REDHAT_RID="dryrun-ask-red-hat-rid"
+  echo "1d. (dry run) Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
+else
+  echo "1d. Registering Ask Red Hat A2A Agent Node..."
+  ASK_REDHAT_PAYLOAD=$(jq -n \
+    --arg base_url "$ASK_REDHAT_A2A_URL" \
+    '{
+      "category": "nodes",
       "type": "a2a_agent_node",
-      "base_url": $base_url,
-      "bearer_token": "",
-      "verify_ssl": true
-    }
-  }')
-ASK_REDHAT_RESPONSE=$(mas_api_upsert_resource "$ASK_REDHAT_PAYLOAD")
+      "name": "Ask Red Hat",
+      "config": {
+        "type": "a2a_agent_node",
+        "base_url": $base_url,
+        "bearer_token": "",
+        "verify_ssl": true
+      }
+    }')
+  ASK_REDHAT_RESPONSE=$(mas_api_upsert_resource "$ASK_REDHAT_PAYLOAD")
 
-ASK_REDHAT_RID=$(echo "$ASK_REDHAT_RESPONSE" | jq -r '.rid // empty')
-if [ -z "$ASK_REDHAT_RID" ]; then
-  ASK_REDHAT_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
-    -H "Authorization: Bearer ${MAS_TOKEN}" \
-    | jq -r '.resources[]? | select(.name == "Ask Red Hat") | .rid' | head -1)
+  ASK_REDHAT_RID=$(echo "$ASK_REDHAT_RESPONSE" | jq -r '.rid // empty')
+  if [ -z "$ASK_REDHAT_RID" ]; then
+    ASK_REDHAT_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
+      -H "Authorization: Bearer ${MAS_TOKEN}" \
+      | jq -r '.resources[]? | select(.name == "Ask Red Hat") | .rid' | head -1)
+  fi
+  echo "   ✅ Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
 fi
-echo "   ✅ Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
+
+# 1f. Hub-adapter investigation node (Task B; see the header comment). Only
+# registered and wired when HUB_ADAPTER_A2A_URL is set on an orchestrated
+# blueprint type. bearer_token mirrors the Ask Red Hat node: empty, so MAS
+# forwards the inbound execution-context credential (Token A) through its
+# credential machinery -- the Praxis front door validates it. base_url MUST
+# be the Praxis public route, never the adapter's internal Service.
+HUB_ADAPTER_NODE=""
+HUB_ADAPTER_PLAN=""
+HUB_ADAPTER_BRANCH=""
+HUB_ADAPTER_AFTER=""
+if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
+  if [ "$DRY_RUN" == "true" ]; then
+    HUB_ADAPTER_RID="dryrun-hub-adapter-rid"
+    echo "1f. (dry run) ${HUB_ADAPTER_AGENT_NAME} A2A Agent RID: $HUB_ADAPTER_RID"
+  else
+    echo ""
+    echo "1f. Registering ${HUB_ADAPTER_AGENT_NAME} A2A Agent Node..."
+    HUB_ADAPTER_PAYLOAD=$(jq -n \
+      --arg base_url "$HUB_ADAPTER_A2A_URL" \
+      --arg name "$HUB_ADAPTER_AGENT_NAME" \
+      '{
+        "category": "nodes",
+        "type": "a2a_agent_node",
+        "name": $name,
+        "config": {
+          "type": "a2a_agent_node",
+          "base_url": $base_url,
+          "bearer_token": "",
+          "verify_ssl": true
+        }
+      }')
+    HUB_ADAPTER_RESPONSE=$(mas_api_upsert_resource "$HUB_ADAPTER_PAYLOAD")
+
+    HUB_ADAPTER_RID=$(echo "$HUB_ADAPTER_RESPONSE" | jq -r '.rid // empty')
+    if [ -z "$HUB_ADAPTER_RID" ]; then
+      HUB_ADAPTER_RID=$(mas_api_curl -sS "${MAS_API_URL}/api/resources/resources.list?category=nodes" \
+        -H "Authorization: Bearer ${MAS_TOKEN}" \
+        | jq -r '.resources[]? | select(.name == "'"${HUB_ADAPTER_AGENT_NAME}"'") | .rid' | head -1)
+    fi
+    echo "   ✅ ${HUB_ADAPTER_AGENT_NAME} A2A Agent RID: $HUB_ADAPTER_RID"
+  fi
+  # Node, plan step, orchestrator branch, and the extra "after" entry that
+  # loops the router back around after an investigation delegation. These
+  # interpolate into the multi-cluster blueprint heredoc below.
+  # Direct string assignment (NOT $(cat <<...)): preserves the trailing blank
+  # line separating nodes, matching the blueprint's style.
+  HUB_ADAPTER_NODE="  - rid: ${HUB_ADAPTER_RID}
+    name: ${HUB_ADAPTER_AGENT_NAME}
+    type: a2a_agent_node
+    config:
+      type: a2a_agent_node
+      # MUST be the Praxis public route (front door): Praxis validates the
+      # delegated Token A and routes on ${HUB_ADAPTER_TARGET_HEADER} to the
+      # hub adapter; the adapter's own Service is internal-only.
+      base_url: \"${HUB_ADAPTER_A2A_URL}\"
+      # Empty uses the token from the MAS execution context; Token A is
+      # forwarded by MAS's credential machinery, never stored here.
+      bearer_token: \"\"
+      verify_ssl: true
+"
+  # Direct string assignment (NOT $(cat <<...)): command substitution would
+  # strip the trailing newline, gluing the next plan step onto the same line.
+  HUB_ADAPTER_PLAN="  - uid: hub_investigate
+    node: ${HUB_ADAPTER_RID}
+"
+  HUB_ADAPTER_BRANCH="      hub_investigate: hub_investigate
+"
+  HUB_ADAPTER_AFTER="      - hub_investigate
+"
+fi
 
 # 1e. Approval-gate tool for the multi-cluster-hitl test blueprint.
 HITL_GATE_NODE=""
 HITL_GATE_PLAN=""
 ORCHESTRATE_FIRST_AFTER="start"
 if [ "$BLUEPRINT_TYPE" == "multi-cluster-hitl" ]; then
+  if [ "$DRY_RUN" == "true" ]; then
+    HITL_TOOL_RID="dryrun-hitl-tool-rid"
+    echo "1e. (dry run) HITL test tool RID: $HITL_TOOL_RID"
+  else
   echo ""
   echo "1e. Registering the HITL test oc_exec tool..."
   HITL_OC_SERVER="${HITL_OC_SERVER:-https://api.${CLUSTER_DOMAIN}:6443}"
@@ -366,6 +545,7 @@ if [ "$BLUEPRINT_TYPE" == "multi-cluster-hitl" ]; then
       | jq -r '.resources[]? | select(.name == "HITL Test oc (read-only)") | .rid' | head -1)
   fi
   echo "   ✅ HITL test tool RID: $HITL_TOOL_RID"
+  fi
   HITL_GATE_NODE=$(cat <<NODE
   - rid: hitl_gate
     name: Approval Gate (HITL test)
@@ -477,7 +657,7 @@ nodes:
       type: user_question_node
 
 ${HITL_GATE_NODE}
-
+${HUB_ADAPTER_NODE}
   - rid: ${ORCH_RID}
     name: Multi-Cluster Router
     type: orchestrator_node
@@ -519,16 +699,16 @@ ${HITL_GATE_PLAN}
     after:
       - ${ORCHESTRATE_FIRST_AFTER}
       - ask_red_hat
-    node: ${ORCH_RID}
+${HUB_ADAPTER_AFTER}    node: ${ORCH_RID}
     exit_condition: ${COND_RID}
     branches:
       ask_red_hat: ask_red_hat
-      finalize: finalize
+${HUB_ADAPTER_BRANCH}      finalize: finalize
 
   - uid: ask_red_hat
     node: ${ASK_REDHAT_RID}
 
-  - uid: finalize
+${HUB_ADAPTER_PLAN}  - uid: finalize
     node: final_answer_end
 EOF
 
@@ -541,6 +721,13 @@ echo ""
 # ============================================================================
 # STEP 3: Save Blueprint
 # ============================================================================
+
+if [ "$DRY_RUN" == "true" ]; then
+  echo "Dry run: blueprint NOT saved. blueprint.save payload (placeholder RIDs):"
+  echo ""
+  cat /tmp/mas-blueprint.yaml | jq -Rs '{blueprintRaw: .}'
+  exit 0
+fi
 
 echo "========================================="
 echo "STEP 3: Saving Blueprint"
@@ -580,6 +767,9 @@ if [ "$IS_MULTI_CLUSTER" == "true" ]; then
   echo "  - Orchestrator RID: $ORCH_RID"
 fi
 echo "  - Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
+if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
+  echo "  - ${HUB_ADAPTER_AGENT_NAME} A2A Agent RID: $HUB_ADAPTER_RID"
+fi
 echo ""
 echo "Next: Update variants/standalone/values-standalone.yaml:"
 echo ""
