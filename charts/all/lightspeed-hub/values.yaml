@@ -127,6 +127,13 @@ adapter:
   # doc's proposal, not a confirmed final name.
   targetHeader: X-Hub-Cluster
 
+  # Fail-fast allow-list of spoke names passed as the adapter's
+  # --allowed-targets flag (comma-joined). Empty = no enforcement (the
+  # admission policy is the hard gate either way). MUST stay identical to
+  # praxis-proxy's spokeGateways keys -- the adapter's unknown-target
+  # failure is the model-facing spelling guard, not a security boundary.
+  allowedTargets: []
+
   # "Only the configured group can create AgenticRuns" (Phase 1 RBAC goal):
   # the Kubernetes GROUP (as the hub API maps it from the exchanged Token
   # H's groups claim -- with the default OIDC groupsPrefix, "keycloak:<
@@ -256,15 +263,19 @@ agenticOperator:
     digest: ""
     pullPolicy: IfNotPresent
 
-  # CRD VENDING DECISION (OPEN): the AgenticRun/Result/... CRDs are NOT
-  # rendered by this chart. Intended source: the lightspeed-agentic-operator
-  # repo's config/crd/bases (via its kustomize `make deploy` rendered into
-  # this chart, or installed by an OLM/subscription flow). Vendoring them
-  # here risks drift with the pinned operator image; leaving them out means
-  # the chart alone cannot bring up a working stack. Decision deferred to
-  # the M4 hardening pass -- see README "CRD source (open decision)".
+  # CRD VENDING DECISION (RESOLVED, M4): the ten agentic.openshift.io CRDs
+  # are VENDORED into this chart (templates/agentic-operator-crds.yaml)
+  # from the lightspeed-agentic-operator repo's config/crd/bases, branch
+  # a2a-support -- see that template's provenance header for the source
+  # commit and the re-vendor mechanism (the upstream schema-drift test is
+  # the guard against drift with the pinned operator image). Mechanism:
+  # a values-gated TEMPLATE (not Helm's crds/ dir) because ArgoCD does not
+  # apply a Helm chart's crds/ directory, and crds/ would also install
+  # while enabled=false, breaking the dormant-chart guarantee -- see
+  # README "CRD source". Each CRD carries argocd sync-wave -1 so it lands
+  # before the operator Deployment (default wave 0).
   crds:
-    install: false
+    install: true
 
   # The configuration ConfigMap repo C reads (pkg/configuration/constants.go:
   # ConfigMapName "lightspeed-agentic-configuration"). In gateway mode repo C

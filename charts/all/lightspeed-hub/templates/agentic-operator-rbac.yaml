@@ -1,0 +1,241 @@
+{{- if and .Values.enabled .Values.agenticOperator.enabled }}
+{{- $runNamespace := include "lightspeed-hub.runNamespace" . }}
+# VENDORED from the lightspeed-agentic-operator repo (openshift/
+# lightspeed-agentic-operator fork), branch a2a-support, commit
+# 8225d31d96e85d5a49f5a6c10207e46ea1bfdbb1, file config/rbac/role.yaml
+# (the operator's controller-manager ClusterRole, kubebuilder-generated).
+#
+# Chart adaptations on top of the vendored rules (rules themselves are
+# byte-for-byte upstream):
+#   - ClusterRole/ClusterRoleBinding names carry the chart's fullname
+#     prefix (upstream: agentic-operator-manager-role/-rolebinding) so the
+#     release owns them and helm uninstall cleans them up
+#   - the binding subjects THIS chart's operator ServiceAccount
+#     (<fullname>-agentic-operator, see templates/agentic-operator.yaml)
+#     in the run namespace instead of upstream's controller-manager in a
+#     placeholder operator namespace
+#   - sync-wave -1: the RBAC lands before the operator Deployment
+#     (default wave 0), so the manager does not crash-loop waiting for
+#     permissions on first install
+#
+# UPSTREAM SEMANTICS PRESERVED DELIBERATELY: this is a ClusterRole bound
+# cluster-wide (upstream role_binding.yaml is a ClusterRoleBinding), because
+# the rules include cluster-scoped resources (customresourcedefinitions get,
+# clusterroles bind, clusterrolebindings create/delete -- repo C creates
+# spoke-side sandbox RBAC, see its config/rbac). That means secrets
+# create/delete/update are granted CLUSTER-WIDE here, exactly as in repo
+# C's own `make deploy`. Narrowing to the run namespace (design §8.3
+# single-namespace hardening) is a follow-up item -- see README.
+#
+# RE-VENDOR MECHANISM (on every operator change / image re-pin): copy
+# config/rbac/role.yaml from that repo@a2a-support HEAD (or the newly
+# pinned commit), re-apply the adaptations above, and update the commit in
+# this header. The upstream RBAC-drift test in the lightspeed-agentic-
+# operator repo is the guard against silent drift.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - serviceaccounts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - agentic.openshift.io
+  resources:
+  - agenticolsconfigs
+  - agents
+  - approvalpolicies
+  - llmproviders
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - agentic.openshift.io
+  resources:
+  - agenticolsconfigs/status
+  - agenticrunapprovals/status
+  - agenticruns/status
+  - analysisresults/status
+  - escalationresults/status
+  - executionresults/status
+  - verificationresults/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - agentic.openshift.io
+  resources:
+  - agenticrunapprovals
+  - agenticruns
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agentic.openshift.io
+  resources:
+  - agenticruns/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - agentic.openshift.io
+  resources:
+  - analysisresults
+  - escalationresults
+  - executionresults
+  - verificationresults
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - agents.x-k8s.io
+  resources:
+  - sandboxes
+  verbs:
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - get
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxtemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - extensions.agents.x-k8s.io
+  resources:
+  - sandboxwarmpools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator-manager
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator
+    namespace: {{ $runNamespace }}
+{{- end }}

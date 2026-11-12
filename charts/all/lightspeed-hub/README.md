@@ -26,6 +26,8 @@ each one is a slot the M1-M3 outputs must fill before activation.
 | `run-creators-rbac.yaml` | "Only the configured group can create AgenticRuns": Role (create on `agenticruns`) + Group RoleBinding when `adapter.hubRunCreatorsGroup` is set |
 | `admission-policy.yaml` | ValidatingAdmissionPolicy + binding + param ConfigMap for requester×target authorization (design §4.3) |
 | `agentic-operator.yaml` | Repo C operator Deployment + `lightspeed-agentic-configuration` ConfigMap + operator SA |
+| `agentic-operator-crds.yaml` | Vendored repo C CRDs (all ten `agentic.openshift.io` kinds), values-gated + sync-wave −1 |
+| `agentic-operator-rbac.yaml` | Vendored repo C operator RBAC (ClusterRole + ClusterRoleBinding), chart-named, sync-wave −1 |
 
 ## Why no Route (design §1)
 
@@ -113,8 +115,17 @@ the variant is where real values land):
 | Adapter Service | `a2aUpstream.service/namespace/port` (default `lightspeed-hub`/`lightspeed-hub`/`8443`) | this chart's Service (`service.port` 8443, TLS via service-serving cert — see `adapter.tls`) | — |
 | Hub audience | — | `adapter.hubAudience` (adapter `--hub-audience`) | `keycloak.hubExchange.hubAudience` |
 | Exchange client | — | `adapter.keycloak.clientId` + `clientSecretSecret.name` | `keycloak.hubExchange.clientId` + `secretName` |
-| Allowed targets | `spokeGateways` keys (the caller×target allow-list IS the spoke map) | `admissionPolicy.allowTargets` values (server-side) | — |
+| Allowed targets | `spokeGateways` keys (the caller×target allow-list IS the spoke map) | `adapter.allowedTargets` (adapter `--allowed-targets`, fail-fast) + `admissionPolicy.allowTargets` values (server-side hard gate) | — |
 | Run-creators group | — | `adapter.hubRunCreatorsGroup` | the group carried on H via `hubExchange.groupMappers` |
+
+**`adapter.allowedTargets` invariant:** this list MUST stay identical to
+praxis-proxy's `spokeGateways` keys. It is the adapter's fail-fast
+`--allowed-targets` behavior (an unknown target fails the task BEFORE any
+AgenticRun or run-token Secret is created, with a self-correcting
+"unknown target ... available clusters" message); the admission policy
+(`admissionPolicy.allowTargets`) is the hard gate either way. Empty (default)
+renders `--allowed-targets=` (empty value), which the adapter treats as no
+enforcement.
 
 Design decision settled for this leg (see praxis-proxy's
 `a2aUpstream` values comment): **Praxis validates Token A + routes +
@@ -176,6 +187,15 @@ recorded in design §4.3 if group granularity proves too coarse.
 
 ## Agentic-operator stack wiring
 
+With `agenticOperator.enabled` (default) the chart deploys the **FULL
+operator stack** — CRDs + RBAC + Deployment + configuration ConfigMap — so
+the chart alone brings up a working repo C installation:
+
+- **CRDs** (`agentic-operator-crds.yaml`): all ten
+  `agentic.openshift.io` CRDs vendored from repo C's `config/crd/bases`
+  (see below).
+- **Operator RBAC** (`agentic-operator-rbac.yaml`): repo C's
+  `config/rbac/role.yaml` rules under chart names (see below).
 - **Configuration ConfigMap** (`lightspeed-agentic-configuration`, repo C's
   well-known name from `pkg/configuration/constants.go`) carrying
   `sandbox-credential-mode: gateway`, `gateway-server-url-template`,
@@ -186,33 +206,62 @@ recorded in design §4.3 if group granularity proves too coarse.
   naming (`praxis-spoke-{targetCluster}...`), and `gateway-ca-secret` must
   name the Secret the praxis-proxy `spokeGatewayConfig.servingCA` bridge
   maintains, with its `targetNamespace` set to this chart's namespace.
-- **Operator Deployment**: placeholder image + standard controller-runtime
-  shape; repo C's actual manager flags are UNCONFIRMED (see below).
+- **Operator Deployment**: the image is pinned in
+  `variants/standalone/values-standalone.yaml` to the quay ref built from
+  repo C's `a2a-support` branch (the chart default is a placeholder, per
+  repo convention); repo C's actual manager flags are UNCONFIRMED (see
+  the register).
 
-### CRD source (open decision)
+### CRD source (vendored, values-gated templates)
 
 The `AgenticRun` / `AgenticRunApproval` / `*Result` / `Agent` /
-`LLMProvider` / `ApprovalPolicy` / `AgenticOLSConfig` CRDs are **not
-rendered by this chart**. Intended source: the lightspeed-agentic-operator
-repo's `config/crd/bases` (ten files). Options deferred to the M4 hardening
-pass:
+`LLMProvider` / `ApprovalPolicy` / `AgenticOLSConfig` CRDs are **vendored
+into this chart** (`templates/agentic-operator-crds.yaml`) from repo C's
+`config/crd/bases`, branch `a2a-support` — each vendored file's provenance
+header records the source repo, branch, commit and the re-vendor
+instruction (re-vendor on every operator change; repo C's upstream
+schema-drift test is the drift guard).
 
-1. **Vendor** the CRD YAMLs into this chart (drift risk with the pinned
-   operator image; needs a re-sync convention like the vendored rhbk chart).
-2. Render repo C's kustomize `make deploy` output into the chart at pin
-   time (re-render on every image bump).
+**Mechanism decision — `templates/` with a values gate
+(`agenticOperator.crds.install`, default true) + `argocd.argoproj.io/
+sync-wave: "-1"`, NOT Helm's native `crds/` directory.** Trade-offs:
 
-For the skeleton, `agenticOperator.crds.install: false` exists as a values
-anchor documenting the intent and renders nothing. **The chart alone cannot
-bring up a working stack until this decision lands.**
+- Helm's `crds/` is applied on `helm install` only — never upgraded,
+  never deleted — and, decisively for this pattern, **ArgoCD does not
+  apply a Helm chart's `crds/` directory at all** when rendering Helm
+  charts; since every chart here deploys as an ArgoCD Application, the
+  CRDs would silently never land.
+- `crds/` also cannot be gated: it would install even with
+  `enabled: false`, breaking this chart's dormant-by-default guarantee
+  (and the `test_default_render_is_empty` pin).
+- A template, by contrast, is ArgoCD-synced, upgradable (schema changes
+  land with chart upgrades), deletable on uninstall, and gated. The cost:
+  ArgoCD could theoretically apply the operator Deployment before the
+  CRDs — mitigated by the sync-wave annotation (CRDs at −1, Deployment at
+  the default wave 0), pinned by test.
+- Remaining trade-off vs `crds/`: CRD deletion on release uninstall is
+  usually *desirable* here (the pattern owns the whole stack), but note
+  Helm prune of CRDs takes every CR instance with it.
 
-### Operator RBAC (not rendered)
+### Operator RBAC (vendored, chart-named)
 
-Repo C's own `config/rbac` (role, leader election, run approver) governs its
-operator SA. Vendoring it here has the same open decision as the CRDs; the
-skeleton renders only a dedicated operator ServiceAccount. The operator
-Deployment will not be functional until its RBAC lands with the CRD
-decision.
+`templates/agentic-operator-rbac.yaml` carries repo C's
+`config/rbac/role.yaml` rules **verbatim**, adapted only in naming:
+`ClusterRole`/`ClusterRoleBinding` are `<fullname>-agentic-operator-manager`
+so the release owns them, and the binding subjects **this chart's**
+`<fullname>-agentic-operator` SA in the run namespace (upstream binds a
+`controller-manager` SA in a placeholder namespace). Both sit at
+sync-wave −1 (before the operator Deployment), so the manager does not
+crash-loop waiting for permissions on first install.
+
+**Upstream semantics preserved deliberately:** the grant is cluster-wide
+(upstream `role_binding.yaml` is a ClusterRoleBinding), because the rules
+include cluster-scoped resources (`customresourcedefinitions` get,
+`clusterroles` bind, `clusterrolebindings` create/delete — repo C creates
+spoke-side sandbox RBAC). That means `secrets` create/delete/update are
+granted **cluster-wide**, exactly as in repo C's own `make deploy`.
+Narrowing to the run namespace (design §8.3 single-namespace hardening)
+is a follow-up item — kept in the register below.
 
 ## Adapter Deployment contract (reconciled M4)
 
@@ -286,11 +335,15 @@ this register in the M4 reconciliation pass):
    through, but the chart does not deploy/mount a SPIRE Workload API
    socket; the variant must wire the volume (hostPath/CSI) for SVID mode
    to actually work on-cluster.
-5. **Operator image** — placeholder pending the pinned repo C `a2a-support`
-   build; manager args are the standard controller-runtime shape, unverified
+5. **Operator image** — the chart default remains a placeholder per repo
+   convention; the real pin (the quay ref built from repo C's
+   `a2a-support` branch) lives in `variants/standalone/values-standalone.yaml`.
+   Manager args are the standard controller-runtime shape, unverified
    against repo C's `config/manager`.
-6. **CRD + operator RBAC vendoring** — open decision (above); nothing
-   rendered.
+6. **Operator RBAC breadth** — the vendored ClusterRole/Binding grants
+   `secrets` create/delete/update cluster-wide (upstream semantics, see
+   "Operator RBAC" above); narrowing to the run namespace is a design §8.3
+   hardening follow-up.
 7. **NetworkPolicy** — namespaceSelector on `praxis-proxy` only; pod-
    selector narrowing and egress rules (kube API / Keycloak / DNS) are
    follow-ups; CNI behavior unverified.
@@ -301,6 +354,10 @@ this register in the M4 reconciliation pass):
 
 Resolved in the M4 reconciliation (kept for the history):
 
+- ~~CRD + operator RBAC vendoring~~ — both vendored
+  (`agentic-operator-crds.yaml`, `agentic-operator-rbac.yaml`) from repo C
+  `a2a-support` with provenance headers; values-gated templates + sync-wave
+  −1, not Helm's `crds/` dir (ArgoCD never applies it — see "CRD source").
 - ~~Adapter env var names~~ — the Deployment now carries the adapter's
   real flags (`--listen`, `--namespace`, `--keycloak-*`, `--hub-audience`,
   card flags, M3 bound flags); the secret rides `KEYCLOAK_CLIENT_SECRET`

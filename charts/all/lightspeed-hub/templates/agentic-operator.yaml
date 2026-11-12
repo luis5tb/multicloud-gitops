@@ -39,8 +39,10 @@ metadata:
 # args below are the standard controller-runtime shape; repo C's actual
 # flags (leader election, metrics/webhook addresses) must be confirmed
 # against its config/manager kustomize before activation -- UNCONFIRMED
-# GUESS, listed in the README. Its RBAC and CRDs are NOT rendered here (see
-# README "CRD source (open decision)" and "Operator RBAC").
+# GUESS, listed in the README. Its CRDs are vendored in
+# templates/agentic-operator-crds.yaml and its RBAC in
+# templates/agentic-operator-rbac.yaml (both sync-wave -1, so they land
+# before this Deployment at the default wave 0).
 apiVersion: apps/v1
 kind: Deployment
 metadata:

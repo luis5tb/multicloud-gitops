@@ -84,6 +84,10 @@ spec:
             {{- end }}
             - --hub-audience={{ .Values.adapter.hubAudience }}
             - --target-header={{ .Values.adapter.targetHeader }}
+            # Fail-fast target allow-list (comma-joined spoke names);
+            # unconditional -- the empty list renders an empty value,
+            # which the adapter treats as "no enforcement" (its default).
+            - --allowed-targets={{ join "," .Values.adapter.allowedTargets }}
             - --run-agent={{ .Values.adapter.runAgent }}
             - --card-name={{ .Values.adapter.agentCard.name }}
             - "--card-description={{ .Values.adapter.agentCard.description }}"

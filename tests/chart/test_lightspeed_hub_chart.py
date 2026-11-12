@@ -4,7 +4,8 @@ The chart is DISABLED by default (enabled=false renders nothing), mirroring
 the mas-a2a a2a.enabled gating. These tests pin the disabled-by-default
 behavior, the rendered shape of an enabled deployment (adapter
 Deployment/Service/SA/NetworkPolicy, run-token Secret writer RBAC, admission
-policy + binding + param ConfigMap, agentic-operator stack), the deliberate
+policy + binding + param ConfigMap, agentic-operator stack with vendored
+CRDs and operator RBAC), the deliberate
 absence of any Route, and the fail-loud required values.
 """
 
@@ -82,6 +83,14 @@ def test_enabled_render_has_expected_resources() -> None:
     assert kinds["NetworkPolicy"] == ["lightspeed-hub"]
     assert sorted(kinds["Role"]) == ["lightspeed-hub-run-token-writer"]
     assert sorted(kinds["RoleBinding"]) == ["lightspeed-hub-run-token-writer"]
+    # Operator stack RBAC (vendored from repo C's config/rbac/role.yaml):
+    # a ClusterRole + ClusterRoleBinding, chart-named.
+    assert sorted(kinds["ClusterRole"]) == [
+        "lightspeed-hub-agentic-operator-manager"
+    ]
+    assert sorted(kinds["ClusterRoleBinding"]) == [
+        "lightspeed-hub-agentic-operator-manager"
+    ]
     assert sorted(kinds["ValidatingAdmissionPolicy"]) == [
         "lightspeed-hub-agenticrun-target-authz"
     ]
@@ -91,6 +100,19 @@ def test_enabled_render_has_expected_resources() -> None:
     assert sorted(kinds["ConfigMap"]) == [
         "lightspeed-agentic-configuration",
         "lightspeed-hub-target-policy",
+    ]
+    # The full vendored CRD set (repo C config/crd/bases, all ten).
+    assert sorted(kinds["CustomResourceDefinition"]) == [
+        "agenticolsconfigs.agentic.openshift.io",
+        "agenticrunapprovals.agentic.openshift.io",
+        "agenticruns.agentic.openshift.io",
+        "agents.agentic.openshift.io",
+        "analysisresults.agentic.openshift.io",
+        "approvalpolicies.agentic.openshift.io",
+        "escalationresults.agentic.openshift.io",
+        "executionresults.agentic.openshift.io",
+        "llmproviders.agentic.openshift.io",
+        "verificationresults.agentic.openshift.io",
     ]
     # Internal-only by design (design doc §1): NEVER a Route.
     assert "Route" not in kinds
@@ -165,6 +187,9 @@ def test_adapter_deployment_carries_real_flags() -> None:
         "--namespace=default",
         "--hub-audience=lightspeed-hub-a2a",
         "--target-header=X-Hub-Cluster",
+        # Fail-fast allow-list: empty default renders an empty value (the
+        # adapter's no-enforcement default).
+        "--allowed-targets=",
         "--run-agent=default",
         "--card-name=lightspeed-hub",
         "--card-version=0.1.0",
@@ -219,6 +244,36 @@ def test_adapter_deployment_carries_real_flags() -> None:
     # The old placeholder env names are gone entirely.
     rendered_text = rendered.stdout
     assert "HUB_ADAPTER_" not in rendered_text
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_adapter_allowed_targets_flag() -> None:
+    """adapter.allowedTargets (comma-joined into the adapter's
+    --allowed-targets flag): set values render verbatim; the empty default
+    renders an empty value (the adapter's no-enforcement default)."""
+    rendered = _helm(*ENABLE_SETS)
+    docs = _resources(rendered.stdout)
+    dep = next(
+        d for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub"
+    )
+    args = dep["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert "--allowed-targets=" in args
+
+    rendered_targets = _helm(
+        *ENABLE_SETS,
+        "--set", "adapter.allowedTargets[0]=east",
+        "--set", "adapter.allowedTargets[1]=west",
+    )
+    docs_targets = _resources(rendered_targets.stdout)
+    dep_targets = next(
+        d for d in docs_targets
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub"
+    )
+    args_targets = dep_targets["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert "--allowed-targets=east,west" in args_targets
 
 
 @pytest.mark.skipif(
@@ -512,3 +567,124 @@ def test_run_creators_rbac_gates_agenticrun_creation() -> None:
     # Both land in the run namespace (the chart's release namespace here).
     run_ns = role["metadata"]["namespace"]
     assert binding["metadata"]["namespace"] == run_ns
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_agentic_operator_crds_render_and_land_before_deployment() -> None:
+    """The vendored CRD set (repo C config/crd/bases, branch a2a-support)
+    renders with the enabled chart: all ten agentic.openshift.io CRDs,
+    each at argocd sync-wave -1 so ArgoCD applies them BEFORE the operator
+    Deployment (default wave 0). agenticOperator.crds.install=false
+    (opt-out) or agenticOperator.enabled=false renders none of them."""
+    rendered = _helm(*ENABLE_SETS)
+    docs = _resources(rendered.stdout)
+    crds = [d for d in docs if d["kind"] == "CustomResourceDefinition"]
+
+    # All ten, in the repo's API group (verified against the vendored
+    # YAMLs, not assumed), with the CRD apiVersion.
+    assert len(crds) == 10
+    for crd in crds:
+        assert crd["apiVersion"] == "apiextensions.k8s.io/v1"
+        assert crd["spec"]["group"] == "agentic.openshift.io"
+        # Sync-wave -1: before the operator Deployment.
+        assert crd["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "-1"
+
+    dep = next(
+        d for d in docs
+        if d["kind"] == "Deployment"
+        and d["metadata"]["name"] == "lightspeed-hub-agentic-operator"
+    )
+    dep_wave = int(
+        dep["metadata"].get("annotations", {}).get("argocd.argoproj.io/sync-wave", 0)
+    )
+    assert dep_wave > -1
+
+    # The vendored bytes survive rendering: the agents CRD's prompt
+    # descriptions contain literal Go-template examples ({{.Request}}),
+    # which the chart escapes for Helm -- they must round-trip intact.
+    agents = next(
+        d for d in crds if d["metadata"]["name"] == "agents.agentic.openshift.io"
+    )
+    assert "{{.Request}}" in yaml.safe_dump(agents)
+
+    # Opt-out: crds.install=false renders no CRDs (the rest stays).
+    rendered_off = _helm(*ENABLE_SETS, "--set", "agenticOperator.crds.install=false")
+    docs_off = _resources(rendered_off.stdout)
+    assert not [d for d in docs_off if d["kind"] == "CustomResourceDefinition"]
+    assert any(
+        d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub-agentic-operator"
+        for d in docs_off
+    )
+
+    # The operator stack gate drops the CRDs too.
+    rendered_noop = _helm(*ENABLE_SETS, "--set", "agenticOperator.enabled=false")
+    docs_noop = _resources(rendered_noop.stdout)
+    assert not [d for d in docs_noop if d["kind"] == "CustomResourceDefinition"]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_agentic_operator_rbac_matches_vendored_upstream() -> None:
+    """The operator RBAC is repo C's config/rbac/role.yaml, adapted only in
+    naming: ClusterRole + ClusterRoleBinding carry the chart fullname, the
+    binding subjects THIS chart's operator SA in the run namespace
+    (upstream: controller-manager in a placeholder namespace), and both sit
+    at sync-wave -1 (before the operator Deployment). The rules themselves
+    are upstream's, verbatim -- including the deliberately cluster-wide
+    secrets grant (see README)."""
+    rendered = _helm(*ENABLE_SETS)
+    docs = _resources(rendered.stdout)
+    role = next(
+        d for d in docs
+        if d["kind"] == "ClusterRole"
+        and d["metadata"]["name"] == "lightspeed-hub-agentic-operator-manager"
+    )
+    binding = next(
+        d for d in docs
+        if d["kind"] == "ClusterRoleBinding"
+        and d["metadata"]["name"] == "lightspeed-hub-agentic-operator-manager"
+    )
+
+    # Spot-check the vendored rule set (full equality is pinned against
+    # the upstream repo by its own drift test; here we pin the shape).
+    by_resource = {
+        tuple(r["resources"]): sorted(r["verbs"])
+        for r in role["rules"]
+        if r["apiGroups"] == [""]
+    }
+    assert by_resource[("secrets",)] == [
+        "create", "delete", "get", "list", "update", "watch",
+    ]
+    agentic = [
+        r for r in role["rules"] if r["apiGroups"] == ["agentic.openshift.io"]
+    ]
+    assert {
+        tuple(r["resources"]): sorted(r["verbs"]) for r in agentic
+    }[("agenticrunapprovals", "agenticruns")] == [
+        "create", "delete", "get", "list", "patch", "update", "watch",
+    ]
+    # Cluster-scoped grants that force the ClusterRole shape upstream
+    # (narrowing them into a namespaced Role would be invalid).
+    groups = {tuple(r["apiGroups"]) for r in role["rules"]}
+    assert ("rbac.authorization.k8s.io",) in groups
+    assert ("apiextensions.k8s.io",) in groups
+
+    # Binding: chart-named roleRef, this chart's operator SA in the run
+    # namespace (release namespace here), sync-wave -1.
+    assert binding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "lightspeed-hub-agentic-operator-manager",
+    }
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "lightspeed-hub-agentic-operator",
+            "namespace": "default",
+        }
+    ]
+    for obj in (role, binding):
+        assert obj["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "-1"
