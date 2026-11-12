@@ -510,6 +510,15 @@ clusterGroup:
         #   export HUB_ADAPTER_AGENT_NAME="Hub Cluster Investigator"
         #   export HUB_ADAPTER_TARGET_HEADER="X-Hub-Cluster"
         #   #   ^ must equal a2aUpstream.targetHeader above
+        #   export HUB_ADAPTER_CLUSTERS="east,west"
+        #   #   ^ closed list of target cluster names; must equal the
+        #   #     spokeGateways keys above (and lightspeed-hub's
+        #   #     adapter.allowedTargets). With it set, the orchestrator
+        #   #     prompt enumerates the list and the model may only target
+        #   #     a listed name, copied verbatim into the delegate_task
+        #   #     data.headers value. Empty: the adapter's fail-fast
+        #   #     unknown-target message (its --allowed-targets flag) is
+        #   #     the only spelling guard.
         #   ./setup-mas-blueprint.sh --dry-run multi-cluster  # inspect first
         #   ./setup-mas-blueprint.sh multi-cluster
         # KNOWN LIMITATION (design §4.2 deviation): the header NAME is

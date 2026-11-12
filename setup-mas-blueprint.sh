@@ -48,6 +48,20 @@
 #   HUB_ADAPTER_TARGET_HEADER Routing header Praxis matches on
 #                             (default X-Hub-Cluster; must equal
 #                             praxis-proxy a2aUpstream.targetHeader).
+#   HUB_ADAPTER_CLUSTERS      Comma-separated closed list of target cluster
+#                             names (e.g. "east,west"). When set together
+#                             with HUB_ADAPTER_A2A_URL, the orchestrator
+#                             prompt's investigation-routing rule enumerates
+#                             the list: the model may ONLY target one of the
+#                             listed names and must copy it verbatim into
+#                             the delegate_task data.headers value. Keep it
+#                             identical to the praxis-proxy spokeGateways
+#                             keys (and the lightspeed-hub chart's
+#                             adapter.allowedTargets). Empty (default) with
+#                             the URL set: the prompt keeps the open wording
+#                             and the adapter's fail-fast unknown-target
+#                             message (its --allowed-targets flag) is the
+#                             only spelling guard.
 #
 # The target cluster travels as the VALUE of that header inside the
 # delegate_task "data" argument (structured tool-arg data, per design §4.2 --
@@ -154,6 +168,10 @@ ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/as
 HUB_ADAPTER_A2A_URL="${HUB_ADAPTER_A2A_URL:-}"
 HUB_ADAPTER_AGENT_NAME="${HUB_ADAPTER_AGENT_NAME:-Hub Cluster Investigator}"
 HUB_ADAPTER_TARGET_HEADER="${HUB_ADAPTER_TARGET_HEADER:-X-Hub-Cluster}"
+HUB_ADAPTER_CLUSTERS="${HUB_ADAPTER_CLUSTERS:-}"
+# Normalize "east, west" / "east,west" into a display list "east, west" for
+# the prompt's closed list (the model copies names verbatim from it).
+HUB_ADAPTER_CLUSTERS_LIST="$(printf '%s' "$HUB_ADAPTER_CLUSTERS" | tr -d ' ' | sed 's/,/, /g')"
 
 # Blueprint type must be parsed before the orchestrator prompt below, so the
 # prompt can vary with HUB_ADAPTER_ENABLED. The hub-adapter node is only
@@ -188,6 +206,17 @@ fi
 # tool-argument spelling is still load-bearing for any future header-based
 # routing (see UPSTREAM_CONTRIBUTIONS.md for the durable in-MAS fix).
 if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
+  # Closed-list vs open target rule. With HUB_ADAPTER_CLUSTERS set, the
+  # prompt enumerates the registered clusters and forbids anything else
+  # (the model must copy a listed name verbatim). Without it, the prompt
+  # keeps the open wording and the adapter's fail-fast unknown-target
+  # message (its --allowed-targets flag) is the only spelling guard --
+  # said out loud below so nobody assumes the prompt is enforcing it.
+  if [ -n "$HUB_ADAPTER_CLUSTERS" ]; then
+    HUB_ADAPTER_CLUSTER_RULE="  The cluster id MUST be one of the following registered clusters -- the complete list, there are no others: ${HUB_ADAPTER_CLUSTERS_LIST}. Copy the chosen name VERBATIM into the header value (exact spelling, casing, and hyphens; never abbreviate, pluralize, or invent a variant). If the user names a cluster that is not on this list, or does not specify one, ask which of the listed clusters to investigate before delegating."
+  else
+    HUB_ADAPTER_CLUSTER_RULE="  The cluster id is the target cluster's registered identifier (for example api-<hostname>-6443). If the user does not specify a cluster, ask which cluster to investigate before delegating."
+  fi
   ORCHESTRATOR_SYSTEM_MESSAGE=$(cat <<EOF
 You are a Red Hat knowledge router. For every request, decide whether to delegate to Ask Red Hat or the cluster investigator (or answer directly), then finalize.
 
@@ -199,7 +228,7 @@ ROUTING:
 - For documentation, product questions, how-to guidance, or other topics covered by an advertised Ask Red Hat Agent Card skill, delegate to Ask Red Hat.
 - For live cluster inspection or troubleshooting, delegate to ${HUB_ADAPTER_AGENT_NAME}. Determine the target cluster from the user's question. When delegating, you MUST set the "data" parameter with the routing header, spelled EXACTLY "${HUB_ADAPTER_TARGET_HEADER}" (hyphens, this exact casing, never underscores):
   data={"headers": {"${HUB_ADAPTER_TARGET_HEADER}": "<cluster-id>"}}
-  The cluster id is the target cluster's registered identifier (for example api-<hostname>-6443). If the user does not specify a cluster, ask which cluster to investigate before delegating.
+${HUB_ADAPTER_CLUSTER_RULE}
 
 Synthesize the agent's results into one answer. Distinguish documentation-based guidance from observed facts, and do not present documentation as evidence of any cluster's current state.
 EOF
@@ -242,6 +271,11 @@ echo "Blueprint Type: $BLUEPRINT_TYPE"
 echo "Ask Red Hat A2A: $ASK_REDHAT_A2A_URL"
 if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
   echo "Hub Adapter A2A: $HUB_ADAPTER_A2A_URL (agent: ${HUB_ADAPTER_AGENT_NAME}, header: ${HUB_ADAPTER_TARGET_HEADER})"
+  if [ -n "$HUB_ADAPTER_CLUSTERS" ]; then
+    echo "Hub Adapter clusters: ${HUB_ADAPTER_CLUSTERS_LIST} (closed list in the orchestrator prompt)"
+  else
+    echo "⚠️  HUB_ADAPTER_CLUSTERS is empty: the orchestrator prompt carries NO closed cluster list, and the adapter's fail-fast unknown-target message (its --allowed-targets flag) is the only spelling guard for target names. Set HUB_ADAPTER_CLUSTERS to the same list as praxis-proxy's spokeGateways keys to add the prompt-side rule."
+  fi
 elif [ -n "$HUB_ADAPTER_A2A_URL" ]; then
   echo "Hub Adapter A2A: $HUB_ADAPTER_A2A_URL (IGNORED -- the ${BLUEPRINT_TYPE} blueprint has no orchestrator)"
 fi
