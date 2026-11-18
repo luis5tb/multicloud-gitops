@@ -10,7 +10,7 @@
 # clusterBaseDomain empty and edit nothing here at all. Any derived value is still
 # explicitly overridable in the per-app overrides below.
 global:
-  clusterBaseDomain: bm-cluster.e2e.bos.redhat.com
+  clusterBaseDomain: cluster-jq8zh.dyn.redhatworkshops.io
   # Keycloak realm the issuer URLs derive from; must equal the keycloak-oidc
   # Application's keycloak.realm override below (default rca).
   keycloakRealm: rca
@@ -141,6 +141,21 @@ clusterGroup:
         # command is in that README too).
         - name: openshiftOIDC.enabled
           value: "true"
+        # Hub-as-spoke: the hub cluster is its own investigation target, so
+        # its (already chart-managed) Authentication must ALSO trust the
+        # per-spoke U audience -- do NOT apply the runbook's spoke-adapted
+        # Authentication on the hub itself. lightspeed-hub-a2a is the A->H
+        # Token H audience; praxis-spoke-hub is the A->U Token U audience
+        # (must equal spokeGateways.hub.exchangeAudience below):
+        - name: openshiftOIDC.extraAudiences[0]
+          value: lightspeed-hub-a2a
+        - name: openshiftOIDC.extraAudiences[1]
+          value: praxis-spoke-hub
+        # Map H/U's Keycloak groups claim to Kubernetes groups
+        # (keycloak:<group> with the default prefix) for the run-creators
+        # RoleBinding and spoke RBAC:
+        - name: openshiftOIDC.groupsClaim
+          value: groups
         # openshiftOIDC.issuerURL and openshiftOIDC.consoleRoute are no longer
         # set here: both derive from global.clusterBaseDomain at the top of this
         # file (https://keycloak.apps.<base>/realms/<realm> and
@@ -278,14 +293,15 @@ clusterGroup:
         # already imported, the client and mappers must be created
         # manually in the Admin Console (see charts/all/keycloak-oidc
         # README).
-        # - name: keycloak.spokeGatewayExchanger.enabled
-        #   value: "true"
-        # - name: keycloak.spokeGatewayExchanger.vaultKey
-        #   value: secret/data/global/praxis-spoke-gateway
+        - name: keycloak.spokeGatewayExchanger.enabled
+          value: "true"
+        - name: keycloak.spokeGatewayExchanger.vaultKey
+          value: secret/data/global/praxis-spoke-gateway
         # One entry per registered spoke, matching each spoke gateway's
-        # exchangeAudience:
-        # - name: keycloak.spokeGatewayExchanger.spokeAudiences[0]
-        #   value: praxis-spoke-example-spoke
+        # exchangeAudience. The hub cluster doubles as its own spoke
+        # ("hub"): its U-audience is praxis-spoke-hub:
+        - name: keycloak.spokeGatewayExchanger.spokeAudiences[0]
+          value: praxis-spoke-hub
         # TASK B / PHASE 1 H-SIDE WIRING (DISABLED): Keycloak prerequisites
         # for the hub A2A adapter's A->H exchange (charts/all/lightspeed-hub
         # adapter.keycloak.clientId; the ADAPTER performs the exchange --
@@ -296,12 +312,12 @@ clusterGroup:
         # in the Admin Console (see charts/all/keycloak-oidc README). The
         # hubAudience must equal the lightspeed-hub chart's
         # adapter.hubAudience and stay distinct from every other audience.
-        # - name: keycloak.hubExchange.enabled
-        #   value: "true"
-        # - name: keycloak.hubExchange.vaultKey
-        #   value: secret/data/global/lightspeed-hub-adapter
-        # - name: keycloak.hubExchange.hubAudience
-        #   value: lightspeed-hub-a2a
+        - name: keycloak.hubExchange.enabled
+          value: "true"
+        - name: keycloak.hubExchange.vaultKey
+          value: secret/data/global/lightspeed-hub-adapter
+        - name: keycloak.hubExchange.hubAudience
+          value: lightspeed-hub-a2a
         # The lightspeed-hub chart's adapter.keycloak.clientId /
         # clientSecretSecret.name defaults are EMPTY -- the variant's
         # commented values there must line up with this chart's
@@ -392,7 +408,7 @@ clusterGroup:
         - name: dnsIPv4Only.clusterDnsIP
           value: "172.30.0.10"
         - name: dnsIPv4Only.extraSearches[0]
-          value: bm-cluster.e2e.bos.redhat.com
+          value: cluster-jq8zh.dyn.redhatworkshops.io
         # agentCard.name/description/rpcUrl inherit the chart's generic
         # gateway defaults; override only to diverge. agentCard.rpcUrl
         # auto-derives from global.clusterBaseDomain.
@@ -427,27 +443,23 @@ clusterGroup:
           value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
         - name: identity.oidcIssuers[1].audience
           value: api.ask_red_hat
-        # PHASE 2 B1 (PROPOSED, DISABLED): per-spoke Praxis spoke-gateways.
-        # Everything below stays commented out until the two pending spikes
-        # pass against a live deployment -- (1) whether the pinned Praxis
-        # image (ghcr.io/praxis-proxy/ai:0.4.1 / praxis-policy 0.3.1) can
-        # pass through the Kubernetes API at all (watch/exec/websocket
-        # upgrades), and (2) whether it supports the oauth delegator
-        # (RFC 8693 A->U exchange; the recipes documenting it are from PPE
-        # 0.4.x). See PLAN-lightspeed-hub-migration.md "B1 wiring" and
+        # PHASE 2 B1 (ACTIVATED): per-spoke Praxis spoke-gateways. The
+        # kube-API pass-through and oauth-delegator spikes PASSED on the
+        # pinned image (local podman runtime verification -- see
         # charts/all/praxis-proxy/README.md "Spoke gateways (B1,
-        # proposed)" for the full UNCONFIRMED GUESS list. Uncomment and
-        # duplicate per registered spoke; example.test placeholders only:
-        # - name: spokeGateways.example-spoke.remoteAPIServer
-        #   value: https://api.example-spoke.example.test:6443
-        # - name: spokeGateways.example-spoke.exchangeAudience
-        #   value: praxis-spoke-example-spoke
-        # Reference an existing Secret in the praxis-proxy namespace
-        # holding the spoke API server's CA bundle (key ca.crt by
-        # default); create it from the spoke's API CA -- never commit the
-        # real CA to this repo.
-        # - name: spokeGateways.example-spoke.remoteCACert.secretName
-        #   value: praxis-spoke-example-spoke-api-ca
+        # proposed)" for the remaining live-cluster items). The hub
+        # cluster doubles as its own spoke ("hub"): the remote API is the
+        # hub's own API server:
+        - name: spokeGateways.hub.remoteAPIServer
+          value: https://api.cluster-jq8zh.dyn.redhatworkshops.io:6443
+        - name: spokeGateways.hub.exchangeAudience
+          value: praxis-spoke-hub
+        # Secret in the praxis-proxy namespace holding the hub API
+        # server's CA bundle (key ca.crt) -- created manually from the
+        # hub kubeconfig's certificate-authority-data (see the deployment
+        # runbook A4); never commit the real CA to this repo.
+        - name: spokeGateways.hub.remoteCACert.secretName
+          value: praxis-spoke-hub-api-ca
         # Shared cross-spoke settings live in spokeGatewayConfig (NOT
         # under spokeGateways, which is purely per-spoke).
         # exchangeClient.clientId/secretName and the derived token URL
@@ -457,26 +469,20 @@ clusterGroup:
         # - name: spokeGatewayConfig.exchangeClient.clientId
         #   value: praxis-spoke-gateway
         # The sandbox namespaces allowed to reach the gateways' 8443
-        # listeners: [mao] is a PLACEHOLDER (design-doc open question Q4 --
-        # where repo C's sandboxes run is undecided); it is a
-        # mandatory-override value, not a correct default.
-        # - name: spokeGatewayConfig.networkPolicy.ingressFromNamespaces[0]
-        #   value: <repo C sandbox namespace>
-        # TASK B REQUEST LEG (leg 2; DISABLED -- everything commented).
+        # listeners: the lightspeed-hub run namespace (where repo C's
+        # sandboxes run on this deployment -- design-doc Q4 settled for
+        # this variant):
+        - name: spokeGatewayConfig.networkPolicy.ingressFromNamespaces[0]
+          value: lightspeed-hub
+        # TASK B REQUEST LEG (leg 2; ACTIVATED).
         # Front-door hop: forward the main gateway's A2A traffic to the hub
         # A2A adapter (charts/all/lightspeed-hub). DESIGN: Praxis validates
         # Token A + enforces caller x target (the allow-list IS the
         # spokeGateways keys above); the ADAPTER performs the A->H exchange.
-        # Do NOT enable until the lightspeed-hub chart itself is enabled
-        # AND its README's cross-chart contract open items close (adapter
-        # TLS serving on 8443 with a service-serving cert; adapter-side
-        # duplicate-target-header rejection -- the pinned Praxis router
-        # OR-matches repeated header values and cannot reject them; see
-        # charts/all/praxis-proxy/README.md "A2A upstream"). Requires at
-        # least one spokeGateways entry (fails the render loudly
-        # otherwise) and policy.enabled=true (already set above).
-        # - name: a2aUpstream.enabled
-        #   value: "true"
+        # Enabled together with the lightspeed-hub chart; adapter TLS
+        # serving on 8443 (service cert) is wired in that chart.
+        - name: a2aUpstream.enabled
+          value: "true"
         # Defaults line up with the lightspeed-hub chart's adapter Service
         # (lightspeed-hub.lightspeed-hub.svc.cluster.local:8443) and its
         # adapter.targetHeader (X-Hub-Cluster, the adapter's
@@ -527,12 +533,12 @@ clusterGroup:
         # prompt's exact-spelling rule. See setup-mas-blueprint.sh's header
         # comment and charts/all/mao/mas-a2a/README.md.
         # Serving-CA bridge: repo C's gatewayCASecret expects a Secret
-        # (key ca.crt) in ITS OPERATOR NAMESPACE -- targetNamespace MUST
-        # be set to that namespace here, and repo C's config must name the
-        # same secretName (default praxis-spoke-gateway-ca). The sync
-        # job/CronJob keeps it current across service-CA rotation.
-        # - name: spokeGatewayConfig.servingCA.targetNamespace
-        #   value: <repo C operator namespace>
+        # (key ca.crt) in ITS OPERATOR NAMESPACE -- targetNamespace set to
+        # the lightspeed-hub run namespace, matching where the operator
+        # and sandboxes run. The sync job/CronJob keeps it current across
+        # service-CA rotation.
+        - name: spokeGatewayConfig.servingCA.targetNamespace
+          value: lightspeed-hub
     acme-agent:
       name: acme-agent
       namespace: acme-agent
@@ -556,15 +562,9 @@ clusterGroup:
           # it became "3.425697e+07", which then fails to parse as an image
           # reference -- InvalidImageName). Always quote tags that could be
           # all-digits.
-          # BRIDGE (temporary): this pinned image predates the Task A OLS
-          # removal -- it still contains the removed OLS/cluster-routing
-          # code, and the Deployment env changes in this branch are untested
-          # against it (source-green is not runtime-green). It must be
-          # rebuilt from the post-Task-A source and re-pinned here as part
-          # of the G3 runtime cutover (PLAN-lightspeed-hub-migration.md,
-          # "Runtime cutover sequence (G3)"). Delete this comment when the
-          # rebuilt image is pinned and verified live.
-          value: "69cd1c1f"
+          # Post-Task-A rebuild (OLS/cluster-routing code removed): built
+          # from agents/acme_agent at git short SHA ea132e00.
+          value: "ea132e00"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
@@ -580,7 +580,7 @@ clusterGroup:
         - name: a2a.remoteAgents[0].description
           value: "MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat. Use for all Red Hat-related requests; MAO selects the appropriate specialist(s)."
         - name: a2a.remoteAgents[0].endpoint
-          value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
+          value: "https://mao-a2a-mas-a2a-mao.apps.cluster-jq8zh.dyn.redhatworkshops.io"
         # Allow 60s beyond the analysis for polling and returning the
         # final A2A response.
         - name: a2a.requestTimeout
@@ -771,12 +771,12 @@ clusterGroup:
         # SCRIPT emits; replacing the live blueprint is the separate runtime
         # cutover (G3) in that plan.
         - name: a2a.blueprintId
-          value: "75f82122-eb7d-4870-93ee-6fe4214fd8b3"
+          value: "93ed0707-c309-4f6b-978d-1165b4e5f025"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
         - name: a2a.publicBaseUrl
-          value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
+          value: "https://mas-a2a-mao.apps.cluster-jq8zh.dyn.redhatworkshops.io"
         # Must be a real list: the chart applies toJson so the app can JSON-decode
         # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
         # JSON string) so the clusterGroup override builds an actual YAML list.
@@ -803,7 +803,7 @@ clusterGroup:
         - name: route.enabled
           value: "true"
         # - name: route.host
-        #   value: "mas-a2a.apps.bm-cluster.e2e.bos.redhat.com"
+        #   value: "mas-a2a.apps.cluster-jq8zh.dyn.redhatworkshops.io"
 
         # Multi-issuer OIDC: accept tokens from Red Hat SSO and Keycloak
         # Keycloak is NOT auto-appended; include it explicitly
@@ -824,9 +824,9 @@ clusterGroup:
         - name: identity.oidcIssuers[1].username_claim
           value: preferred_username
         - name: identity.oidcIssuers[2].issuer_url
-          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
+          value: https://keycloak.apps.cluster-jq8zh.dyn.redhatworkshops.io/realms/rca
         - name: identity.oidcIssuers[2].jwks_url
-          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca/protocol/openid-connect/certs
+          value: https://keycloak.apps.cluster-jq8zh.dyn.redhatworkshops.io/realms/rca/protocol/openid-connect/certs
         - name: identity.oidcIssuers[2].audience
           value: mas-a2a
         - name: identity.oidcIssuers[2].username_claim
@@ -845,70 +845,73 @@ clusterGroup:
       argoProject: hub
       path: charts/all/lightspeed-hub
       overrides:
-        # TASK B / M4 SKELETON (DISABLED): the hub A2A adapter + repo C
-        # (lightspeed-agentic-operator, a2a-support) stack. The chart's own
-        # default is enabled=false (renders nothing); this override keeps
-        # the intent explicit here where the activation flips. Do NOT
-        # enable until the M1-M3 outputs land -- see
-        # charts/all/lightspeed-hub/README.md "PLACEHOLDER / UNCONFIRMED
-        # GUESS register" (placeholder adapter/operator images, env flag
-        # names, CRD + operator RBAC vendoring decision, admission-policy
-        # mapping). docs/LIGHTSPEED_HUB_ADAPTER_DESIGN.md is the design.
+        # TASK B (ACTIVATED): the hub A2A adapter + repo C
+        # (lightspeed-agentic-operator, a2a-support) stack. Images pinned
+        # above; the adapter performs the A->H exchange behind the Praxis
+        # front door, and the operator runs in gateway credential mode.
+        # docs/LIGHTSPEED_HUB_ADAPTER_DESIGN.md is the design;
+        # docs/lightspeed-hub-deployment-runbook.md is the runbook.
         - name: enabled
-          value: "false"
+          value: "true"
         # ------------------------------------------------------------------
-        # Example activation block (example.test placeholders only -- fill
-        # with real values at cutover; keep commented until then).
-        #
-        # Hub audience of the A->H token exchange (keycloak-oidc chart work
-        # in M1; must exist as an audience mapper before enabling):
-        # - name: adapter.hubAudience
-        #   value: lightspeed-hub-a2a
-        # The adapter's exchange client (created by keycloak-oidc; the
-        # client secret lands in this namespace as an ExternalSecret):
-        # - name: adapter.keycloak.clientId
-        #   value: lightspeed-hub-adapter
-        # - name: adapter.keycloak.clientSecretSecret.name
-        #   value: lightspeed-hub-adapter-client
+        # Hub audience of the A->H token exchange (must equal keycloak-oidc's
+        # keycloak.hubExchange.hubAudience):
+        - name: adapter.hubAudience
+          value: lightspeed-hub-a2a
+        # The adapter's exchange client (created by keycloak-oidc's
+        # hubExchange; the client secret lands in this namespace as an
+        # ExternalSecret):
+        - name: adapter.keycloak.clientId
+          value: lightspeed-hub-adapter
+        - name: adapter.keycloak.clientSecretSecret.name
+          value: lightspeed-hub-adapter-client
         # adapter.keycloak.issuerUrl/tokenUrl derive from
         # global.clusterBaseDomain + global.keycloakRealm; override only to
         # diverge.
         # Adapter image pin (own pipeline, immutable digest or exact QUOTED
-        # tag -- never all-digits unquoted; see docs/ARCHITECTURE.md):
-        # - name: adapter.image.repository
-        #   value: quay.io/example/lightspeed-hub-adapter
-        # - name: adapter.image.tag
-        #   value: "0.1.0"
-        # Repo C operator image pin (a2a-support build):
-        # - name: agenticOperator.image.repository
-        #   value: quay.io/example/lightspeed-agentic-operator
-        # - name: agenticOperator.image.tag
-        #   value: "0.1.0"
-        # Gateway credential mode keys (owned by the praxis-proxy
-        # spoke-gateway implementer; gatewayServerURLTemplate must match the
-        # per-spoke gateway Service naming, gatewayCASecret must name the
-        # Secret praxis-proxy's spokeGatewayConfig.servingCA bridge
-        # maintains, with that bridge's targetNamespace set to
-        # lightspeed-hub):
-        # - name: agenticOperator.config.gatewayServerURLTemplate
-        #   value: https://praxis-spoke-{targetCluster}.praxis-proxy.svc.cluster.local:8443
-        # - name: agenticOperator.config.gatewayCASecret
-        #   value: praxis-spoke-gateway-ca
+        # tag -- never all-digits unquoted; see docs/ARCHITECTURE.md).
+        # Built from the lightspeed-hub repo, branch a2a (make
+        # image-a2a-adapter):
+        - name: adapter.image.repository
+          value: quay.io/ltomasbo/lightspeed-hub-a2a-adapter
+        - name: adapter.image.tag
+          value: "poc"
+        # Repo C operator image pin (built from the
+        # lightspeed-agentic-operator repo, branch a2a-support):
+        - name: agenticOperator.image.repository
+          value: quay.io/ltomasbo/lightspeed-agentic-operator
+        - name: agenticOperator.image.tag
+          value: "a2a"
+        # Gateway credential mode keys (repo C's ConfigMap load fails
+        # loudly without all three; the chart mirrors that at render
+        # time). gatewayServerURLTemplate matches the per-spoke gateway
+        # Service naming; gatewayCASecret names the Secret praxis-proxy's
+        # spokeGatewayConfig.servingCA bridge maintains (targetNamespace
+        # set to lightspeed-hub there):
+        - name: agenticOperator.config.gatewayServerURLTemplate
+          value: https://praxis-spoke-{targetCluster}.praxis-proxy.svc.cluster.local:8443
+        - name: agenticOperator.config.gatewayCASecret
+          value: praxis-spoke-gateway-ca
+        # Fail-fast allow-list of target clusters (the adapter's
+        # --allowed-targets; the unknown-target message is the model-facing
+        # spelling guard). MUST stay identical to the spokeGateways keys
+        # (here: the hub cluster as its own spoke):
+        - name: adapter.allowedTargets[0]
+          value: hub
         # Requester x target admission-policy allow-list (deny-all while
         # empty; keys are Token H usernames or group names, values are the
         # allowed targetCluster names):
-        # - name: admissionPolicy.allowTargets.keycloak\:acme-agent-rca[0]
-        #   value: example-spoke
+        - name: admissionPolicy.allowTargets.keycloak\:acme-agent-rca[0]
+          value: hub
         # "Only the configured group can create AgenticRuns" (Phase 1 RBAC
-        # goal; DISABLED while empty): the Kubernetes group (as the hub API
-        # maps it from Token H's groups claim -- with the default OIDC
-        # groupsPrefix, keycloak:<Keycloak group>) bound to a Role granting
-        # create on agenticruns in the run namespace. This gates creation
-        # itself; the admission policy above additionally restricts WHICH
-        # targetCluster. Must name a group the keycloak-oidc hubExchange
-        # mappers actually put on H:
-        # - name: adapter.hubRunCreatorsGroup
-        #   value: keycloak:acme-agent-rca
+        # goal): the Kubernetes group (as the hub API maps it from Token
+        # H's groups claim -- with the default OIDC groupsPrefix,
+        # keycloak:<Keycloak group>) bound to a Role granting create on
+        # agenticruns in the run namespace. This gates creation itself;
+        # the admission policy above additionally restricts WHICH
+        # targetCluster:
+        - name: adapter.hubRunCreatorsGroup
+          value: keycloak:acme-agent-rca
         # Cross-chart contract (request leg): adapter.targetHeader must equal
         # praxis-proxy's a2aUpstream.targetHeader (X-Hub-Cluster default
         # both sides); adapter.hubAudience must equal keycloak-oidc's
