@@ -875,7 +875,7 @@ clusterGroup:
         - name: adapter.image.repository
           value: quay.io/ltomasbo/lightspeed-hub-a2a-adapter
         - name: adapter.image.tag
-          value: "poc"
+          value: "poc2"
         # Repo C operator image pin (built from the
         # lightspeed-agentic-operator repo, branch a2a-support):
         - name: agenticOperator.image.repository
