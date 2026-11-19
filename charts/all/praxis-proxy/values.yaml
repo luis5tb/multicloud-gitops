@@ -458,3 +458,11 @@ agentCard:
   # Empty derives https://praxis-proxy.apps.<clusterBaseDomain>/a2a
   rpcUrl: ""
   version: "1.0.0"
+  capabilities:
+    # Must match what the a2aUpstream-fronted backend actually implements,
+    # NOT the backend's own agent card (the A2A client never sees that card;
+    # it only sees this one). A caller requests message/stream vs
+    # message/send based on this flag alone. See files/praxis.yaml for the
+    # live JSON-RPC "method not found" failure this caused when left at the
+    # default true against a backend that only implements message/send.
+    streaming: true

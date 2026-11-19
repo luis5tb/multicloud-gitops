@@ -422,6 +422,16 @@ clusterGroup:
         # agentCard.name/description/rpcUrl inherit the chart's generic
         # gateway defaults; override only to diverge. agentCard.rpcUrl
         # auto-derives from global.clusterBaseDomain.
+        # The a2aUpstream-fronted backend (lightspeed-hub-a2a-adapter,
+        # currently the quay.io/ltomasbo/lightspeed-hub-a2a-adapter:poc2
+        # PLACEHOLDER build) only implements message/send, not
+        # message/stream. VERIFIED-BROKEN LIVE (2026-11): leaving this at
+        # the chart default (true) made MAS call message/stream and fail
+        # every hub_investigate delegation with a JSON-RPC "method not
+        # found" error. Flip back to true (or remove this override) once
+        # the adapter's final build implements message/stream.
+        - name: agentCard.capabilities.streaming
+          value: "false"
         # Trusted issuers the policy filter validates caller tokens against
         # (policy.enabled=true above): Red Hat SSO production and stage, plus the
         # local Keycloak issuer (which the chart appends automatically).

@@ -30,13 +30,20 @@ filter_chains:
       # Praxis serves the same card at both paths - multiple when: conditions in
       # one filter may require ALL to match (AND), not ANY (OR).
       #
-      # The card is deliberately generic: this chart no longer fronts an
-      # investigation backend, so it advertises only the gateway itself. A
-      # future backend chart (see PLAN-lightspeed-hub-migration.md Task B)
-      # should override agentCard.description in the variant, or replace this
-      # card with a proxied one once there is a backend to proxy to.
+      # The card is generic: it advertises the gateway itself, not whatever
+      # backend a2aUpstream currently fronts. When a2aUpstream is enabled,
+      # override agentCard.description in the variant to describe the real
+      # backend, and set agentCard.capabilities.streaming to match what that
+      # backend actually implements -- the client picks message/stream vs
+      # message/send based on THIS card, not the backend's own (unreachable
+      # from here) agent card. VERIFIED-BROKEN LIVE (2026-11, a2aUpstream ->
+      # lightspeed-hub-a2a-adapter poc2 build): this card advertised
+      # streaming: true unconditionally, so MAS called message/stream against
+      # an adapter that only implements message/send, failing every
+      # delegation with a JSON-RPC "method not found" error. Set to false
+      # until the fronted backend actually implements message/stream.
       {{- $rpcUrl := .Values.agentCard.rpcUrl | default (printf "https://%s/a2a" (include "praxis-proxy.effectiveRouteHost" .)) }}
-      {{- $agentCard := dict "name" .Values.agentCard.name "description" .Values.agentCard.description "supportedInterfaces" (list (dict "url" $rpcUrl "protocolBinding" "JSONRPC" "protocolVersion" "1.0")) "version" .Values.agentCard.version "capabilities" (dict "streaming" true "pushNotifications" false) "defaultInputModes" (list "text/plain") "defaultOutputModes" (list "text/plain") "url" $rpcUrl }}
+      {{- $agentCard := dict "name" .Values.agentCard.name "description" .Values.agentCard.description "supportedInterfaces" (list (dict "url" $rpcUrl "protocolBinding" "JSONRPC" "protocolVersion" "1.0")) "version" .Values.agentCard.version "capabilities" (dict "streaming" .Values.agentCard.capabilities.streaming "pushNotifications" false) "defaultInputModes" (list "text/plain") "defaultOutputModes" (list "text/plain") "url" $rpcUrl }}
       - filter: static_response
         conditions:
           - when:
