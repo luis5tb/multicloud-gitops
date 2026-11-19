@@ -132,8 +132,12 @@ def test_run_token_writer_role_verbs() -> None:
       pause-count annotation, a2a.lightspeed.io/credential-pauses);
     - agenticruns/status: NOT granted (the adapter never writes status or
       conditions, design §6.1);
-    - agenticrunapprovals: get only (decisions are patched as the caller,
-      Token H -- hub-side RoleBinding wiring, not this chart).
+    - agenticrunapprovals: get/list/watch (the SA reads approvals both
+      directly -- pending-stage derivation -- and via the M3 informer
+      watch, which LISTs and WATCHes them in the run namespace; get-only
+      starves the informer and the adapter never binds its listener --
+      live incident. DECISIONS are still patched as the caller, Token H
+      -- hub-side RoleBinding wiring, not this chart).
     """
     rendered = _helm(*ENABLE_SETS)
     docs = _resources(rendered.stdout)
@@ -149,7 +153,7 @@ def test_run_token_writer_role_verbs() -> None:
     assert by_resource[("secrets",)] == ["create", "delete", "get", "update"]
     assert by_resource[("agenticruns",)] == ["get", "list", "update", "watch"]
     assert ("agenticruns/status",) not in by_resource
-    assert by_resource[("agenticrunapprovals",)] == ["get"]
+    assert by_resource[("agenticrunapprovals",)] == ["get", "list", "watch"]
     assert by_resource[
         ("analysisresults", "executionresults", "verificationresults", "escalationresults")
     ] == ["get", "list", "watch"]

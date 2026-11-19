@@ -31,11 +31,16 @@ rules:
     verbs: ["get", "list", "watch", "update"]
   # Approval DECISIONS are patched as the CALLER (Token H) -- that
   # authorization is hub Authentication/RoleBinding wiring (keycloak-oidc
-  # chart work). The adapter SA itself only READS approvals (pending-stage
-  # derivation, internal/server/handler.go approvalDetail), so: get only.
+  # The adapter SA READS approvals two ways: direct gets (pending-stage
+  # derivation, internal/server/handler.go approvalDetail) AND the M3
+  # informer watch (internal/watch/ctrl.go lists+watches AgenticRunApproval
+  # in the run namespace). get-only starves the informer: the LIST gets
+  # 403, WaitForCacheSync never completes, the adapter never binds its
+  # listener (live incident -- probes saw connection refused with no error
+  # in the logs, because the reflector's 403s go to unrouted klog).
   - apiGroups: ["agentic.openshift.io"]
     resources: ["agenticrunapprovals"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["agentic.openshift.io"]
     resources: ["analysisresults", "executionresults", "verificationresults", "escalationresults"]
     verbs: ["get", "list", "watch"]
