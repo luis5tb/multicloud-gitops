@@ -14,7 +14,12 @@ spec:
   policyTypes:
     - Ingress
   podSelector:
-    {{- include "lightspeed-hub.selectorLabels" . | nindent 4 }}
+    # LabelSelector REQUIRES matchLabels -- labels placed directly under
+    # podSelector are unknown fields the API server silently drops
+    # (live incident: the rendered policy applied as podSelector: {},
+    # selecting every pod in the namespace, with a permanent Argo diff).
+    matchLabels:
+      {{- include "lightspeed-hub.selectorLabels" . | nindent 6 }}
   ingress:
     - from:
         - namespaceSelector:

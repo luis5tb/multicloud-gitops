@@ -402,6 +402,16 @@ def test_network_policy_admits_only_praxis_namespace() -> None:
     docs = _resources(rendered.stdout)
     np = next(d for d in docs if d["kind"] == "NetworkPolicy")
     assert np["spec"]["policyTypes"] == ["Ingress"]
+    # podSelector is a LabelSelector: the adapter's labels MUST sit under
+    # matchLabels -- placed directly on podSelector they are unknown fields
+    # the API server silently drops (live incident: applied as {}, selecting
+    # every pod in the namespace, with a permanent Argo diff).
+    assert np["spec"]["podSelector"] == {
+        "matchLabels": {
+            "app.kubernetes.io/name": "lightspeed-hub",
+            "app.kubernetes.io/instance": "lightspeed-hub",
+        }
+    }
     assert np["spec"]["ingress"] == [
         {
             "from": [
