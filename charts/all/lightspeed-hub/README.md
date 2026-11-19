@@ -211,6 +211,20 @@ the chart alone brings up a working repo C installation:
   repo C's `a2a-support` branch (the chart default is a placeholder, per
   repo convention); repo C's actual manager flags are UNCONFIRMED (see
   the register).
+- **Webhook serving cert** (`<fullname>-agentic-operator-webhook` Service):
+  repo C's manager registers its admission webhooks
+  (`/mutate-agenticrunapproval`, `/validate-agent`) **unconditionally**
+  (no disable gate in its `cmd/main.go`), so it exits at startup
+  ("setup problem running manager") without `tls.crt` at its CertDir. The
+  chart provisions an OpenShift service-ca serving cert via the webhook
+  Service's annotation and mounts it read-only at
+  `/tmp/k8s-webhook-server/serving-certs` (port 9443).
+  **KNOWN LIMITATION**: no Mutating/ValidatingWebhookConfiguration is
+  rendered yet, so the endpoints are served but never invoked — the
+  AgenticRunApproval approver-identity mutator and the Agent validator are
+  effectively OFF. Follow-up: render the webhook configurations with this
+  Service's CA bundle (config-import from repo C's `config/webhook`,
+  adapted to service-ca like the CRD vendoring).
 
 ### CRD source (vendored, values-gated templates)
 

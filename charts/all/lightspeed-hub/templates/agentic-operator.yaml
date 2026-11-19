@@ -35,6 +35,35 @@ metadata:
   labels:
     {{- include "lightspeed-hub.labels" . | nindent 4 }}
 ---
+# Webhook serving cert: repo C's manager registers its admission webhooks
+# (/mutate-agenticrunapproval, /validate-agent) UNCONDITIONALLY (cmd/main.go
+# has no disable gate), so the manager refuses to start without a cert at
+# /tmp/k8s-webhook-server/serving-certs. This Service + the OpenShift
+# service-ca annotation provision exactly that (keys tls.crt/tls.key --
+# controller-runtime's expected names). NOTE (known limitation, README):
+# no Mutating/ValidatingWebhookConfiguration is rendered yet, so the
+# endpoints are served but never invoked -- the AgenticRunApproval
+# approver-identity mutator and the Agent validator are effectively OFF
+# until the webhook configurations are wired with this Service's CA bundle
+# (documented follow-up in the chart README).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator-webhook
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: {{ include "lightspeed-hub.fullname" . }}-agentic-operator-webhook
+spec:
+  ports:
+    - port: 9443
+      targetPort: 9443
+      name: webhook
+  selector:
+    app.kubernetes.io/name: {{ include "lightspeed-hub.name" . }}-agentic-operator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+---
 # Operator Deployment (repo C, branch a2a-support). PLACEHOLDER: the manager
 # args below are the standard controller-runtime shape; repo C's actual
 # flags (leader election, metrics/webhook addresses) must be confirmed
@@ -84,9 +113,27 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          # Webhook serving cert (see the Service above): repo C's manager
+          # hard-requires tls.crt/tls.key at this CertDir or it exits at
+          # startup ("setup problem running manager").
+          volumeMounts:
+            - name: webhook-cert
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
           {{- with .Values.agenticOperator.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      volumes:
+        - name: webhook-cert
+          secret:
+            # Created by the service-ca annotator from the webhook Service
+            # above; keys tls.crt / tls.key.
+            secretName: {{ include "lightspeed-hub.fullname" . }}-agentic-operator-webhook
+            defaultMode: 0444
 {{- end }}
 {{- end }}

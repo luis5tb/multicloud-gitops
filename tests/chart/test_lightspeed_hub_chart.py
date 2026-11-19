@@ -75,7 +75,10 @@ def test_enabled_render_has_expected_resources() -> None:
         "lightspeed-hub",
         "lightspeed-hub-agentic-operator",
     ]
-    assert kinds["Service"] == ["lightspeed-hub"]
+    assert sorted(kinds["Service"]) == [
+        "lightspeed-hub",
+        "lightspeed-hub-agentic-operator-webhook",
+    ]
     assert sorted(kinds["ServiceAccount"]) == [
         "lightspeed-hub",
         "lightspeed-hub-agentic-operator",
@@ -301,7 +304,11 @@ def test_adapter_tls_disabled_is_plain_http_dev_shape() -> None:
         assert http_get["port"] == "http"
         assert "scheme" not in http_get
 
-    svc = next(d for d in docs if d["kind"] == "Service")
+    svc = next(
+        d
+        for d in docs
+        if d["kind"] == "Service" and d["metadata"]["name"] == "lightspeed-hub"
+    )
     assert "annotations" not in svc["metadata"]
     assert svc["spec"]["ports"] == [
         {"name": "http", "port": 8443, "targetPort": "http", "protocol": "TCP"}
@@ -316,7 +323,11 @@ def test_adapter_service_carries_serving_cert_annotation() -> None:
     mounts: name defaults to <fullname>-serving-cert and is overridable."""
     rendered = _helm(*ENABLE_SETS)
     docs = _resources(rendered.stdout)
-    svc = next(d for d in docs if d["kind"] == "Service")
+    svc = next(
+        d
+        for d in docs
+        if d["kind"] == "Service" and d["metadata"]["name"] == "lightspeed-hub"
+    )
     assert svc["metadata"]["annotations"] == {
         "service.beta.openshift.io/serving-cert-secret-name": "lightspeed-hub-serving-cert"
     }
@@ -329,7 +340,11 @@ def test_adapter_service_carries_serving_cert_annotation() -> None:
         "--set", "adapter.tls.servingCertSecretName=my-cert",
     )
     docs_named = _resources(rendered_named.stdout)
-    svc_named = next(d for d in docs_named if d["kind"] == "Service")
+    svc_named = next(
+        d
+        for d in docs_named
+        if d["kind"] == "Service" and d["metadata"]["name"] == "lightspeed-hub"
+    )
     assert svc_named["metadata"]["annotations"] == {
         "service.beta.openshift.io/serving-cert-secret-name": "my-cert"
     }
@@ -631,6 +646,48 @@ def test_agentic_operator_crds_render_and_land_before_deployment() -> None:
     assert any(
         d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub-agentic-operator"
         for d in docs_off
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_agentic_operator_webhook_cert_wiring() -> None:
+    """Repo C's manager registers its admission webhooks unconditionally
+    and exits at startup without tls.crt at its CertDir. The chart must
+    provision a service-ca serving cert: a webhook Service with the
+    serving-cert annotation, and the generated Secret mounted read-only at
+    /tmp/k8s-webhook-server/serving-certs with port 9443 exposed. (No
+    WebhookConfigurations are rendered yet -- documented limitation.)"""
+    rendered = _helm(*ENABLE_SETS)
+    docs = _resources(rendered.stdout)
+
+    svc = next(
+        d for d in docs
+        if d["kind"] == "Service"
+        and d["metadata"]["name"] == "lightspeed-hub-agentic-operator-webhook"
+    )
+    assert svc["metadata"]["annotations"][
+        "service.beta.openshift.io/serving-cert-secret-name"
+    ] == "lightspeed-hub-agentic-operator-webhook"
+    assert svc["spec"]["ports"][0]["port"] == 9443
+
+    dep = next(
+        d for d in docs
+        if d["kind"] == "Deployment"
+        and d["metadata"]["name"] == "lightspeed-hub-agentic-operator"
+    )
+    container = dep["spec"]["template"]["spec"]["containers"][0]
+    mounts = container["volumeMounts"]
+    assert any(
+        m["mountPath"] == "/tmp/k8s-webhook-server/serving-certs" and m["readOnly"]
+        for m in mounts
+    )
+    assert any(p["name"] == "webhook" and p["containerPort"] == 9443 for p in container["ports"])
+    volumes = dep["spec"]["template"]["spec"]["volumes"]
+    assert any(
+        v["secret"]["secretName"] == "lightspeed-hub-agentic-operator-webhook"
+        for v in volumes
     )
 
     # The operator stack gate drops the CRDs too.
