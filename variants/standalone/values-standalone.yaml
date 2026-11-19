@@ -775,8 +775,12 @@ clusterGroup:
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
+        # (LIVE FIX: the A2A client rejects a card whose RPC URL origin
+        # differs from the origin the card was FETCHED from -- ACME fetches
+        # via the mao-a2a route above, so publicBaseUrl must be the SAME
+        # origin, not a differently-named route.)
         - name: a2a.publicBaseUrl
-          value: "https://mas-a2a-mao.apps.cluster-jq8zh.dyn.redhatworkshops.io"
+          value: "https://mao-a2a-mas-a2a-mao.apps.cluster-jq8zh.dyn.redhatworkshops.io"
         # Must be a real list: the chart applies toJson so the app can JSON-decode
         # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
         # JSON string) so the clusterGroup override builds an actual YAML list.
