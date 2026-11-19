@@ -41,12 +41,18 @@ spec:
     # Hub runs (no spec.targetCluster) are not target-scoped: allow them;
     # spoke runs require an explicit allow-list match on the authenticated
     # requester's username or one of their groups.
+    #
+    # ConfigMap keys cannot contain ':' (Kubernetes data-key validation,
+    # regex [-._a-zA-Z0-9]+), but group names do (keycloak:<group>): the
+    # chart sanitizes map keys at render time (':' -> '.') and this
+    # expression applies the same transformation to the username/group
+    # before lookup.
     - expression: >-
         !has(object.spec.targetCluster)
-        || params.data.exists(k, k == request.userInfo.username
+        || params.data.exists(k, k == request.userInfo.username.replace(":", ".")
           && params.data[k].split(',').exists(t, t.trim() == object.spec.targetCluster))
         || request.userInfo.groups.exists(g,
-          params.data.exists(k, k == g
+          params.data.exists(k, k == g.replace(":", ".")
             && params.data[k].split(',').exists(t, t.trim() == object.spec.targetCluster)))
       messageExpression: >-
         'AgenticRun target "' + object.spec.targetCluster + '" is not authorized for requester "'
@@ -78,10 +84,13 @@ metadata:
   labels:
     {{- include "lightspeed-hub.labels" . | nindent 4 }}
 # Deny-all while empty (design §4.3 open item). Keys: authenticated
-# usernames or group names; values: comma-separated targetCluster names.
+# usernames or group names, SANITIZED for ConfigMap-key validity (':'
+# -> '.', since group names contain colons but ConfigMap keys may not);
+# the policy's CEL applies the same transformation before lookup.
+# Values: comma-separated targetCluster names.
 data:
   {{- range $principal, $targets := .Values.admissionPolicy.allowTargets }}
-  {{ $principal | quote }}: {{ $targets | join "," | quote }}
+  {{ ($principal | replace ":" ".") | quote }}: {{ $targets | join "," | quote }}
   {{- end }}
 {{- end }}
 {{- end }}

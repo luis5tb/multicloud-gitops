@@ -434,6 +434,9 @@ def test_admission_policy_binding_references_param_configmap() -> None:
     )
     assert param["data"] in (None, {}, "")
     # With an allow entry, the mapping renders as key -> comma-joined targets.
+    # Group names contain ':' which is invalid in ConfigMap keys: the chart
+    # sanitizes them (':' -> '.') and the CEL expression applies the same
+    # transformation before lookup.
     rendered_map = _helm(
         *ENABLE_SETS,
         "--set", "admissionPolicy.allowTargets.keycloak\\:acme-agent-rca[0]=example-spoke",
@@ -443,7 +446,7 @@ def test_admission_policy_binding_references_param_configmap() -> None:
         d for d in docs_map
         if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "lightspeed-hub-target-policy"
     )
-    assert param_map["data"] == {"keycloak:acme-agent-rca": "example-spoke"}
+    assert param_map["data"] == {"keycloak.acme-agent-rca": "example-spoke"}
 
 
 @pytest.mark.skipif(
@@ -503,8 +506,15 @@ def test_missing_required_values_fail_loudly() -> None:
 @pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm is required to render chart"
 )
-def test_variant_registers_disabled_application() -> None:
-    """The pattern must carry the app entry (disabled) and its namespace."""
+def test_variant_registers_application() -> None:
+    """The pattern must carry the app entry (activated, hub-as-spoke) and
+    its namespace.
+
+    The standalone variant activates the Task B stack with the hub cluster
+    as its own spoke ("hub"): enabled=true, one allowedTarget, the
+    run-creators group bound to it, and the image pins for the adapter and
+    agentic-operator.
+    """
     variant = yaml.safe_load(VARIANT.read_text())
     cluster_group = variant["clusterGroup"]
     assert "lightspeed-hub" in cluster_group["namespaces"]
@@ -513,7 +523,12 @@ def test_variant_registers_disabled_application() -> None:
     assert app["namespace"] == "lightspeed-hub"
     assert app["argoProject"] == "hub"
     overrides = {o["name"]: o["value"] for o in app["overrides"]}
-    assert overrides["enabled"] == "false"
+    assert overrides["enabled"] == "true"
+    assert overrides["adapter.allowedTargets[0]"] == "hub"
+    assert overrides["adapter.hubRunCreatorsGroup"] == "keycloak:acme-agent-rca"
+    assert overrides["adapter.image.repository"] == "quay.io/ltomasbo/lightspeed-hub-a2a-adapter"
+    assert overrides["agenticOperator.image.repository"] == "quay.io/ltomasbo/lightspeed-agentic-operator"
+    assert overrides["agenticOperator.config.gatewayCASecret"] == "praxis-spoke-gateway-ca"
 
 
 @pytest.mark.skipif(
