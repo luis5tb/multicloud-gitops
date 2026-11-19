@@ -405,8 +405,18 @@ clusterGroup:
         #   -o jsonpath='{.spec.template.spec.containers[?(@.name=="dns")].image}'
         - name: dnsIPv4Only.image
           value: "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:2168f78e98dee245b93011b4af41970f4e2e64ae46ece6ce7742dc3c2a0cd1cd"
+        # NOT the universal OpenShift SDN default (172.30.0.10): this cluster's
+        # service network is 172.231.0.0/16, so dns-default is 172.231.0.10.
+        # A hardcoded 172.30.0.10 here silently NXDOMAINs every in-cluster
+        # lookup from the dnsIPv4Only sidecar (observed live: it broke the
+        # Praxis->lightspeed-hub upstream with "Name does not resolve", not
+        # just the sso.redhat.com egress path this was added for -- see
+        # README). Re-derive per cluster: oc get svc dns-default
+        #   -n openshift-dns -o jsonpath='{.spec.clusterIP}', or
+        #   oc get network.config cluster -o jsonpath='{.spec.serviceNetwork}'
+        #   and use .10 in that CIDR.
         - name: dnsIPv4Only.clusterDnsIP
-          value: "172.30.0.10"
+          value: "172.231.0.10"
         - name: dnsIPv4Only.extraSearches[0]
           value: cluster-jq8zh.dyn.redhatworkshops.io
         # agentCard.name/description/rpcUrl inherit the chart's generic
