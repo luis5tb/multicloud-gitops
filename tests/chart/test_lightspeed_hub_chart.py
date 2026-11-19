@@ -441,6 +441,13 @@ def test_admission_policy_binding_references_param_configmap() -> None:
         "namespace": "default",
         "parameterNotFoundAction": "Deny",
     }
+    # v1 bindings have no spec.namespace (v1beta1 shape; the API server
+    # drops it and Argo shows a permanent diff) -- the run-namespace scope
+    # is spelled matchResources.namespaceSelector instead:
+    assert binding["spec"]["matchResources"]["namespaceSelector"] == {
+        "matchLabels": {"kubernetes.io/metadata.name": "default"}
+    }
+    assert "namespace" not in binding["spec"]
     # Deny-all default: the rendered param ConfigMap carries no entries
     # until allowTargets is populated.
     param = next(

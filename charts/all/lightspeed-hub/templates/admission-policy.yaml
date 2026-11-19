@@ -68,8 +68,14 @@ spec:
   policyName: {{ include "lightspeed-hub.fullname" . }}-agenticrun-target-authz
   validationActions: [Deny]
   # Scoped to the run namespace (design §8.3): AgenticRuns live only there,
-  # so the policy does not gate unrelated namespaces' runs.
-  namespace: {{ $runNamespace }}
+  # so the policy does not gate unrelated namespaces' runs. v1 bindings
+  # have no spec.namespace (that was v1beta1 -- the API server silently
+  # drops it and Argo shows a permanent diff); the v1 spelling is
+  # matchResources.namespaceSelector:
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $runNamespace }}
   paramRef:
     name: {{ $paramName }}
     namespace: {{ $runNamespace }}
