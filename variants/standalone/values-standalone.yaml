@@ -514,6 +514,11 @@ clusterGroup:
         # to diverge.
         # - name: spokeGatewayConfig.exchangeClient.clientId
         #   value: praxis-spoke-gateway
+        # The sandbox presents the run token R, whose azp is the adapter's
+        # exchanger client (lightspeed-hub.adapter.keycloak.clientId), not
+        # acme-agent -- the spoke gateways must allow-list THAT client.
+        - name: spokeGatewayConfig.allowedCallers[0]
+          value: lightspeed-hub-a2a
         # The sandbox namespaces allowed to reach the gateways' 8443
         # listeners: the lightspeed-hub run namespace (where repo C's
         # sandboxes run on this deployment -- design-doc Q4 settled for

@@ -236,10 +236,19 @@ data:
       THIS gateway fronts -- its own exchanger client ID by default, since
       Keycloak only exchanges a subject token carrying the exchanging client
       in `aud`. Never the hub gateway's identity.keycloak.audience (that is
-      lightspeed-hub-adapter, which the run token R does not carry).
-      VERIFIED LIVE (2026-11-20): R = A exchanged by the adapter for
+      mas-a2a, which the run token R does not carry).
+      VERIFIED LIVE (2026-11-20): R = H exchanged by the adapter for
       aud praxis-spoke-gateway, accepted by Keycloak as the subject of this
       gateway's R->U exchange. */}}
 {{- $_ := set $spokeValues.identity.keycloak "audience" ($.Values.spokeGatewayConfig.inboundAudience | default $.Values.spokeGatewayConfig.exchangeClient.clientId) }}
+{{- /* azp allow-list for the spoke gateways. An exchanged token's `azp` is
+      the client that PERFORMED the exchange, so the run token R carries
+      azp=<adapter exchanger client> (lightspeed-hub-a2a), not the original
+      caller (acme-agent). VERIFIED-BROKEN LIVE (2026-11-20): inheriting the
+      hub gateway's policy.allowedCallers denied every sandbox kube call with
+      403 "not an allow-listed caller". Empty = inherit (Token A mode). */}}
+{{- with $.Values.spokeGatewayConfig.allowedCallers }}
+{{- $_ := set $spokeValues.policy "allowedCallers" . }}
+{{- end }}
 {{ tpl ($.Files.Get "files/policy.yaml") (dict "Values" $spokeValues "Chart" $.Chart "Release" $.Release "Template" $.Template) | indent 4 }}
 {{- end }}

@@ -309,6 +309,14 @@ spokeGatewayConfig:
   # sandbox presents R, whose only audience is this. Do NOT reuse the front
   # door's identity.keycloak.audience. Override only to diverge.
   inboundAudience: ""
+  # azp allow-list the spoke gateways enforce on inbound tokens. Empty
+  # (default) = inherit policy.allowedCallers, which is only right when the
+  # sandbox presents the caller's own Token A. With the lightspeed-hub
+  # run token R (adapter.runTokenAudience) set this to the adapter's
+  # exchanger client (e.g. lightspeed-hub-a2a): Keycloak stamps an
+  # exchanged token's azp with the client that performed the exchange, so
+  # R's azp is that client, never the original caller.
+  allowedCallers: []
   # PPE's own exchanger client identity, shared by every spoke gateway
   # (the exchange is performed by the gateway, not the sandbox). The
   # client and its Vault-backed secret are created by

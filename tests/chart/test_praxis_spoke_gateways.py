@@ -540,3 +540,42 @@ def test_spoke_gateway_networkpolicy_allows_dns_pod_port() -> None:
     )
     ports = {(p["protocol"], p["port"]) for p in dns_rule["ports"]}
     assert {("UDP", 5353), ("TCP", 5353), ("UDP", 53), ("TCP", 53)} <= ports
+
+
+def _spoke_policy(*extra: str) -> str:
+    rendered = _helm(CHART, "--set", "identity.keycloak.audience=mas-a2a", *SPOKE_SETS, *extra)
+    cm = next(
+        d for d in _resources(rendered.stdout)
+        if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "praxis-spoke-east"
+    )
+    return cm["data"]["policy.yaml"]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_spoke_gateway_allowed_callers_override() -> None:
+    """The run token R's azp is the adapter's exchanger client, not the
+    original caller: VERIFIED-BROKEN LIVE (2026-11-20) when the spoke
+    gateway inherited the hub gateway's allow-list (403 on every sandbox
+    kube call). spokeGatewayConfig.allowedCallers replaces it; empty
+    inherits policy.allowedCallers."""
+    inherited = _spoke_policy()
+    assert "claim.azp != 'acme-agent'" in inherited
+
+    overridden = _spoke_policy("--set", "spokeGatewayConfig.allowedCallers[0]=lightspeed-hub-a2a")
+    assert "claim.azp != 'lightspeed-hub-a2a': deny(" in overridden
+    assert "'acme-agent'" not in overridden
+
+
+def test_variant_spoke_gateways_allow_the_run_token_minter() -> None:
+    """The variant's spoke allow-list must name the adapter's exchanger
+    client (the azp Keycloak stamps on R)."""
+    apps = yaml.safe_load(VARIANT.read_text())["clusterGroup"]["applications"]
+
+    def overrides(app: str) -> dict:
+        return {o["name"]: o["value"] for o in apps[app].get("overrides", [])}
+
+    praxis = overrides("praxis-proxy")
+    hub = overrides("lightspeed-hub")
+    assert praxis["spokeGatewayConfig.allowedCallers[0]"] == hub["adapter.keycloak.clientId"]

@@ -588,6 +588,16 @@ The spoke gateways validate their own exchanger audience
 (`spokeGatewayConfig.inboundAudience`, default the exchanger client ID
 `praxis-spoke-gateway`), which is what the run token R carries.
 
+They also enforce their own azp allow-list
+(`spokeGatewayConfig.allowedCallers`; empty inherits `policy.allowedCallers`).
+Keycloak stamps an exchanged token's `azp` with the client that performed the
+exchange, so R's `azp` is the adapter's exchanger (`lightspeed-hub-a2a`), not
+`acme-agent`. VERIFIED-BROKEN LIVE (2026-11-20): inheriting the hub gateway's
+list denied every sandbox kube call with 403 "not an allow-listed caller".
+
+Known limit: a large `kubectl logs` response fails at the spoke gateway with
+500 "streamed response body exceeds global body limit" (pinned image default).
+
 When enabled, `files/praxis.yaml` gains (inside one `{{- if }}` — the
 disabled render keeps the historical no-router bytes):
 

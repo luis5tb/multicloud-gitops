@@ -521,3 +521,10 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   the standalone allow-list had been populated with the OAuth client UUID.
   Decode a real non-secret test token and copy only its `sub` into
   `a2a.allowedPrincipals`.
+- **An exchanged token's `azp` is the exchanger, not the caller.** Hit live
+  (2026-11-20) right after the hub-gateway cutover: every sandbox kube call got
+  403 "not an allow-listed caller" at the spoke gateway, which still inherited
+  the hub gateway's `policy.allowedCallers` (`acme-agent`) while the run token
+  R carried `azp=lightspeed-hub-a2a`. The Keycloak replay test checked aud and
+  groups at Keycloak and the kube API, never the gateway's azp gate. Fixed with
+  `praxis-proxy` `spokeGatewayConfig.allowedCallers`.
