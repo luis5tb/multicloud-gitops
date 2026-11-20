@@ -296,7 +296,8 @@ spec:
           jwt.credential.sub: {{ printf "spiffe://%s/ns/%s/sa/%s" (include "keycloak-oidc.effectiveTrustDomain" .) .Values.keycloak.acmeWorkload.namespace .Values.keycloak.acmeWorkload.serviceAccount | quote }}
           {{- end }}
           {{- if .Values.keycloak.acmeAccessTokenLifespanSeconds }}
-          # Test aid: short-lived Token A to exercise expiry and renewal.
+          # Token A lifespan override (see values.yaml
+          # acmeAccessTokenLifespanSeconds: interim long-run aid / test aid).
           access.token.lifespan: {{ .Values.keycloak.acmeAccessTokenLifespanSeconds | toString | quote }}
           {{- end }}
         {{- end }}

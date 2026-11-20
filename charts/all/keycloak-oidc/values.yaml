@@ -29,10 +29,16 @@ keycloak:
   # charts/all/acme-agent).
   acmeClientId: acme-agent
   acmeClientName: ACME A2A agent
-  # Optional access-token lifespan (seconds) for acme-agent's client, e.g.
-  # "120" to test token expiry and renewal. Empty keeps the realm default
-  # (300). Realm imports only apply when the realm is first created; on an
-  # existing realm set Clients > acme-agent > Advanced > Access Token Lifespan.
+  # Optional access-token lifespan (seconds) for acme-agent's client (Token
+  # A). Empty keeps the realm default (300). Also a test aid ("120" to
+  # exercise expiry and renewal). INTERIM USE: the lightspeed-hub run-token
+  # Secret carries Token A for the whole AgenticRun step, and nothing renews
+  # it mid-step, so a 300s Token A killed every investigation about 5 min in
+  # (live, 2026-11-20). The standalone variant raises it until the adapter
+  # stores a run-scoped token instead (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md
+  # s8). Delete that override once it does. Realm imports only apply when the
+  # realm is first created; on an existing realm set Clients > acme-agent >
+  # Advanced > Access Token Lifespan.
   acmeAccessTokenLifespanSeconds: ""
   # Dedicated group for calls attributed to acme-agent -- named
   # <caller>-<callee> (not just "acme-agent") so it reads as

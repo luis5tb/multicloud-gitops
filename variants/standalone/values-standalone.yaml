@@ -332,6 +332,16 @@ clusterGroup:
         # The lightspeed-hub chart binds RBAC to those role groups. One-shot
         # realm import: the live realm was configured via the admin API
         # (README "Audience-scoped exchange roles").
+        # INTERIM / BRIDGE: 15-minute Token A (realm default 300s). The
+        # lightspeed-hub run-token Secret carries Token A for a whole
+        # AgenticRun step with no mid-step renewal, so 300s killed every
+        # investigation about 5 minutes in (live 2026-11-20). DELETE this
+        # override once the adapter stores a run-scoped token instead of
+        # Token A (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s8). Trade-off:
+        # every Token A (also the one MAS sees) is replayable for 15 min.
+        # Applied to the live realm via the admin API (one-shot import).
+        - name: keycloak.acmeAccessTokenLifespanSeconds
+          value: "900"
         - name: keycloak.exchangeRoles.enabled
           value: "true"
         - name: keycloak.exchangeRoles.groups[0]
