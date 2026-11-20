@@ -841,6 +841,23 @@ clusterGroup:
           value: "true"
         # - name: route.host
         #   value: "mas-a2a.apps.cluster-jq8zh.dyn.redhatworkshops.io"
+        # Long-running delegations (lightspeed-hub investigations): the
+        # chart default 300s stream cap made MAS end ACME's stream with "The
+        # stream time limit was reached. Query the task for its current
+        # state." while the AgenticRun was still analyzing (seen live
+        # 2026-11-20) -- ACME's ADK client does not poll the task. Sized to
+        # the hub Agent's analysis timeout (1200s); ACME's a2a.requestTimeout
+        # is 1260s. Chart guards: route > stream, shutdown > stream,
+        # terminationGracePeriodSeconds > shutdown. (Trade-off: a rollout can
+        # wait up to ~21 min for open streams to drain.)
+        - name: a2a.streamMaxDurationSeconds
+          value: "1200"
+        - name: a2a.shutdownTimeoutSeconds
+          value: "1230"
+        - name: terminationGracePeriodSeconds
+          value: "1260"
+        - name: route.timeoutSeconds
+          value: "1260"
 
         # Multi-issuer OIDC: accept tokens from Red Hat SSO and Keycloak
         # Keycloak is NOT auto-appended; include it explicitly

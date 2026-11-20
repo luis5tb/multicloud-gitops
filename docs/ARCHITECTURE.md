@@ -266,6 +266,21 @@ management (operator `a2a-support`): the standing `spoke-kubeconfig-<id>`,
 per-step spoke SA and reader bindings were never used by the sandbox. See
 `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
 
+Live spoke-gateway DNS finding (2026-11-20): the IPv4-only DNS sidecar
+(`dnsIPv4Only`) was wired only into the MAIN praxis-proxy Deployment. The
+per-spoke gateways (`praxis-spoke-<id>`) used plain ClusterFirst DNS, could
+not resolve the Keycloak Route (`resolve ... deadline exceeded`), failed their
+JWKS fetch, and answered every sandbox request with 401. The sandbox's agent
+just kept retrying tool calls. Any new Praxis Deployment must get the same
+sidecar.
+
+Live MAS stream-cap finding (2026-11-20): "The stream time limit was reached.
+Query the task for its current state." comes from MAS's inbound A2A server
+(`A2A_STREAM_MAX_DURATION_SECONDS`, chart default 300 s), not from
+lightspeed-hub. ACME's ADK client does not poll the task afterwards, so long
+investigations look failed while the AgenticRun keeps running. Sized to the
+Agent's analysis timeout (1200 s) in the variant.
+
 Live Praxis audience finding (2026-11-20): the main gateway still validated
 local-Keycloak tokens for `mas-a2a`, left over from when ACME called Praxis
 directly. It now fronts the hub adapter, so it checks `lightspeed-hub-adapter`

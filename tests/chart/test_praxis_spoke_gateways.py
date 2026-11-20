@@ -479,3 +479,42 @@ def test_keycloak_spoke_gateway_exchanger_client() -> None:
     )
     assert missing.returncode != 0
     assert "spokeGatewayExchanger.vaultKey is required" in missing.stderr
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_spoke_gateway_gets_ipv4_only_dns_sidecar() -> None:
+    """dnsIPv4Only applies to spoke gateways too, not only the main gateway.
+
+    VERIFIED-BROKEN LIVE (2026-11-20): the spoke gateway (no sidecar,
+    ClusterFirst DNS) could not resolve the Keycloak Route on the IPv4-only
+    cluster (`resolve 'keycloak.apps.<base>:443': deadline exceeded`), so its
+    JWKS fetch failed and it rejected every sandbox request with 401.
+    """
+    dns = [
+        "--set", "dnsIPv4Only.enabled=true",
+        "--set", "dnsIPv4Only.image=quay.io/example/coredns@sha256:" + "0" * 64,
+        "--set", "dnsIPv4Only.clusterDnsIP=172.30.0.10",
+    ]
+
+    def spoke_spec(*extra: str) -> dict:
+        docs = _resources(_helm(CHART, "--set", "identity.keycloak.audience=mas-a2a", *SPOKE_SETS, *extra).stdout)
+        dep = next(
+            d for d in docs
+            if d["kind"] == "Deployment"
+            and d["metadata"].get("labels", {}).get("praxis-proxy.spoke-gateway")
+        )
+        return dep["spec"]["template"]["spec"]
+
+    off = spoke_spec()
+    assert [c["name"] for c in off["containers"]] == ["praxis-spoke-gateway"]
+    assert "dnsPolicy" not in off
+
+    on = spoke_spec(*dns)
+    assert [c["name"] for c in on["containers"]] == ["praxis-spoke-gateway", "dns-ipv4only"]
+    assert on["dnsPolicy"] == "None"
+    assert on["dnsConfig"]["nameservers"] == ["127.0.0.1"]
+    assert {"name": "net.ipv4.ip_unprivileged_port_start", "value": "53"} in on["securityContext"]["sysctls"]
+    vols = {v["name"]: v for v in on["volumes"]}
+    assert vols["dns-ipv4only-config"]["configMap"]["name"] == "praxis-proxy-dns-ipv4only"
