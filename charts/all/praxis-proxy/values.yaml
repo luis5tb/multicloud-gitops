@@ -301,6 +301,14 @@ spokeGateways: {}
 # kept OUT of that map so it stays purely per-spoke). Nothing here
 # renders while spokeGateways is empty.
 spokeGatewayConfig:
+  # Audience the spoke gateways require on inbound local-Keycloak tokens.
+  # Empty (default) = exchangeClient.clientId: the token a gateway receives
+  # must carry its exchanger client in `aud` anyway (Keycloak's standard
+  # token exchange rule), so that IS the hop's audience. With the
+  # lightspeed-hub adapter's run token (adapter.runTokenAudience) the
+  # sandbox presents R, whose only audience is this. Do NOT reuse the front
+  # door's identity.keycloak.audience. Override only to diverge.
+  inboundAudience: ""
   # PPE's own exchanger client identity, shared by every spoke gateway
   # (the exchange is performed by the gateway, not the sandbox). The
   # client and its Vault-backed secret are created by
@@ -385,7 +393,7 @@ spokeGatewayConfig:
         memory: 128Mi
 
 # TASK B / lightspeed-hub REQUEST LEG (leg 2 of the architecture; see
-# docs/lightspeed-hub-plan.html s3 "Praxis stays the front door"). DISABLED
+# docs/lightspeed-hub-plan.html s3 "Praxis stays the hub gateway"). DISABLED
 # BY DEFAULT: while disabled, the main gateway keeps its NO-UPSTREAM shape
 # (see the long comment in files/praxis.yaml) and this block renders
 # nothing -- the disabled render is byte-identical to the pre-block one
@@ -434,16 +442,32 @@ a2aUpstream:
   # resolves the AgenticRun's spec.targetCluster from it. The model never
   # constructs this header name.
   targetHeader: X-Hub-Cluster
-  # NOT SUPPORTED (fails the render loudly when true). Would move the
-  # A->H exchange from the adapter onto the main gateway (the spoke-
-  # gateway pattern's delegator/oauth plugin + delegate() step). Blocked
-  # on the pinned image by the protected-A handoff: front-door delegation
-  # REPLACES the outbound Authorization header with H, which hides Token A
-  # from the adapter -- but the adapter NEEDS A for the deferred run leg
-  # (the A->U spoke exchange; see PLAN-lightspeed-hub-migration.md
-  # "Protected A handoff is required, not deferred"). No mechanism on
-  # ghcr.io/praxis-proxy/ai:0.4.1 delivers A alongside H to the upstream
-  # (PPE 0.3.1's assertions: block can only project validated identity
-  # slots, never the raw bearer, onto a header). Do not enable until that
-  # exists AND the image is bumped past the documented role:client defect.
+  # HUB-GATEWAY EXCHANGE (A -> H at praxis-hub, this main gateway). The main gateway
+  # validates the caller's Token A (aud = the exchanger client, e.g.
+  # mas-a2a) and runs delegate() to exchange it for Token H (aud =
+  # exchange.audience, e.g. lightspeed-hub-a2a) before forwarding to the
+  # adapter -- the same delegator/oauth block the spoke gateways use (schema
+  # verified on the pinned image; the spoke gateways' delegate() works
+  # live). The adapter then creates the AgenticRun with H directly and
+  # exchanges H -> R for the run token; it never sees Token A
+  # (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md). This was formerly
+  # fail-guarded because the adapter needed Token A for the run leg; with
+  # the run token derived from H that blocker is gone. Requires
+  # a2aUpstream.enabled and policy.enabled.
   exchangeAtPraxis: false
+  exchange:
+    # Exchanger client the gateway authenticates as. MUST be Token A's
+    # audience (Keycloak only exchanges a subject token carrying the
+    # exchanging client in `aud`) -- keycloak-oidc hubGatewayExchanger.
+    clientId: ""
+    # Token H's audience requested in the exchange (single audience: the
+    # pinned delegate() takes one). Must equal the lightspeed-hub chart's
+    # adapter.keycloak.clientId (the adapter exchanges H as that client) and
+    # be accepted by the hub kube API (keycloak-oidc openshiftOIDC
+    # extraAudiences).
+    audience: ""
+    # Secret in this namespace with the exchanger's client secret (created
+    # by keycloak-oidc's hubGatewayExchanger ExternalSecret). ALPHANUMERIC
+    # only: the delegator sends Basic auth without URL-encoding.
+    secretName: praxis-hub-exchange-client
+    secretKey: client-secret

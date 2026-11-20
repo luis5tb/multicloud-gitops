@@ -58,8 +58,18 @@ spec:
         - name: praxis-proxy
           image: {{ include "praxis-proxy.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if or .Values.policy.caBundleConfigMap.name .Values.logLevel }}
+          {{- if or .Values.policy.caBundleConfigMap.name .Values.logLevel .Values.a2aUpstream.exchangeAtPraxis }}
           env:
+            {{- if .Values.a2aUpstream.exchangeAtPraxis }}
+            # Hub-gateway A->H exchanger's client secret (keycloak-oidc
+            # hubGatewayExchanger ExternalSecret in this namespace). A dangling
+            # reference fails closed (CreateContainerConfigError).
+            - name: PRAXIS_HUB_EXCHANGE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.a2aUpstream.exchange.secretName }}
+                  key: {{ .Values.a2aUpstream.exchange.secretKey }}
+            {{- end }}
             {{- if .Values.policy.caBundleConfigMap.name }}
             - name: SSL_CERT_FILE
               value: /etc/praxis/ca-bundle/ca-bundle.crt

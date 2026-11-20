@@ -121,6 +121,27 @@ adapter:
   # backend contract (keycloak-oidc chart work), not this chart.
   hubAudience: ""
 
+  # RUN TOKEN (the adapter's --run-token-audience). When set, the adapter
+  # stores R = exchange(Token A, this audience) in the run-token Secret
+  # instead of the caller's raw Token A. R's lifespan is the exchange
+  # client's (keycloak-oidc hubExchange.accessTokenLifespanSeconds), so a
+  # short-lived Token A no longer cuts an AgenticRun step short, and R is
+  # usable only at the spoke gateway (praxis-proxy
+  # spokeGatewayConfig.inboundAudience). Must equal keycloak-oidc's
+  # hubExchange.runTokenAudience (the audience mapper that makes it
+  # requestable). Empty = store Token A (requires the adapter image with
+  # the flag; older images reject unknown flags).
+  runTokenAudience: ""
+
+  # The inbound bearer is already Token H: the Praxis hub gateway
+  # (praxis-proxy a2aUpstream.exchangeAtPraxis) exchanged the caller's
+  # Token A before forwarding. The adapter creates AgenticRuns with it
+  # directly (no A->H exchange) and, with runTokenAudience, exchanges H into
+  # the run token R -- it never sees Token A. adapter.keycloak.clientId must
+  # then be Token H's audience (praxis-proxy a2aUpstream.exchange.audience),
+  # since Keycloak only lets the client named in H's `aud` exchange it.
+  inboundHubToken: false
+
   # Deterministic target header (design §4.2). Header name for the hub leg;
   # the model never constructs it -- rename is chart-level, decided with the
   # concurrent praxis work. UNCONFIRMED GUESS: "X-Hub-Cluster" is the design

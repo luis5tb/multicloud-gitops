@@ -676,6 +676,43 @@ Note: the `keycloak-system/keycloak-admin-user` secret's password was found
 stale on the standalone cluster (2026-11-20, `invalid_grant` for `admin`),
 so use whatever admin login you currently have.
 
+## Hub gateway exchange (`keycloak.hubGatewayExchanger`)
+
+Chain (see `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md` s2): each token's
+audience names the client that exchanges it next, so every exchange needs a
+single audience.
+
+| Client | Exchanges | Adds to the issued token | Notes |
+|---|---|---|---|
+| `acme-agent` (caller) | (mints A) | `aud mas-a2a` only | `fullScopeAllowed: false` (otherwise "audience resolve" leaks the kube audiences into A) |
+| `mas-a2a` (`hubGatewayExchanger`) | A -> H (Praxis hub gateway) | `aud lightspeed-hub-a2a`, hub roles in `groups` | confidential, exchange-only; Vault `praxis-hub-exchange`, **alphanumeric** |
+| `lightspeed-hub-a2a` (`hubExchange`, clientId = hubAudience) | H -> R (adapter) | `aud praxis-spoke-gateway`, no roles | `runTokenLifespanSeconds` (1800); Vault `lightspeed-hub-adapter` (same secret as before) |
+| `praxis-spoke-gateway` (`spokeGatewayExchanger`) | R -> U (spoke gateway, per call) | `aud praxis-spoke-<id>`, spoke roles in `groups` | alphanumeric secret |
+
+Guards enforce the contract: `hubGatewayExchanger.clientId` equals
+`masA2aAudience`, `hubExchange.clientId` equals `hubAudience`, both
+`subjectTokenAudienceMapper` flags are off (Token A = `[mas-a2a]`), and
+`hubExchange.runTokenAudience` is set. Boolean flags are normalized, so
+`--set-string ...=false` is handled correctly.
+
+**Verified live (2026-11-20):**
+- Exchanged tokens get the exchanging client's lifespan, even past the
+  subject's expiry, so R (1800 s) outlives A (300 s).
+- The full chain A→H→R→U, replayed with fresh tokens, gives H, then
+  `keycloak:lightspeed-hub-a2a:agenticrun-creator`, U, then
+  `keycloak:praxis-spoke-hub:reader` at the kube API. R and A both get 401.
+
+**Live realm (one-shot import):** configured on 2026-11-20 via the admin API:
+- the `mas-a2a` client (secret from Vault `praxis-hub-exchange`), with its
+  audience and role mappers and the hub-role scope mapping;
+- `lightspeed-hub-a2a` turned into a confidential exchanger (secret = the
+  adapter's existing Vault value, `standard.token.exchange.enabled`, lifespan
+  1800, mapper `aud praxis-spoke-gateway`, no service account).
+
+After cutover, remove the old Token A audience mappers from `acme-agent`
+(`lightspeed-hub-adapter`, `praxis-spoke-gateway`) and its lifespan override
+(back to 300 s). The `lightspeed-hub-adapter` client is then unused.
+
 ## Audience-scoped exchange roles (`keycloak.exchangeRoles`)
 
 Kubernetes RBAC binds groups, not audiences. With a plain group mapper, every

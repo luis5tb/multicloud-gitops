@@ -216,7 +216,7 @@ data:
   policy.yaml: |
 {{- /*
     The spoke's policy.yaml is the shared files/policy.yaml PLUS the B1
-    delegation additions, gated on a __spokeDelegation flag injected into a
+    delegation additions, gated on a __delegation flag injected into a
     deep-copied Values tree (so the PUBLIC gateway's policy.yaml -- rendered
     from the same file without the flag -- is byte-identical to before and
     never contains the delegator). The flag selects:
@@ -231,6 +231,15 @@ data:
     Empirical gotchas are recorded as comments in files/policy.yaml.
 */}}
 {{- $spokeValues := deepCopy $.Values }}
-{{- $_ := set $spokeValues "__spokeDelegation" (dict "plugin" "spoke-delegator" "target" "spoke-api" "audience" $cfg.exchangeAudience) }}
+{{- $_ := set $spokeValues "__delegation" (dict "plugin" "spoke-delegator" "target" "spoke-api" "audience" $cfg.exchangeAudience "clientId" $.Values.spokeGatewayConfig.exchangeClient.clientId "secretEnv" "PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET" "tokenUrl" (include "praxis-proxy.spokeExchangeTokenUrl" $)) }}
+{{- /* Inbound audience for local-Keycloak tokens: the audience of the hop
+      THIS gateway fronts -- its own exchanger client ID by default, since
+      Keycloak only exchanges a subject token carrying the exchanging client
+      in `aud`. Never the hub gateway's identity.keycloak.audience (that is
+      lightspeed-hub-adapter, which the run token R does not carry).
+      VERIFIED LIVE (2026-11-20): R = A exchanged by the adapter for
+      aud praxis-spoke-gateway, accepted by Keycloak as the subject of this
+      gateway's R->U exchange. */}}
+{{- $_ := set $spokeValues.identity.keycloak "audience" ($.Values.spokeGatewayConfig.inboundAudience | default $.Values.spokeGatewayConfig.exchangeClient.clientId) }}
 {{ tpl ($.Files.Get "files/policy.yaml") (dict "Values" $spokeValues "Chart" $.Chart "Release" $.Release "Template" $.Template) | indent 4 }}
 {{- end }}

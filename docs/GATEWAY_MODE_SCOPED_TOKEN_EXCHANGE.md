@@ -23,15 +23,18 @@ Three components, three owners. Each section below is tagged with its owner.
 
 | Owner | Component | Responsibility in this design |
 |---|---|---|
-| **lightspeed-agentic-operator** | the operator that runs AgenticRuns in sandbox pods | gateway credential mode: render the sandbox kubeconfig pointing at the gateway with the requester's Token A; validate the run-token Secret; pause on expired credentials; **do no spoke management in gateway mode** (s3) |
-| **lightspeed-hub** | `a2a-adapter` (A2A front for AgenticRuns) | A->H exchange; create the AgenticRun *as the user* with H; write and renew the run-token Secret (Token A) the operator mounts; serve the agent card at `/a2a/.well-known/agent-card.json` too |
+| **lightspeed-agentic-operator** | the operator that runs AgenticRuns in sandbox pods | gateway credential mode: render the sandbox kubeconfig pointing at the spoke gateway with the run credential from the run-token Secret (`tokenFile`); validate that Secret; pause on expired credentials; **do no spoke management in gateway mode** (s3). It is agnostic to *which* token is stored (R in this design) |
+| **lightspeed-hub** | `a2a-adapter` (A2A front for AgenticRuns) | receive **Token H** (`--inbound-hub-token`) and create the AgenticRun *as the user* with it -- **no exchange, never sees Token A**; exchange H -> run token R (`--run-token-audience`) and write/renew it in the run-token Secret; serve the agent card at `/a2a/.well-known/agent-card.json` too |
 | **lightspeed-hub** | hub operator (`SpokeCluster` registration) | spoke registry and probes. In gateway mode it needs no standing admin kubeconfig and no spoke-side provisioning (`openshift-lightspeed-managed`, reader bindings); registration becomes "URL + trust" (s6, B-full) |
-| **deployment** (here: `multicloud-gitops`) | Keycloak realm, Praxis gateways, cluster OIDC + RBAC | audience clients, audience-scoped roles in `groups` (s4); per-spoke Praxis gateway doing A->U; OIDC claim mappings and RBAC bindings to the role groups (s5) |
+| **deployment** (here: `multicloud-gitops`) | Keycloak realm, Praxis gateways, cluster OIDC + RBAC | exchanger clients and audience-scoped roles (s4); the **praxis hub gateway** (main `praxis-proxy`, MAS -> adapter) doing A -> H; per-spoke **praxis spoke gateways** doing R -> U per call; OIDC claim mappings and RBAC bindings to the role groups (s5) |
 | **MAS** | orchestrator | today forwards Token A verbatim; future per-delegation exchange (s4.2) |
 
 The operator never talks to Keycloak and never sees H or U: it only mounts
-Token A and points the sandbox at the gateway. The adapter never touches the
-spoke. Keycloak and RBAC configuration is deployment-owned, but its *shape*
+the stored run credential and points the sandbox at the spoke gateway. The
+adapter never sees Token A and never touches the spoke. Naming: the **front
+door** is the MAS A2A endpoint; the Praxis instances are the **hub gateway**
+(between MAS and the adapter) and the **spoke gateways** (between the sandbox
+and each spoke API). Keycloak and RBAC configuration is deployment-owned, but its *shape*
 (s4.3, s5.2) is the contract the two upstream components rely on.
 
 ## 1. Goal
@@ -45,23 +48,62 @@ that user's RBAC on the target cluster, and nothing more:
 - each token in the chain authorizes **only its own hop**, even when two hops
   land on the same Kubernetes API server (the hub acting as its own spoke).
 
-## 2. Actors and tokens
+## 2. Actors and tokens [live]
 
 ```
-ACME/caller --A--> MAS --A--> praxis-proxy --A--> hub A2A adapter --H--> hub kube API
-                                                        | stores A (run-token Secret)
-                                                        v
-            AgenticRun sandbox --A--> praxis-spoke-<id> --U--> spoke kube API
+ACME --A--> MAS (front door) --A--> praxis hub gateway --H--> hub A2A adapter --H--> hub kube API
+                                     (exchanges A->H)          | exchanges H->R, stores R (run-token Secret)
+                                                               v
+            AgenticRun sandbox --R--> praxis spoke gateway --U--> spoke kube API
+                                      (exchanges R->U per call)
 ```
 
-| Token | Minted by | Audience (`aud`) | Used against | Purpose |
-|---|---|---|---|---|
-| **A** | Keycloak, for the caller (client credentials / user login) | the exchangers + the first hop (`mas-a2a`, `lightspeed-hub-adapter`, `praxis-spoke-gateway`) | MAS, praxis-proxy; never a kube API | caller identity, carried through the chain |
-| **H** | Keycloak, exchange A→H by the hub adapter | `lightspeed-hub-a2a` | **hub** kube API | create the AgenticRun *as the user* |
-| **U** | Keycloak, exchange A→U by the per-spoke Praxis gateway | `praxis-spoke-<id>` | **spoke** kube API | the investigation's reads, *as the user* |
+**Principle: each token's audience names the client that exchanges or
+consumes it next.** So every exchange requests a single audience (the
+pinned Praxis `delegate()` takes exactly one), and Keycloak's rule that the
+exchanging client must be in the subject token's `aud` (s4.2) holds by
+construction.
 
-All three carry the same `sub`. Kubernetes sees the same username
-(`keycloak:<sub>`) for H and U, which is why section 5 is needed.
+| Token | Minted by (client) | `aud` | Lifespan | Exchanged / consumed by | Purpose |
+|---|---|---|---|---|---|
+| **A** | Keycloak for the caller (`acme-agent`) | `mas-a2a` | 300 s | MAS; the hub gateway exchanges it **as client `mas-a2a`** | caller identity, only as far as the hub gateway |
+| **H** | hub gateway (`mas-a2a`) | `lightspeed-hub-a2a` | 300 s | **hub** kube API (create the AgenticRun); the adapter exchanges it **as client `lightspeed-hub-a2a`** | run creation *as the user* |
+| **R** | adapter (`lightspeed-hub-a2a`) | `praxis-spoke-gateway` | **1800 s** | only the spoke gateway, which exchanges it **as client `praxis-spoke-gateway`** | the run's stored credential, covering a whole step |
+| **U** | spoke gateway (`praxis-spoke-gateway`), per call | `praxis-spoke-<id>` | 300 s (per call) | **spoke** kube API | the investigation's reads *as the user* |
+
+All four carry the same `sub`. Kubernetes sees the same username
+(`keycloak:<sub>`) for H and U, which is why section 5 is needed. R is
+rejected by every kube API (verified live: 401), and so is Token A.
+
+Verified live (2026-11-20), one fresh Token A replayed through all three
+exchanges exactly as each hop performs them (Praxis hops with HTTP Basic,
+the adapter with form auth):
+
+```
+H by mas-a2a              aud lightspeed-hub-a2a    groups [lightspeed-hub-a2a:agenticrun-creator]  300s
+R by lightspeed-hub-a2a   aud praxis-spoke-gateway  groups none                                     1800s
+U by praxis-spoke-gateway aud praxis-spoke-hub      groups [praxis-spoke-hub:reader]                300s
+kube API: H -> keycloak:lightspeed-hub-a2a:agenticrun-creator   U -> keycloak:praxis-spoke-hub:reader   R -> 401
+```
+
+**Why this shape** (it replaced two earlier ones, both run live):
+
+1. *Adapter stores Token A.* A (5 min) expired mid-investigation; the
+   interim fix was a 15-minute A, replayable that long everywhere.
+2. *Adapter exchanges A -> H and A -> R.* Works, but the adapter handles the
+   caller's original token and A must name the adapter as an audience.
+3. *Current: the hub gateway exchanges A -> H; the adapter exchanges H -> R.*
+   The adapter never sees A and creates the run with what it receives; ACME
+   requests only `mas-a2a`; R is long-lived but useless anywhere except the
+   spoke gateway; U is per call and short. The former "protected-A handoff"
+   blocker for exchanging at Praxis disappeared because the run credential
+   now derives from H, not A.
+
+**Lifetimes (verified live):** an exchanged token gets the **exchanging
+client's** `access.token.lifespan`, even past the subject token's expiry (A
+900 s exchanged by a 3600 s client gave a token expiring 2702 s after A).
+That is what lets R (1800 s) outlive A (300 s). Beyond R's lifetime the
+renewal path applies (fresh A -> fresh H -> fresh R, s8).
 
 ## 3. Gateway credential mode in the agentic operator
 
@@ -158,11 +200,27 @@ succeeded. Multiple audiences on Token A were **not** the cause.
 ### 4.2 The subject token must carry the exchanger [live]
 
 Keycloak 26 also requires the **exchanging client** to be in the subject
-token's `aud`. Because MAS forwards Token A verbatim (it cannot exchange per
-delegation yet), Token A carries every downstream exchanger
-(`lightspeed-hub-adapter`, `praxis-spoke-gateway`) via audience mappers on the
-caller's client. **This is a stopgap.** The target design has the caller mint
-`aud: mas-a2a` only and MAS exchange per delegation (needs a MAS feature).
+token's `aud`. In the current chain that is satisfied by naming each token's
+audience after its next exchanger (s2): A carries `mas-a2a` (the hub
+gateway's client), H carries `lightspeed-hub-a2a` (the adapter's client), R
+carries `praxis-spoke-gateway`.
+
+So Token A now carries **only `mas-a2a`**, and `mas-a2a` is a confidential
+exchanger client whose secret the hub gateway holds: the hop acting for MAS
+on its outbound delegation swaps the audience. When MAS can exchange per
+delegation itself, it takes over that same client and nothing changes for
+the caller. Trade-off: whoever holds the `mas-a2a` secret can exchange any
+token meant for MAS. (Previously Token A carried every downstream exchanger
+-- `lightspeed-hub-adapter`, `praxis-spoke-gateway` -- via audience mappers
+on the caller's client, because the adapter and spoke gateway exchanged A
+directly.)
+
+Also required on the caller's client: **`fullScopeAllowed: false`.** With
+audience-scoped roles (s4.3) the caller's group holds client roles on the
+hub/spoke audience clients, and with full scope Keycloak's default `roles`
+scope ("audience resolve") added those clients to Token A's `aud` -- making
+the raw Token A acceptable to the kube APIs (found live 2026-11-20; fixed,
+Token A now gets 401 at the kube API).
 
 ### 4.3 Audience-scoped roles projected into `groups` [live]
 
@@ -338,17 +396,29 @@ hub needs only a minimal probe identity for health checks (B-full).
 
 | Change | Owner / repo | State |
 |---|---|---|
-| Gateway credential mode (sandbox -> gateway with Token A, run-token validation, credential pause) | lightspeed-agentic-operator | implemented on fork (`8225d31`) |
+| Gateway credential mode (sandbox -> gateway with the stored run credential, run-token validation, credential pause) | lightspeed-agentic-operator | implemented on fork (`8225d31`) |
 | No spoke management in gateway mode (s3.2) | lightspeed-agentic-operator | implemented on fork |
-| A2A adapter: A->H exchange, AgenticRun as the user, run-token Secret, renewal | lightspeed-hub (`a2a-adapter`) | implemented on fork |
-| Adapter serves its agent card under `/a2a` too (gateway card pass-through) | lightspeed-hub (`a2a-adapter`) | implemented on fork |
+| Adapter: create AgenticRun as the user; run-token Secret + renewal | lightspeed-hub (`a2a-adapter`) | implemented on fork |
+| Adapter: `--inbound-hub-token` (inbound bearer is H, no A->H) and `--run-token-audience` (store R = exchange(H)) | lightspeed-hub (`a2a-adapter`) | implemented on fork, unit-tested; chain verified live by replay |
+| Adapter serves its agent card under `/a2a` too | lightspeed-hub (`a2a-adapter`) | implemented on fork |
 | Gateway-mode spokes need no admin kubeconfig / spoke provisioning; B-full probe identity | lightspeed-hub (hub operator) | proposed |
-| Audience-only clients (s4.1) | deployment (Keycloak) | live |
-| Audience-scoped roles in `groups` (s4.3) | deployment (Keycloak); shape documented upstream | live |
+| Hub gateway A->H exchange (`a2aUpstream.exchangeAtPraxis`) | deployment (praxis-proxy chart) | implemented (chart) |
+| Exchanger-per-audience clients, audience-scoped roles (s2, s4) | deployment (Keycloak) | live |
 | RBAC bound to role groups (s5.2) | deployment (cluster RBAC) | implemented (charts) |
-| Per-delegation token exchange (drop multi-audience Token A) | MAS | proposed |
+| Praxis delegator: form-URL-encode `client_secret_basic` | Praxis | proposed (workaround: alphanumeric secrets) |
+| Per-delegation token exchange in MAS (take over the `mas-a2a` exchanger) | MAS | proposed |
 
 ## 8. Open questions
+
+- **Runs longer than R (30 min):** the renewal path (fresh A from the caller
+  -> fresh H -> fresh R) exists in the adapter but needs the caller (MAS/ACME)
+  to answer `auth-required`; unverified end to end.
+- **Per-target R:** R is spoke-agnostic (`aud: praxis-spoke-gateway`); a
+  compromised sandbox could present it at another spoke's gateway and get a
+  U there (still within the user's own rights). Hardening: per-spoke
+  exchanger clients and a per-target R audience.
+- **SSO callers:** the hub gateway's Praxis delegator sends no
+  `subject_issuer`, so an SSO-issued Token A cannot be exchanged A->H.
 
 - Execution with the user's own RBAC vs approval-based elevation (3.2).
 - Token A lifetime vs long runs: the adapter's renewal bridge and

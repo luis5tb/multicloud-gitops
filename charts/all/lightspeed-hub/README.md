@@ -312,6 +312,25 @@ UNCONFIRMED: the Vault record is a gcloud `authorized_user` ADC, not the
 service-account key the operator's API comment describes (google-auth accepts
 both); and the sandbox's Gemini support is untested live.
 
+## Tokens the adapter handles (hub-gateway chain)
+
+With `adapter.inboundHubToken` the adapter's inbound bearer is **Token H**,
+already exchanged from the caller's Token A by the praxis hub gateway. The
+adapter creates the AgenticRun with it directly (no exchange) and, with
+`adapter.runTokenAudience`, exchanges H for the **run token R**. It
+authenticates as `adapter.keycloak.clientId` = H's audience
+(`lightspeed-hub-a2a`), the only client Keycloak lets exchange H. It stores R,
+not its inbound token, in `ls-run-token-<run UID>` (key `token-a`: the
+operator's contract name, now holding R).
+- **R's properties:** `aud: praxis-spoke-gateway`, lifespan from keycloak-oidc
+  `hubExchange.runTokenLifespanSeconds` (1800 s), usable only at the spoke
+  gateway, which exchanges it per call for U.
+- **Renewal:** a fresh H from the caller is exchanged into a fresh R the same
+  way.
+- **Why:** the previous version stored the caller's 5-minute Token A, so
+  investigations died about 5 minutes in (live 2026-11-20). See
+  `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md` s2.
+
 ## Identity-scoped RBAC (run creation vs spoke reads)
 
 With keycloak-oidc `exchangeRoles`, Token H and Token U carry different,

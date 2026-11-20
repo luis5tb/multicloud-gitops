@@ -70,15 +70,18 @@ plugins:
         {{ end }}
       claim_mapper: keycloak
 
-{{- if .Values.__spokeDelegation }}
-  # B1 spoke-gateway ONLY (never rendered for the public gateway: the flag
-  # is injected solely by templates/spoke-gateway-configmap.yaml). Schema
+{{- if .Values.__delegation }}
+  # RFC 8693 delegation, rendered ONLY when a template injects the
+  # __delegation flag into a deep-copied Values tree: the spoke gateways
+  # (templates/spoke-gateway-configmap.yaml, A/R -> U) and -- with
+  # a2aUpstream.exchangeAtPraxis -- the hub gateway (templates/configmap.yaml,
+  # A -> H). A plain render never contains a delegator. Schema
   # VERIFIED end-to-end on the pinned image (ghcr.io/praxis-proxy/ai:0.4.1,
   # praxis-policy 0.3.1) against a mock IdP performing RFC 8693 exchange.
   # This is a POLICY PLUGIN, not a Core filter: the delegation is driven by
   # the `delegate(...)` step appended to the catch-all route's
   # pre_invocation below.
-  - name: {{ .Values.__spokeDelegation.plugin }}
+  - name: {{ .Values.__delegation.plugin }}
     kind: delegator/oauth
     hooks: [token.delegate]
     capabilities:
@@ -89,16 +92,19 @@ plugins:
       # https REQUIRED in prod (the mock-IdP spike needed
       # insecure_http: true only because the mock listened on plain http;
       # it is deliberately NOT set here).
-      token_endpoint: {{ include "praxis-proxy.spokeExchangeTokenUrl" . | quote }}
-      client_id: {{ .Values.spokeGatewayConfig.exchangeClient.clientId | quote }}
-      # The secret comes from the env var the spoke Deployment already
-      # injects (spoke-gateway-deployment.yaml, from the ExternalSecret
-      # created by charts/all/keycloak-oidc). Client authentication at the
-      # token endpoint is HTTP Basic client_id:client_secret (verified
-      # empirically), NOT a body parameter.
+      token_endpoint: {{ .Values.__delegation.tokenUrl | quote }}
+      client_id: {{ .Values.__delegation.clientId | quote }}
+      # The secret comes from the env var the gateway's Deployment injects
+      # (from the ExternalSecret created by charts/all/keycloak-oidc).
+      # Client authentication at the token endpoint is HTTP Basic
+      # client_id:client_secret (verified empirically), NOT a body
+      # parameter -- and it is sent WITHOUT RFC 6749 form-URL-encoding
+      # (VERIFIED-BROKEN LIVE 2026-11-20 with a '%' in the secret), so the
+      # secret MUST be alphanumeric (values-secret.yaml.template
+      # alphaNumericPolicy).
       client_secret_source:
         kind: env_var
-        name: PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET
+        name: {{ .Values.__delegation.secretEnv }}
       # Optional delegated-token cache (verified field names in the pinned
       # binary; left off -- enable only after tuning for the IdP's token
       # lifetimes, the binary refuses to cache when the staleness margin
@@ -220,12 +226,14 @@ routes:
     authorization:
       pre_invocation:
         - {{ $conds := list }}{{ range .Values.policy.allowedCallers }}{{ $conds = append $conds (printf "claim.azp != '%s'" .) }}{{ end }}{{ printf "%s: deny('not an allow-listed caller')" (join " & " $conds) | quote }}
-        {{- if .Values.__spokeDelegation }}
-        # B1 spoke-gateway ONLY: after the azp allow-list conjunct above
-        # passes (pre_invocation steps run in sequence until one denies),
-        # exchange the inbound Token A for a spoke-audience Token U before
-        # the request is forwarded to the fixed spoke-api upstream.
-        # Verified syntax on the pinned image: delegate(<plugin>, target:
-        # <upstream cluster name>, audience: <exchange audience>).
-        - {{ printf "delegate(%s, target: %s, audience: %s)" .Values.__spokeDelegation.plugin .Values.__spokeDelegation.target .Values.__spokeDelegation.audience | quote }}
+        {{- if .Values.__delegation }}
+        # After the azp allow-list conjunct above passes (pre_invocation
+        # steps run in sequence until one denies), exchange the inbound
+        # token for the hop's audience before forwarding to the fixed
+        # upstream (spoke gateway: R -> U for spoke-api; hub gateway: A -> H
+        # for hub-adapter). Verified syntax on the pinned image:
+        # delegate(<plugin>, target: <upstream cluster name>, audience:
+        # <exchange audience>) -- a SINGLE audience, which is why every
+        # token's audience names the client that exchanges it next.
+        - {{ printf "delegate(%s, target: %s, audience: %s)" .Values.__delegation.plugin .Values.__delegation.target .Values.__delegation.audience | quote }}
         {{- end }}

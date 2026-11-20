@@ -42,4 +42,15 @@ data:
   praxis.yaml: |
 {{ tpl (.Files.Get "files/praxis.yaml") . | indent 4 }}
   policy.yaml: |
+{{- if .Values.a2aUpstream.exchangeAtPraxis }}
+{{- /* Hub-gateway A->H exchange (a2aUpstream.exchangeAtPraxis): same
+      delegation block as the spoke gateways, injected into a deep copy so
+      the plain render stays delegator-free. Token A's audience is the
+      exchanging client (keycloak-oidc hubGatewayExchanger, e.g. mas-a2a), so
+      Keycloak's subject-audience rule holds; H carries the hub audience. */}}
+{{- $fdValues := deepCopy .Values }}
+{{- $_ := set $fdValues "__delegation" (dict "plugin" "hub-delegator" "target" "hub-adapter" "audience" .Values.a2aUpstream.exchange.audience "clientId" .Values.a2aUpstream.exchange.clientId "secretEnv" "PRAXIS_HUB_EXCHANGE_CLIENT_SECRET" "tokenUrl" (include "praxis-proxy.hubExchangeTokenUrl" .)) }}
+{{ tpl (.Files.Get "files/policy.yaml") (dict "Values" $fdValues "Chart" .Chart "Release" .Release "Template" .Template) | indent 4 }}
+{{- else }}
 {{ tpl (.Files.Get "files/policy.yaml") . | indent 4 }}
+{{- end }}

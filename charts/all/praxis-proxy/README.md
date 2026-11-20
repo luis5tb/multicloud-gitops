@@ -557,25 +557,36 @@ the gateway's fixed operator-configured endpoint and verified CA/SNI.
 
 `a2aUpstream` (disabled by default; **empty by default renders nothing and
 the default render is byte-identical to the pre-block one** — pinned by
-`tests/chart/test_praxis_a2a_upstream.py`) is the front-door hop of the
+`tests/chart/test_praxis_a2a_upstream.py`) is the hub-gateway hop of the
 lightspeed-hub request leg (leg 2; `docs/lightspeed-hub-plan.html` s3
 "Praxis stays the front door"): the main gateway forwards A2A traffic to
 the hub A2A adapter (charts/all/lightspeed-hub) instead of answering 404.
 
-**Design decision (settled for this leg):** Praxis VALIDATES Token A
-(the existing JWT + `claim.azp` allow-list policy, unchanged) and ROUTES;
-the **ADAPTER performs the A→H exchange** with its M1 exchanger. The
-Praxis-side exchange is documented as `a2aUpstream.exchangeAtPraxis` but
-**fails the render loudly** when set to true: front-door delegation
-replaces the outbound Authorization header with H, hiding Token A from
-the adapter — which needs A for the run leg (the A→U spoke exchange), and
-the pinned image (ai:0.4.1 / praxis-policy 0.3.1) has no protected-A
-handoff mechanism (PPE's assertions can only project validated identity
-slots, never the raw bearer, onto a header). See
-`PLAN-lightspeed-hub-migration.md` "Protected A handoff is required, not
-deferred". Fail-loudly-honest was chosen over rendering the spoke-gateway
-delegator pattern half-wired: a delegator that silently destroys the run
-leg's subject token is worse than no delegator.
+**Design (current): this main gateway is the praxis HUB gateway and
+exchanges A→H** (`a2aUpstream.exchangeAtPraxis`). It validates the caller's
+Token A (`aud: mas-a2a`, plus the `claim.azp` allow-list), then
+`delegate(hub-delegator, target: hub-adapter, audience: lightspeed-hub-a2a)`
+exchanges it as client `mas-a2a` (Token A's audience, which is Keycloak's
+condition for exchanging it) and forwards Token H. The adapter creates the
+AgenticRun with H and derives the run token R from H, so it never sees Token
+A. The delegator block, client secret env var
+(`PRAXIS_HUB_EXCHANGE_CLIENT_SECRET`) and token endpoint are the same
+parameterized `files/policy.yaml` block the spoke gateways use (`__delegation`).
+The pinned `delegate()` takes ONE audience, which is why every token's
+audience names the client that exchanges it next.
+
+History: this was previously fail-guarded. The adapter did A→H itself and
+stored Token A for the run leg, and front-door delegation would have hidden A
+from it (no protected-A handoff on ai:0.4.1). Deriving the run credential
+from H removed that blocker. Two caveats remain:
+- **Alphanumeric client secret only.** The delegator sends Basic auth without
+  URL-encoding (`values-secret.yaml.template` `alphaNumericPolicy`).
+- **No SSO callers yet.** The delegator sends no `subject_issuer`, so an
+  SSO-issued Token A cannot be exchanged here.
+
+The spoke gateways validate their own exchanger audience
+(`spokeGatewayConfig.inboundAudience`, default the exchanger client ID
+`praxis-spoke-gateway`), which is what the run token R carries.
 
 When enabled, `files/praxis.yaml` gains (inside one `{{- if }}` — the
 disabled render keeps the historical no-router bytes):

@@ -61,7 +61,7 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- if or (eq $hub.hubAudience "openshift") (eq $hub.hubAudience .Values.keycloak.masA2aAudience) (eq $hub.hubAudience .Values.keycloak.masApiAudience) }}
 {{- fail "keycloak.hubExchange.hubAudience must be distinct from openshift, keycloak.masA2aAudience and keycloak.masApiAudience" }}
 {{- end }}
-{{- if eq $hub.hubAudience $hub.clientId }}
+{{- if and (eq $hub.hubAudience $hub.clientId) (ne (toString .Values.keycloak.hubGatewayExchanger.enabled) "true") }}
 {{- fail "keycloak.hubExchange.hubAudience must be distinct from keycloak.hubExchange.clientId (the client ID is itself minted as a Token A audience by subjectTokenAudienceMapper)" }}
 {{- end }}
 {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
@@ -70,6 +70,39 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- fail "keycloak.hubExchange.hubAudience must be distinct from every keycloak.spokeGatewayExchanger.spokeAudiences entry (spoke vs hub audiences name different consumers)" }}
 {{- end }}
 {{- end }}
+{{- end }}
+{{- end }}
+{{- /* HUB-GATEWAY EXCHANGE (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md):
+      Token A's audience client (mas-a2a) is the Praxis hub gateway's
+      exchanger (A -> H); Token H's audience client (hubExchange.hubAudience)
+      is the adapter's exchanger (H -> run token R). Each token's audience
+      names the client that exchanges it next, so every exchange needs a
+      single audience (the pinned Praxis delegate() takes one). */}}
+{{- /* Normalize boolean flags: Argo passes `--set` (real bools) but
+      `--set-string`/forceString renders "false" as a truthy string. */}}
+{{- $hubSTAM := eq (toString .Values.keycloak.hubExchange.subjectTokenAudienceMapper) "true" }}
+{{- $spokeSTAM := eq (toString .Values.keycloak.spokeGatewayExchanger.subjectTokenAudienceMapper) "true" }}
+{{- $hg := .Values.keycloak.hubGatewayExchanger }}
+{{- $hgEnabled := eq (toString $hg.enabled) "true" }}
+{{- $hgClientId := $hg.clientId | default .Values.keycloak.masA2aAudience }}
+{{- if $hgEnabled }}
+{{- if not .Values.keycloak.hubExchange.enabled }}
+{{- fail "keycloak.hubGatewayExchanger.enabled requires keycloak.hubExchange.enabled (Token H's audience client is the adapter's exchanger)" }}
+{{- end }}
+{{- if not $hg.vaultKey }}
+{{- fail "keycloak.hubGatewayExchanger.vaultKey is required when keycloak.hubGatewayExchanger.enabled is true (Vault path of the hub gateway exchanger's alphanumeric client secret)" }}
+{{- end }}
+{{- if ne $hgClientId .Values.keycloak.masA2aAudience }}
+{{- fail "keycloak.hubGatewayExchanger.clientId must equal keycloak.masA2aAudience: Keycloak only exchanges a subject token carrying the exchanging client in `aud`, and Token A's audience is masA2aAudience" }}
+{{- end }}
+{{- if ne .Values.keycloak.hubExchange.clientId .Values.keycloak.hubExchange.hubAudience }}
+{{- fail "with keycloak.hubGatewayExchanger.enabled, keycloak.hubExchange.clientId must equal keycloak.hubExchange.hubAudience: the adapter exchanges Token H (aud = hubAudience) into the run token, so it must authenticate as that client" }}
+{{- end }}
+{{- if or $hubSTAM (and .Values.keycloak.spokeGatewayExchanger.enabled $spokeSTAM) }}
+{{- fail "with keycloak.hubGatewayExchanger.enabled, Token A must carry ONLY masA2aAudience: set keycloak.hubExchange.subjectTokenAudienceMapper=false and keycloak.spokeGatewayExchanger.subjectTokenAudienceMapper=false (H and the run token R carry the downstream audiences instead)" }}
+{{- end }}
+{{- if not .Values.keycloak.hubExchange.runTokenAudience }}
+{{- fail "with keycloak.hubGatewayExchanger.enabled, keycloak.hubExchange.runTokenAudience is required (the adapter's exchanger mints the run token R for the spoke gateway)" }}
 {{- end }}
 {{- end }}
 {{- /* Audience-scoped exchange roles (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md
@@ -82,7 +115,7 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- if $er.enabled }}
 {{- if .Values.keycloak.hubExchange.enabled }}
 {{- $_ := set $audRoles .Values.keycloak.hubExchange.hubAudience $er.hubRoles }}
-{{- $_ := set $audExchanger .Values.keycloak.hubExchange.hubAudience .Values.keycloak.hubExchange.clientId }}
+{{- $_ := set $audExchanger .Values.keycloak.hubExchange.hubAudience (ternary $hgClientId .Values.keycloak.hubExchange.clientId $hgEnabled) }}
 {{- end }}
 {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
 {{- range .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
@@ -118,7 +151,7 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   keycloakCRName: {{ .Values.keycloak.name }}
-  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.hubExchange.enabled }}
+  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.hubExchange.enabled .Values.keycloak.hubGatewayExchanger.enabled }}
   placeholders:
     {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
     # Resolves $(PRAXIS_SPOKE_EXCHANGER_SECRET) below into the spoke
@@ -135,6 +168,14 @@ spec:
     HUB_EXCHANGE_SECRET:
       secret:
         name: {{ .Values.keycloak.hubExchange.secretName }}
+        key: client-secret
+    {{- end }}
+    {{- if .Values.keycloak.hubGatewayExchanger.enabled }}
+    # Resolves $(HUB_GATEWAY_EXCHANGE_SECRET) below into the Praxis hub
+    # gateway exchanger's secret (Vault-backed, hub-gateway-exchanger-secret.yaml).
+    HUB_GATEWAY_EXCHANGE_SECRET:
+      secret:
+        name: {{ .Values.keycloak.hubGatewayExchanger.secretName }}
         key: client-secret
     {{- end }}
     {{- range $index, $provider := .Values.keycloak.externalOidcProviders }}
@@ -286,6 +327,17 @@ spec:
         standardFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
+        {{- if $er.enabled }}
+        # Token A must carry NO client roles. With exchangeRoles the caller's
+        # group holds roles on the exchange audience clients, and with full
+        # scope Keycloak's default "roles" scope (audience resolve) added
+        # those clients -- the hub/spoke kube API audiences -- to Token A's
+        # aud, so the clusters would accept the raw Token A. VERIFIED LIVE
+        # (2026-11-20): with full scope, Token A's aud included
+        # lightspeed-hub-a2a and praxis-spoke-hub; with fullScopeAllowed
+        # false it is back to its own hops and the kube API answers 401.
+        fullScopeAllowed: false
+        {{- end }}
         {{- if .Values.keycloak.spiffeIdentityProvider.enabled }}
         clientAuthenticatorType: federated-jwt
         {{- end }}
@@ -324,7 +376,7 @@ spec:
               access.token.claim: "true"
               id.token.claim: "true"
               userinfo.token.claim: "true"
-          {{- if and .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.spokeGatewayExchanger.subjectTokenAudienceMapper }}
+          {{- if and .Values.keycloak.spokeGatewayExchanger.enabled $spokeSTAM }}
           # PHASE 2 B1 (PROPOSED): RFC 8693 exchange prerequisite (b) --
           # the SUBJECT token (A) must already carry the exchanging client
           # as an audience; the `audience` request parameter only ever
@@ -341,7 +393,7 @@ spec:
               included.custom.audience: {{ .Values.keycloak.spokeGatewayExchanger.clientId | quote }}
               access.token.claim: "true"
           {{- end }}
-          {{- if and .Values.keycloak.hubExchange.enabled .Values.keycloak.hubExchange.subjectTokenAudienceMapper }}
+          {{- if and .Values.keycloak.hubExchange.enabled $hubSTAM }}
           # TASK B / PHASE 1: RFC 8693 exchange prerequisite (b) for the
           # A->H exchange -- the SUBJECT token (A) must already carry the
           # exchanging client (the hub adapter) as an audience. UNCONFIRMED
@@ -444,14 +496,35 @@ spec:
         publicClient: false
         standardFlowEnabled: false
         directAccessGrantsEnabled: false
-        serviceAccountsEnabled: true
+        # Exchange-only in hub-gateway mode (H -> R): no client_credentials.
+        serviceAccountsEnabled: {{ not $hgEnabled }}
         secret: $(HUB_EXCHANGE_SECRET)
-        {{- if $er.enabled }}
+        {{- if or $er.enabled $hgEnabled }}
         fullScopeAllowed: false
         {{- end }}
         attributes:
           standard.token.exchange.enabled: "true"
+          {{- with .Values.keycloak.hubExchange.runTokenLifespanSeconds }}
+          # Lifespan of the tokens this client exchanges -- the RUN TOKEN R
+          # (VERIFIED LIVE 2026-11-20: an exchanged token gets the exchanging
+          # client's lifespan, even past the subject token's expiry). Sized
+          # to an AgenticRun step so a short Token A no longer cuts it short.
+          access.token.lifespan: {{ . | toString | quote }}
+          {{- end }}
         protocolMappers:
+          {{- with .Values.keycloak.hubExchange.runTokenAudience }}
+          # RUN TOKEN R's audience (the spoke gateway's exchanger client):
+          # the adapter exchanges its inbound token for R and stores R in
+          # the run-token Secret; only the spoke gateway accepts it and
+          # exchanges it (as this audience's client) for the spoke's U.
+          - name: {{ printf "%s-audience" . | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ . | quote }}
+              access.token.claim: "true"
+          {{- end }}
+          {{- if not $hgEnabled }}
           # The hub audience on the exchanged Token H (must equal
           # charts/all/lightspeed-hub's adapter.hubAudience).
           - name: {{ printf "%s-audience" .Values.keycloak.hubExchange.hubAudience | quote }}
@@ -494,12 +567,58 @@ spec:
               id.token.claim: "true"
               userinfo.token.claim: "true"
           {{- end }}
+          {{- end }}
+      {{- end }}
+      {{- if $hgEnabled }}
+      # HUB GATEWAY EXCHANGER: the client named by Token A's audience
+      # (masA2aAudience). The Praxis hub gateway (praxis-proxy
+      # a2aUpstream.exchangeAtPraxis) authenticates as it and exchanges the
+      # caller's Token A for Token H (single audience: hubAudience) before
+      # forwarding to the adapter, which never sees Token A. H carries only
+      # the hub audience and -- with exchangeRoles -- only the hub
+      # audience's roles in `groups`. Short-lived on purpose (realm default):
+      # the adapter exchanges H into the run token immediately. Secret is
+      # Vault-backed and MUST be alphanumeric (Praxis Basic-auth bug).
+      - clientId: {{ $hgClientId | quote }}
+        name: {{ $hg.clientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        secret: $(HUB_GATEWAY_EXCHANGE_SECRET)
+        fullScopeAllowed: false
+        attributes:
+          standard.token.exchange.enabled: "true"
+        protocolMappers:
+          - name: {{ printf "%s-audience" .Values.keycloak.hubExchange.hubAudience | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ .Values.keycloak.hubExchange.hubAudience | quote }}
+              access.token.claim: "true"
+          {{- if $er.enabled }}
+          - name: {{ printf "%s-roles-as-groups" .Values.keycloak.hubExchange.hubAudience | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              usermodel.clientRoleMapping.clientId: {{ .Values.keycloak.hubExchange.hubAudience | quote }}
+              usermodel.clientRoleMapping.rolePrefix: {{ printf "%s:" .Values.keycloak.hubExchange.hubAudience | quote }}
+              claim.name: groups
+              multivalued: "true"
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "false"
+          {{- end }}
       {{- end }}
       {{- /* Audience-only clients: one per audience an exchanger REQUESTS
              (hubExchange.hubAudience, each spokeGatewayExchanger
              spokeAudiences entry). */}}
       {{- $audienceClients := list }}
-      {{- if .Values.keycloak.hubExchange.enabled }}
+      {{- if and .Values.keycloak.hubExchange.enabled (not $hgEnabled) }}
       {{- $audienceClients = append $audienceClients .Values.keycloak.hubExchange.hubAudience }}
       {{- end }}
       {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}

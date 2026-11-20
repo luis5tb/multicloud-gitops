@@ -1,7 +1,7 @@
-"""Regression tests for the a2aUpstream front-door hop (Task B request leg).
+"""Regression tests for the a2aUpstream hub-gateway hop (Task B request leg).
 
 Leg 2 of the lightspeed-hub architecture (docs/lightspeed-hub-plan.html s3
-"Praxis stays the front door"): when a2aUpstream is enabled, the MAIN
+"Praxis stays the hub gateway"): when a2aUpstream is enabled, the MAIN
 gateway forwards A2A traffic to the hub A2A adapter Service over verified
 service-CA TLS, with caller x target rules in the router (one route per
 registered spokeGateways key -- the allow-list IS the spoke map). Token A
@@ -235,10 +235,13 @@ def test_variant_has_no_static_card_overrides() -> None:
     assert not [n for n in names if n.startswith("agentCard.")]
     values = {o["name"]: o["value"] for o in overrides}
     assert values["a2aUpstream.enabled"] == "true"
-    # This gateway fronts the hub adapter, so local-Keycloak tokens must be
-    # meant for the adapter -- not mas-a2a (MAS validates that itself; no
-    # Praxis sits in front of MAS). Red Hat SSO issuers stay for SSO callers.
-    assert values["identity.keycloak.audience"] == "lightspeed-hub-adapter"
+    # The praxis HUB gateway receives Token A and exchanges it A -> H as
+    # client mas-a2a, so it validates A's (only) audience mas-a2a; the
+    # adapter never sees A. Red Hat SSO issuers stay for SSO callers.
+    assert values["identity.keycloak.audience"] == "mas-a2a"
+    assert values["a2aUpstream.exchangeAtPraxis"] == "true"
+    assert values["a2aUpstream.exchange.clientId"] == "mas-a2a"
+    assert values["a2aUpstream.exchange.audience"] == "lightspeed-hub-a2a"
     assert values["identity.oidcIssuers[0].audience"] == "api.ask_red_hat"
 
 
@@ -249,7 +252,7 @@ def test_enabled_requires_registered_spokes() -> None:
     """Empty spokeGateways + enabled a2aUpstream must fail the render.
 
     The caller x target allow-list IS the spokeGateways map; an enabled
-    front door with no registered spokes would route nothing while
+    hub gateway with no registered spokes would route nothing while
     looking configured.
     """
     result = _helm(
@@ -265,34 +268,66 @@ def test_enabled_requires_registered_spokes() -> None:
 @pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm is required to render chart"
 )
-def test_exchange_at_praxis_fails_loudly() -> None:
-    """exchangeAtPraxis=true is documented but NOT SUPPORTED: fail loudly.
+def test_exchange_at_praxis_renders_hub_gateway_delegation() -> None:
+    """exchangeAtPraxis: the hub gateway (praxis-hub) exchanges A -> H (single audience).
 
-    The ADAPTER performs the A->H exchange on this leg. Front-door
-    delegation would replace the outbound Authorization with H and hide
-    Token A from the adapter (no protected-A handoff on the pinned image)
-    -- rendering the spoke-gateway delegator pattern here half-wired
-    would silently destroy the run leg's subject token, so the render
-    refuses instead.
+    Formerly fail-guarded (the adapter needed Token A for the run leg); with
+    the run token derived from H the adapter never sees A. The hub gateway
+    validates A against the exchanger client's audience (mas-a2a), runs
+    delegate() as that client for Token H's audience, and gets the client
+    secret from an env var; the spoke gateways keep their own R -> U
+    delegation; a plain render has no delegator. Missing contract values
+    fail loud.
     """
-    result = _helm(
-        CHART,
+    import re
+
+    base = [
         "--set", "identity.keycloak.audience=mas-a2a",
         "--set", "a2aUpstream.enabled=true",
-        "--set", "a2aUpstream.exchangeAtPraxis=true",
         *SPOKE_SETS,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "a2aUpstream.exchangeAtPraxis=true is NOT SUPPORTED" in result.stderr
-    assert "protected-A handoff" in result.stderr
+    ]
+    fd = [
+        "--set", "a2aUpstream.exchangeAtPraxis=true",
+        "--set", "a2aUpstream.exchange.clientId=mas-a2a",
+        "--set", "a2aUpstream.exchange.audience=lightspeed-hub-a2a",
+    ]
+    docs = _resources(_helm(CHART, *base, *fd).stdout)
+    main = _main_configmap(docs)["data"]["policy.yaml"]
+    live_steps = [l.strip() for l in main.splitlines() if l.strip().startswith('- "delegate(')]
+    assert live_steps == ['- "delegate(hub-delegator, target: hub-adapter, audience: lightspeed-hub-a2a)"']
+    assert 'client_id: "mas-a2a"' in main
+    assert "name: PRAXIS_HUB_EXCHANGE_CLIENT_SECRET" in main
+    dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "praxis-proxy")
+    env = {e["name"]: e for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["PRAXIS_HUB_EXCHANGE_CLIENT_SECRET"]["valueFrom"]["secretKeyRef"] == {
+        "name": "praxis-hub-exchange-client", "key": "client-secret",
+    }
+
+    # Spoke gateway: still its own R -> U delegation as praxis-spoke-gateway,
+    # validating its own exchanger audience (the run token R).
+    spoke = next(
+        d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"].startswith("praxis-spoke-")
+        and "policy.yaml" in (d.get("data") or {})
+    )["data"]["policy.yaml"]
+    assert 'client_id: "praxis-spoke-gateway"' in spoke
+    assert "hub-delegator" not in spoke
+
+    # Plain render: no live delegate() step in the hub gateway.
+    plain = _main_configmap(_resources(_helm(CHART, *base).stdout))["data"]["policy.yaml"]
+    assert not [l for l in plain.splitlines() if l.strip().startswith('- "delegate(')]
+
+    # Fail loud without the exchange contract or without the upstream.
+    r = _helm(CHART, *base, "--set", "a2aUpstream.exchangeAtPraxis=true", check=False)
+    assert r.returncode != 0 and "a2aUpstream.exchange.clientId" in r.stderr
+    r = _helm(CHART, "--set", "identity.keycloak.audience=mas-a2a", *SPOKE_SETS, *fd, check=False)
+    assert r.returncode != 0 and "requires a2aUpstream.enabled=true" in r.stderr
 
 
 @pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm is required to render chart"
 )
 def test_enabled_requires_policy() -> None:
-    """The front door must keep validating: policy.enabled=false fails."""
+    """The hub gateway must keep validating: policy.enabled=false fails."""
     result = _helm(
         CHART,
         "--set", "identity.keycloak.audience=mas-a2a",
@@ -603,6 +638,86 @@ def test_keycloak_exchange_roles_scope_groups_per_audience() -> None:
     assert bad.returncode != 0 and "not a group this realm import creates" in bad.stderr
     none = realm("--set", "keycloak.exchangeRoles.enabled=true", check=False)
     assert none.returncode != 0
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_keycloak_hub_gateway_exchange_chain() -> None:
+    """Hub-gateway mode: each token's audience names its next exchanger.
+
+    A (aud mas-a2a) -> H by client mas-a2a (the Praxis hub gateway) ->
+    R by client lightspeed-hub-a2a (the adapter, 30-min lifespan) -> U by
+    praxis-spoke-gateway. Every exchange uses a single audience (the pinned
+    Praxis delegate() takes one). Token A carries only mas-a2a, no client
+    roles (fullScopeAllowed false). Guards fail loud on contract breaks.
+    """
+    def kc(*args: str, check: bool = True):
+        out = subprocess.run(
+            ["helm", "template", "keycloak-oidc", str(KEYCLOAK_CHART), "-f", str(VARIANT),
+             "--set", "keycloak.spiffeIdentityProvider.enabled=false", *args],
+            check=check, capture_output=True, text=True,
+        )
+        return out
+
+    sets = [
+        "--set", "keycloak.hubExchange.enabled=true",
+        "--set", "keycloak.hubExchange.vaultKey=secret/data/global/lightspeed-hub-adapter",
+        "--set", "keycloak.hubExchange.hubAudience=lightspeed-hub-a2a",
+        "--set", "keycloak.hubExchange.clientId=lightspeed-hub-a2a",
+        "--set", "keycloak.hubExchange.subjectTokenAudienceMapper=false",
+        "--set", "keycloak.hubExchange.runTokenAudience=praxis-spoke-gateway",
+        "--set", "keycloak.hubExchange.runTokenLifespanSeconds=1800",
+        "--set", "keycloak.spokeGatewayExchanger.enabled=true",
+        "--set", "keycloak.spokeGatewayExchanger.vaultKey=secret/data/global/praxis-spoke-gateway",
+        "--set", "keycloak.spokeGatewayExchanger.spokeAudiences[0]=praxis-spoke-hub",
+        "--set", "keycloak.spokeGatewayExchanger.subjectTokenAudienceMapper=false",
+        "--set", "keycloak.exchangeRoles.enabled=true",
+        "--set", "keycloak.exchangeRoles.groups[0]=acme-agent-rca",
+        "--set", "keycloak.hubGatewayExchanger.enabled=true",
+        "--set", "keycloak.hubGatewayExchanger.vaultKey=secret/data/global/praxis-hub-exchange",
+    ]
+    docs = _resources(kc(*sets).stdout)
+    spec = next(d for d in docs if d["kind"] == "KeycloakRealmImport")["spec"]
+    realm = spec["realm"]
+    clients = {c["clientId"]: c for c in realm["clients"]}
+
+    def auds(c):
+        return sorted(m["config"]["included.custom.audience"] for m in c.get("protocolMappers", [])
+                      if m["protocolMapper"] == "oidc-audience-mapper")
+
+    acme = clients["acme-agent"]
+    assert auds(acme) == ["mas-a2a"] and acme["fullScopeAllowed"] is False
+
+    hg = clients["mas-a2a"]
+    assert hg["secret"] == "$(HUB_GATEWAY_EXCHANGE_SECRET)"
+    assert hg["attributes"]["standard.token.exchange.enabled"] == "true"
+    assert hg["serviceAccountsEnabled"] is False and hg["fullScopeAllowed"] is False
+    assert auds(hg) == ["lightspeed-hub-a2a"]
+
+    adapter = clients["lightspeed-hub-a2a"]
+    assert adapter["secret"] == "$(HUB_EXCHANGE_SECRET)"
+    assert adapter["serviceAccountsEnabled"] is False
+    assert adapter["attributes"]["access.token.lifespan"] == "1800"
+    assert auds(adapter) == ["praxis-spoke-gateway"]
+    assert not any(m["protocolMapper"] == "oidc-usermodel-client-role-mapper" for m in adapter["protocolMappers"])
+
+    assert realm["clientScopeMappings"]["lightspeed-hub-a2a"] == [{"client": "mas-a2a", "roles": ["agenticrun-creator"]}]
+    assert "HUB_GATEWAY_EXCHANGE_SECRET" in spec["placeholders"]
+    es = {(d["metadata"]["namespace"], d["metadata"]["name"]) for d in docs if d["kind"] == "ExternalSecret"}
+    assert {("keycloak-system", "praxis-hub-exchange-client"), ("praxis-proxy", "praxis-hub-exchange-client")} <= es
+    # The hub audience is a real client here: no audience-only duplicate.
+    assert [c["clientId"] for c in realm["clients"]].count("lightspeed-hub-a2a") == 1
+
+    def broken(*override: str) -> str:
+        r = kc(*sets, *override, check=False)
+        assert r.returncode != 0
+        return r.stderr
+
+    assert "Token A must carry ONLY" in broken("--set", "keycloak.hubExchange.subjectTokenAudienceMapper=true")
+    assert "must equal keycloak.hubExchange.hubAudience" in broken("--set", "keycloak.hubExchange.clientId=lightspeed-hub-adapter")
+    assert "runTokenAudience is required" in broken("--set", "keycloak.hubExchange.runTokenAudience=")
+    assert "must equal keycloak.masA2aAudience" in broken("--set", "keycloak.hubGatewayExchanger.clientId=other")
 
 
 @pytest.mark.skipif(

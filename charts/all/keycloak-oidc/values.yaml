@@ -312,6 +312,42 @@ keycloak:
     # an audience to every Token A; verify no audience-sensitive validator
     # (MAS, Praxis allow-list) rejects the extra audience before enabling.
     subjectTokenAudienceMapper: true
+    # RUN TOKEN R: audience the adapter's exchange client adds so it can
+    # exchange its inbound token for R (the spoke gateway's exchanger
+    # client, e.g. praxis-spoke-gateway). Must equal charts/all/lightspeed-hub's
+    # adapter.runTokenAudience. Empty = no run token (the adapter stores its
+    # inbound token as-is).
+    runTokenAudience: ""
+    # Lifespan (seconds) of tokens this client exchanges -- i.e. R. Sized to
+    # an AgenticRun step (e.g. "1800"); empty = realm default (300).
+    runTokenLifespanSeconds: ""
+
+  # HUB GATEWAY EXCHANGER (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md): the
+  # client the Praxis HUB GATEWAY (charts/all/praxis-proxy, main gateway in
+  # front of the lightspeed-hub adapter, a2aUpstream.exchangeAtPraxis)
+  # authenticates as to exchange the caller's Token A for Token H. It IS
+  # Token A's audience client (masA2aAudience) -- Keycloak only exchanges a
+  # subject token carrying the exchanging client in `aud` -- so the caller
+  # requests ONLY that audience. When enabled, also: hubExchange.clientId
+  # must equal hubExchange.hubAudience (the adapter exchanges H as H's
+  # audience client), both subjectTokenAudienceMapper flags must be false
+  # (Token A = [masA2aAudience]), and hubExchange.runTokenAudience is
+  # required. One-shot realm import: existing realms need the client created
+  # via the admin API (README "Hub gateway exchange").
+  hubGatewayExchanger:
+    enabled: false
+    # Empty = keycloak.masA2aAudience (must equal it).
+    clientId: ""
+    clientName: Praxis hub gateway token exchanger (A -> H)
+    # Vault path/property of the client secret. ALPHANUMERIC ONLY
+    # (values-secret.yaml.template alphaNumericPolicy): the Praxis delegator
+    # sends Basic client auth without URL-encoding.
+    vaultKey: ""
+    vaultProperty: praxis-hub-exchange-client-secret
+    # Namespace of the hub gateway (praxis-proxy) and the Secret name it
+    # reads (praxis-proxy a2aUpstream.exchange.secretName).
+    targetNamespace: praxis-proxy
+    secretName: praxis-hub-exchange-client
 
   # AUDIENCE-SCOPED EXCHANGE ROLES (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md
   # s4.3). Kubernetes RBAC binds groups, not audiences; with a plain group

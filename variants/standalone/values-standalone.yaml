@@ -318,30 +318,38 @@ clusterGroup:
           value: secret/data/global/lightspeed-hub-adapter
         - name: keycloak.hubExchange.hubAudience
           value: lightspeed-hub-a2a
-        # The lightspeed-hub chart's adapter.keycloak.clientId /
-        # clientSecretSecret.name defaults are EMPTY -- the variant's
-        # commented values there must line up with this chart's
-        # hubExchange defaults (clientId lightspeed-hub-adapter,
-        # secretName lightspeed-hub-adapter-client); override only to
-        # diverge. (Exchanger mappers DO apply to exchanged tokens --
-        # confirmed live 2026-11-20.)
+        # HUB-GATEWAY EXCHANGE CHAIN (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md).
+        # Each token's audience names the client that exchanges it next, so
+        # every exchange uses a single audience:
+        #   A (ACME, 300s, aud mas-a2a)
+        #     -> H  by client mas-a2a (Praxis hub gateway), aud lightspeed-hub-a2a
+        #     -> R  by client lightspeed-hub-a2a (adapter), aud praxis-spoke-gateway, 1800s
+        #     -> U  by client praxis-spoke-gateway (spoke gateway, per call), aud praxis-spoke-hub
+        # The adapter's exchange client is therefore lightspeed-hub-a2a
+        # (Token H's audience); Token A carries only mas-a2a (both
+        # subjectTokenAudienceMapper flags off). This replaces the interim
+        # 15-minute Token A: the 1800s run token R covers an AgenticRun
+        # step. One-shot realm import: the live realm was configured via
+        # the admin API (keycloak-oidc README "Hub gateway exchange").
+        - name: keycloak.hubExchange.clientId
+          value: lightspeed-hub-a2a
+        - name: keycloak.hubExchange.subjectTokenAudienceMapper
+          value: "false"
+        - name: keycloak.hubExchange.runTokenAudience
+          value: praxis-spoke-gateway
+        - name: keycloak.hubExchange.runTokenLifespanSeconds
+          value: "1800"
+        - name: keycloak.spokeGatewayExchanger.subjectTokenAudienceMapper
+          value: "false"
+        - name: keycloak.hubGatewayExchanger.enabled
+          value: "true"
+        - name: keycloak.hubGatewayExchanger.vaultKey
+          value: secret/data/global/praxis-hub-exchange
         # Audience-scoped exchange roles: H carries only
         # lightspeed-hub-a2a:agenticrun-creator, U only
         # praxis-spoke-hub:reader, so each token authorizes only its own hop
         # on the (shared) hub API. Members of acme-agent-rca get both roles.
-        # The lightspeed-hub chart binds RBAC to those role groups. One-shot
-        # realm import: the live realm was configured via the admin API
-        # (README "Audience-scoped exchange roles").
-        # INTERIM / BRIDGE: 15-minute Token A (realm default 300s). The
-        # lightspeed-hub run-token Secret carries Token A for a whole
-        # AgenticRun step with no mid-step renewal, so 300s killed every
-        # investigation about 5 minutes in (live 2026-11-20). DELETE this
-        # override once the adapter stores a run-scoped token instead of
-        # Token A (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s8). Trade-off:
-        # every Token A (also the one MAS sees) is replayable for 15 min.
-        # Applied to the live realm via the admin API (one-shot import).
-        - name: keycloak.acmeAccessTokenLifespanSeconds
-          value: "900"
+        # The lightspeed-hub chart binds RBAC to those role groups.
         - name: keycloak.exchangeRoles.enabled
           value: "true"
         - name: keycloak.exchangeRoles.groups[0]
@@ -453,22 +461,18 @@ clusterGroup:
         # token whose aud array is
         # ["cloud-services","api.graphql","api.ask_red_hat","api.console"];
         # api.ask_red_hat is the narrowest value that fits the assistant use case.
-        # Audience on local-Keycloak caller tokens: THIS gateway fronts the
-        # lightspeed-hub adapter (MAS -> praxis-proxy -> adapter), so it
-        # checks that Token A was meant for the adapter. acme-agent's token
-        # carries lightspeed-hub-adapter via keycloak-oidc's
-        # hubExchange.subjectTokenAudienceMapper (MAS forwards Token A
-        # verbatim -- it cannot exchange per delegation yet). It used to be
-        # mas-a2a, a leftover from when ACME called Praxis directly; mas-a2a
-        # is validated by MAS itself (mao-a2a MULTI_ISSUER_OIDC_ISSUERS_JSON +
-        # A2A_ALLOWED_PRINCIPALS), and there is no Praxis in front of MAS.
-        # The Red Hat SSO issuers below stay (api.ask_red_hat): MAS may
-        # forward an SSO caller token, which Keycloak trusts via
-        # keycloak-oidc externalOidcProviders. Required even with
-        # identity.oidcIssuers set: the chart appends the local Keycloak
-        # issuer with this audience and fails loud if it is empty.
+        # Audience on local-Keycloak caller tokens at THIS gateway -- the
+        # praxis HUB gateway (MAS -> praxis-proxy -> lightspeed-hub adapter).
+        # It receives the caller's Token A (MAS forwards it verbatim) and
+        # EXCHANGES it (a2aUpstream.exchangeAtPraxis below) as client
+        # mas-a2a, which Keycloak only allows when A carries mas-a2a -- so
+        # that is the audience it validates. ACME therefore requests ONLY
+        # mas-a2a (MAS validates the same audience itself). The Red Hat SSO
+        # issuers below stay (api.ask_red_hat) but an SSO token cannot be
+        # exchanged here yet (the Praxis delegator sends no subject_issuer).
+        # Required even with identity.oidcIssuers set.
         - name: identity.keycloak.audience
-          value: lightspeed-hub-adapter
+          value: mas-a2a
         - name: identity.oidcIssuers[0].name
           value: red-hat-sso-prod
         - name: identity.oidcIssuers[0].issuerUrl
@@ -517,12 +521,11 @@ clusterGroup:
         - name: spokeGatewayConfig.networkPolicy.ingressFromNamespaces[0]
           value: lightspeed-hub
         # TASK B REQUEST LEG (leg 2; ACTIVATED).
-        # Front-door hop: forward the main gateway's A2A traffic to the hub
-        # A2A adapter (charts/all/lightspeed-hub). DESIGN: Praxis validates
-        # Token A + enforces caller x target (the allow-list IS the
-        # spokeGateways keys above); the ADAPTER performs the A->H exchange.
-        # Enabled together with the lightspeed-hub chart; adapter TLS
-        # serving on 8443 (service cert) is wired in that chart.
+        # Hub-gateway hop: forward the main gateway's A2A traffic to the hub
+        # A2A adapter (charts/all/lightspeed-hub). Praxis validates Token A,
+        # enforces caller x target (the allow-list IS the spokeGateways keys
+        # above) and EXCHANGES A -> H (below); the adapter never sees A.
+        # Adapter TLS serving on 8443 (service cert) is wired in that chart.
         - name: a2aUpstream.enabled
           value: "true"
         # Defaults line up with the lightspeed-hub chart's adapter Service
@@ -537,12 +540,17 @@ clusterGroup:
         #   value: "8443"
         # - name: a2aUpstream.targetHeader
         #   value: X-Hub-Cluster
-        # NOT SUPPORTED (render fails loudly): Praxis-side A->H exchange.
-        # Blocked on the pinned image by the protected-A handoff (it would
-        # hide Token A from the adapter, which needs A for the run leg) --
-        # see charts/all/praxis-proxy/values.yaml a2aUpstream comment.
-        # - name: a2aUpstream.exchangeAtPraxis
-        #   value: "false"
+        # HUB-GATEWAY EXCHANGE: A (aud mas-a2a) -> H (aud lightspeed-hub-a2a)
+        # as client mas-a2a (keycloak-oidc hubGatewayExchanger; Vault
+        # praxis-hub-exchange, alphanumeric). The adapter creates the
+        # AgenticRun with H and exchanges H -> run token R itself
+        # (lightspeed-hub adapter.inboundHubToken / runTokenAudience).
+        - name: a2aUpstream.exchangeAtPraxis
+          value: "true"
+        - name: a2aUpstream.exchange.clientId
+          value: mas-a2a
+        - name: a2aUpstream.exchange.audience
+          value: lightspeed-hub-a2a
         # TASK B REQUEST LEG (leg 1 -- the MAS blueprint side; DISABLED --
         # everything commented). Once the front door above is enabled, the
         # persisted MAS blueprint must route investigation delegations
@@ -922,13 +930,22 @@ clusterGroup:
         # keycloak.hubExchange.hubAudience):
         - name: adapter.hubAudience
           value: lightspeed-hub-a2a
-        # The adapter's exchange client (created by keycloak-oidc's
-        # hubExchange; the client secret lands in this namespace as an
-        # ExternalSecret):
+        # The adapter's exchange client = Token H's audience
+        # (lightspeed-hub-a2a): it receives H from the praxis hub gateway
+        # and exchanges it into the run token R, which Keycloak only allows
+        # for the client named in H's `aud` (keycloak-oidc hubExchange;
+        # same Vault-backed secret as before, ExternalSecret in this ns):
         - name: adapter.keycloak.clientId
-          value: lightspeed-hub-adapter
+          value: lightspeed-hub-a2a
         - name: adapter.keycloak.clientSecretSecret.name
           value: lightspeed-hub-adapter-client
+        # Inbound bearer is already Token H (no A->H in the adapter); store
+        # the run token R (aud praxis-spoke-gateway, 1800s) for the sandbox
+        # instead of the inbound token.
+        - name: adapter.inboundHubToken
+          value: "true"
+        - name: adapter.runTokenAudience
+          value: praxis-spoke-gateway
         # adapter.keycloak.issuerUrl/tokenUrl derive from
         # global.clusterBaseDomain + global.keycloakRealm; override only to
         # diverge.
@@ -938,10 +955,10 @@ clusterGroup:
         # image-a2a-adapter):
         - name: adapter.image.repository
           value: quay.io/ltomasbo/lightspeed-hub-a2a-adapter
-        # poc3: serves the agent card at /a2a/.well-known/agent-card.json as
-        # well, required by praxis-proxy's pass-through card route.
+        # poc4: --inbound-hub-token and --run-token-audience (hub-gateway
+        # exchange chain); also serves the agent card under /a2a (poc3).
         - name: adapter.image.tag
-          value: "poc3"
+          value: "poc4"
         # Repo C operator image pin (built from the
         # lightspeed-agentic-operator repo, branch a2a-support).
         # a2a-gw: gateway credential mode does no spoke management (no

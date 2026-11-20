@@ -83,6 +83,12 @@ spec:
             - --keycloak-client-id={{ .Values.adapter.keycloak.clientId }}
             {{- end }}
             - --hub-audience={{ .Values.adapter.hubAudience }}
+            {{- with .Values.adapter.runTokenAudience }}
+            - --run-token-audience={{ . }}
+            {{- end }}
+            {{- if .Values.adapter.inboundHubToken }}
+            - --inbound-hub-token
+            {{- end }}
             - --target-header={{ .Values.adapter.targetHeader }}
             # Fail-fast target allow-list (comma-joined spoke names);
             # unconditional -- the empty list renders an empty value,

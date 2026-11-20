@@ -92,30 +92,31 @@ Application).
 > the reasoning and live findings behind them still apply to the
 > replacement backend design (Task B).
 
-- **Current (Task B) request path and who checks which audience.** Verified
-  live 2026-11-20:
+- **Current (Task B) request path: one exchange per hop, each token's
+  audience names its next exchanger.** Chain verified live 2026-11-20 (see
+  `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md` s2 for the token table):
 
   ```
-  ACME --A--> MAS A2A (public Route, NO Praxis)        checks aud mas-a2a (local KC) / api.ask_red_hat (SSO)
+  ACME --A--> MAS A2A (front door; public Route)   validates aud mas-a2a (local KC) / api.ask_red_hat (SSO)
                  | MAS forwards A verbatim
                  v
-              praxis-proxy (main gateway) --> hub adapter --H--> hub kube API   (aud lightspeed-hub-a2a)
-              checks aud lightspeed-hub-adapter (local KC) / api.ask_red_hat (SSO), azp allow-list
-                                                 | stores A for the run
-                                                 v
-              AgenticRun sandbox --A--> praxis-spoke-<id> --U--> spoke kube API (aud praxis-spoke-<id>)
+              praxis HUB gateway (praxis-proxy)    validates A (aud mas-a2a, azp allow-list), exchanges A->H as client mas-a2a
+                 | H (aud lightspeed-hub-a2a, 300s)
+                 v
+              hub adapter --H--> hub kube API      creates the AgenticRun with H (no exchange)
+                 | exchanges H->R as client lightspeed-hub-a2a; stores R (aud praxis-spoke-gateway, 1800s)
+                 v
+              AgenticRun sandbox --R--> praxis SPOKE gateway (praxis-spoke-<id>) --U--> spoke kube API
+                                        validates R (aud praxis-spoke-gateway), exchanges R->U per call (aud praxis-spoke-<id>)
   ```
 
-  There are exactly two Praxis instances; none fronts MAS. MAS validates its
-  own `mas-a2a` audience and principal allow-list, so no Praxis is needed
-  there unless MAS's Route is made internal-only. Each gateway checks that
-  the token was meant for the hop it fronts. Token A carries
-  `mas-a2a` + `lightspeed-hub-adapter` + `praxis-spoke-gateway` because
-  Keycloak 26 requires every exchanger to be in the subject token's `aud`,
-  and MAS cannot exchange per delegation yet. That multi-audience Token A is
-  a **stopgap**: the target is ACME minting `mas-a2a` only, MAS exchanging
-  for `lightspeed-hub-adapter`, and the adapter exchanging for the run's
-  `praxis-spoke-gateway` token (upstream MAS work).
+  Token A carries only `mas-a2a` and lives 5 minutes; the adapter never sees
+  it. The run's stored credential R outlives A (an exchanged token gets the
+  exchanging client's lifespan), but only the spoke gateway accepts it. The
+  front door is the MAS A2A endpoint; the two Praxis instances are the hub
+  gateway and the spoke gateways. MAS validates its own `mas-a2a` audience
+  and principal allow-list. Target state: MAS performs the A->H exchange per
+  delegation itself, taking over the `mas-a2a` exchanger client.
 
 - **The identity chain is the point.** ACME authenticates to Keycloak as
   itself (SPIFFE JWT-SVID, `client_credentials`), gets "Token A", sends it
@@ -293,6 +294,18 @@ secret (`alphaNumericPolicy` in values-secret.yaml.template); the Praxis bug
 should go upstream. Once both were fixed, the full sandbox -> praxis-spoke-hub
 -> spoke API leg worked as the user (`keycloak:praxis-spoke-hub:reader`:
 read 200, create AgenticRun 403).
+
+Live token-lifetime/chain finding (2026-11-20): the run-token Secret held
+Token A (5 min), so investigations died mid-step once everything else worked.
+Keycloak gives an EXCHANGED token the exchanging client's lifespan, even past
+the subject token's expiry, so the fix is a run token R minted by an exchange
+(1800 s) rather than a longer Token A (the 15-minute bridge was removed).
+Moving A->H to the Praxis hub gateway lets the adapter derive R from H and
+never handle Token A. The pinned Praxis `delegate()` takes ONE audience, so
+each token's audience is the client that exchanges it next (mas-a2a ->
+lightspeed-hub-a2a -> praxis-spoke-gateway). Also found: with audience-scoped
+roles, the caller's client needs `fullScopeAllowed: false`, or Keycloak's
+"audience resolve" put the kube API audiences into Token A.
 
 Live Praxis audience finding (2026-11-20): the main gateway still validated
 local-Keycloak tokens for `mas-a2a`, left over from when ACME called Praxis
