@@ -213,6 +213,14 @@ data:
     insecure_options:
       allow_private_endpoints: true
       allow_private_upstreams: true
+    {{- with $.Values.spokeGatewayConfig.maxResponseBytes }}
+    # Global response ceiling (Praxis default 10 MiB when omitted). Kube
+    # API responses stream through here; an unbounded `kubectl logs` of a
+    # chatty pod exceeds the default and fails with 500 "streamed response
+    # body exceeds global body limit" (VERIFIED LIVE 2026-11-20, 12.4 MB log).
+    body_limits:
+      max_response_bytes: {{ int . }}
+    {{- end }}
   policy.yaml: |
 {{- /*
     The spoke's policy.yaml is the shared files/policy.yaml PLUS the B1

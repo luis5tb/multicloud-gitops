@@ -519,6 +519,10 @@ clusterGroup:
         # acme-agent -- the spoke gateways must allow-list THAT client.
         - name: spokeGatewayConfig.allowedCallers[0]
           value: lightspeed-hub-a2a
+        # 32 MiB response ceiling (Praxis default 10 MiB): a full
+        # `kubectl logs` of the demo payments-api pod is ~12.4 MB.
+        - name: spokeGatewayConfig.maxResponseBytes
+          value: "33554432"
         # The sandbox namespaces allowed to reach the gateways' 8443
         # listeners: the lightspeed-hub run namespace (where repo C's
         # sandboxes run on this deployment -- design-doc Q4 settled for

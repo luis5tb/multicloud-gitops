@@ -596,7 +596,9 @@ exchange, so R's `azp` is the adapter's exchanger (`lightspeed-hub-a2a`), not
 list denied every sandbox kube call with 403 "not an allow-listed caller".
 
 Known limit: a large `kubectl logs` response fails at the spoke gateway with
-500 "streamed response body exceeds global body limit" (pinned image default).
+500 "streamed response body exceeds global body limit" (Praxis default 10 MiB;
+the demo payments-api log was 12.4 MB). Raise it with
+`spokeGatewayConfig.maxResponseBytes` (renders `body_limits.max_response_bytes`).
 
 When enabled, `files/praxis.yaml` gains (inside one `{{- if }}` — the
 disabled render keeps the historical no-router bytes):

@@ -579,3 +579,22 @@ def test_variant_spoke_gateways_allow_the_run_token_minter() -> None:
     praxis = overrides("praxis-proxy")
     hub = overrides("lightspeed-hub")
     assert praxis["spokeGatewayConfig.allowedCallers[0]"] == hub["adapter.keycloak.clientId"]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_spoke_gateway_max_response_bytes() -> None:
+    """Default renders no body_limits (Praxis 10 MiB); the knob renders
+    max_response_bytes as an integer."""
+    def praxis_cfg(*extra: str) -> dict:
+        rendered = _helm(CHART, "--set", "identity.keycloak.audience=mas-a2a", *SPOKE_SETS, *extra)
+        cm = next(
+            d for d in _resources(rendered.stdout)
+            if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "praxis-spoke-east"
+        )
+        return yaml.safe_load(cm["data"]["praxis.yaml"])
+
+    assert "body_limits" not in praxis_cfg()
+    cfg = praxis_cfg("--set-string", "spokeGatewayConfig.maxResponseBytes=33554432")
+    assert cfg["body_limits"] == {"max_response_bytes": 33554432}

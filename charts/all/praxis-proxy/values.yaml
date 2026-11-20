@@ -317,6 +317,13 @@ spokeGatewayConfig:
   # exchanged token's azp with the client that performed the exchange, so
   # R's azp is that client, never the original caller.
   allowedCallers: []
+  # Response body ceiling (bytes) for the spoke gateways' praxis.yaml
+  # `body_limits.max_response_bytes`. Empty = Praxis default (10 MiB).
+  # Kube API responses (notably `kubectl logs` without --tail) stream
+  # through the gateway; anything larger fails with 500 "streamed response
+  # body exceeds global body limit". Unbounded is deliberately not offered
+  # (Praxis requires insecure_options.allow_unbounded_body for that).
+  maxResponseBytes: ""
   # PPE's own exchanger client identity, shared by every spoke gateway
   # (the exchange is performed by the gateway, not the sandbox). The
   # client and its Vault-backed secret are created by
