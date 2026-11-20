@@ -518,3 +518,25 @@ def test_spoke_gateway_gets_ipv4_only_dns_sidecar() -> None:
     assert {"name": "net.ipv4.ip_unprivileged_port_start", "value": "53"} in on["securityContext"]["sysctls"]
     vols = {v["name"]: v for v in on["volumes"]}
     assert vols["dns-ipv4only-config"]["configMap"]["name"] == "praxis-proxy-dns-ipv4only"
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_spoke_gateway_networkpolicy_allows_dns_pod_port() -> None:
+    """DNS egress allows the DNS pods' port 5353, not just the Service's 53.
+
+    VERIFIED-BROKEN LIVE (2026-11-20, OVN-Kubernetes): NetworkPolicy matches
+    the destination pod port after Service DNAT; dns-default targets pod
+    port 5353, so a 53-only rule silently dropped every lookup (JWKS fetch
+    failed -> every sandbox request 401).
+    """
+    docs = _resources(_helm(CHART, "--set", "identity.keycloak.audience=mas-a2a", *SPOKE_SETS).stdout)
+    np = next(d for d in docs if d["kind"] == "NetworkPolicy")
+    dns_rule = next(
+        r for r in np["spec"]["egress"]
+        if any(t.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name") == "openshift-dns"
+               for t in r.get("to", []))
+    )
+    ports = {(p["protocol"], p["port"]) for p in dns_rule["ports"]}
+    assert {("UDP", 5353), ("TCP", 5353), ("UDP", 53), ("TCP", 53)} <= ports

@@ -48,6 +48,13 @@ spec:
   # PLAN-lightspeed-hub-migration.md records for B1.
   egress:
     # Cluster DNS (name resolution for the remote API host, IdP and JWKS).
+    # BOTH 53 and 5353: the dns-default Service listens on 53 but targets
+    # the DNS pods' named port `dns` = 5353, and NetworkPolicy (OVN-
+    # Kubernetes) matches the DESTINATION POD port after Service DNAT.
+    # VERIFIED-BROKEN LIVE (2026-11-20): with only 53 allowed, every lookup
+    # from this gateway (and its dnsIPv4Only sidecar's upstream queries)
+    # timed out, the JWKS fetch failed, and every sandbox request got 401.
+    # 53 is kept for CNIs that match the Service port.
     - to:
         - namespaceSelector:
             matchLabels:
@@ -60,6 +67,10 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
     # HTTPS to the fixed remote spoke API, the Keycloak token endpoint and
     # the JWKS URL. Remote kube API servers listen on 6443 (or whatever
     # port this spoke's remoteAPIServer URL carries -- parsed at render

@@ -281,6 +281,19 @@ lightspeed-hub. ACME's ADK client does not poll the task afterwards, so long
 investigations look failed while the AgenticRun keeps running. Sized to the
 Agent's analysis timeout (1200 s) in the variant.
 
+Live spoke-gateway NetworkPolicy + Basic-auth findings (2026-11-20): (1) the
+spoke gateway's egress NetworkPolicy allowed DNS on 53 only. dns-default
+targets pod port 5353, and OVN-Kubernetes matches the pod port after DNAT, so
+every lookup timed out even with the DNS sidecar. Fixed by allowing
+53 and 5353. (2) The Praxis oauth delegator (ai:0.4.1) sends
+`client_secret_basic` without RFC 6749 form-URL-encoding. A generated secret
+containing `%` made Keycloak fail client auth (`unauthorized_client`,
+clientId="null"), and every A->U exchange failed. Rotated to an alphanumeric
+secret (`alphaNumericPolicy` in values-secret.yaml.template); the Praxis bug
+should go upstream. Once both were fixed, the full sandbox -> praxis-spoke-hub
+-> spoke API leg worked as the user (`keycloak:praxis-spoke-hub:reader`:
+read 200, create AgenticRun 403).
+
 Live Praxis audience finding (2026-11-20): the main gateway still validated
 local-Keycloak tokens for `mas-a2a`, left over from when ACME called Praxis
 directly. It now fronts the hub adapter, so it checks `lightspeed-hub-adapter`
