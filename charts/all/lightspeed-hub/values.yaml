@@ -179,8 +179,15 @@ adapter:
   # Agent-card fields (design §2.1; flags --card-*). The name default is
   # aligned with the ADAPTER FLAG DEFAULT "lightspeed-hub"
   # (a2a-adapter/internal/config/config.go) -- do not diverge the two
-  # without changing both. url is the Praxis-fronted origin callers use
-  # (empty = the adapter serves the card without a URL).
+  # without changing both. url is the Praxis-fronted RPC endpoint callers
+  # use; empty derives https://praxis-proxy.apps.<clusterBaseDomain>/a2a
+  # (templates/_helpers.tpl lightspeed-hub.agentCardUrl). It MUST be
+  # non-empty and point at Praxis when praxis-proxy's
+  # a2aUpstream is on: Praxis then serves THIS card to callers,
+  # and a2a-sdk (MAS) needs the url to pick the 0.3 JSON-RPC transport.
+  # protocolVersion must stay 0.3.x -- the adapter's a2a-go v0.3 server only
+  # speaks message/send|message/stream; a "1.0" card makes clients call
+  # SendMessage/SendStreamingMessage and fail with "method not found".
   agentCard:
     name: lightspeed-hub
     description: "Red Hat cluster investigation via lightspeed-hub"

@@ -119,16 +119,23 @@ def test_enabled_renders_route_to_adapter_service() -> None:
     router = next(f for f in filters if f["filter"] == "router")
     # One route per REGISTERED spoke (the allow-list IS the spokeGateways
     # map), each requiring an exact target-header value match.
+    # The two header-less agent-card pass-through routes come FIRST; then
+    # one route per REGISTERED spoke (the allow-list IS the spokeGateways
+    # map), each requiring an exact target-header value match.
     assert router["routes"] == [
+        {"path_prefix": "/a2a/.well-known/agent-card.json", "cluster": "hub-adapter"},
+        {"path_prefix": "/.well-known/agent-card.json", "cluster": "hub-adapter"},
         {"path_prefix": "/", "headers": {"X-Hub-Cluster": "east"}, "cluster": "hub-adapter"},
         {"path_prefix": "/", "headers": {"X-Hub-Cluster": "west"}, "cluster": "hub-adapter"},
     ]
     # No catch-all route: a request with a MISSING or UNREGISTERED target
     # header matches no route and is answered 404 by Core (verified live
-    # during the pre-Task-A routing era). This is the presence check; the
-    # unknown/missing-target rejection is exactly "no route matches".
-    assert all(r.get("headers") for r in router["routes"])
-    assert not any("headers" not in r for r in router["routes"])
+    # during the pre-Task-A routing era). Only the card paths are
+    # header-less; every route that can match an arbitrary path requires
+    # the target header.
+    for r in router["routes"]:
+        if "headers" not in r:
+            assert r["path_prefix"].endswith("/.well-known/agent-card.json")
 
     # Single fixed upstream: the adapter Service over HTTPS with
     # service-CA verification (same mechanism as the spoke gateways).
@@ -182,6 +189,51 @@ def test_enabled_renders_route_to_adapter_service() -> None:
     lbs = [f for f in cfg["filter_chains"][0]["filters"] if f["filter"] == "load_balancer"]
     assert lbs[0]["clusters"][0]["endpoints"] == ["hub-adaptersvc.hub-ns.svc.cluster.local:9443"]
     assert lbs[0]["clusters"][0]["tls"]["sni"] == "hub-adaptersvc.hub-ns.svc.cluster.local"
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_agent_card_is_passed_through_from_adapter() -> None:
+    """The discovery card is the adapter's own, never a static Praxis copy.
+
+    VERIFIED-BROKEN LIVE (2026-11): the static card Praxis used to serve
+    advertised protocolVersion "1.0", so MAS (a2a-sdk 1.1.5) called
+    SendStreamingMessage against the A2A 0.3 adapter -> "method not found"
+    on every delegation. Now no static card filter is rendered; readiness
+    stays local; the policy still exempts only GET on the two exact card
+    paths (the router routes them header-less to hub-adapter -- asserted in
+    test_enabled_renders_route_to_adapter_service).
+    """
+    rendered = _helm(
+        CHART,
+        "--set", "identity.keycloak.audience=mas-a2a",
+        "--set", "a2aUpstream.enabled=true",
+        *SPOKE_SETS,
+    )
+    cm = _main_configmap(_resources(rendered.stdout))
+    filters = yaml.safe_load(cm["data"]["praxis.yaml"])["filter_chains"][0]["filters"]
+
+    statics = [f for f in filters if f["filter"] == "static_response"]
+    assert [s["conditions"] for s in statics] == [
+        [{"when": {"path": "/readiness", "methods": ["GET"]}}]
+    ], "only readiness may be answered locally -- no static agent card"
+
+    for path in ("/.well-known/agent-card.json", "/a2a/.well-known/agent-card.json"):
+        assert f"path: {path}\n      method: GET" in cm["data"]["policy.yaml"]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_variant_has_no_static_card_overrides() -> None:
+    """The variant must not carry overrides for the removed static card."""
+    overrides = yaml.safe_load(VARIANT.read_text())["clusterGroup"]["applications"][
+        "praxis-proxy"
+    ]["overrides"]
+    names = [o["name"] for o in overrides]
+    assert not [n for n in names if n.startswith("agentCard.")]
+    assert {o["name"]: o["value"] for o in overrides}["a2aUpstream.enabled"] == "true"
 
 
 @pytest.mark.skipif(
@@ -308,6 +360,8 @@ def test_multi_valued_target_header_gap_is_pinned() -> None:
     )
     registered = {"east", "west"}
     for route in router["routes"]:
+        if route["path_prefix"].endswith("/.well-known/agent-card.json"):
+            continue  # header-less agent-card pass-through (public discovery)
         # Exact-value match only: single header key, single spoke value.
         assert set(route["headers"]) == {"X-Hub-Cluster"}
         assert route["headers"]["X-Hub-Cluster"] in registered

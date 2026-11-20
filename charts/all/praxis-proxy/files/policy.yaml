@@ -127,8 +127,10 @@ plugins:
 
 routes:
   # The A2A discovery document is public by design. Its RPC URL points
-  # at the public Praxis Route; the card itself is served by the
-  # static_response filter in files/praxis.yaml.
+  # at the public Praxis Route; the card itself is the a2aUpstream
+  # backend's own, routed unauthenticated by the router in
+  # files/praxis.yaml (404 when a2aUpstream is disabled). Keep these
+  # exemptions GET-only and exact-path.
   - http:
       path: /.well-known/agent-card.json
       method: GET

@@ -54,8 +54,10 @@ route:
 # configures NO upstream clusters: the OpenShift Lightspeed investigation
 # backend it used to front was removed (see PLAN-lightspeed-hub-migration.md
 # Task A); a future backend (Task B, lightspeed-hub) will re-introduce
-# routed upstreams. Until then Praxis serves its own agent card and
-# readiness (see files/praxis.yaml) and enforces the caller allow-list.
+# routed upstreams. Praxis serves readiness itself and enforces the caller
+# allow-list; it has NO agent card of its own -- with a2aUpstream enabled the
+# A2A discovery card is the backend's, routed through unchanged (see
+# files/praxis.yaml).
 global:
   # Single cluster-domain anchor shared across this pattern's charts (see
   # templates/_helpers.tpl). Base domain WITHOUT the apps. prefix, e.g.
@@ -119,7 +121,7 @@ policy:
     enabled: true
     # Image for the check Job (Python stdlib only -- no extra deps).
     image: registry.access.redhat.com/ubi9/python-312-minimal:9.6
-    # Any protected path (not /.well-known/agent-card.json or /readiness, which
+    # Any protected path (not the agent-card paths or /readiness, which
     # are public by design) -- the catch-all route requires auth.
     protectedPath: /
     timeoutSeconds: 30
@@ -445,24 +447,3 @@ a2aUpstream:
   # slots, never the raw bearer, onto a header). Do not enable until that
   # exists AND the image is bumped past the documented role:client defect.
   exchangeAtPraxis: false
-
-# Static agent card served by Praxis at the A2A discovery paths. The card is
-# generic by design: this gateway currently fronts no investigation backend
-# (see the global comment above), so it only advertises itself. rpcUrl is
-# derived from the Praxis Route when empty. Override name/description in the
-# variant when a backend with real skills is introduced.
-agentCard:
-  enabled: true
-  name: "praxis-a2a-gateway"
-  description: "Policy-enforcing A2A gateway. No agent backend is currently registered behind it."
-  # Empty derives https://praxis-proxy.apps.<clusterBaseDomain>/a2a
-  rpcUrl: ""
-  version: "1.0.0"
-  capabilities:
-    # Must match what the a2aUpstream-fronted backend actually implements,
-    # NOT the backend's own agent card (the A2A client never sees that card;
-    # it only sees this one). A caller requests message/stream vs
-    # message/send based on this flag alone. See files/praxis.yaml for the
-    # live JSON-RPC "method not found" failure this caused when left at the
-    # default true against a backend that only implements message/send.
-    streaming: true

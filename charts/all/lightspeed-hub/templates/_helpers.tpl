@@ -79,6 +79,27 @@ when neither is available.
 {{- end }}
 {{- end }}
 
+{{/*
+Agent-card URL: the public Praxis A2A endpoint callers send JSON-RPC to.
+praxis-proxy routes discovery to THIS card verbatim, so the URL
+must be the Praxis route, never the internal adapter Service. Derived with
+the same anchor + default route host as praxis-proxy
+(praxis-proxy.apps.<base>/a2a); set adapter.agentCard.url when praxis-proxy
+overrides route.host. Empty only when no domain is
+known -- and a2a-sdk then cannot select the 0.3 transport (it only maps a
+legacy card's protocolVersion onto an interface when url is set).
+*/}}
+{{- define "lightspeed-hub.agentCardUrl" -}}
+{{- if .Values.adapter.agentCard.url -}}
+{{- .Values.adapter.agentCard.url -}}
+{{- else -}}
+{{- $base := .Values.global.clusterBaseDomain | default (trimPrefix "apps." (.Values.global.localClusterDomain | default "")) -}}
+{{- if $base -}}
+{{- printf "https://praxis-proxy.apps.%s/a2a" $base -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{- define "lightspeed-hub.adapterImage" -}}
 {{- if .Values.adapter.image.digest -}}
 {{- printf "%s@%s" .Values.adapter.image.repository .Values.adapter.image.digest -}}

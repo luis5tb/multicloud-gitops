@@ -18,62 +18,23 @@ filter_chains:
         init_timeout_secs: 30
       {{- end }}
 
-      {{- if .Values.agentCard.enabled }}
-      # Core 0.7.0 (embedded in the pinned ai:0.4.1 image) has no static-files
-      # load-balancer cluster. Serve the discovery card with the built-in
-      # static_response filter instead; the preceding policy explicitly allows
-      # this public path.
-      #
-      # MAS A2A validation expects agent card at {base_url}/.well-known/agent-card.json.
-      # When base_url includes /a2a, it looks for /a2a/.well-known/agent-card.json.
-      # Create TWO static_response filter instances (each with one condition) so
-      # Praxis serves the same card at both paths - multiple when: conditions in
-      # one filter may require ALL to match (AND), not ANY (OR).
-      #
-      # The card is generic: it advertises the gateway itself, not whatever
-      # backend a2aUpstream currently fronts. When a2aUpstream is enabled,
-      # override agentCard.description in the variant to describe the real
-      # backend, and set agentCard.capabilities.streaming to match what that
-      # backend actually implements -- the client picks message/stream vs
-      # message/send based on THIS card, not the backend's own (unreachable
-      # from here) agent card. VERIFIED-BROKEN LIVE (2026-11, a2aUpstream ->
-      # lightspeed-hub-a2a-adapter poc2 build): this card advertised
-      # streaming: true unconditionally, so MAS called message/stream against
-      # an adapter that only implements message/send, failing every
-      # delegation with a JSON-RPC "method not found" error. Set to false
-      # until the fronted backend actually implements message/stream.
-      {{- $rpcUrl := .Values.agentCard.rpcUrl | default (printf "https://%s/a2a" (include "praxis-proxy.effectiveRouteHost" .)) }}
-      {{- $agentCard := dict "name" .Values.agentCard.name "description" .Values.agentCard.description "supportedInterfaces" (list (dict "url" $rpcUrl "protocolBinding" "JSONRPC" "protocolVersion" "1.0")) "version" .Values.agentCard.version "capabilities" (dict "streaming" .Values.agentCard.capabilities.streaming "pushNotifications" false) "defaultInputModes" (list "text/plain") "defaultOutputModes" (list "text/plain") "url" $rpcUrl }}
-      - filter: static_response
-        conditions:
-          - when:
-              path: /.well-known/agent-card.json
-              methods: [GET]
-        status: 200
-        headers:
-          - name: Content-Type
-            value: application/json
-        body: {{ $agentCard | toJson | quote }}
-
-      - filter: static_response
-        conditions:
-          - when:
-              path: /a2a/.well-known/agent-card.json
-              methods: [GET]
-        status: 200
-        headers:
-          - name: Content-Type
-            value: application/json
-        body: {{ $agentCard | toJson | quote }}
-      {{- end }}
+      # NO static agent card: the A2A discovery card is the a2aUpstream
+      # backend's OWN card, routed through unchanged by the router below
+      # (only when a2aUpstream is enabled -- with no backend there is no
+      # agent behind this gateway, so discovery answers 404).
+      # VERIFIED-BROKEN LIVE (2026-11): the static card this chart used to
+      # serve advertised A2A protocolVersion "1.0", so MAS (a2a-sdk 1.1.5)
+      # picked its v1.0 transport and called SendStreamingMessage/SendMessage
+      # against the A2A 0.3 lightspeed-hub adapter (a2a-go v0.3.15, which
+      # only knows message/stream|message/send) -- every hub_investigate
+      # delegation failed with JSON-RPC "method not found". A hand-maintained
+      # copy of a backend's card drifts; pass-through cannot.
 
       # Readiness is answered by the proxy itself (200) rather than routed to
-      # a backend: this chart currently configures no upstream clusters, so
-      # there is nothing else to health-check. The startup/liveness probes
-      # already cover process health via the loopback admin listener; this
-      # only proves the main listener and filter chain are serving. When a
-      # backend is (re)introduced, consider routing this to it again so the
-      # proxy is not marked ready while the backend is down.
+      # a backend. The startup/liveness probes already cover process health
+      # via the loopback admin listener; this only proves the main listener
+      # and filter chain are serving. Consider routing it to the a2aUpstream
+      # backend so the proxy is not marked ready while the backend is down.
       - filter: static_response
         conditions:
           - when:
@@ -82,11 +43,11 @@ filter_chains:
         status: 200
         body: "ok"
 
-      # No upstream clusters are configured, so there is deliberately NO
-      # router filter at all: every request that survives the policy
-      # filter's catch-all (i.e. allow-listed callers hitting any path other
-      # than the public discovery and readiness routes above) falls off the
-      # end of the filter chain and is answered with a 404 by Core itself.
+      # With a2aUpstream disabled there is deliberately NO router filter at
+      # all: every request that survives the policy filter's catch-all
+      # (i.e. allow-listed callers hitting any path other than readiness)
+      # falls off the end of the filter chain and is answered with a 404 by
+      # Core itself.
       #
       # VERIFIED-BROKEN (2026-11 local podman run of the pinned image
       # ghcr.io/praxis-proxy/ai:0.4.1, praxis-policy 0.3.1): a `router`
@@ -94,12 +55,8 @@ filter_chains:
       # here as a "clean 404" terminator -- is a FATAL config-load error on
       # the pinned image:
       #   fatal: router: 'routes' is empty; every request would fail with 404
-      # The binary refuses to start. The empty-routes caveat recorded in the
-      # chart README is therefore closed: the router filter is removed
-      # entirely. Re-introduce a router only together with real (non-empty)
-      # routes, e.g. when the Task B lightspeed-hub backend lands; the
-      # static_response filters above already serve every route this gateway
-      # currently answers.
+      # The binary refuses to start. Re-introduce a router only together
+      # with real (non-empty) routes, as the a2aUpstream block below does.
       {{- if .Values.a2aUpstream.enabled }}
       # TASK B REQUEST LEG (a2aUpstream.enabled): the router comes back,
       # with REAL (non-empty) routes this time -- one per registered spoke.
@@ -133,6 +90,31 @@ filter_chains:
       # request can achieve anyway. Re-check this gap on the next image bump.
       - filter: router
         routes:
+          # AGENT CARD (pass-through): discovery is the BACKEND's own card,
+          # forwarded unchanged, so the advertised protocolVersion,
+          # capabilities and url always match what the backend implements.
+          # These are the ONLY header-less routes and they are listed FIRST
+          # (specific prefixes win under either first-match or longest-
+          # prefix matching). Discovery carries no target header, so it
+          # cannot use the per-spoke routes below.
+          #
+          # No path rewrite: the pinned image has no rewrite filter, so the
+          # adapter serves its card at BOTH paths itself (lightspeed-hub
+          # a2a-adapter server.AgentCardPaths). The card's url must be the
+          # public Praxis /a2a endpoint (lightspeed-hub chart
+          # adapter.agentCard.url, derived by default).
+          #
+          # Exposure: policy.yaml exempts only GET on these two EXACT paths;
+          # any other method/sub-path still needs an allow-listed Token A.
+          # path_prefix may also match e.g. /a2a/.well-known/agent-card.json/x
+          # which the adapter's catch-all JSON-RPC handler would receive
+          # WITHOUT this router's target-header check -- the adapter's own
+          # --allowed-targets allow-list and the admission policy still
+          # reject a missing/unregistered target (defense in depth).
+          - path_prefix: /a2a/.well-known/agent-card.json
+            cluster: hub-adapter
+          - path_prefix: /.well-known/agent-card.json
+            cluster: hub-adapter
           {{- range $spoke := keys .Values.spokeGateways | sortAlpha }}
           # Exact allow-listed target-header match for registered spoke
           # "{{ $spoke }}". The allow-list IS the spokeGateways map: a

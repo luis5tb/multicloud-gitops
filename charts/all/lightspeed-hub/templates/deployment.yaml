@@ -91,8 +91,8 @@ spec:
             - --run-agent={{ .Values.adapter.runAgent }}
             - --card-name={{ .Values.adapter.agentCard.name }}
             - "--card-description={{ .Values.adapter.agentCard.description }}"
-            {{- if .Values.adapter.agentCard.url }}
-            - --card-url={{ .Values.adapter.agentCard.url }}
+            {{- with include "lightspeed-hub.agentCardUrl" . }}
+            - --card-url={{ . }}
             {{- end }}
             - --card-version={{ .Values.adapter.agentCard.version }}
             - --card-protocol-version={{ .Values.adapter.agentCard.protocolVersion }}

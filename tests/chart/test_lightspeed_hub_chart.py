@@ -256,6 +256,35 @@ def test_adapter_deployment_carries_real_flags() -> None:
 @pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm is required to render chart"
 )
+def test_adapter_card_url_derives_praxis_endpoint() -> None:
+    """--card-url defaults to the public Praxis /a2a endpoint.
+
+    praxis-proxy routes A2A discovery to the adapter's own card for
+    callers, and a2a-sdk only maps a 0.3 card's protocolVersion onto an
+    interface when its url is non-empty -- an empty url silently drops MAS
+    back to the v1.0 transport (SendMessage/SendStreamingMessage), which
+    the a2a-go v0.3 adapter rejects with "method not found" (seen live).
+    An explicit adapter.agentCard.url still wins.
+    """
+    def card_flags(*extra: str) -> list[str]:
+        docs = _resources(_helm(*ENABLE_SETS, *extra).stdout)
+        dep = next(
+            d for d in docs
+            if d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub"
+        )
+        args = dep["spec"]["template"]["spec"]["containers"][0]["args"]
+        return [a for a in args if a.startswith("--card-url=")]
+
+    base_domain = yaml.safe_load(VARIANT.read_text())["global"]["clusterBaseDomain"]
+    assert card_flags() == [f"--card-url=https://praxis-proxy.apps.{base_domain}/a2a"]
+    assert card_flags("--set", "adapter.agentCard.url=https://gw.example.test/a2a") == [
+        "--card-url=https://gw.example.test/a2a"
+    ]
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
 def test_adapter_allowed_targets_flag() -> None:
     """adapter.allowedTargets (comma-joined into the adapter's
     --allowed-targets flag): set values render verbatim; the empty default

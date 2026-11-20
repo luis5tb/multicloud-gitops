@@ -13,48 +13,56 @@ card, and answers readiness itself.
 > `global.olsClusters` registry. The OLS backend was removed
 > (`PLAN-lightspeed-hub-migration.md` Task A), so the chart currently
 > configures **no upstream clusters**: everything else (policy filter,
-> allow-list enforcement check, discovery card, readiness) is unchanged, and
+> allow-list enforcement check, readiness) is unchanged, and
 > a future backend (Task B, lightspeed-hub) will re-introduce routed
 > upstreams. The "Validation evidence" section below records the live
 > findings from the routing era and is kept as historical reference.
 
-## Static agent card
+## Agent card (pass-through, no static card)
 
-When `agentCard.enabled` is `true` (the default), Praxis serves its own
-static agent card through the `static_response` filter at both
-`/.well-known/agent-card.json` and `/a2a/.well-known/agent-card.json` (MAS
-A2A validation looks in both places depending on the configured base URL).
-The card's critical field is `rpc_url`: it points to Praxis's own public
-endpoint (auto-derived from `global.clusterBaseDomain` as
-`https://praxis-proxy.apps.<base>/a2a` when not explicitly set), ensuring
-A2A clients (like the MAS orchestrator) call Praxis rather than any
-internal Service. The filter runs after the policy filter, whose explicit
-public-path rule allows agent-card discovery without a bearer token.
+Praxis has **no agent card of its own**. With `a2aUpstream.enabled`, the
+router forwards `GET /.well-known/agent-card.json` and
+`GET /a2a/.well-known/agent-card.json` (MAS resolves the card at
+`{base_url}/.well-known/agent-card.json`, and its base URL ends in `/a2a`)
+to the `hub-adapter` cluster **unchanged**, so callers see the
+lightspeed-hub adapter's own card. With `a2aUpstream` disabled there is no
+agent behind the gateway, and discovery answers 404. The policy filter
+exempts only `GET` on those two exact paths from authentication.
 
-**Why this matters:** The A2A SDK (`client.py`) uses the agent card's
-`rpc_url` for all actual calls, not the `base_url` initially provided.
+Why: callers pick their JSON-RPC transport *and method names* from this
+card. **VERIFIED-BROKEN LIVE (2026-11):** the static card this chart used
+to serve advertised A2A `protocolVersion: "1.0"`, so MAS (a2a-sdk 1.1.5)
+used its v1.0 transport and called `SendStreamingMessage`. The adapter
+(a2a-go v0.3.15) only knows the 0.3 names `message/stream` /
+`message/send`, so every `hub_investigate` delegation failed with JSON-RPC
+`method not found`. A first attempted fix, `streaming: false` on the static
+card, just switched MAS to `SendMessage`, which fails the same way (probed
+directly against the adapter). Nothing caught it sooner because the chart
+tests only checked the card's *shape*, the adapter's own tests never saw
+the Praxis card, and MAS logged the failure only as a work-item note, not
+an error. The fix is to stop duplicating the backend's card at all.
 
-**Configuration:**
-- `agentCard.enabled: true` activates the feature.
-- `agentCard.name`, `description`, and `version` default to a generic
-  gateway card (no skills -- there is no agent backend behind it); override
-  in the variant when a real backend is registered.
-- `agentCard.rpcUrl` auto-derives from `global.clusterBaseDomain`; override
-  only for a non-standard Praxis Route hostname.
-- The chart renders the card JSON into a conditional `static_response` filter
-  in `praxis.yaml`; it does not need a filesystem mount or a load-balancer
-  cluster for the card. This is compatible with the pinned
-  `ghcr.io/praxis-proxy/ai:0.4.1` image, whose embedded Praxis Core 0.7.0
-  rejects `static_files` as an unknown load-balancer cluster field.
+Contract with the backend (lightspeed-hub chart / a2a-adapter):
 
-### Static card configuration failure
+- The adapter serves its card at **both** paths
+  (`a2a-adapter/internal/server/card.go` `AgentCardPaths`): the pinned
+  image has no path-rewrite filter, so Praxis cannot map `/a2a/...` to
+  `/...` itself.
+- The card's `url` must be the public Praxis endpoint
+  (`https://praxis-proxy.apps.<base>/a2a`); the lightspeed-hub chart
+  derives it (`adapter.agentCard.url` overrides). a2a-sdk only maps a 0.3
+  card's `protocolVersion` onto an interface when `url` is non-empty;
+  with an empty url MAS falls back to the v1.0 transport again.
+- The card routes are the only header-less routes, listed before the
+  per-spoke routes. Because they are prefix matches, an authenticated
+  request to e.g. `/a2a/.well-known/agent-card.json/x` would reach the
+  adapter's catch-all JSON-RPC handler without the router's target-header
+  check. The adapter's `--allowed-targets` allow-list and the admission
+  policy still reject a missing/unregistered target.
 
-If the Praxis pod fails configuration loading with an error that `static_files`
-is an unknown field in an inline load-balancer cluster, the config is using an
-unsupported cluster type. The pinned AI 0.4.1 image embeds Core 0.7.0, whose
-strict cluster schema does not support that field. Keep static card serving on
-the built-in `static_response` filter as rendered by this chart; do not model
-files as load-balancer clusters.
+Card serving never uses a filesystem mount or a load-balancer `static_files`
+cluster: the pinned `ghcr.io/praxis-proxy/ai:0.4.1` image (Core 0.7.0)
+rejects `static_files` as an unknown cluster field and crash-loops.
 
 ### Readiness
 
@@ -82,9 +90,9 @@ fatal: router: 'routes' is empty; every request would fail with 404
 (Reproduced 2026-11 with a local `podman run` of the pinned image against
 a minimal no-upstream config; the same binary accepts the config with the
 router filter removed.) The fix, as the old guess's fallback prescribed:
-the rendered `praxis.yaml` now has **no router filter at all** — the
-`static_response` filters serve every route this gateway currently
-answers, and anything else that survives the policy filter falls off the
+the rendered `praxis.yaml` (with `a2aUpstream` disabled) has **no router
+filter at all** — the readiness `static_response` filter is the only
+route answered locally, and anything else that survives the policy filter falls off the
 end of the filter chain to Core's own 404. Re-introduce a router only
 together with real (non-empty) routes, e.g. when the Task B
 lightspeed-hub backend lands.
@@ -221,11 +229,12 @@ It runs in two tiers, by what credentials are available:
   Keycloak Route verifies.
 
 Two unauthenticated HTTP paths are intentionally served without a token
-(see "Static agent card" and "Readiness" above):
+(see "Agent card" and "Readiness" above):
 
 - `GET /.well-known/agent-card.json` (and its `/a2a/`-prefixed twin) serves
-  A2A discovery. The card advertises the public Praxis Route, never an
-  internal Service.
+  A2A discovery: the a2aUpstream backend's own card, routed through
+  unchanged (404 without a backend). The card advertises the public Praxis
+  Route, never an internal Service.
 - `GET /readiness` lets the proxy readiness probe verify the gateway is
   serving; with no backend configured it is answered by the proxy itself.
   (Historical note: when this chart fronted OLS, this path proxied the

@@ -419,19 +419,13 @@ clusterGroup:
           value: "172.231.0.10"
         - name: dnsIPv4Only.extraSearches[0]
           value: cluster-jq8zh.dyn.redhatworkshops.io
-        # agentCard.name/description/rpcUrl inherit the chart's generic
-        # gateway defaults; override only to diverge. agentCard.rpcUrl
-        # auto-derives from global.clusterBaseDomain.
-        # The a2aUpstream-fronted backend (lightspeed-hub-a2a-adapter,
-        # currently the quay.io/ltomasbo/lightspeed-hub-a2a-adapter:poc2
-        # PLACEHOLDER build) only implements message/send, not
-        # message/stream. VERIFIED-BROKEN LIVE (2026-11): leaving this at
-        # the chart default (true) made MAS call message/stream and fail
-        # every hub_investigate delegation with a JSON-RPC "method not
-        # found" error. Flip back to true (or remove this override) once
-        # the adapter's final build implements message/stream.
-        - name: agentCard.capabilities.streaming
-          value: "false"
+        # No agent-card overrides: Praxis has no card of its own; with
+        # a2aUpstream enabled (below) it routes discovery to the
+        # lightspeed-hub adapter's own card (see the chart README "Agent
+        # card"). That needs the adapter build serving its card at
+        # /a2a/.well-known/agent-card.json too (lightspeed-hub
+        # adapter.image.tag) and a card url pointing at Praxis (derived by
+        # the lightspeed-hub chart).
         # Trusted issuers the policy filter validates caller tokens against
         # (policy.enabled=true above): Red Hat SSO production and stage, plus the
         # local Keycloak issuer (which the chart appends automatically).
@@ -899,8 +893,10 @@ clusterGroup:
         # image-a2a-adapter):
         - name: adapter.image.repository
           value: quay.io/ltomasbo/lightspeed-hub-a2a-adapter
+        # poc3: serves the agent card at /a2a/.well-known/agent-card.json as
+        # well, required by praxis-proxy's pass-through card route.
         - name: adapter.image.tag
-          value: "poc2"
+          value: "poc3"
         # Repo C operator image pin (built from the
         # lightspeed-agentic-operator repo, branch a2a-support):
         - name: agenticOperator.image.repository

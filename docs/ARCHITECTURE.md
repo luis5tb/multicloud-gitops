@@ -189,9 +189,17 @@ it appears on fully successful requests too; the real rejection signal is
 Live Praxis startup finding: enabling the static agent card originally rendered
 `static_files` as a `load_balancer.clusters[]` field. The pinned
 `ghcr.io/praxis-proxy/ai:0.4.1` image embeds Core 0.7.0, whose strict cluster
-schema rejects that field and crash-loops the pod. The chart now serves the card
-with Core's `static_response` filter after the policy filter; keep discovery
-public through the explicit policy route and do not model files as LB clusters.
+schema rejects that field and crash-loops the pod. (The static card is gone
+now -- see the next lesson -- but do not model files as LB clusters.)
+
+Live A2A finding (2026-11): never hand-maintain a copy of a backend's agent
+card at the gateway. Praxis's static card advertised `protocolVersion: "1.0"`,
+so MAS (a2a-sdk 1.1.5) called `SendStreamingMessage` / `SendMessage` against
+the A2A 0.3 lightspeed-hub adapter (a2a-go v0.3.15: `message/stream` /
+`message/send` only) and every `hub_investigate` failed with "method not
+found"; toggling `streaming` did not help. Praxis now routes discovery to the
+adapter's own card (which must carry the Praxis `/a2a` url). See
+`charts/all/praxis-proxy/README.md` "Agent card".
 
 Live Praxis TLS finding: a same-cluster `global.olsClusters` entry was pointed
 at the OLS public Route while Praxis trusted only the cluster service-ca; the
