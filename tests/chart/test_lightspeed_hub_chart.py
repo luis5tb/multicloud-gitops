@@ -597,7 +597,14 @@ def test_variant_registers_application() -> None:
     overrides = {o["name"]: o["value"] for o in app["overrides"]}
     assert overrides["enabled"] == "true"
     assert overrides["adapter.allowedTargets[0]"] == "hub"
-    assert overrides["adapter.hubRunCreatorsGroup"] == "keycloak:acme-agent-rca"
+    # Audience-scoped role groups (keycloak-oidc exchangeRoles): H's group
+    # creates runs, U's group reads the hub-as-spoke -- never the same group
+    # (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s4.3/s5.2).
+    assert overrides["adapter.hubRunCreatorsGroup"] == "keycloak:lightspeed-hub-a2a:agenticrun-creator"
+    assert overrides["admissionPolicy.allowTargets.keycloak\\:lightspeed-hub-a2a\\:agenticrun-creator[0]"] == "hub"
+    assert overrides["spokeReaderRBAC.enabled"] == "true"
+    assert overrides["spokeReaderRBAC.groups[0]"] == "keycloak:praxis-spoke-hub:reader"
+    assert overrides["adapter.hubRunCreatorsGroup"] != overrides["spokeReaderRBAC.groups[0]"]
     assert overrides["adapter.image.repository"] == "quay.io/ltomasbo/lightspeed-hub-a2a-adapter"
     assert overrides["agenticOperator.image.repository"] == "quay.io/ltomasbo/lightspeed-agentic-operator"
     assert overrides["agenticOperator.config.gatewayCASecret"] == "praxis-spoke-gateway-ca"
@@ -878,3 +885,37 @@ def test_agent_configuration_renders_vertex_agent_and_policy() -> None:
     for drop in (2, 6):  # projectID, model
         sets = agent_sets[:drop] + agent_sets[drop + 2:]
         assert _helm(*ENABLE_SETS, *sets, check=False).returncode != 0
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_spoke_reader_rbac_binds_role_groups() -> None:
+    """Hub-as-spoke read access goes to Token U's role group only.
+
+    VERIFIED-BROKEN LIVE (2026-11-20): with no binding the requester's group
+    had only run-creators, so every investigation read would be denied.
+    Disabled by default; enabled, one ClusterRoleBinding per cluster role,
+    subjects exactly the listed groups; empty groups fails loud.
+    """
+    assert not [
+        d for d in _resources(_helm(*ENABLE_SETS).stdout)
+        if d["kind"] == "ClusterRoleBinding" and "spoke-reader" in d["metadata"]["name"]
+    ]
+    docs = _resources(_helm(
+        *ENABLE_SETS,
+        "--set", "spokeReaderRBAC.enabled=true",
+        "--set", "spokeReaderRBAC.groups[0]=keycloak:praxis-spoke-hub:reader",
+    ).stdout)
+    crbs = {
+        d["roleRef"]["name"]: d for d in docs
+        if d["kind"] == "ClusterRoleBinding" and "spoke-reader" in d["metadata"]["name"]
+    }
+    assert set(crbs) == {"cluster-reader", "cluster-monitoring-view"}
+    for crb in crbs.values():
+        assert crb["subjects"] == [{
+            "kind": "Group",
+            "apiGroup": "rbac.authorization.k8s.io",
+            "name": "keycloak:praxis-spoke-hub:reader",
+        }]
+    assert _helm(*ENABLE_SETS, "--set", "spokeReaderRBAC.enabled=true", check=False).returncode != 0

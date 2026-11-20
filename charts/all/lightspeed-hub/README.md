@@ -312,6 +312,24 @@ UNCONFIRMED: the Vault record is a gcloud `authorized_user` ADC, not the
 service-account key the operator's API comment describes (google-auth accepts
 both); and the sandbox's Gemini support is untested live.
 
+## Identity-scoped RBAC (run creation vs spoke reads)
+
+With keycloak-oidc `exchangeRoles`, Token H and Token U carry different,
+audience-scoped role groups, and this chart binds each to its own job:
+
+| Group (as the kube API sees it) | Token | Bound by | Grants |
+|---|---|---|---|
+| `keycloak:lightspeed-hub-a2a:agenticrun-creator` | H | `adapter.hubRunCreatorsGroup`, `admissionPolicy.allowTargets` | create AgenticRuns in the run namespace, for allowed targets |
+| `keycloak:praxis-spoke-hub:reader` | U | `spokeReaderRBAC` (hub as its own spoke) | `cluster-reader`, `cluster-monitoring-view` |
+
+Before this, both were `keycloak:acme-agent-rca`, which both tokens carried.
+And nothing granted spoke reads, so every investigation read would have been
+denied (live finding 2026-11-20). In gateway credential mode the operator
+creates no spoke ServiceAccounts or bindings: these group bindings are the
+only spoke authorization. For a separate spoke, `spokeReaderRBAC`'s
+equivalent belongs on that cluster, keyed on its own audience's role group.
+See `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
+
 ## Adapter Deployment contract (reconciled M4)
 
 The adapter container runs with the **real flags** from

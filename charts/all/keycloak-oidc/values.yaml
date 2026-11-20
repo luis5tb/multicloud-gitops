@@ -307,6 +307,42 @@ keycloak:
     # (MAS, Praxis allow-list) rejects the extra audience before enabling.
     subjectTokenAudienceMapper: true
 
+  # AUDIENCE-SCOPED EXCHANGE ROLES (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md
+  # s4.3). Kubernetes RBAC binds groups, not audiences; with a plain group
+  # mapper every exchanged token (H for the hub API, U for each spoke API)
+  # carries the same `groups`, so -- when the hub is its own spoke -- what is
+  # granted for U (cluster read) is also usable with H, and what is granted
+  # for H (create AgenticRuns) is also usable with U, which an LLM drives.
+  # When enabled:
+  #   - each exchange TARGET audience client (hubExchange.hubAudience, every
+  #     spokeGatewayExchanger.spokeAudiences entry) gets client roles
+  #     (hubRoles / spokeRoles);
+  #   - the realm groups listed in `groups` get all of those roles (group
+  #     membership stays the single "who is allowed" switch);
+  #   - each exchanger gets fullScopeAllowed: false plus role scope mappings
+  #     for only its audiences' roles, and a client-role mapper projecting
+  #     ONLY its audience's roles into `groups`, prefixed "<audience>:"
+  #     (replacing hubExchange.groupMappers on the hub exchanger).
+  # Result on the kube API (Native OIDC maps `groups` -> keycloak:<entry>):
+  #   H -> Group keycloak:<hubAudience>:<hubRole>      (e.g. ...:agenticrun-creator)
+  #   U -> Group keycloak:<spokeAudience>:<spokeRole>  (e.g. praxis-spoke-hub:reader)
+  # Bind RBAC to those groups (charts/all/lightspeed-hub), never to the
+  # user (identical across tokens). One-shot realm import only: an
+  # already-imported realm needs these created via the admin API/console
+  # (see README "Audience-scoped exchange roles").
+  exchangeRoles:
+    enabled: false
+    # Realm groups (must be created by this import: acmeGroupName and/or
+    # adminGroupName) whose members get every role below.
+    groups: []
+    #   - acme-agent-rca
+    # Roles on the hub audience client (what H may do on the hub API).
+    hubRoles:
+      - agenticrun-creator
+    # Roles on each spoke audience client (what U may do on that spoke).
+    spokeRoles:
+      - reader
+
 openshiftOIDC:
   enabled: false
   providerName: keycloak

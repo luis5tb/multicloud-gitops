@@ -240,9 +240,10 @@ runTokenSecretRBAC:
 # also denies (parameterNotFoundAction: Deny -- never fail open).
 #
 # Mapping shape: keys are authenticated request usernames (Token H's mapped
-# user, e.g. keycloak-oidc's OIDC username mapping) OR group names (e.g.
-# keycloak:acme-agent-rca); values are lists of allowed targetCluster names.
-# An empty map is the deny-all default.
+# user, e.g. keycloak-oidc's OIDC username mapping) OR group names -- with
+# keycloak-oidc exchangeRoles, Token H's audience-scoped role group, e.g.
+# keycloak:lightspeed-hub-a2a:agenticrun-creator; values are lists of
+# allowed targetCluster names. An empty map is the deny-all default.
 admissionPolicy:
   enabled: true
   paramConfigMapName: lightspeed-hub-target-policy
@@ -373,6 +374,19 @@ agenticOperator:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# Spoke-side READ access for gateway-mode investigations when this cluster
+# also acts as a spoke (templates/spoke-reader-rbac.yaml). The sandbox reads
+# the spoke AS THE REQUESTER via Token U; these ClusterRoleBindings grant the
+# U role group (keycloak-oidc exchangeRoles: keycloak:<spokeAudience>:<role>)
+# what an investigation may see. Never list a user, only role groups.
+spokeReaderRBAC:
+  enabled: false
+  groups: []
+  #   - keycloak:praxis-spoke-hub:reader
+  clusterRoles:
+    - cluster-reader
+    - cluster-monitoring-view
 
 # Vault-backed ExternalSecrets rendered by this chart (agent LLM credentials).
 secretStore:

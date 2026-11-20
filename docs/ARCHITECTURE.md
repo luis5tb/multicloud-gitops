@@ -255,6 +255,17 @@ password and console client secret to the CURRENT Vault values via the admin
 API. Rotating a Keycloak credential means changing it in Keycloak too, not
 only in Vault.
 
+Live identity-scoping finding (2026-11-20): Kubernetes RBAC binds groups,
+not audiences. With a raw Keycloak group mapper, H (hub API) and U (spoke
+API) carried the same `groups`, so on a hub that is its own spoke, U (driven
+by the LLM in the sandbox) could have created AgenticRuns. Exchangers now
+project only their audience's client roles into `groups`
+(`keycloak.exchangeRoles`), and RBAC binds those role groups. Verified live
+with `SelfSubjectReview`. Separately, gateway mode no longer does spoke
+management (operator `a2a-support`): the standing `spoke-kubeconfig-<id>`,
+per-step spoke SA and reader bindings were never used by the sandbox. See
+`docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
+
 Live Praxis audience finding (2026-11-20): the main gateway still validated
 local-Keycloak tokens for `mas-a2a`, left over from when ACME called Praxis
 directly. It now fronts the hub adapter, so it checks `lightspeed-hub-adapter`

@@ -1,0 +1,42 @@
+{{- if and .Values.enabled .Values.spokeReaderRBAC.enabled }}
+{{- if not .Values.spokeReaderRBAC.groups }}
+{{- fail "spokeReaderRBAC.groups must list at least one group when spokeReaderRBAC.enabled is true (e.g. keycloak:praxis-spoke-hub:reader)" }}
+{{- end }}
+# SPOKE-SIDE read access for gateway-mode investigations, for the cluster
+# this chart runs on acting AS A SPOKE (the hub doubling as spoke "hub").
+#
+# In gateway credential mode the sandbox reaches the spoke through the
+# Praxis spoke gateway, which exchanges Token A for Token U; the spoke's kube
+# API authenticates U as the REQUESTER (keycloak:<sub>) with groups from U's
+# `groups` claim. With keycloak-oidc's exchangeRoles, U carries only the
+# spoke audience's roles, e.g. "praxis-spoke-hub:reader" -> Group
+# keycloak:praxis-spoke-hub:reader. These ClusterRoleBindings are what the
+# investigation may read; nothing operator-managed is involved (no
+# openshift-lightspeed-managed namespace, no per-run SA bindings).
+# VERIFIED-BROKEN LIVE (2026-11-20): with no such binding the requester's
+# group had only run-creators in this namespace, so every investigation read
+# would have been denied (403).
+#
+# For a real (separate) spoke, the same bindings belong on THAT cluster
+# (distributed by GitOps/ACM), keyed on its own audience's role group.
+# Never bind to the user (keycloak:<sub> is identical across H and U).
+{{- range $role := .Values.spokeReaderRBAC.clusterRoles }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "%s-spoke-reader-%s" (include "lightspeed-hub.fullname" $) $role | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "lightspeed-hub.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $role }}
+subjects:
+  {{- range $g := $.Values.spokeReaderRBAC.groups }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ $g | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

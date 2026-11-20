@@ -72,6 +72,40 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- /* Audience-scoped exchange roles (docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md
+      s4.3): $audRoles maps each exchange TARGET audience client to the
+      client roles defined on it; $audExchanger maps it to the exchanger
+      client that may carry (and projects) those roles. */}}
+{{- $er := .Values.keycloak.exchangeRoles }}
+{{- $audRoles := dict }}
+{{- $audExchanger := dict }}
+{{- if $er.enabled }}
+{{- if .Values.keycloak.hubExchange.enabled }}
+{{- $_ := set $audRoles .Values.keycloak.hubExchange.hubAudience $er.hubRoles }}
+{{- $_ := set $audExchanger .Values.keycloak.hubExchange.hubAudience .Values.keycloak.hubExchange.clientId }}
+{{- end }}
+{{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
+{{- range .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
+{{- $_ := set $audRoles . $er.spokeRoles }}
+{{- $_ := set $audExchanger . $.Values.keycloak.spokeGatewayExchanger.clientId }}
+{{- end }}
+{{- end }}
+{{- if not $audRoles }}
+{{- fail "keycloak.exchangeRoles.enabled requires keycloak.hubExchange.enabled and/or keycloak.spokeGatewayExchanger.enabled (with spokeAudiences): there is no exchange audience to scope roles to" }}
+{{- end }}
+{{- if or (and .Values.keycloak.hubExchange.enabled (not $er.hubRoles)) (and .Values.keycloak.spokeGatewayExchanger.enabled (not $er.spokeRoles)) }}
+{{- fail "keycloak.exchangeRoles.hubRoles / spokeRoles must be non-empty for every enabled exchanger" }}
+{{- end }}
+{{- $knownGroups := list .Values.keycloak.acmeGroupName }}
+{{- if .Values.keycloak.adminGroupName }}
+{{- $knownGroups = append $knownGroups .Values.keycloak.adminGroupName }}
+{{- end }}
+{{- range $er.groups }}
+{{- if not (has . $knownGroups) }}
+{{- fail (printf "keycloak.exchangeRoles.groups entry %q is not a group this realm import creates (%s)" . (join ", " $knownGroups)) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: k8s.keycloak.org/v2alpha1
 kind: KeycloakRealmImport
 metadata:
@@ -142,10 +176,44 @@ spec:
     enabled: true
     displayName: {{ .Values.keycloak.displayName | quote }}
     groups:
+      {{- $groupNames := list }}
       {{- if .Values.keycloak.adminGroupName }}
-      - name: {{ .Values.keycloak.adminGroupName | quote }}
+      {{- $groupNames = append $groupNames .Values.keycloak.adminGroupName }}
       {{- end }}
-      - name: {{ .Values.keycloak.acmeGroupName | quote }}
+      {{- $groupNames = append $groupNames .Values.keycloak.acmeGroupName }}
+      {{- range $g := $groupNames }}
+      - name: {{ $g | quote }}
+        {{- if and $er.enabled (has $g $er.groups) }}
+        # Members get every audience-scoped exchange role; each exchanger
+        # projects only its own audience's roles into `groups`.
+        clientRoles:
+          {{- range $aud := keys $audRoles | sortAlpha }}
+          {{ $aud | quote }}: {{ toJson (get $audRoles $aud) }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+    {{- if $er.enabled }}
+    # Client roles on the exchange TARGET (audience-only) clients: what a
+    # principal may do on that target. See exchangeRoles in values.yaml.
+    roles:
+      client:
+        {{- range $aud := keys $audRoles | sortAlpha }}
+        {{ $aud | quote }}:
+          {{- range get $audRoles $aud }}
+          - name: {{ . | quote }}
+            clientRole: true
+          {{- end }}
+        {{- end }}
+    # Role scope: each exchanger (fullScopeAllowed: false) may carry ONLY its
+    # own audiences' roles -- the Keycloak-native "scope" filter, so a token
+    # can never carry another hop's roles even if more mappers are added.
+    clientScopeMappings:
+      {{- range $aud := keys $audRoles | sortAlpha }}
+      {{ $aud | quote }}:
+        - client: {{ get $audExchanger $aud | quote }}
+          roles: {{ toJson (get $audRoles $aud) }}
+      {{- end }}
+    {{- end }}
     clients:
       # Named openshift-cli (OpenShift's own name for this platform-client
       # role, see oidcClients[componentName: cli] in openshift-authentication.yaml).
@@ -315,20 +383,40 @@ spec:
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
         secret: $(PRAXIS_SPOKE_EXCHANGER_SECRET)
+        {{- if $er.enabled }}
+        fullScopeAllowed: false
+        {{- end }}
         attributes:
           standard.token.exchange.enabled: "true"
         {{- with .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
         protocolMappers:
           {{- range $aud := . }}
           # One per registered spoke: the audience the exchanged Token U
-          # carries for that spoke's API server. UNCONFIRMED GUESS: see the
-          # values.yaml spokeAudiences comment.
+          # carries for that spoke's API server.
           - name: {{ printf "%s-audience" $aud | quote }}
             protocol: openid-connect
             protocolMapper: oidc-audience-mapper
             config:
               included.custom.audience: {{ $aud | quote }}
               access.token.claim: "true"
+          {{- if $er.enabled }}
+          # Project ONLY this spoke's roles into `groups`, prefixed with the
+          # audience: U for this spoke carries e.g. "<aud>:reader", which the
+          # spoke maps to Group keycloak:<aud>:reader. The prefix keeps one
+          # spoke's roles from granting anything on another.
+          - name: {{ printf "%s-roles-as-groups" $aud | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              usermodel.clientRoleMapping.clientId: {{ $aud | quote }}
+              usermodel.clientRoleMapping.rolePrefix: {{ printf "%s:" $aud | quote }}
+              claim.name: groups
+              multivalued: "true"
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "false"
+          {{- end }}
           {{- end }}
         {{- end }}
       {{- end }}
@@ -357,6 +445,9 @@ spec:
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
         secret: $(HUB_EXCHANGE_SECRET)
+        {{- if $er.enabled }}
+        fullScopeAllowed: false
+        {{- end }}
         attributes:
           standard.token.exchange.enabled: "true"
         protocolMappers:
@@ -368,14 +459,30 @@ spec:
             config:
               included.custom.audience: {{ .Values.keycloak.hubExchange.hubAudience | quote }}
               access.token.claim: "true"
-          {{- if .Values.keycloak.hubExchange.groupMappers }}
+          {{- if $er.enabled }}
+          # Audience-scoped roles REPLACE the raw group mapper: H carries
+          # only the hub audience's roles, prefixed (e.g.
+          # "lightspeed-hub-a2a:agenticrun-creator" -> Group
+          # keycloak:lightspeed-hub-a2a:agenticrun-creator on the hub API),
+          # so H cannot use permissions granted for another hop. See
+          # docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s4.3.
+          - name: {{ printf "%s-roles-as-groups" .Values.keycloak.hubExchange.hubAudience | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              usermodel.clientRoleMapping.clientId: {{ .Values.keycloak.hubExchange.hubAudience | quote }}
+              usermodel.clientRoleMapping.rolePrefix: {{ printf "%s:" .Values.keycloak.hubExchange.hubAudience | quote }}
+              claim.name: groups
+              multivalued: "true"
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "false"
+          {{- else if .Values.keycloak.hubExchange.groupMappers }}
           # Group protocol mapper so the EXCHANGED Token H carries the
-          # principal's Keycloak groups (which the hub API's OIDC group
-          # mapping + RoleBindings consume), while minted Token A stays
-          # groupless. UNCONFIRMED GUESS: whether this mapper applies to
-          # RFC 8693-exchanged tokens on this Keycloak build (plan spike
-          # item #5) -- validate against a live realm before relying on
-          # it (see values.yaml hubExchange.groupMappers).
+          # principal's Keycloak groups (CONFIRMED LIVE 2026-11-20: exchanger
+          # mappers apply to exchanged tokens). Superseded by exchangeRoles,
+          # which scopes H's groups to the hub audience's roles.
           - name: groups
             protocol: openid-connect
             protocolMapper: oidc-group-membership-mapper

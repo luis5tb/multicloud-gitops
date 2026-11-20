@@ -676,6 +676,43 @@ Note: the `keycloak-system/keycloak-admin-user` secret's password was found
 stale on the standalone cluster (2026-11-20, `invalid_grant` for `admin`),
 so use whatever admin login you currently have.
 
+## Audience-scoped exchange roles (`keycloak.exchangeRoles`)
+
+Kubernetes RBAC binds groups, not audiences. With a plain group mapper, every
+exchanged token (H for the hub API, U for each spoke API) carries the same
+`groups`. On a hub that is its own spoke, U could then create AgenticRuns and
+H could read the whole cluster. With `exchangeRoles.enabled`:
+
+- client roles on each exchange target audience client (`hubRoles` on
+  `hubExchange.hubAudience`, `spokeRoles` on every `spokeAudiences` entry);
+- the realm groups in `exchangeRoles.groups` get all of them;
+- each exchanger gets `fullScopeAllowed: false` plus role scope mappings for
+  only its audiences, and a client-role mapper projecting **only its
+  audience's roles** into `groups`, prefixed `"<audience>:"`. This replaces
+  the hub exchanger's raw group mapper.
+
+**CONFIRMED LIVE (2026-11-20):** from one fresh Token A, H carried
+`groups: ["lightspeed-hub-a2a:agenticrun-creator"]` and U carried
+`["praxis-spoke-hub:reader"]`. The hub API's `SelfSubjectReview` mapped them
+to `keycloak:lightspeed-hub-a2a:agenticrun-creator` and
+`keycloak:praxis-spoke-hub:reader` (same user). Bind RBAC to those groups
+(charts/all/lightspeed-hub `adapter.hubRunCreatorsGroup`,
+`admissionPolicy.allowTargets`, `spokeReaderRBAC`), never to the user. Full
+design: `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
+
+**Live realm (one-shot import):** applied via the admin API on 2026-11-20.
+For another already-imported realm, for each `(audience, role, exchanger)`:
+
+1. `POST /admin/realms/<realm>/clients/<audience-uuid>/roles` `{"name": "<role>"}`;
+2. `POST .../groups/<group-id>/role-mappings/clients/<audience-uuid>` `[<role rep>]`;
+3. on the exchanger: `fullScopeAllowed: false` (PUT the client), then
+   `POST .../clients/<exchanger-uuid>/scope-mappings/clients/<audience-uuid>` `[<role rep>]`;
+4. add a mapper on the exchanger: `oidc-usermodel-client-role-mapper` with
+   `usermodel.clientRoleMapping.clientId=<audience>`,
+   `usermodel.clientRoleMapping.rolePrefix=<audience>:`, `claim.name=groups`,
+   `multivalued=true`, access token only; and delete any
+   `oidc-group-membership-mapper` on the exchanger.
+
 **Known gap -- SSO callers on the hub leg:** Praxis still accepts Red Hat SSO
 tokens (`api.ask_red_hat`) on this leg, and Keycloak trusts the SSO IdPs
 (`externalOidcProviders`), but the adapter's exchanger never sends

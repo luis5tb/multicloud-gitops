@@ -533,6 +533,81 @@ def test_keycloak_exchange_audiences_are_clients() -> None:
 @pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm is required to render chart"
 )
+def test_keycloak_exchange_roles_scope_groups_per_audience() -> None:
+    """exchangeRoles: each exchanged token's `groups` is its audience's roles.
+
+    Kubernetes RBAC binds groups, not audiences: with a plain group mapper H
+    (hub API) and U (spoke API) carry the same groups, so on a hub that is
+    its own spoke each token can use the other's permissions. Roles live on
+    the audience clients, groups get them, each exchanger is role-scoped
+    (fullScopeAllowed false + scope mappings) and projects only its
+    audience's roles into `groups` with an "<audience>:" prefix -- replacing
+    the hub exchanger's raw group mapper.
+    """
+    def realm(*args: str, check: bool = True):
+        out = subprocess.run(
+            ["helm", "template", "keycloak-oidc", str(KEYCLOAK_CHART), "-f", str(VARIANT),
+             "--set", "keycloak.spiffeIdentityProvider.enabled=false", *args],
+            check=check, capture_output=True, text=True,
+        )
+        if not check:
+            return out
+        return next(d for d in _resources(out.stdout) if d["kind"] == "KeycloakRealmImport")["spec"]["realm"]
+
+    both = [
+        "--set", "keycloak.hubExchange.enabled=true",
+        "--set", "keycloak.hubExchange.vaultKey=secret/data/global/lightspeed-hub-adapter",
+        "--set", "keycloak.hubExchange.hubAudience=lightspeed-hub-a2a",
+        "--set", "keycloak.spokeGatewayExchanger.enabled=true",
+        "--set", "keycloak.spokeGatewayExchanger.vaultKey=secret/data/global/praxis-spoke-gateway",
+        "--set", "keycloak.spokeGatewayExchanger.spokeAudiences[0]=praxis-spoke-hub",
+    ]
+    # Off by default: no roles, raw group mapper on the hub exchanger.
+    off = realm(*both)
+    assert "roles" not in off and "clientScopeMappings" not in off
+    hub_off = {c["clientId"]: c for c in off["clients"]}["lightspeed-hub-adapter"]
+    assert any(m["protocolMapper"] == "oidc-group-membership-mapper" for m in hub_off["protocolMappers"])
+
+    r = realm(*both, "--set", "keycloak.exchangeRoles.enabled=true",
+              "--set", "keycloak.exchangeRoles.groups[0]=acme-agent-rca")
+    assert r["roles"]["client"] == {
+        "lightspeed-hub-a2a": [{"name": "agenticrun-creator", "clientRole": True}],
+        "praxis-spoke-hub": [{"name": "reader", "clientRole": True}],
+    }
+    group = {g["name"]: g for g in r["groups"]}["acme-agent-rca"]
+    assert group["clientRoles"] == {
+        "lightspeed-hub-a2a": ["agenticrun-creator"],
+        "praxis-spoke-hub": ["reader"],
+    }
+    assert r["clientScopeMappings"] == {
+        "lightspeed-hub-a2a": [{"client": "lightspeed-hub-adapter", "roles": ["agenticrun-creator"]}],
+        "praxis-spoke-hub": [{"client": "praxis-spoke-gateway", "roles": ["reader"]}],
+    }
+    clients = {c["clientId"]: c for c in r["clients"]}
+    for exchanger, aud in (("lightspeed-hub-adapter", "lightspeed-hub-a2a"),
+                           ("praxis-spoke-gateway", "praxis-spoke-hub")):
+        c = clients[exchanger]
+        assert c["fullScopeAllowed"] is False
+        role_mappers = [m for m in c["protocolMappers"] if m["protocolMapper"] == "oidc-usermodel-client-role-mapper"]
+        assert len(role_mappers) == 1, exchanger
+        cfg = role_mappers[0]["config"]
+        assert cfg["usermodel.clientRoleMapping.clientId"] == aud
+        assert cfg["usermodel.clientRoleMapping.rolePrefix"] == f"{aud}:"
+        assert cfg["claim.name"] == "groups"
+        # The raw group mapper is gone: groups would leak across hops.
+        assert not any(m["protocolMapper"] == "oidc-group-membership-mapper" for m in c["protocolMappers"])
+
+    # Fail loud: unknown group, or enabled with no exchanger.
+    bad = realm(*both, "--set", "keycloak.exchangeRoles.enabled=true",
+                "--set", "keycloak.exchangeRoles.groups[0]=no-such-group", check=False)
+    assert bad.returncode != 0 and "not a group this realm import creates" in bad.stderr
+    none = realm("--set", "keycloak.exchangeRoles.enabled=true", check=False)
+    assert none.returncode != 0
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
 def test_keycloak_hub_exchange_fail_guards() -> None:
     """hubAudience distinctness + required values fail loudly."""
     def kc(*args: str) -> subprocess.CompletedProcess:

@@ -323,9 +323,19 @@ clusterGroup:
         # commented values there must line up with this chart's
         # hubExchange defaults (clientId lightspeed-hub-adapter,
         # secretName lightspeed-hub-adapter-client); override only to
-        # diverge. Whether the group mappers apply to EXCHANGED tokens is
-        # an UNCONFIRMED GUESS (plan spike item #5) -- validate on a live
-        # realm before relying on H carrying groups.
+        # diverge. (Exchanger mappers DO apply to exchanged tokens --
+        # confirmed live 2026-11-20.)
+        # Audience-scoped exchange roles: H carries only
+        # lightspeed-hub-a2a:agenticrun-creator, U only
+        # praxis-spoke-hub:reader, so each token authorizes only its own hop
+        # on the (shared) hub API. Members of acme-agent-rca get both roles.
+        # The lightspeed-hub chart binds RBAC to those role groups. One-shot
+        # realm import: the live realm was configured via the admin API
+        # (README "Audience-scoped exchange roles").
+        - name: keycloak.exchangeRoles.enabled
+          value: "true"
+        - name: keycloak.exchangeRoles.groups[0]
+          value: acme-agent-rca
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
@@ -906,11 +916,14 @@ clusterGroup:
         - name: adapter.image.tag
           value: "poc3"
         # Repo C operator image pin (built from the
-        # lightspeed-agentic-operator repo, branch a2a-support):
+        # lightspeed-agentic-operator repo, branch a2a-support).
+        # a2a-gw: gateway credential mode does no spoke management (no
+        # spoke-kubeconfig-<id>, no per-step spoke SA / reader bindings) --
+        # docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s3.2.
         - name: agenticOperator.image.repository
           value: quay.io/ltomasbo/lightspeed-agentic-operator
         - name: agenticOperator.image.tag
-          value: "a2a"
+          value: "a2a-gw"
         # Agent configuration (LLMProvider + Agent named adapter.runAgent +
         # ApprovalPolicy "cluster" with Analysis Automatic). Without it every
         # run failed live with `Agent "default" not found` (2026-11-20).
@@ -946,20 +959,30 @@ clusterGroup:
         # (here: the hub cluster as its own spoke):
         - name: adapter.allowedTargets[0]
           value: hub
+        # Token H's AUDIENCE-SCOPED role group (keycloak-oidc exchangeRoles:
+        # H carries only "lightspeed-hub-a2a:agenticrun-creator", mapped to
+        # Group keycloak:lightspeed-hub-a2a:agenticrun-creator). Was
+        # keycloak:acme-agent-rca, which U carried too -- so with the hub as
+        # its own spoke, the sandbox's U could have created AgenticRuns. See
+        # docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s4.3/s5.2.
         # Requester x target admission-policy allow-list (deny-all while
         # empty; keys are Token H usernames or group names, values are the
         # allowed targetCluster names):
-        - name: admissionPolicy.allowTargets.keycloak\:acme-agent-rca[0]
+        - name: admissionPolicy.allowTargets.keycloak\:lightspeed-hub-a2a\:agenticrun-creator[0]
           value: hub
-        # "Only the configured group can create AgenticRuns" (Phase 1 RBAC
-        # goal): the Kubernetes group (as the hub API maps it from Token
-        # H's groups claim -- with the default OIDC groupsPrefix,
-        # keycloak:<Keycloak group>) bound to a Role granting create on
-        # agenticruns in the run namespace. This gates creation itself;
-        # the admission policy above additionally restricts WHICH
-        # targetCluster:
+        # "Only the configured group can create AgenticRuns": the group bound
+        # to a Role granting create on agenticruns in the run namespace. The
+        # admission policy above additionally restricts WHICH targetCluster:
         - name: adapter.hubRunCreatorsGroup
-          value: keycloak:acme-agent-rca
+          value: keycloak:lightspeed-hub-a2a:agenticrun-creator
+        # The hub doubles as spoke "hub": read access for gateway-mode
+        # investigations, granted to Token U's audience-scoped role group
+        # (keycloak:praxis-spoke-hub:reader) -- never to the user. Without
+        # it every investigation read was denied.
+        - name: spokeReaderRBAC.enabled
+          value: "true"
+        - name: spokeReaderRBAC.groups[0]
+          value: keycloak:praxis-spoke-hub:reader
         # Cross-chart contract (request leg): adapter.targetHeader must equal
         # praxis-proxy's a2aUpstream.targetHeader (X-Hub-Cluster default
         # both sides); adapter.hubAudience must equal keycloak-oidc's
