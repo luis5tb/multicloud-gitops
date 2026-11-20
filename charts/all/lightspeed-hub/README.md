@@ -277,6 +277,41 @@ granted **cluster-wide**, exactly as in repo C's own `make deploy`.
 Narrowing to the run namespace (design §8.3 single-namespace hardening)
 is a follow-up item — kept in the register below.
 
+## Agent configuration (`agenticOperator.agent`)
+
+The operator cannot run anything without three CLUSTER-scoped CRs, which
+`templates/agentic-agent.yaml` renders when `agenticOperator.agent.enabled`
+(adapted from the mao-poc-rca branch's lightspeed-agentic-operator chart):
+
+- an `LLMProvider` (`GoogleCloudVertex`; project/region/modelProvider from
+  values, no defaults -- set in the variant) whose credentials Secret is an
+  ExternalSecret re-keying the shared Vault ADC record
+  (`secret/data/global/llm-creds-vertex`, the one mao/mas-worker uses) to
+  `GOOGLE_APPLICATION_CREDENTIALS`;
+- an `Agent` named **`adapter.runAgent`** (so the agent the adapter requests
+  always exists) with the model from values;
+- the `ApprovalPolicy` named `cluster` with **Analysis Automatic** (adapter
+  runs are analysis-only) and Execution Manual.
+
+The standalone variant uses the same model as the MAS orchestrator
+(`gemini-3.8-flash`, `modelProvider: Google`, project
+`redhat-marketplace-dev`, region `global` -- `setup-mas-blueprint.sh`
+defaults); keep them in sync.
+
+**VERIFIED-BROKEN LIVE (2026-11-20), how it was hit:** once the target policy
+stopped blocking the operator's finalizer, every adapter-created run failed
+terminally with `workflow resolution failed: Agent "default" not found` --
+the chart installed the CRDs and operator but no Agent/LLMProvider. Four
+`AgenticRunApproval`s had also accumulated: without an ApprovalPolicy the
+operator auto-approves only Escalation (`controller/agenticrun/approval.go`),
+so Analysis would have waited for a human even with an Agent. **Why nothing
+caught it sooner:** no run had ever got past admission before, and the chart
+tests only checked the operator Deployment and ConfigMap.
+
+UNCONFIRMED: the Vault record is a gcloud `authorized_user` ADC, not the
+service-account key the operator's API comment describes (google-auth accepts
+both); and the sandbox's Gemini support is untested live.
+
 ## Adapter Deployment contract (reconciled M4)
 
 The adapter container runs with the **real flags** from

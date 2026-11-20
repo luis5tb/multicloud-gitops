@@ -1,0 +1,105 @@
+{{- if and .Values.enabled .Values.agenticOperator.enabled .Values.agenticOperator.agent.enabled }}
+{{- $agent := .Values.agenticOperator.agent }}
+{{- $p := $agent.llmProvider }}
+{{- $v := $p.vertex }}
+{{- $runNamespace := include "lightspeed-hub.runNamespace" . }}
+{{- if not $agent.model }}
+{{- fail "agenticOperator.agent.model must be set when agenticOperator.agent.enabled is true (the model ID on the Vertex provider, e.g. claude-opus-4-6)" }}
+{{- end }}
+{{- if not (and $v.projectID $v.region) }}
+{{- fail "agenticOperator.agent.llmProvider.vertex.projectID and .region must be set when agenticOperator.agent.enabled is true (set them in the variant)" }}
+{{- end }}
+{{- if not .Values.adapter.runAgent }}
+{{- fail "adapter.runAgent must be set: it is the name of the Agent this chart renders" }}
+{{- end }}
+# Agent configuration for the lightspeed-agentic-operator: the LLM
+# credentials, the LLMProvider, the Agent the adapter's runs request
+# (named adapter.runAgent), and the cluster ApprovalPolicy. See values.yaml
+# agenticOperator.agent for the live failures these fix.
+#
+# Credentials: the pattern-wide Vault ADC JSON (the same record
+# mao/mas-worker uses), re-keyed to GOOGLE_APPLICATION_CREDENTIALS as the
+# operator requires. NOTE: that record is a gcloud `authorized_user` ADC
+# (user refresh token), not a service-account key as the operator's API
+# comment describes; google-auth accepts both via
+# GOOGLE_APPLICATION_CREDENTIALS. UNCONFIRMED until a run completes live.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: {{ $v.credentialsSecretName }}
+  namespace: {{ $runNamespace }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  refreshInterval: {{ .Values.secretStore.refreshInterval }}
+  secretStoreRef:
+    name: {{ .Values.secretStore.name }}
+    kind: {{ .Values.secretStore.kind }}
+  target:
+    name: {{ $v.credentialsSecretName }}
+    template:
+      type: Opaque
+      data:
+        GOOGLE_APPLICATION_CREDENTIALS: "{{ `{{ .credentials }}` }}"
+  data:
+    - secretKey: credentials
+      remoteRef:
+        key: {{ $v.vaultKey }}
+        property: {{ $v.vaultProperty }}
+---
+apiVersion: agentic.openshift.io/v1alpha1
+kind: LLMProvider
+metadata:
+  name: {{ $p.name }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+  annotations:
+    # After the vendored CRDs (wave -1); skip dry-run on a fresh cluster
+    # where the CRD does not exist yet at diff time.
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  type: GoogleCloudVertex
+  googleCloudVertex:
+    projectID: {{ $v.projectID | quote }}
+    region: {{ $v.region | quote }}
+    modelProvider: {{ $v.modelProvider }}
+    credentialsSecret:
+      name: {{ $v.credentialsSecretName }}
+---
+apiVersion: agentic.openshift.io/v1alpha1
+kind: Agent
+metadata:
+  name: {{ .Values.adapter.runAgent }}
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  llmProvider:
+    name: {{ $p.name }}
+  model: {{ $agent.model | quote }}
+  maxTurns: {{ $agent.maxTurns }}
+  timeouts:
+    analysisSeconds: {{ $agent.timeouts.analysisSeconds }}
+    executionSeconds: {{ $agent.timeouts.executionSeconds }}
+    verificationSeconds: {{ $agent.timeouts.verificationSeconds }}
+---
+apiVersion: agentic.openshift.io/v1alpha1
+kind: ApprovalPolicy
+metadata:
+  # The operator reads exactly this name (controller/agenticrun/approval.go).
+  name: cluster
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  maxConcurrentRuns: {{ $agent.approvalPolicy.maxConcurrentRuns }}
+  stages:
+    {{- toYaml $agent.approvalPolicy.stages | nindent 4 }}
+{{- end }}

@@ -911,6 +911,25 @@ clusterGroup:
           value: quay.io/ltomasbo/lightspeed-agentic-operator
         - name: agenticOperator.image.tag
           value: "a2a"
+        # Agent configuration (LLMProvider + Agent named adapter.runAgent +
+        # ApprovalPolicy "cluster" with Analysis Automatic). Without it every
+        # run failed live with `Agent "default" not found` (2026-11-20).
+        # Vertex with the SAME shared Vault ADC credential MAS uses
+        # (secret/data/global/llm-creds-vertex) and the same project/location
+        # as setup-mas-blueprint.sh (VERTEX_PROJECT / VERTEX_LOCATION).
+        - name: agenticOperator.agent.enabled
+          value: "true"
+        - name: agenticOperator.agent.llmProvider.vertex.projectID
+          value: redhat-marketplace-dev
+        - name: agenticOperator.agent.llmProvider.vertex.region
+          value: global
+        # Same model as the MAS orchestrator (setup-mas-blueprint.sh
+        # VERTEX_MODEL default): Gemini on Vertex. Keep the two in sync when
+        # changing either.
+        - name: agenticOperator.agent.llmProvider.vertex.modelProvider
+          value: Google
+        - name: agenticOperator.agent.model
+          value: gemini-3.8-flash
         # Gateway credential mode keys (repo C's ConfigMap load fails
         # loudly without all three; the chart mirrors that at render
         # time). gatewayServerURLTemplate matches the per-spoke gateway

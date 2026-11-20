@@ -817,3 +817,64 @@ def test_agentic_operator_rbac_matches_vendored_upstream() -> None:
     ]
     for obj in (role, binding):
         assert obj["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"] == "-1"
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_agent_configuration_renders_vertex_agent_and_policy() -> None:
+    """LLMProvider + Agent + ApprovalPolicy + Vertex credentials.
+
+    VERIFIED-BROKEN LIVE (2026-11-20): with no Agent every adapter run failed
+    terminally (`Agent "default" not found`), and without an ApprovalPolicy
+    the operator auto-approves only Escalation, so Analysis would wait for a
+    human. The Agent is named adapter.runAgent (no drift), Analysis is
+    Automatic, the credential is re-keyed to GOOGLE_APPLICATION_CREDENTIALS
+    from the shared MAS Vault record, and project/region/model fail loud.
+    """
+    # Disabled by default: nothing agent-related renders.
+    base = _resources(_helm(*ENABLE_SETS).stdout)
+    assert not [d for d in base if d["kind"] in ("Agent", "LLMProvider", "ApprovalPolicy")]
+
+    agent_sets = [
+        "--set", "agenticOperator.agent.enabled=true",
+        "--set", "agenticOperator.agent.llmProvider.vertex.projectID=my-project-1",
+        "--set", "agenticOperator.agent.llmProvider.vertex.region=global",
+        "--set", "agenticOperator.agent.model=claude-opus-4-6",
+    ]
+    docs = _resources(_helm(*ENABLE_SETS, *agent_sets, "--set", "adapter.runAgent=investigator").stdout)
+    by_kind = {d["kind"]: d for d in docs if d["kind"] in ("Agent", "LLMProvider", "ApprovalPolicy")}
+
+    provider = by_kind["LLMProvider"]
+    assert provider["spec"]["type"] == "GoogleCloudVertex"
+    assert provider["spec"]["googleCloudVertex"] == {
+        "projectID": "my-project-1",
+        "region": "global",
+        "modelProvider": "Anthropic",
+        "credentialsSecret": {"name": "llm-creds-vertex"},
+    }
+    agent = by_kind["Agent"]
+    assert agent["metadata"]["name"] == "investigator"  # == adapter.runAgent
+    assert agent["spec"]["llmProvider"] == {"name": provider["metadata"]["name"]}
+    assert agent["spec"]["model"] == "claude-opus-4-6"
+
+    policy = by_kind["ApprovalPolicy"]
+    assert policy["metadata"]["name"] == "cluster"
+    stages = {s["name"]: s["approval"] for s in policy["spec"]["stages"]}
+    assert stages["Analysis"] == "Automatic"
+    assert stages["Execution"] == "Manual"
+
+    es = next(
+        d for d in docs
+        if d["kind"] == "ExternalSecret" and d["metadata"]["name"] == "llm-creds-vertex"
+    )
+    assert es["spec"]["data"][0]["remoteRef"] == {
+        "key": "secret/data/global/llm-creds-vertex",
+        "property": "credentials",
+    }
+    assert "GOOGLE_APPLICATION_CREDENTIALS" in es["spec"]["target"]["template"]["data"]
+
+    # Fail loud on missing deployment-owned values.
+    for drop in (2, 6):  # projectID, model
+        sets = agent_sets[:drop] + agent_sets[drop + 2:]
+        assert _helm(*ENABLE_SETS, *sets, check=False).returncode != 0

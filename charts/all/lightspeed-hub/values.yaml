@@ -309,6 +309,63 @@ agenticOperator:
     # (design §2.3).
     terminalTTLDays: 14
 
+  # Agent configuration the operator needs to run anything (all three are
+  # CLUSTER-scoped CRs; adapted from the mao-poc-rca branch's
+  # lightspeed-agentic-operator chart). VERIFIED-BROKEN LIVE (2026-11-20):
+  # with none of them present every adapter-created run failed terminally
+  # with `workflow resolution failed: Agent "default" not found`, and -- even
+  # with an Agent -- would have stalled waiting for MANUAL Analysis approval,
+  # since without an ApprovalPolicy the operator auto-approves only the
+  # Escalation stage.
+  agent:
+    enabled: false
+    # The Agent's NAME is always adapter.runAgent (the agent the adapter
+    # requests on every AgenticRun), so the two cannot drift.
+    # model: the model ID on the provider below (e.g. claude-opus-4-6 for
+    # Vertex/Anthropic). No default -- belongs to the deployment, set it in
+    # the variant; the render fails when empty.
+    model: ""
+    maxTurns: 200
+    timeouts:
+      analysisSeconds: 1200
+      executionSeconds: 1200
+      verificationSeconds: 600
+    # Only GoogleCloudVertex is wired here (the pattern's shared Vault ADC
+    # credential, also used by mao/mas-worker). Add another type alongside
+    # if needed.
+    llmProvider:
+      name: vertex
+      vertex:
+        # GCP project and region of the Vertex AI endpoint. No defaults --
+        # set them in the variant (the render fails when empty).
+        projectID: ""
+        region: ""
+        # Anthropic (Claude on Vertex) or Google (Gemini).
+        modelProvider: Anthropic
+        # Secret (in the operator/run namespace) the LLMProvider references;
+        # the operator requires the key GOOGLE_APPLICATION_CREDENTIALS.
+        credentialsSecretName: llm-creds-vertex
+        # Pattern-wide Vault ADC JSON (values-secret.yaml.template
+        # llm-creds-vertex), the same record mao/mas-worker consumes.
+        vaultKey: secret/data/global/llm-creds-vertex
+        vaultProperty: credentials
+    # The operator reads the ApprovalPolicy named "cluster". Adapter runs
+    # are analysis-only, so Analysis MUST be Automatic or every run waits
+    # for a human; Execution stays Manual (cluster mutations need a human).
+    approvalPolicy:
+      maxConcurrentRuns: 5
+      stages:
+        - name: Analysis
+          approval: Automatic
+        - name: Execution
+          approval: Manual
+        - name: Verification
+          approval: Automatic
+        # Escalation only produces a report; keep it Automatic so a
+        # verification failure is not stranded at the gate.
+        - name: Escalation
+          approval: Automatic
+
   resources:
     requests:
       cpu: 100m
@@ -316,6 +373,12 @@ agenticOperator:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# Vault-backed ExternalSecrets rendered by this chart (agent LLM credentials).
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+  refreshInterval: 15m
 
 podSecurityContext:
   runAsNonRoot: true
