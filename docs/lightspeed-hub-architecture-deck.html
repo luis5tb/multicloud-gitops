@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lightspeed Hub — Architecture &amp; Token Chain (as implemented)</title>
+  <link href="https://cdn.jsdelivr.net/npm/@rhds/tokens@3.0.2/css/global.min.css" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;700;900&family=Red+Hat+Text:wght@400;500;700&family=Red+Hat+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    /* === RESET & BASE === */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root { color-scheme: dark; }
+
+    /* === COLOR VARIABLES (Core Dark) === */
+    :root {
+      --bg-primary: #000000;
+      --bg-secondary: #1f1f1f;
+      --bg-surface: #292929;
+      --text-primary: #ffffff;
+      --text-secondary: #c7c7c7;
+      --text-muted: #a3a3a3;
+      --accent: #ee0000;
+      --accent-dark: #a60000;
+      --accent-light: #f56e6e;
+      --tag-border: #383838;
+      --icon-filter: brightness(0) invert(1);
+      --icon-filter-accent: invert(12%) sepia(100%) saturate(10000%) hue-rotate(0deg) brightness(95%);
+      --font-display: var(--rh-font-family-heading, 'Red Hat Display', sans-serif);
+      --font-body: var(--rh-font-family-body-text, 'Red Hat Text', sans-serif);
+      --font-mono: var(--rh-font-family-code, 'Red Hat Mono', monospace);
+    }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* === SLIDE CONTAINER === */
+    .deck { position: relative; height: 100vh; width: 100vw; }
+    .slide {
+      position: absolute; inset: 0;
+      display: none; flex-direction: column;
+      padding: var(--rh-space-4xl, 80px) var(--rh-space-3xl, 64px);
+      background: var(--bg-primary);
+      overflow: hidden;
+    }
+    .slide.active { display: flex; }
+    .slide::before {
+      content: '';
+      position: absolute; top: -20%; right: -10%;
+      width: 60%; height: 60%;
+      background: radial-gradient(ellipse, rgba(238,0,0,0.08) 0%, transparent 70%);
+      pointer-events: none; z-index: 0;
+    }
+    .slide > * { position: relative; z-index: 1; }
+
+    /* === TYPOGRAPHY === */
+    .headline-xl {
+      font-family: var(--font-display); font-weight: 900;
+      font-size: var(--rh-font-size-heading-2xl, 3rem); line-height: 1.05;
+      letter-spacing: -0.02em; max-width: 900px;
+    }
+    .headline-lg {
+      font-family: var(--font-display); font-weight: 900;
+      font-size: var(--rh-font-size-heading-lg, 2rem); line-height: 1.1;
+      letter-spacing: -0.01em; margin-bottom: var(--rh-space-md, 16px);
+    }
+    .subtitle { font-size: var(--rh-font-size-body-text-xl, 1.25rem); color: var(--text-secondary); line-height: 1.5; max-width: 820px; }
+    .body-text { font-size: var(--rh-font-size-body-text-lg, 1.125rem); color: var(--text-secondary); line-height: 1.55; max-width: 860px; }
+    .accent { color: var(--accent); }
+    .slide-label {
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      color: var(--accent); letter-spacing: 0.12em; text-transform: uppercase;
+      margin-bottom: var(--rh-space-md, 16px);
+    }
+    .source { font-size: var(--rh-font-size-body-text-sm, 0.875rem); color: var(--text-muted); margin-top: auto; padding-top: var(--rh-space-lg, 24px); }
+
+    /* === BREADCRUMB / ATTRIBUTION === */
+    .breadcrumb {
+      position: absolute; top: var(--rh-space-2xl, 48px); left: var(--rh-space-3xl, 64px);
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      color: var(--text-muted); display: flex; align-items: center;
+    }
+    .breadcrumb svg + span { margin-left: var(--rh-space-sm, 8px); }
+    .attribution {
+      position: absolute; bottom: var(--rh-space-2xl, 48px); left: var(--rh-space-3xl, 64px);
+      font-size: var(--rh-font-size-body-text-sm, 0.875rem); color: var(--text-muted);
+    }
+
+    /* === LOGO === */
+    .rh-logo { height: 28px; width: auto; }
+    .rh-logo.small { height: 20px; }
+    .rh-logo.large { height: 40px; }
+
+    /* === ICONS === */
+    .rh-icon { height: 48px; width: 48px; filter: var(--icon-filter); vertical-align: middle; }
+    .rh-icon.small { height: 24px; width: 24px; }
+    .rh-icon.medium { height: 48px; width: 48px; }
+    .rh-icon.xl { height: 96px; width: 96px; }
+    .rh-icon.accent { filter: var(--icon-filter-accent); }
+
+    /* === TAGS === */
+    .tag {
+      display: inline-block;
+      padding: var(--rh-space-xs, 4px) var(--rh-space-md, 16px);
+      border: var(--rh-border-width-sm, 1px) solid var(--tag-border);
+      border-radius: var(--rh-border-radius-pill, 64px);
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-secondary);
+    }
+    .tag.accent { border-color: var(--accent); color: var(--accent); }
+    .tag-row { display: flex; gap: var(--rh-space-sm, 8px); flex-wrap: wrap; }
+
+    /* === BULLET LIST === */
+    .bullet-list { list-style: none; display: flex; flex-direction: column; gap: var(--rh-space-md, 16px); max-width: 860px; }
+    .bullet-list li {
+      position: relative; padding-left: var(--rh-space-lg, 24px);
+      font-size: var(--rh-font-size-body-text-lg, 1.125rem); color: var(--text-secondary); line-height: 1.5;
+    }
+    .bullet-list li::before {
+      content: ''; position: absolute; left: 0; top: 0.65em;
+      width: 14px; height: 3px; background: var(--accent); border-radius: 0;
+    }
+    .bullet-list li strong { color: var(--text-primary); }
+
+    /* === ARCHITECTURE (horizontal flow) === */
+    .arch-flow {
+      display: flex; align-items: stretch; gap: var(--rh-space-sm, 8px);
+      margin-top: var(--rh-space-lg, 24px);
+    }
+    .arch-box {
+      flex: 1; border: var(--rh-border-width-sm, 1px) solid var(--tag-border);
+      background: rgba(31,31,31,0.85); border-radius: var(--rh-border-radius-default, 3px);
+      padding: var(--rh-space-md, 16px); display: flex; flex-direction: column; gap: var(--rh-space-xs, 4px);
+      box-shadow: var(--rh-box-shadow-sm, 0 2px 4px 0 rgba(21,21,21,0.2));
+      min-width: 0;
+    }
+    .arch-box .arch-tag {
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em;
+    }
+    .arch-box h4 { font-family: var(--font-display); font-size: var(--rh-font-size-heading-sm, 1.25rem); font-weight: 700; color: var(--text-primary); }
+    .arch-box p { font-size: var(--rh-font-size-body-text-sm, 0.875rem); color: var(--text-secondary); line-height: 1.35; }
+    .arch-box.hot { border-color: var(--accent); background: rgba(238,0,0,0.06); }
+    .arch-arrow {
+      align-self: center; font-family: var(--font-mono); color: var(--accent);
+      font-size: 1.25rem; flex: 0 0 auto; padding: 0 2px;
+    }
+    .arch-lane-label {
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em;
+      margin-top: var(--rh-space-lg, 24px); margin-bottom: var(--rh-space-xs, 4px);
+    }
+    .token-chip {
+      display: inline-block; font-family: var(--font-mono);
+      font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      border: var(--rh-border-width-sm, 1px) solid var(--accent); color: var(--accent);
+      border-radius: var(--rh-border-radius-pill, 64px); padding: 2px 10px; align-self: flex-start;
+      margin-top: var(--rh-space-xs, 4px);
+    }
+    .token-chip.gray { border-color: var(--tag-border); color: var(--text-secondary); }
+
+    /* === TABLE === */
+    .plan-table { border-collapse: collapse; width: 100%; margin-top: var(--rh-space-lg, 24px); font-size: var(--rh-font-size-body-text-md, 1rem); }
+    .plan-table th {
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);
+      text-align: left; padding: var(--rh-space-sm, 8px) var(--rh-space-md, 16px);
+      border-bottom: var(--rh-border-width-md, 2px) solid var(--accent);
+    }
+    .plan-table td {
+      padding: var(--rh-space-sm, 8px) var(--rh-space-md, 16px);
+      border-bottom: var(--rh-border-width-sm, 1px) solid var(--tag-border);
+      color: var(--text-secondary); vertical-align: top; line-height: 1.4;
+    }
+    .plan-table td:first-child { color: var(--text-primary); font-weight: 500; white-space: nowrap; }
+
+    /* === COMPARE GRID === */
+    .compare-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--rh-space-md, 16px); margin-top: var(--rh-space-lg, 24px); }
+    .compare-col {
+      border: var(--rh-border-width-sm, 1px) solid var(--tag-border);
+      border-radius: var(--rh-border-radius-default, 3px); padding: var(--rh-space-md, 16px);
+      background: rgba(31,31,31,0.85); display: flex; flex-direction: column; gap: var(--rh-space-xs, 4px);
+    }
+    .compare-col .lead {
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem);
+      text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);
+    }
+    .compare-col h3 { font-family: var(--font-display); font-size: var(--rh-font-size-heading-sm, 1.25rem); font-weight: 700; }
+    .compare-col p { font-size: var(--rh-font-size-body-text-sm, 0.875rem); color: var(--text-secondary); line-height: 1.4; }
+    .compare-col.winner { border-color: var(--accent); background: rgba(238,0,0,0.06); }
+    .compare-col.winner .lead { color: var(--accent); }
+    .compare-col.rejected { opacity: 0.55; }
+
+    /* === CODE BLOCK === */
+    .code-block {
+      font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-sm, 0.875rem);
+      background: var(--bg-secondary); border: var(--rh-border-width-sm, 1px) solid var(--tag-border);
+      border-radius: var(--rh-border-radius-default, 3px);
+      padding: var(--rh-space-md, 16px); line-height: 1.5; color: var(--text-secondary);
+      overflow: hidden; max-width: 860px;
+    }
+    .code-block .k { color: var(--accent-light); }
+    .code-block .c { color: var(--text-muted); }
+
+    /* === LAYOUT HELPERS === */
+    .content-body { display: flex; flex-direction: column; gap: var(--rh-space-lg, 24px); margin-top: var(--rh-space-md, 16px); }
+    .title-content { margin-top: auto; margin-bottom: auto; display: flex; flex-direction: column; gap: var(--rh-space-lg, 24px); }
+
+    /* === NAVIGATION === */
+    .controls {
+      position: fixed; bottom: var(--rh-space-lg, 24px); right: var(--rh-space-3xl, 64px);
+      display: flex; align-items: center; gap: var(--rh-space-lg, 24px); z-index: 100;
+    }
+    .nav-hint { font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-xs, 0.75rem); color: var(--text-muted); }
+    .progress { font-family: var(--font-mono); font-size: var(--rh-font-size-body-text-sm, 0.875rem); color: var(--text-secondary); }
+    .progress .current { color: var(--accent); font-weight: 700; }
+
+    /* === CONTEXTUAL NOTES PANEL === */
+    .notes-panel {
+      position: fixed; bottom: 0; left: 0; right: 0; max-height: 35vh; overflow-y: auto;
+      background: var(--bg-secondary); border-top: var(--rh-border-width-md, 2px) solid var(--accent);
+      padding: var(--rh-space-lg, 24px) var(--rh-space-3xl, 64px);
+      font-size: var(--rh-font-size-body-text-sm, 0.875rem); color: var(--text-secondary); line-height: 1.55;
+      display: none; z-index: 90;
+    }
+    .notes-panel.visible { display: block; }
+    .notes-panel strong { color: var(--text-primary); }
+    .notes-panel code { font-family: var(--font-mono); color: var(--accent-light); }
+
+    /* === ANIMATIONS === */
+    .slide.active .animate-in { animation: fadeSlideUp 0.6s ease-out forwards; }
+    .slide.active .animate-in:nth-child(2) { animation-delay: 0.1s; }
+    .slide.active .animate-in:nth-child(3) { animation-delay: 0.2s; }
+    .slide.active .animate-in:nth-child(4) { animation-delay: 0.3s; }
+    @keyframes fadeSlideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* === THANK YOU SLIDE === */
+    .thank-you-slide { justify-content: center; align-items: center; text-align: center; }
+    .thank-you-slide .headline-xl { max-width: none; }
+    .thank-you-slide .author-block { margin-top: var(--rh-space-md, 16px); color: var(--text-secondary); font-size: var(--rh-font-size-body-text-lg, 1.125rem); line-height: 1.6; }
+    .thank-you-slide .author-block .name { color: var(--text-primary); font-weight: 700; font-size: var(--rh-font-size-heading-md, 1.5rem); }
+    .logo-footer { margin-top: var(--rh-space-2xl, 48px); }
+
+    /* === RESPONSIVE === */
+    @media (max-width: 900px) {
+      .slide { padding: var(--rh-space-xl, 32px) var(--rh-space-lg, 24px); }
+      .headline-xl { font-size: 2.2rem; }
+      .arch-flow { flex-direction: column; }
+      .arch-arrow { transform: rotate(90deg); align-self: center; }
+      .compare-grid { grid-template-columns: 1fr 1fr; }
+      .breadcrumb, .attribution { left: var(--rh-space-lg, 24px); }
+    }
+
+    /* === PRINT PREVIEW HYGIENE === */
+    body.printing .deck { visibility: hidden; }
+
+    /* === PRINT / PDF EXPORT (digital sharing: dark palette preserved) === */
+    @media print {
+      body.printing .deck, body.printing .slide { visibility: visible !important; }
+      @page { size: 13.33in 7.5in; margin: 0; }
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      html, body { height: auto !important; width: auto !important; overflow: visible !important; background: var(--bg-primary) !important; }
+      .deck { height: auto !important; width: auto !important; position: static !important; overflow: visible !important; }
+      .slide {
+        display: flex !important; position: relative !important; inset: auto !important;
+        width: 13.33in !important; height: 7.5in !important;
+        padding: 0.55in 0.85in !important; gap: 0.14in !important; box-sizing: border-box !important;
+        break-after: page; page-break-after: always; break-inside: avoid; page-break-inside: avoid;
+        overflow: hidden !important;
+      }
+      .slide:last-child { break-after: auto; page-break-after: auto; }
+      .slide::before, .slide::after { display: none !important; }
+      .headline-xl { font-size: 60pt !important; line-height: 1.05 !important; letter-spacing: -0.02em; }
+      .headline-lg { font-size: 30pt !important; line-height: 1.1 !important; }
+      .subtitle, .body-text { font-size: 14pt !important; line-height: 1.45 !important; }
+      .slide-label, .breadcrumb { font-size: 10pt !important; letter-spacing: 0.1em; }
+      .attribution, .source, .nav-hint, .arch-box .arch-tag, .compare-col .lead, .tag { font-size: 9pt !important; }
+      .bullet-list { gap: 10pt !important; max-width: none !important; }
+      .bullet-list li { padding-left: 18pt !important; font-size: 12pt !important; line-height: 1.45 !important; }
+      .bullet-list li::before { content: '' !important; position: absolute !important; left: 0 !important; top: 0.7em !important; width: 10pt !important; height: 2pt !important; background: #ee0000 !important; border-radius: 0 !important; }
+      .arch-box { padding: 0.12in 0.16in !important; }
+      .arch-box h4 { font-size: 11pt !important; line-height: 1.15 !important; }
+      .arch-box p { font-size: 8.5pt !important; line-height: 1.3 !important; }
+      .compare-grid { gap: 0.14in !important; }
+      .compare-col { padding: 0.16in !important; }
+      .compare-col h3 { font-size: 12pt !important; }
+      .compare-col p { font-size: 9pt !important; line-height: 1.3 !important; }
+      .plan-table { font-size: 10pt !important; }
+      .plan-table td, .plan-table th { padding: 5pt 8pt !important; }
+      .code-block { font-size: 9pt !important; line-height: 1.45 !important; padding: 0.14in !important; overflow: visible !important; }
+      .breadcrumb { top: 0.4in !important; left: 0.85in !important; }
+      .attribution { bottom: 0.4in !important; left: 0.85in !important; }
+      .slide .animate-in, .slide.active .animate-in { animation: none !important; opacity: 1 !important; transform: none !important; }
+      .controls, .nav-hint, .notes-panel { display: none !important; }
+      .arch-arrow { font-size: 11pt !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="deck">
+
+    <!-- SLIDE 1: TITLE -->
+    <div class="slide" data-notes="Tips for viewers: arrow keys or click to navigate. Press 'N' to toggle contextual notes. Works in any modern browser; share the HTML file directly. For best results use fullscreen (F11).<br><br>This deck was updated on 2026-11-20 to describe the chain <strong>as implemented and verified live</strong> on the standalone cluster (an ACME request completed as AgenticRun a2a-1410731…, Analyzed=True). The original plan (A → H plus A → U, parked Token A) is kept in <code>PLAN-lightspeed-hub-migration.md</code> as history. Current references: <code>docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md</code> (design, ownership split operator vs hub), <code>agents/AUTHENTICATION.md</code> (per-hop reference), <code>docs/agentic-architecture-overview.html</code> and <code>docs/agentic-e2e-token-flow.html</code> (diagrams). Projects: multicloud-gitops (branch rca-mao-praxis-hub), lightspeed-hub (branch a2a, the A2A adapter), lightspeed-agentic-operator (branch a2a-support, gateway credential mode).">
+      <div class="breadcrumb">
+        <svg class="rh-logo small" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 613 145" role="img" aria-label="Red Hat">
+          <title>Red Hat</title>
+          <path d="M127.47,83.49c12.51,0,30.61-2.58,30.61-17.46a14,14,0,0,0-.31-3.42l-7.45-32.36c-1.72-7.12-3.23-10.35-15.73-16.6C124.89,8.69,103.76.5,97.51.5,91.69.5,90,8,83.06,8c-6.68,0-11.64-5.6-17.89-5.6-6,0-9.91,4.09-12.93,12.5,0,0-8.41,23.72-9.49,27.16A6.43,6.43,0,0,0,42.53,44c0,9.22,36.3,39.45,84.94,39.45M160,72.07c1.73,8.19,1.73,9.05,1.73,10.13,0,14-15.74,21.77-36.43,21.77C78.54,104,37.58,76.6,37.58,58.49a18.45,18.45,0,0,1,1.51-7.33C22.27,52,.5,55,.5,74.22c0,31.48,74.59,70.28,133.65,70.28,45.28,0,56.7-20.48,56.7-36.65,0-12.72-11-27.16-30.83-35.78" fill="#e00"/>
+          <path d="M160,72.07c1.73,8.19,1.73,9.05,1.73,10.13,0,14-15.74,21.77-36.43,21.77C78.54,104,37.58,76.6,37.58,58.49a18.45,18.45,0,0,1,1.51-7.33l3.66-9.06A6.43,6.43,0,0,0,42.53,44c0,9.22,36.3,39.45,84.94,39.45,12.51,0,30.61-2.58,30.61-17.46a14,14,0,0,0-.31-3.42Z"/>
+          <path d="M579.74,92.8c0,11.89,7.15,17.67,20.19,17.67a52.11,52.11,0,0,0,11.89-1.68V95a24.84,24.84,0,0,1-7.68,1.16c-5.37,0-7.36-1.68-7.36-6.73V68.3h15.56V54.1H596.78v-18l-17,3.68V54.1H568.49V68.3h11.25Zm-53,.32c0-3.68,3.69-5.47,9.26-5.47a43.12,43.12,0,0,1,10.1,1.26v7.15a21.51,21.51,0,0,1-10.63,2.63c-5.46,0-8.73-2.1-8.73-5.57m5.2,17.56c6,0,10.84-1.26,15.36-4.31v3.37h16.82V74.08c0-13.56-9.14-21-24.39-21-8.52,0-16.94,2-26,6.1l6.1,12.52c6.52-2.74,12-4.42,16.83-4.42,7,0,10.62,2.73,10.62,8.31v2.73a49.53,49.53,0,0,0-12.62-1.58c-14.31,0-22.93,6-22.93,16.73,0,9.78,7.78,17.24,20.19,17.24m-92.44-.94h18.09V80.92h30.29v28.82H506V36.12H487.93V64.41H457.64V36.12H439.55ZM370.62,81.87c0-8,6.31-14.1,14.62-14.1A17.22,17.22,0,0,1,397,72.09V91.54A16.36,16.36,0,0,1,385.24,96c-8.2,0-14.62-6.1-14.62-14.09m26.61,27.87h16.83V32.44l-17,3.68V57.05a28.3,28.3,0,0,0-14.2-3.68c-16.19,0-28.92,12.51-28.92,28.5a28.25,28.25,0,0,0,28.4,28.6,25.12,25.12,0,0,0,14.93-4.83ZM320,67c5.36,0,9.88,3.47,11.67,8.83H308.47C310.15,70.3,314.36,67,320,67M291.33,82c0,16.2,13.25,28.82,30.28,28.82,9.36,0,16.2-2.53,23.25-8.42l-11.26-10c-2.63,2.74-6.52,4.21-11.14,4.21a14.39,14.39,0,0,1-13.68-8.83h39.65V83.55c0-17.67-11.88-30.39-28.08-30.39a28.57,28.57,0,0,0-29,28.81M262,51.58c6,0,9.36,3.78,9.36,8.31S268,68.2,262,68.2H244.11V51.58Zm-36,58.16h18.09V82.92h13.77l13.89,26.82H292l-16.2-29.45a22.27,22.27,0,0,0,13.88-20.72c0-13.25-10.41-23.45-26-23.45H226Z" fill="#fff"/>
+        </svg>
+        <span>› MULTICLOUD GITOPS</span>
+      </div>
+      <div class="title-content">
+        <div class="slide-label animate-in">—— LIGHTSPEED HUB · AS IMPLEMENTED · LIVE 2026-11-20</div>
+        <h1 class="headline-xl animate-in">One Principal, Four Tokens:<br>ACME to the <span class="accent">Spoke Cluster</span></h1>
+        <p class="subtitle animate-in">How an ACME question becomes a lightspeed-hub investigation, running live on the standalone cluster — and how tokens A, H, R and U carry one caller identity across every hop.</p>
+        <div class="tag-row animate-in">
+          <span class="tag accent">A2A</span>
+          <span class="tag">RFC 8693 Token Exchange</span>
+          <span class="tag">Token A / H / R / U</span>
+          <span class="tag">Praxis hub + spoke gateways</span>
+          <span class="tag">Keycloak + SPIFFE</span>
+        </div>
+      </div>
+      <div class="attribution">Multicloud GitOps · branch rca-mao-praxis-hub · Red Hat</div>
+    </div>
+
+    <!-- SLIDE 2: WHERE WE STARTED -->
+    <div class="slide" data-notes="Starting point (early Nov 2026): ACME called the MAS orchestrator, which routed through Praxis (JWT validation, claim.azp allow-list, X-OLS-Cluster routing) to OpenShift Lightspeed running the custom a2a-split fork via the appServerPatch bridge. The fork performed the only RFC 8693 exchange (operator SVID + Token A → Token B) before MCP calls to the spoke. Task A of the plan removed RHOAI and OLS from this repo; this whole chain is now history.">
+      <div class="slide-label animate-in">—— WHERE WE STARTED</div>
+      <h2 class="headline-lg animate-in">We started from a chain that leaned on a <span class="accent">forked OLS bridge</span></h2>
+      <div class="arch-flow animate-in">
+        <div class="arch-box">
+          <span class="arch-tag">Chat Agent</span>
+          <h4>ACME</h4>
+          <p>Mints Token A (client credentials + SVID assertion)</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Orchestrator</span>
+          <h4>MAS</h4>
+          <p>Forwards A without changing azp</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Policy Gateway</span>
+          <h4>Praxis</h4>
+          <p>JWT iss/aud/JWKS, azp allow-list, X-OLS-Cluster routing</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box hot">
+          <span class="arch-tag">Custom Fork · retired</span>
+          <h4>OLS a2a-split</h4>
+          <p>appServerPatch bridge; the only token exchanger</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Spokes</span>
+          <h4>Clusters</h4>
+          <p>Keycloak-trusted; user RBAC applies</p>
+        </div>
+      </div>
+      <ul class="bullet-list animate-in" style="margin-top: var(--rh-space-lg, 24px);">
+        <li><strong>Retired</strong> — Task A removed RHOAI and OLS from multicloud-gitops; the fork and its bridge are gone.</li>
+        <li><strong>Token A is still an agent identity</strong> — client-credentials minted by ACME; human SSO callers remain an open item.</li>
+      </ul>
+      <div class="source">Source: PLAN-lightspeed-hub-migration.md · Background · Task A</div>
+    </div>
+
+    <!-- SLIDE 3: WHAT HAD TO BE BUILT -->
+    <div class="slide" data-notes="lightspeed-hub was a Go operator with no HTTP service and no A2A code; spokes only ever saw standing admin kubeconfigs and a shared reader SA. All four gaps are now closed: the A2A adapter lives in the lightspeed-hub repo (a2a-adapter/, branch a2a); the agentic operator gained gateway credential mode (branch a2a-support); the Praxis hub and spoke gateways and the Keycloak clients are Helm charts in this repo.">
+      <div class="slide-label animate-in">—— WHAT HAD TO BE BUILT</div>
+      <h2 class="headline-lg animate-in">The hub had <span class="accent">no A2A and no identity</span> — both are built and live</h2>
+      <ul class="bullet-list animate-in">
+        <li><strong>A2A adapter</strong> — Go service in lightspeed-hub (<code>a2a-adapter/</code>): A2A task → AgenticRun, status → A2A events, own agent card (protocolVersion 0.3).</li>
+        <li><strong>Spokes see the caller</strong> — every kube read is made with Token U for the caller's <code>sub</code>, through a per-spoke Praxis gateway.</li>
+        <li><strong>lightspeed-agentic-operator, gateway credential mode</strong> — sandbox kubeconfig points at the spoke gateway with the run token; no spoke ServiceAccount, no spoke-management kubeconfig.</li>
+        <li><strong>GitOps for all of it</strong> — charts <code>lightspeed-hub</code>, <code>praxis-proxy</code> (hub + spoke gateways) and <code>keycloak-oidc</code> (exchanger clients, roles) in this repo.</li>
+      </ul>
+      <div class="source">Source: docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md · s0 Who owns what</div>
+    </div>
+
+    <!-- SLIDE 4: ARCHITECTURE AS IMPLEMENTED -->
+    <div class="slide" data-notes="Request leg: ACME gets Token A (aud mas-a2a, 300 s) and calls MAS A2A, the front door. MAS seals A into the Temporal task; mas-worker sends it to the remote agent 'Hub Cluster Investigator', which is the Praxis hub gateway. The hub gateway validates A and exchanges it as client mas-a2a for H (aud lightspeed-hub-a2a, group lightspeed-hub-a2a:agenticrun-creator). The adapter creates the AgenticRun with H, so the run is created by the caller, and exchanges H as client lightspeed-hub-a2a for the run token R (aud praxis-spoke-gateway, 1800 s), stored in ls-run-token-&lt;uid&gt;.<br><br>Run leg: the agentic operator creates the sandbox with a kubeconfig pointing at praxis-spoke-&lt;id&gt; and tokenFile = R. The spoke gateway validates R and exchanges it per call as client praxis-spoke-gateway for U (aud praxis-spoke-&lt;id&gt;, group praxis-spoke-&lt;id&gt;:reader).<br><br>Why a chain and not the planned A → H plus A → U: parking A failed live (A is 5 minutes, investigations died); exchanging at the hub gateway means the adapter never sees A; and R, unlike A, is useless anywhere but the spoke gateway.">
+      <div class="slide-label animate-in">—— ARCHITECTURE AS IMPLEMENTED</div>
+      <h2 class="headline-lg animate-in">A chain: <span class="accent">A → H</span> at the hub gateway, <span class="accent">H → R</span> in the adapter, <span class="accent">R → U</span> at the spoke gateway</h2>
+      <div class="arch-lane-label animate-in">Request leg — run creation</div>
+      <div class="arch-flow animate-in">
+        <div class="arch-box">
+          <span class="arch-tag">Caller</span>
+          <h4>ACME</h4>
+          <span class="token-chip">A · aud mas-a2a</span>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Front door</span>
+          <h4>MAS A2A</h4>
+          <p>validates A, seals it into the task</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box hot">
+          <span class="arch-tag">Praxis · hub gateway</span>
+          <h4>praxis-proxy</h4>
+          <p>A → H as client mas-a2a</p>
+          <span class="token-chip">H · run creation</span>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box hot">
+          <span class="arch-tag">lightspeed-hub</span>
+          <h4>A2A adapter</h4>
+          <p>creates the run with H; H → R</p>
+          <span class="token-chip">R · 30 min</span>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Hub</span>
+          <h4>kube API</h4>
+          <p>H ⇒ agenticrun-creator group; RBAC + admission policy</p>
+        </div>
+      </div>
+      <div class="arch-lane-label animate-in">Run leg — investigation (gateway credential mode)</div>
+      <div class="arch-flow animate-in">
+        <div class="arch-box">
+          <span class="arch-tag">Hub controller</span>
+          <h4>agentic-operator</h4>
+          <p>sandbox pod + kubeconfig → spoke gateway</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Per-run pod</span>
+          <h4>Sandbox</h4>
+          <p>mounts R as tokenFile</p>
+          <span class="token-chip gray">input: R</span>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box hot">
+          <span class="arch-tag">Praxis · per spoke</span>
+          <h4>praxis-spoke-&lt;id&gt;</h4>
+          <p>R → U per call as praxis-spoke-gateway</p>
+          <span class="token-chip">U · spoke reads</span>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Spoke</span>
+          <h4>kube API</h4>
+          <p>U ⇒ reader group; cluster-reader</p>
+        </div>
+      </div>
+      <div class="source">Source: docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s2 · agents/AUTHENTICATION.md</div>
+    </div>
+
+    <!-- SLIDE 5: TOKEN MODEL -->
+    <div class="slide" data-notes="Rule: each token's aud is the client that exchanges or consumes it next. Two hard constraints force it: Keycloak 26 standard token exchange only lets a client exchange a token that names it in aud, and the pinned Praxis delegate() asks for exactly one audience. Exchange audiences must also be existing clients (400 'Audience not found' otherwise), hence the audience-only client praxis-spoke-&lt;id&gt;.<br><br>groups are audience-scoped client roles projected by each exchanger's client-role mapper (charts/all/keycloak-oidc exchangeRoles), so Kubernetes, which binds groups and not audiences, sees run creation (H) and reads (U) as different groups for the same sub. Verified live: kube API maps H to keycloak:lightspeed-hub-a2a:agenticrun-creator, U to keycloak:praxis-spoke-hub:reader; A and R get 401.">
+      <div class="slide-label animate-in">—— TOKEN MODEL</div>
+      <h2 class="headline-lg animate-in">Four tokens, one <span class="accent">sub</span> — each audience names the next exchanger</h2>
+      <table class="plan-table animate-in">
+        <tr><th>Token</th><th>Minted by (client)</th><th>azp</th><th>aud</th><th>groups</th><th>Life</th></tr>
+        <tr><td>A — caller</td><td>Keycloak for <code>acme-agent</code> (SPIFFE)</td><td>acme-agent</td><td>mas-a2a</td><td>acme-agent-rca</td><td>300 s</td></tr>
+        <tr><td>H — run creation</td><td>hub gateway as <code>mas-a2a</code></td><td>mas-a2a</td><td>lightspeed-hub-a2a</td><td>lightspeed-hub-a2a:agenticrun-creator</td><td>300 s</td></tr>
+        <tr><td>R — run credential</td><td>adapter as <code>lightspeed-hub-a2a</code></td><td>lightspeed-hub-a2a</td><td>praxis-spoke-gateway</td><td>none</td><td>1800 s</td></tr>
+        <tr><td>U — spoke reads</td><td>spoke gateway as <code>praxis-spoke-gateway</code>, per call</td><td>praxis-spoke-gateway</td><td>praxis-spoke-&lt;id&gt;</td><td>praxis-spoke-&lt;id&gt;:reader</td><td>300 s</td></tr>
+      </table>
+      <ul class="bullet-list animate-in" style="margin-top: var(--rh-space-lg, 24px);">
+        <li><strong>sub is preserved, azp becomes the exchanger</strong> — so any azp allow-list after an exchange must name the exchanger (the spoke gateways allow <code>lightspeed-hub-a2a</code>).</li>
+        <li><strong>Only one hop can use each token</strong> — A and R are rejected by every kube API (401); U is per spoke.</li>
+      </ul>
+      <div class="source">Source: docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s2, s4 · verified live 2026-11-20</div>
+    </div>
+
+    <!-- SLIDE 6: LEG 1 ACME→MAS -->
+    <div class="slide" data-notes="A2A ↔ MAS/Temporal mapping (verified against uie-mas-hosted): A2A contextId = conversation owned by principal + blueprint, mapped to a MAS session reused across turns. taskId = one submitted turn. messageId = one submission/follow-up; duplicates return the existing record. Temporal workflow a2a-&lt;taskId&gt; is the parent SessionWorkflow (REJECT_DUPLICATE). MAS A2A validates Token A (Keycloak JWKS, aud mas-a2a, sub allow-list) and seals it with Fernet keys from Vault (mao-run-credentials) before it enters the task. The stream to the hub is capped at 1200 s (A2A_STREAM_MAX_DURATION_SECONDS) to fit an investigation.">
+      <div class="slide-label animate-in">—— LEG 1 · ACME → MAS</div>
+      <h2 class="headline-lg animate-in">A2A IDs are the <span class="accent">durable spine</span> — Temporal is MAS's engine, not the protocol</h2>
+      <table class="plan-table animate-in">
+        <tr><th>Layer / ID</th><th>Meaning and persistence</th></tr>
+        <tr><td>A2A contextId</td><td>Conversation, owned by principal + blueprint; Mongo maps it to a MAS session reused across turns</td></tr>
+        <tr><td>A2A taskId</td><td>One submitted turn; task record holds status, message ID, session + workflow handle</td></tr>
+        <tr><td>A2A messageId</td><td>One submission/follow-up; duplicate delivery returns the existing record — no second turn</td></tr>
+        <tr><td>Temporal a2a-&lt;taskId&gt;</td><td>Parent SessionWorkflow, REJECT_DUPLICATE; a graph node may call out via A2A (the Hub Cluster Investigator)</td></tr>
+      </table>
+      <ul class="bullet-list animate-in" style="margin-top: var(--rh-space-lg, 24px);">
+        <li><strong>Token A is sealed</strong> — Fernet (Vault <code>mao-run-credentials</code>); never plaintext in logs or workflow inputs.</li>
+        <li><strong>Downstream hub task ≠ MAS task</strong> — the hub task maps to one AgenticRun; MAS streams it for up to 1200 s.</li>
+      </ul>
+      <div class="source">Source: charts/all/mao/mas-a2a README · PLAN · A2A ↔ MAS / Temporal mapping</div>
+    </div>
+
+    <!-- SLIDE 7: LEG 2 MAS→HUB -->
+    <div class="slide" data-notes="The hub gateway is the praxis-proxy Deployment with a2aUpstream.exchangeAtPraxis: after the azp allow-list passes it runs delegate(hub-delegator, target: hub-adapter, audience: lightspeed-hub-a2a) as confidential client mas-a2a. The pinned Praxis delegator sends client credentials as HTTP Basic without URL-encoding, so the secret is alphanumeric (values-secret alphaNumericPolicy). The planned 'protected A handoff' is not needed: the run credential now derives from H, so the adapter never sees A.<br><br>The adapter (lightspeed-hub a2a-adapter, flags --inbound-hub-token and --run-token-audience) creates the AgenticRun with H; its own ServiceAccount only watches runs and manages the run-token Secret. Requester × target is enforced by a ValidatingAdmissionPolicy (CEL) shipped in charts/all/lightspeed-hub, not a webhook. The target comes from the X-Hub-Cluster header or the message's targetCluster metadata. The agent card is the adapter's own, passed through publicly by Praxis (protocolVersion 0.3, so MAS uses message/stream).">
+      <div class="slide-label animate-in">—— LEG 2 · MAS → LIGHTSPEED HUB</div>
+      <h2 class="headline-lg animate-in">The hub gateway mints <span class="accent">H</span>; the adapter creates the run as the caller and mints <span class="accent">R</span></h2>
+      <ul class="bullet-list animate-in">
+        <li><strong>A → H at Praxis</strong> — <code>delegate()</code> as client <code>mas-a2a</code>; the adapter never sees A, so no protected-A handoff is needed.</li>
+        <li><strong>Run created with H</strong> — the hub kube API sees user <code>keycloak:&lt;sub&gt;</code> in group <code>…:agenticrun-creator</code>; the adapter's SA cannot create runs.</li>
+        <li><strong>H → R in the adapter</strong> — as client <code>lightspeed-hub-a2a</code> (lifespan 1800 s); R stored in <code>ls-run-token-&lt;uid&gt;</code>, key <code>token-a</code>.</li>
+        <li><strong>Requester × target</strong> — ValidatingAdmissionPolicy on <code>spec.targetCluster</code> for the creator's group.</li>
+        <li><strong>Agent card passthrough</strong> — Praxis serves the adapter's own card (protocolVersion 0.3); no static card to drift.</li>
+      </ul>
+      <div class="source">Source: charts/all/praxis-proxy README · charts/all/lightspeed-hub README</div>
+    </div>
+
+    <!-- SLIDE 8: LEG 3 HUB→SPOKE -->
+    <div class="slide" data-notes="Gateway credential mode in lightspeed-agentic-operator: the operator mounts the run-token Secret (no subPath, so renewals appear) and a CA Secret, and writes a kubeconfig whose server is the spoke gateway Service. It creates no spoke ServiceAccount, no spoke-management kubeconfig and does not materialize approved execution RBAC.<br><br>The spoke gateway (praxis-spoke-&lt;id&gt;, one Deployment per spoke) validates R (aud praxis-spoke-gateway, azp lightspeed-hub-a2a via spokeGatewayConfig.allowedCallers), runs delegate(spoke-delegator, target: spoke-api, audience: praxis-spoke-&lt;id&gt;) per call, strips routing headers and forwards to one fixed spoke API over TLS verified against the spoke CA. Kube API pass-through works on the pinned image for arbitrary paths, watch streaming and websocket upgrades; kubectl exec over SPDY is still unverified. Responses are capped at 32 MiB (spokeGatewayConfig.maxResponseBytes). The pod needs an IPv4-only DNS sidecar on this cluster, and its NetworkPolicy must allow DNS on pod port 5353.">
+      <div class="slide-label animate-in">—— LEG 3 · HUB → SPOKE CLUSTER API</div>
+      <h2 class="headline-lg animate-in">The spoke gateway mints <span class="accent">U per call</span> — the sandbox holds only R</h2>
+      <div class="arch-flow animate-in">
+        <div class="arch-box">
+          <span class="arch-tag">Controller</span>
+          <h4>agentic-operator</h4>
+          <p>gateway mode: kubeconfig → spoke gateway; no spoke SA</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">Sandbox pod</span>
+          <h4>Tools / kubectl</h4>
+          <p>tokenFile = R (read-only mount)</p>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box hot">
+          <span class="arch-tag">TLS leg 1 · service CA</span>
+          <h4>Spoke gateway</h4>
+          <p>validates R; R → U as praxis-spoke-gateway</p>
+          <span class="token-chip">U · spoke aud</span>
+        </div>
+        <span class="arch-arrow">→</span>
+        <div class="arch-box">
+          <span class="arch-tag">TLS leg 2 · spoke CA</span>
+          <h4>Spoke API</h4>
+          <p>U ⇒ keycloak:praxis-spoke-&lt;id&gt;:reader</p>
+        </div>
+      </div>
+      <ul class="bullet-list animate-in" style="margin-top: var(--rh-space-lg, 24px);">
+        <li><strong>Control plane is not the command path</strong> — the sandbox's tools make their own kube calls through the gateway.</li>
+        <li><strong>Stable per-spoke endpoints</strong> — <code>praxis-spoke-&lt;id&gt;.praxis-proxy.svc:8443</code>, one fixed upstream each; NetworkPolicy admits only the sandbox namespace.</li>
+        <li><strong>R goes only to the gateway</strong> — every kube API rejects it (401).</li>
+        <li><strong>Kube API pass-through works</strong> on the pinned Praxis (watch, streaming, websocket; exec over SPDY unverified); responses capped at 32 MiB.</li>
+      </ul>
+      <div class="source">Source: lightspeed-agentic-operator docs/gateway-credential-mode.md · charts/all/praxis-proxy README (Spoke gateways)</div>
+    </div>
+
+    <!-- SLIDE 9: KUBECONFIG -->
+    <div class="slide" data-notes="This is the kubeconfig the operator actually renders (Secret ls-sandbox-kubeconfig-…), captured from a live sandbox with kubectl config view. The CA is the OpenShift service-serving CA, copied by the praxis-proxy chart's CA-sync bridge into the Secret the operator mounts. tokenFile is read on every request by kubectl, so a renewed R is picked up without restarting the pod.">
+      <div class="slide-label animate-in">—— LEG 3 · THE ARTIFACT</div>
+      <h2 class="headline-lg animate-in">One kubeconfig is the whole <span class="accent">run-leg contract</span></h2>
+      <div class="code-block animate-in"><pre>clusters:
+  - name: spoke-via-gateway
+    cluster:
+      server: https://praxis-spoke-hub.praxis-proxy.svc.cluster.local:8443
+      certificate-authority: /var/run/secrets/praxis-gateway/ca.crt
+users:
+  - name: requester
+    user:
+      tokenFile: /var/run/secrets/run-identity/token-a   <span class="c"># the run token R</span>
+contexts:
+  - name: spoke
+    context: { cluster: spoke-via-gateway, user: requester }
+current-context: spoke</pre></div>
+      <ul class="bullet-list animate-in" style="margin-top: var(--rh-space-lg, 24px);">
+        <li><strong>The gateway is the server</strong> — no subPath on the token mount, so a renewed R appears in place.</li>
+        <li><strong>The B1 spike passed</strong> — the pinned Praxis proxies the kube API reads an investigation needs, so the fallback (adapter brokers U) was never needed.</li>
+      </ul>
+      <div class="source">Source: lightspeed-agentic-operator controller/agenticrun/gateway.go · live sandbox, 2026-11-20</div>
+    </div>
+
+    <!-- SLIDE 10: DECISION MATRIX -->
+    <div class="slide" data-notes="The plan chose B1 (exchange at the resource side, per call) with A as fallback. B1 was implemented. What changed is what rests in the run Secret: the plan parked the caller's Token A, but A lives 300 s and investigations died about 5 minutes in. An interim 15-minute A worked but made A replayable for 15 minutes everywhere. The final design parks R instead: minted from H by the adapter, 1800 s, audience praxis-spoke-gateway only, so it is useless anywhere but the spoke gateway, and A can stay at 5 minutes.">
+      <div class="slide-label animate-in">—— DECISION · PHASE 2 MATRIX</div>
+      <h2 class="headline-lg animate-in"><span class="accent">B1 won</span> — and the run token R replaced the parked A</h2>
+      <div class="compare-grid animate-in">
+        <div class="compare-col rejected">
+          <span class="lead">Not needed</span>
+          <h3>A · adapter brokers U</h3>
+          <p>Fallback if Praxis could not proxy the kube API. The spike passed, so it was never built.</p>
+        </div>
+        <div class="compare-col winner">
+          <span class="lead">Implemented</span>
+          <h3>B1 · gateway at the spoke API</h3>
+          <p>Spoke gateway mints U per call; no U at rest, no refresh loop. The sandbox carries R (30 min, usable only at the gateway), not the caller's A.</p>
+        </div>
+        <div class="compare-col rejected">
+          <span class="lead">Rejected</span>
+          <h3>B2 · sandbox self-serve</h3>
+          <p>Both halves of the exchange inside the run's blast radius, for no gain.</p>
+        </div>
+        <div class="compare-col">
+          <span class="lead">Upstream default</span>
+          <h3>C · operator SA tokens</h3>
+          <p>Stock behaviour outside gateway mode: standing kubeconfig, per-run SA, no caller identity at the spoke.</p>
+        </div>
+      </div>
+      <p class="body-text animate-in" style="margin-top: var(--rh-space-lg, 24px);">Invariant kept: the token the spoke accepts speaks for the caller (same <code>sub</code>). What crosses the request→run gap is R, derived from H, never the caller's own A.</p>
+      <div class="source">Source: PLAN · Phase 2 matrix · docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s2 'Why this shape'</div>
+    </div>
+
+    <!-- SLIDE 11: RENEWAL -->
+    <div class="slide" data-notes="Verified live: an exchanged token takes the exchanging client's access.token.lifespan, even past the subject token's expiry (A at 900 s exchanged by a 3600 s client gave a token expiring 2702 s after A). That is what lets R (1800 s on lightspeed-hub-a2a) outlive A and H. For longer runs the adapter parks the A2A task in auth-required; MAS's mailbox asks ACME for a fresh A on the same task, which arrives at the adapter as a fresh H and is exchanged into a fresh R written to the same Secret. Seen live: 'task paused for credential renewal' followed by 'renewed run credential' five seconds later. Renewal beyond a single 30-minute R across long approvals is still open.">
+      <div class="slide-label animate-in">—— RENEWAL &amp; RESUME</div>
+      <h2 class="headline-lg animate-in">R outlives A because <span class="accent">an exchanged token takes the exchanger's lifespan</span></h2>
+      <table class="plan-table animate-in">
+        <tr><th>Token</th><th>Lifetime</th><th>Renewed by</th></tr>
+        <tr><td>SVID (workload)</td><td>Short; rotated in place</td><td>Workload API — automatic</td></tr>
+        <tr><td>A (caller)</td><td>300 s</td><td>ACME re-mints: 401 → mint + resend; AUTH_REQUIRED → follow-up on the same task</td></tr>
+        <tr><td>H (run creation)</td><td>300 s</td><td>Hub gateway exchanges the fresh A</td></tr>
+        <tr><td>R (run credential)</td><td>1800 s</td><td>Adapter exchanges the fresh H and rewrites <code>ls-run-token-&lt;uid&gt;</code></td></tr>
+        <tr><td>U (spoke reads)</td><td>300 s</td><td>Nothing — minted per call by the spoke gateway</td></tr>
+      </table>
+      <ul class="bullet-list animate-in" style="margin-top: var(--rh-space-lg, 24px);">
+        <li><strong>MAS mailbox</strong> — the adapter's auth-required lands on the same task/context with a new message ID; no new run, no second submit().</li>
+        <li><strong>Open</strong> — renewal for steps longer than one R, across long approvals.</li>
+        <li><strong>Safety ≠ renewal</strong> — 403 is a denial; fresh credentials never revive terminal tasks or bypass approvals.</li>
+      </ul>
+      <div class="source">Source: docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s2 Lifetimes · charts/all/lightspeed-hub README</div>
+    </div>
+
+    <!-- SLIDE 12: WHAT LIVE TESTING PROVED -->
+    <div class="slide" data-notes="Every check here was run against the live standalone cluster on 2026-11-20, either by replaying one fresh Token A through all three exchanges (SelfSubjectReview at the kube API for each token) or through a full ACME request. The Keycloak and Praxis findings are recorded as hard-won lessons in docs/ARCHITECTURE.md and in the Troubleshooting section of agents/AUTHENTICATION.md.">
+      <div class="slide-label animate-in">—— WHAT LIVE TESTING PROVED</div>
+      <h2 class="headline-lg animate-in">Done means <span class="accent">fails closed</span> — proven with real requests</h2>
+      <ul class="bullet-list animate-in">
+        <li><strong>End to end</strong> — an ACME request ran to <code>Analyzed=True Succeeded</code>; R stored with aud praxis-spoke-gateway, azp lightspeed-hub-a2a, 1800 s.</li>
+        <li><strong>Each token works at one place only</strong> — H ⇒ agenticrun-creator, U ⇒ reader; A and R get 401 at every kube API.</li>
+        <li><strong>Keycloak rules</strong> — exchange audience must be an existing client; the exchanger must be in the subject's aud; azp becomes the exchanger; <code>fullScopeAllowed: false</code> or audience-resolve leaks audiences into A.</li>
+        <li><strong>Praxis quirks</strong> — Basic auth without URL-encoding (alphanumeric secrets); <code>role: user</code> workaround; IPv4-only DNS sidecar; NetworkPolicy must allow DNS pod port 5353.</li>
+        <li><strong>Fail-closed paths seen live</strong> — wrong azp ⇒ 403 at the spoke gateway; missing finalizer UPDATE clause ⇒ admission denied; expired A ⇒ investigation stopped.</li>
+      </ul>
+      <div class="source">Source: docs/ARCHITECTURE.md Hard-won lessons · agents/AUTHENTICATION.md Troubleshooting</div>
+    </div>
+
+    <!-- SLIDE 13: STATUS -->
+    <div class="slide" data-notes="Status as of 2026-11-20. Phases 0–2 are implemented and live on the standalone cluster (the hub acts as its own spoke via praxis-spoke-hub). Phase 3 (removing the standing spoke kubeconfig on the registration side, e.g. an OIDC CredentialSource) is not started; in gateway mode the operator no longer uses spoke management at all, which shrinks what Phase 3 must cover. Open items are tracked in docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s8.">
+      <div class="slide-label animate-in">—— STATUS</div>
+      <h2 class="headline-lg animate-in">Phases 0–2 are <span class="accent">live</span>; Phase 3 and three hardening items remain</h2>
+      <table class="plan-table animate-in">
+        <tr><th>Phase</th><th>Work</th><th>Status</th></tr>
+        <tr><td>0 · entry gate</td><td>lightspeed-agentic-operator AgenticRun / sandbox contract</td><td>Done</td></tr>
+        <tr><td>Task A</td><td>Remove RHOAI + OLS from multicloud-gitops</td><td>Done</td></tr>
+        <tr><td>1 · request leg</td><td>A2A adapter, lightspeed-hub chart, admission policy, operator stack, hub gateway A → H</td><td>Live</td></tr>
+        <tr><td>2 · run leg</td><td>Gateway credential mode, spoke gateways R → U, run token R</td><td>Live</td></tr>
+        <tr><td>3 · registration</td><td>Eliminate the standing spoke kubeconfig (CredentialSource)</td><td>Not started</td></tr>
+        <tr><td>Hardening</td><td>Renewal past 30 min · per-spoke R · SSO callers (no subject_issuer in the delegator)</td><td>Open</td></tr>
+      </table>
+      <div class="source">Source: docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s7–s8</div>
+    </div>
+
+    <!-- SLIDE 14: CLOSING -->
+    <div class="slide" data-notes="The written design for upstream review is docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md: it separates what belongs to lightspeed-agentic-operator (gateway credential mode) from what belongs to lightspeed-hub (adapter, tokens) and to the deployment (Keycloak clients, Praxis gateways). agents/AUTHENTICATION.md is the per-hop reference for this repo.">
+      <div class="slide-label animate-in">—— WHERE TO GO DEEPER</div>
+      <h2 class="headline-lg animate-in">The design is <span class="accent">documented and running</span></h2>
+      <ul class="bullet-list animate-in">
+        <li><strong>Diagrams</strong> — docs/agentic-architecture-overview.html (components) and docs/agentic-e2e-token-flow.html (every hop, every token).</li>
+        <li><strong>Design for upstream</strong> — docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md: operator vs hub vs deployment ownership.</li>
+        <li><strong>Per-hop reference</strong> — agents/AUTHENTICATION.md, including the bugs hit live.</li>
+      </ul>
+      <div class="tag-row animate-in" style="margin-top: var(--rh-space-lg, 24px);">
+        <span class="tag">GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md</span>
+        <span class="tag">agents/AUTHENTICATION.md</span>
+        <span class="tag">docs/ARCHITECTURE.md</span>
+        <span class="tag">docs/agentic-e2e-token-flow.html</span>
+      </div>
+      <div class="source">Multicloud GitOps · branch rca-mao-praxis-hub</div>
+    </div>
+
+    <!-- SLIDE 15: THANK YOU -->
+    <div class="slide thank-you-slide" data-notes="Thank you slide. Contact: Multicloud GitOps team, branch rca-mao-praxis-hub. Written references: docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md and agents/AUTHENTICATION.md.">
+      <div class="title-content" style="align-items: center;">
+        <h1 class="headline-xl animate-in">Thank <span class="accent">You</span></h1>
+        <div class="author-block animate-in">
+          <div class="name">Multicloud GitOps</div>
+          <div>Agentic OpenShift Investigation Pattern · branch rca-mao-praxis-hub</div>
+          <div>Red Hat</div>
+        </div>
+        <div class="logo-footer animate-in">
+          <svg class="rh-logo large" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 613 145" role="img" aria-label="Red Hat">
+            <title>Red Hat</title>
+            <path d="M127.47,83.49c12.51,0,30.61-2.58,30.61-17.46a14,14,0,0,0-.31-3.42l-7.45-32.36c-1.72-7.12-3.23-10.35-15.73-16.6C124.89,8.69,103.76.5,97.51.5,91.69.5,90,8,83.06,8c-6.68,0-11.64-5.6-17.89-5.6-6,0-9.91,4.09-12.93,12.5,0,0-8.41,23.72-9.49,27.16A6.43,6.43,0,0,0,42.53,44c0,9.22,36.3,39.45,84.94,39.45M160,72.07c1.73,8.19,1.73,9.05,1.73,10.13,0,14-15.74,21.77-36.43,21.77C78.54,104,37.58,76.6,37.58,58.49a18.45,18.45,0,0,1,1.51-7.33C22.27,52,.5,55,.5,74.22c0,31.48,74.59,70.28,133.65,70.28,45.28,0,56.7-20.48,56.7-36.65,0-12.72-11-27.16-30.83-35.78" fill="#e00"/>
+            <path d="M160,72.07c1.73,8.19,1.73,9.05,1.73,10.13,0,14-15.74,21.77-36.43,21.77C78.54,104,37.58,76.6,37.58,58.49a18.45,18.45,0,0,1,1.51-7.33l3.66-9.06A6.43,6.43,0,0,0,42.53,44c0,9.22,36.3,39.45,84.94,39.45,12.51,0,30.61-2.58,30.61-17.46a14,14,0,0,0-.31-3.42Z"/>
+            <path d="M579.74,92.8c0,11.89,7.15,17.67,20.19,17.67a52.11,52.11,0,0,0,11.89-1.68V95a24.84,24.84,0,0,1-7.68,1.16c-5.37,0-7.36-1.68-7.36-6.73V68.3h15.56V54.1H596.78v-18l-17,3.68V54.1H568.49V68.3h11.25Zm-53,.32c0-3.68,3.69-5.47,9.26-5.47a43.12,43.12,0,0,1,10.1,1.26v7.15a21.51,21.51,0,0,1-10.63,2.63c-5.46,0-8.73-2.1-8.73-5.57m5.2,17.56c6,0,10.84-1.26,15.36-4.31v3.37h16.82V74.08c0-13.56-9.14-21-24.39-21-8.52,0-16.94,2-26,6.1l6.1,12.52c6.52-2.74,12-4.42,16.83-4.42,7,0,10.62,2.73,10.62,8.31v2.73a49.53,49.53,0,0,0-12.62-1.58c-14.31,0-22.93,6-22.93,16.73,0,9.78,7.78,17.24,20.19,17.24m-92.44-.94h18.09V80.92h30.29v28.82H506V36.12H487.93V64.41H457.64V36.12H439.55ZM370.62,81.87c0-8,6.31-14.1,14.62-14.1A17.22,17.22,0,0,1,397,72.09V91.54A16.36,16.36,0,0,1,385.24,96c-8.2,0-14.62-6.1-14.62-14.09m26.61,27.87h16.83V32.44l-17,3.68V57.05a28.3,28.3,0,0,0-14.2-3.68c-16.19,0-28.92,12.51-28.92,28.5a28.25,28.25,0,0,0,28.4,28.6,25.12,25.12,0,0,0,14.93-4.83ZM320,67c5.36,0,9.88,3.47,11.67,8.83H308.47C310.15,70.3,314.36,67,320,67M291.33,82c0,16.2,13.25,28.82,30.28,28.82,9.36,0,16.2-2.53,23.25-8.42l-11.26-10c-2.63,2.74-6.52,4.21-11.14,4.21a14.39,14.39,0,0,1-13.68-8.83h39.65V83.55c0-17.67-11.88-30.39-28.08-30.39a28.57,28.57,0,0,0-29,28.81M262,51.58c6,0,9.36,3.78,9.36,8.31S268,68.2,262,68.2H244.11V51.58Zm-36,58.16h18.09V82.92h13.77l13.89,26.82H292l-16.2-29.45a22.27,22.27,0,0,0,13.88-20.72c0-13.25-10.41-23.45-26-23.45H226Z" fill="#fff"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="controls">
+    <div class="nav-hint">← → or click to navigate · N for additional context</div>
+    <div class="progress"><span class="current">1</span> / <span class="total">15</span></div>
+  </div>
+
+  <div class="notes-panel"></div>
+
+  <script>
+    (function() {
+      const slides = document.querySelectorAll('.slide');
+      const currentEl = document.querySelector('.current');
+      const totalEl = document.querySelector('.total');
+      const notesPanel = document.querySelector('.notes-panel');
+      let idx = 0;
+      let notesVisible = false;
+
+      totalEl.textContent = slides.length;
+
+      function pauseAllMedia() {
+        document.querySelectorAll('.slide:not(.active) video').forEach(v => v.pause());
+        document.querySelectorAll('.slide:not(.active) iframe').forEach(f => {
+          f.contentWindow.postMessage('{"event":"command","func":"pauseVideo","args":""}', '*');
+          f.contentWindow.postMessage('{"method":"pause"}', '*');
+        });
+      }
+      function playActiveMedia() {
+        document.querySelectorAll('.slide.active video').forEach(v => v.play());
+        document.querySelectorAll('.slide.active iframe').forEach(f => {
+          f.contentWindow.postMessage('{"event":"command","func":"playVideo","args":""}', '*');
+          f.contentWindow.postMessage('{"method":"play"}', '*');
+        });
+      }
+
+      function show(i) {
+        slides.forEach((s, j) => {
+          s.classList.toggle('active', j === i);
+          s.style.display = j === i ? 'flex' : 'none';
+        });
+        currentEl.textContent = i + 1;
+        pauseAllMedia();
+        playActiveMedia();
+        if (notesVisible && notesPanel) {
+          notesPanel.innerHTML = slides[i].dataset.notes || '';
+        }
+      }
+
+      function next() { if (idx < slides.length - 1) { idx++; show(idx); } }
+      function prev() { if (idx > 0) { idx--; show(idx); } }
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); next(); }
+        if (e.key === 'ArrowLeft') { prev(); }
+        if (e.key === 'n' || e.key === 'N') {
+          notesVisible = !notesVisible;
+          if (notesPanel) notesPanel.classList.toggle('visible', notesVisible);
+          show(idx);
+        }
+      });
+
+      document.addEventListener('click', (e) => {
+        if (e.target.closest('.controls') || e.target.closest('.notes-panel') || e.target.closest('.video-container') || e.target.closest('.media-container')) return;
+        const x = e.clientX / window.innerWidth;
+        x > 0.5 ? next() : prev();
+      });
+
+      let touchStartX = 0;
+      document.addEventListener('touchstart', (e) => { touchStartX = e.touches[0].clientX; });
+      document.addEventListener('touchend', (e) => {
+        const diff = e.changedTouches[0].clientX - touchStartX;
+        if (Math.abs(diff) > 50) { diff < 0 ? next() : prev(); }
+      });
+
+      window.addEventListener('beforeprint', () => {
+        slides.forEach(s => { s.style.display = ''; });
+        document.body.classList.add('printing');
+        slides.forEach(s => {
+          let fit = s.querySelector(':scope > .slide-fit');
+          if (!fit) {
+            fit = document.createElement('div');
+            fit.className = 'slide-fit';
+            while (s.firstChild) fit.appendChild(s.firstChild);
+            s.appendChild(fit);
+          }
+          const cs = window.getComputedStyle(s);
+          fit.style.cssText =
+            'display:flex;width:100%;height:100%;' +
+            'flex-direction:' + (cs.flexDirection || 'column') + ';' +
+            'justify-content:' + (cs.justifyContent || 'center') + ';' +
+            'align-items:' + (cs.alignItems || 'stretch') + ';' +
+            'text-align:' + (cs.textAlign || 'left') + ';' +
+            'gap:' + (cs.gap || '0') + ';' +
+            'transform-origin:top left;transform:none;';
+          for (let i = 0; i < fit.children.length; i++) {
+            fit.children[i].style.flexShrink = '0';
+          }
+          s._priorStyle = s.style.cssText;
+          s.style.cssText +=
+            ';display:flex !important;width:13.33in !important;height:7.5in !important;' +
+            'padding:0.55in 0.85in !important;box-sizing:border-box !important;' +
+            'overflow:hidden !important;';
+          const cw = fit.clientWidth, ch = fit.clientHeight;
+          const sw = fit.scrollWidth, sh = fit.scrollHeight;
+          if (sw > cw + 1 || sh > ch + 1) {
+            const k = Math.min(cw / sw, ch / sh);
+            fit.style.width  = (cw / k) + 'px';
+            fit.style.height = (ch / k) + 'px';
+            fit.style.transform = 'scale(' + k + ')';
+            fit.dataset.fitScale = k.toFixed(3);
+          }
+        });
+      });
+      window.addEventListener('afterprint', () => {
+        document.body.classList.remove('printing');
+        document.querySelectorAll('.slide > .slide-fit').forEach(fit => {
+          const s = fit.parentElement;
+          while (fit.firstChild) {
+            const child = fit.firstChild;
+            if (child.style && child.style.flexShrink) child.style.flexShrink = '';
+            s.appendChild(child);
+          }
+          fit.remove();
+          if (s._priorStyle !== undefined) {
+            s.style.cssText = s._priorStyle;
+            delete s._priorStyle;
+          }
+        });
+        show(idx);
+      });
+
+      show(0);
+    })();
+  </script>
+</body>
+</html>
