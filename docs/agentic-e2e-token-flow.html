@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACME → lightspeed-hub · end-to-end token walkthrough</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: light-dark(#f4f6fa, #0c1421);
+    --panel: light-dark(#ffffff, #131f30);
+    --subtle: light-dark(#edf1f7, #1b2a3f);
+    --text: light-dark(#17263b, #edf3fc);
+    --muted: light-dark(#52627a, #adbed5);
+    --border: light-dark(#ced7e4, #354962);
+    --accent: light-dark(#175eb3, #8cbfff);
+    --tint: light-dark(#e9f2ff, #203955);
+    --A: light-dark(#1a5a9d, #98c9ff);
+    --H: light-dark(#8a4b08, #f5c37a);
+    --R: light-dark(#6b3fa0, #cfb1f4);
+    --U: light-dark(#14654f, #89ddc2);
+    --S: light-dark(#5b6b80, #9fb0c6);
+    --kc: light-dark(#a3293c, #ffa9b5);
+    --ok: light-dark(#14654f, #89ddc2);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); }
+  main { max-width: 1480px; margin: auto; padding: 22px clamp(14px, 3vw, 40px) 40px; }
+  header { display: flex; justify-content: space-between; align-items: end; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: clamp(22px, 2.4vw, 32px); letter-spacing: -.03em; margin: 2px 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; }
+  nav { display: flex; gap: 8px; align-items: center; }
+  button { font: inherit; font-size: 14px; padding: 7px 14px; border-radius: 9px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  .counter { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 14px; min-width: 64px; text-align: center; }
+  .dots { display: flex; gap: 5px; flex-wrap: wrap; margin: 14px 0 10px; }
+  .dots button { padding: 3px 9px; font-size: 12px; border-radius: 999px; }
+  .dots button.on { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+  .lane { display: grid; grid-template-columns: repeat(14, minmax(0, 1fr)); gap: 6px; margin: 6px 0 16px; }
+  .ent { border: 1.5px solid var(--border); background: var(--panel); border-radius: 10px; padding: 7px 6px; font-size: 11.5px; text-align: center; line-height: 1.25; color: var(--muted); min-height: 50px; display: flex; align-items: center; justify-content: center; transition: all .15s; }
+  .ent.touch { border-style: dashed; border-color: var(--accent); color: var(--text); }
+  .ent.from, .ent.to { border-width: 2.5px; border-color: var(--accent); color: var(--text); font-weight: 650; background: var(--tint); }
+  .ent.from::before { content: "▶ "; color: var(--accent); }
+  .ent.to::after { content: " ◀"; color: var(--accent); }
+  .ent.kc { color: var(--kc); }
+  .slide { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 22px 24px; }
+  .slide h2 { margin: 0 0 4px; font-size: 22px; letter-spacing: -.02em; }
+  .slide .who { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
+  .slide p.sum { margin: 0 0 16px; max-width: 1100px; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .box { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: var(--bg); }
+  .box h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .box ul { margin: 0; padding-left: 18px; font-size: 14px; }
+  .box li { margin: 3px 0; }
+  .token { border: 2px solid var(--S); border-radius: 12px; padding: 10px 12px; background: var(--panel); margin-top: 6px; }
+  .token .tt { font-weight: 700; font-size: 14px; display: flex; justify-content: space-between; gap: 8px; }
+  .token pre { margin: 6px 0 0; font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
+  .tA { border-color: var(--A); } .tA .tt { color: var(--A); }
+  .tH { border-color: var(--H); } .tH .tt { color: var(--H); }
+  .tR { border-color: var(--R); } .tR .tt { color: var(--R); }
+  .tU { border-color: var(--U); } .tU .tt { color: var(--U); }
+  .tS .tt { color: var(--S); }
+  .arrow { text-align: center; font-size: 13px; color: var(--muted); margin: 6px 0; }
+  pre.req { font-size: 12px; background: var(--subtle); border-radius: 8px; padding: 9px 11px; margin: 6px 0 0; white-space: pre; overflow-x: auto; }
+  code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: .92em; background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
+  pre, pre * { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+  .note { margin-top: 14px; padding: 10px 14px; border-left: 4px solid var(--accent); background: var(--tint); border-radius: 0 10px 10px 0; font-size: 14px; }
+  .note.warn { border-color: var(--H); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--subtle); }
+  .k { font-size: 12px; color: var(--muted); }
+  footer { margin-top: 18px; font-size: 13px; color: var(--muted); }
+  a { color: var(--accent); }
+  @media (max-width: 1000px) { .lane { grid-template-columns: repeat(7, minmax(0, 1fr)); } }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div>
+    <div class="sub">multicloud-gitops · rca-mao-praxis-hub · live-verified 2026-11-20</div>
+    <h1>ACME → lightspeed-hub investigation: tokens hop by hop</h1>
+    <div class="sub">← / → keys or the buttons. Component map: <a href="agentic-architecture-overview.html">agentic-architecture-overview.html</a></div>
+  </div>
+  <nav>
+    <button id="prev">← Prev</button>
+    <span class="counter" id="counter"></span>
+    <button id="next">Next →</button>
+  </nav>
+</header>
+<div class="dots" id="dots"></div>
+<div class="lane" id="lane"></div>
+<section class="slide" id="slide"></section>
+<footer>Token claims are trimmed to what each hop checks; the <code>sub</code> (<code>bb366787-…</code>, the
+acme-agent service account) is identical in all four tokens. <code>&lt;kc&gt;</code> =
+<code>https://keycloak.apps.&lt;cluster-domain&gt;/realms/rca</code>.</footer>
+</main>
+
+<script>
+const ENT = [
+  ["spire", "SPIRE /<br>ZTWIM"], ["kc", "Keycloak<br>(rca)"], ["sso", "Red Hat<br>SSO"],
+  ["acme", "ACME<br>agent"], ["mas", "MAS A2A<br>(front door)"], ["worker", "mas-worker"],
+  ["phub", "Praxis hub<br>gateway"], ["adapter", "hub A2A<br>adapter"], ["hubapi", "Hub<br>kube API"],
+  ["op", "agentic<br>operator"], ["sbx", "sandbox<br>pod"], ["pspoke", "Praxis spoke<br>gateway"],
+  ["spokeapi", "Spoke<br>kube API"], ["vertex", "Vertex AI<br>(Gemini)"],
+];
+
+const T = {
+  svid: { c: "tS", name: "JWT-SVID", life: "short-lived", body:
+`iss: spiffe (ZTWIM trust domain)
+sub: spiffe://<trust-domain>/ns/acme-agent/sa/acme-agent
+aud: <kc>   (the realm issuer, not the workload name)` },
+  A: { c: "tA", name: "Token A · caller", life: "300 s", body:
+`iss:    <kc>
+sub:    bb366787-…   (service-account-acme-agent)
+azp:    acme-agent
+aud:    mas-a2a
+groups: [acme-agent-rca]` },
+  H: { c: "tH", name: "Token H · run creation", life: "300 s", body:
+`iss:    <kc>
+sub:    bb366787-…
+azp:    mas-a2a
+aud:    lightspeed-hub-a2a
+groups: [lightspeed-hub-a2a:agenticrun-creator]` },
+  R: { c: "tR", name: "Token R · run credential", life: "1800 s", body:
+`iss:    <kc>
+sub:    bb366787-…
+azp:    lightspeed-hub-a2a
+aud:    praxis-spoke-gateway
+groups: (none)` },
+  U: { c: "tU", name: "Token U · spoke reads", life: "300 s, per call", body:
+`iss:    <kc>
+sub:    bb366787-…
+azp:    praxis-spoke-gateway
+aud:    praxis-spoke-hub
+groups: [praxis-spoke-hub:reader]` },
+};
+
+const xreq = (client, auth, subj, aud) =>
+`POST <kc>/protocol/openid-connect/token
+  grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+  subject_token=<${subj}>
+  subject_token_type=urn:ietf:params:oauth:token-type:access_token
+  audience=${aud}
+  client: ${client} (${auth})`;
+
+const STEPS = [
+{
+  title: "The cast and the plan",
+  who: "Overview",
+  from: null, to: null, touch: ENT.map(e => e[0]),
+  sum: "One user question to ACME becomes one AgenticRun on the hub. Four tokens are involved, each minted for the next hop only. Praxis sits in front of the hub (hub gateway) and in front of every cluster API the sandbox reads (spoke gateway).",
+  html: `<table>
+  <tr><th>Token</th><th>Minted by (client)</th><th>aud</th><th>groups</th><th>Life</th><th>Used at</th></tr>
+  <tr><td><b style="color:var(--A)">A</b></td><td>Keycloak for <code>acme-agent</code></td><td>mas-a2a</td><td>acme-agent-rca</td><td>300 s</td><td>MAS A2A, hub gateway</td></tr>
+  <tr><td><b style="color:var(--H)">H</b></td><td>hub gateway as <code>mas-a2a</code></td><td>lightspeed-hub-a2a</td><td>lightspeed-hub-a2a:agenticrun-creator</td><td>300 s</td><td>adapter, hub kube API</td></tr>
+  <tr><td><b style="color:var(--R)">R</b></td><td>adapter as <code>lightspeed-hub-a2a</code></td><td>praxis-spoke-gateway</td><td>none</td><td>1800 s</td><td>spoke gateway only</td></tr>
+  <tr><td><b style="color:var(--U)">U</b></td><td>spoke gateway as <code>praxis-spoke-gateway</code></td><td>praxis-spoke-hub</td><td>praxis-spoke-hub:reader</td><td>300 s</td><td>spoke kube API</td></tr>
+</table>
+<div class="note">Rule: a token's <code>aud</code> is the client that exchanges or consumes it next. Keycloak only lets a client exchange a token that names it in <code>aud</code>, and Praxis's <code>delegate()</code> asks for exactly one audience, so this rule is what makes every exchange legal.</div>`
+},
+{
+  title: "ACME gets its workload identity",
+  who: "ACME agent → SPIRE (ZTWIM)",
+  from: "acme", to: "spire", touch: [],
+  sum: "ACME has no static Keycloak secret. It asks the SPIFFE Workload API for a JWT-SVID that proves it runs as the acme-agent ServiceAccount.",
+  out: ["svid"],
+  connects: ["SPIFFE Workload API socket (CSI driver) in the ACME pod"],
+  notes: ["The SVID's audience must be the Keycloak realm issuer URL, otherwise Keycloak's federated client auth rejects it."],
+},
+{
+  title: "ACME mints Token A at Keycloak",
+  who: "ACME agent → Keycloak",
+  from: "acme", to: "kc", touch: [],
+  sum: "Client-credentials grant for client acme-agent, authenticated by the JWT-SVID as client_assertion (clientAuthenticatorType federated-jwt). The audience mapper adds only mas-a2a.",
+  inTok: ["svid"],
+  req: `POST <kc>/protocol/openid-connect/token
+  grant_type=client_credentials
+  client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+  client_assertion=<JWT-SVID>        (no client_id parameter)
+  scope=openid mas-a2a`,
+  out: ["A"],
+  client: "acme-agent (federated-jwt against the spiffe identity provider)",
+  notes: ["acme-agent has fullScopeAllowed=false: without it Keycloak's audience-resolve added every client whose roles it held (kube API audiences included).",
+          "Alternative: an SSO caller presents a Red Hat SSO token (aud api.ask_red_hat). MAS and the hub gateway trust it, but the hub gateway cannot exchange it yet (no subject_issuer)."],
+},
+{
+  title: "ACME calls MAS, the front door",
+  who: "ACME agent → MAS A2A",
+  from: "acme", to: "mas", touch: ["kc"],
+  sum: "A2A message/stream to MAS with Bearer A. MAS A2A is the only thing a caller talks to.",
+  inTok: ["A"],
+  validates: ["Signature via Keycloak JWKS, iss = realm rca", "aud contains mas-a2a", "sub is an allow-listed principal"],
+  connects: ["Keycloak JWKS (validation)", "Temporal (starts the task)"],
+  notes: ["A is sealed with Fernet (Vault-backed mao-run-credentials) into the task, so the worker can use it later; it is never stored in clear."],
+  fwd: "A, sealed, to the Temporal task",
+},
+{
+  title: "MAS delegates to the Hub Cluster Investigator",
+  who: "mas-worker → Praxis hub gateway",
+  from: "worker", to: "phub", touch: ["vertex"],
+  sum: "The orchestrator (Gemini on Vertex) routes the question to the remote A2A agent \"Hub Cluster Investigator\". It reads the agent card, then sends message/stream with the caller's A.",
+  inTok: ["A"],
+  req: `GET  /a2a/.well-known/agent-card.json   (public; Praxis passes the adapter's own card through)
+POST /a2a   message/stream   Authorization: Bearer <A>`,
+  connects: ["Vertex AI (LLM routing)", "Praxis hub gateway Route"],
+  notes: ["The card advertises protocolVersion 0.3, so MAS uses message/stream; a 1.0 card made it call v1 method names the adapter does not serve.",
+          "MAS caps the stream at 1200 s (A2A_STREAM_MAX_DURATION_SECONDS)."],
+  fwd: "A",
+},
+{
+  title: "Hub gateway validates A and exchanges it for H",
+  who: "Praxis hub gateway ⇄ Keycloak",
+  from: "phub", to: "kc", touch: ["sso"],
+  sum: "Praxis authenticates the caller, applies the azp allow-list, and runs delegate(hub-delegator, target: hub-adapter, audience: lightspeed-hub-a2a) as client mas-a2a.",
+  inTok: ["A"],
+  validates: ["Signature + iss (Keycloak, or Red Hat SSO as alternative issuer)", "aud = mas-a2a", "azp ∈ {acme-agent, SSO client}"],
+  req: xreq("mas-a2a", "HTTP Basic, secret praxis-hub-exchange-client", "A", "lightspeed-hub-a2a"),
+  out: ["H"],
+  client: "mas-a2a (confidential, exchange only)",
+  notes: ["Praxis sends Basic credentials without URL-encoding, so the client secret must be alphanumeric (alphaNumericPolicy in values-secret).",
+          "H's groups come from mas-a2a's client-role mapper: the audience-scoped role agenticrun-creator."],
+  fwd: "H → hub adapter",
+},
+{
+  title: "Adapter creates the AgenticRun as the user",
+  who: "hub A2A adapter → Hub kube API",
+  from: "adapter", to: "hubapi", touch: ["phub"],
+  sum: "The adapter receives H (--inbound-hub-token) and creates the AgenticRun in ns lightspeed-hub with H itself, so the run is created by the user, not by the adapter's ServiceAccount.",
+  inTok: ["H"],
+  validates: ["Kube API (OpenShift Native OIDC): iss = Keycloak, aud = lightspeed-hub-a2a", "user keycloak:bb366787-…", "group keycloak:lightspeed-hub-a2a:agenticrun-creator → RBAC create agenticruns", "ValidatingAdmissionPolicy …-agenticrun-target-authz: target allowed for that group"],
+  req: `POST /apis/agentic.openshift.io/v1alpha1/namespaces/lightspeed-hub/agenticruns
+  Authorization: Bearer <H>
+  name: a2a-<hash>   spec.targetCluster: hub   spec.analysis.agent: default`,
+  connects: ["Hub kube API"],
+  notes: ["The adapter's own ServiceAccount only watches runs and manages run-token Secrets; it cannot create runs."],
+  fwd: "AgenticRun a2a-…",
+},
+{
+  title: "Adapter exchanges H for the run token R",
+  who: "hub A2A adapter ⇄ Keycloak",
+  from: "adapter", to: "kc", touch: ["hubapi"],
+  sum: "R is what the sandbox will use. The adapter exchanges H for audience praxis-spoke-gateway and stores R in the run-token Secret the operator mounts.",
+  inTok: ["H"],
+  req: xreq("lightspeed-hub-a2a", "form post, KEYCLOAK_CLIENT_SECRET", "H", "praxis-spoke-gateway"),
+  out: ["R"],
+  client: "lightspeed-hub-a2a (confidential; access.token.lifespan 1800)",
+  fwdHtml: `Secret <code>ls-run-token-&lt;run uid&gt;</code>, key <code>token-a</code> (the operator's contract name, now holding R)`,
+  notes: ["An exchanged token takes the exchanging client's lifespan, even past the subject token's expiry: that is why R outlives A and H.",
+          "Renewal: the adapter parks the A2A task in auth-required; MAS replies with a fresh A, which arrives as a fresh H and becomes a fresh R."],
+},
+{
+  title: "Operator starts the sandbox",
+  who: "agentic operator → sandbox pod",
+  from: "op", to: "sbx", touch: ["hubapi", "vertex"],
+  sum: "The operator reconciles the AgenticRun (Agent default, LLMProvider vertex, ApprovalPolicy cluster). In gateway credential mode it creates the sandbox with a kubeconfig whose only credential is R.",
+  inTok: [],
+  connects: ["Hub kube API (operator's own ServiceAccount)", "Secret llm-creds-vertex → sandbox LLM config"],
+  html: `<div class="box" style="margin-top:4px"><h3>Sandbox kubeconfig (Secret ls-sandbox-kubeconfig-…)</h3>
+<pre class="req">clusters:
+- name: spoke-via-gateway
+  cluster:
+    server: https://praxis-spoke-hub.praxis-proxy.svc.cluster.local:8443
+    certificate-authority: /var/run/secrets/praxis-gateway/ca.crt
+users:
+- name: requester
+  user:
+    tokenFile: /var/run/secrets/run-identity/token-a   # R, mounted without subPath so renewals appear</pre></div>`,
+  notes: ["No spoke ServiceAccount and no spoke-management kubeconfig are created in gateway mode: every read happens as the user, through the gateway."],
+},
+{
+  title: "Sandbox reads the cluster with R",
+  who: "sandbox pod → Praxis spoke gateway",
+  from: "sbx", to: "pspoke", touch: ["vertex"],
+  sum: "The investigation agent (Gemini on Vertex) runs kubectl. Each request carries Bearer R to the spoke gateway Service, TLS-verified with the service CA.",
+  inTok: ["R"],
+  req: `GET https://praxis-spoke-hub.praxis-proxy.svc:8443/api/v1/namespaces/payments/pods
+  Authorization: Bearer <R>`,
+  connects: ["Praxis spoke gateway (NetworkPolicy: only from ns lightspeed-hub)", "Vertex AI (LLM)"],
+  notes: ["Every tool result is inspected by the sandbox before the model sees it; a suspicious result stops the run (ToolResultSafetyInspectionFailed)."],
+  fwd: "R",
+},
+{
+  title: "Spoke gateway validates R and exchanges it for U",
+  who: "Praxis spoke gateway ⇄ Keycloak",
+  from: "pspoke", to: "kc", touch: ["sbx"],
+  sum: "Per call: authenticate R, check the azp allow-list, then delegate(spoke-delegator, target: spoke-api, audience: praxis-spoke-hub) as client praxis-spoke-gateway.",
+  inTok: ["R"],
+  validates: ["Signature + iss = Keycloak", "aud = praxis-spoke-gateway", "azp = lightspeed-hub-a2a (spokeGatewayConfig.allowedCallers)"],
+  req: xreq("praxis-spoke-gateway", "HTTP Basic, secret praxis-spoke-gateway-client", "R", "praxis-spoke-hub"),
+  out: ["U"],
+  client: "praxis-spoke-gateway (confidential, exchange only)",
+  notes: ["An exchanged token's azp is the client that exchanged it. R's azp is lightspeed-hub-a2a, not acme-agent: inheriting the hub gateway's allow-list caused 403 on every call (fixed 2026-11-20).",
+          "One audience per spoke (praxis-spoke-<id>), so per-spoke RBAC can differ."],
+  fwd: "U → spoke API",
+},
+{
+  title: "Spoke kube API authorizes U as a reader",
+  who: "Praxis spoke gateway → Spoke kube API",
+  from: "pspoke", to: "spokeapi", touch: ["kc"],
+  sum: "The gateway forwards to its one fixed upstream (the spoke API, TLS-verified with the spoke CA), stripping routing headers. The kube API maps U to the user and its reader group.",
+  inTok: ["U"],
+  validates: ["OpenShift Native OIDC: iss = Keycloak, aud = praxis-spoke-hub", "user keycloak:bb366787-…", "group keycloak:praxis-spoke-hub:reader → cluster-reader, cluster-monitoring-view (spokeReaderRBAC)"],
+  connects: ["Keycloak JWKS (validation)"],
+  notes: ["Responses stream back through the gateway; the ceiling is 32 MiB (spokeGatewayConfig.maxResponseBytes, default 10 MiB). A full kubectl logs of a busy pod can exceed it."],
+  fwd: "kube API responses → sandbox",
+},
+{
+  title: "The run completes and the answer flows back",
+  who: "sandbox → operator → adapter → hub gateway → MAS → ACME",
+  from: "adapter", to: "worker", touch: ["sbx", "op", "hubapi", "phub", "mas", "acme"],
+  sum: "The sandbox writes its analysis; the operator sets Analyzed=True (Succeeded). The adapter, watching with its own ServiceAccount, turns that into A2A task events (working → completed with the analysis artifact) on the open stream.",
+  inTok: [],
+  html: `<div class="cols">
+<div class="box"><h3>Back along the request path</h3><ul>
+<li>adapter → hub gateway → mas-worker: SSE task status + artifact</li>
+<li>mas-worker (Gemini) composes the final answer</li>
+<li>MAS A2A → ACME: completed task on the original stream</li>
+<li>ACME → user</li></ul></div>
+<div class="box"><h3>Cleanup</h3><ul>
+<li>sandbox pod released by the operator</li>
+<li><code>ls-run-token-&lt;uid&gt;</code> deleted after the terminal grace period</li>
+<li>no long-lived token remains: R expires within 30 min anyway</li></ul></div>
+</div>`,
+  notes: ["Seen live: a2a-1410731… finished with Analyzed=True Succeeded, R stored with aud praxis-spoke-gateway / azp lightspeed-hub-a2a / 1800 s."],
+},
+{
+  title: "Who holds what, and what it can do",
+  who: "Summary",
+  from: null, to: null, touch: ["kc", "phub", "adapter", "pspoke"],
+  sum: "Leaking any one token gives only that hop. Kubernetes can tell run creation (H) from investigation reads (U) apart because the audience-scoped roles land in different groups.",
+  html: `<table>
+<tr><th>Entity</th><th>Receives</th><th>Client it authenticates as</th><th>Sends on</th><th>Talks to</th></tr>
+<tr><td>ACME</td><td>JWT-SVID</td><td>acme-agent</td><td><b style="color:var(--A)">A</b></td><td>SPIRE, Keycloak, MAS, LiteLLM</td></tr>
+<tr><td>MAS A2A / worker</td><td><b style="color:var(--A)">A</b></td><td>(none: validates only)</td><td><b style="color:var(--A)">A</b></td><td>Keycloak JWKS, Temporal, Vertex, hub gateway</td></tr>
+<tr><td>Praxis hub gateway</td><td><b style="color:var(--A)">A</b></td><td>mas-a2a</td><td><b style="color:var(--H)">H</b></td><td>Keycloak, (Red Hat SSO JWKS), adapter</td></tr>
+<tr><td>hub A2A adapter</td><td><b style="color:var(--H)">H</b></td><td>lightspeed-hub-a2a</td><td><b style="color:var(--H)">H</b> to the kube API, <b style="color:var(--R)">R</b> to the Secret</td><td>Keycloak, hub kube API</td></tr>
+<tr><td>agentic operator</td><td>(own SA)</td><td>none</td><td>R mounted into the sandbox</td><td>hub kube API</td></tr>
+<tr><td>sandbox</td><td><b style="color:var(--R)">R</b> (file)</td><td>none</td><td><b style="color:var(--R)">R</b></td><td>spoke gateway, Vertex</td></tr>
+<tr><td>Praxis spoke gateway</td><td><b style="color:var(--R)">R</b></td><td>praxis-spoke-gateway</td><td><b style="color:var(--U)">U</b></td><td>Keycloak, spoke kube API</td></tr>
+<tr><td>Spoke kube API</td><td><b style="color:var(--U)">U</b></td><td>none</td><td>-</td><td>Keycloak JWKS</td></tr>
+</table>
+<div class="note warn">Open items: renewal for steps longer than R's 30 minutes; a per-spoke R so one spoke's run token cannot be replayed at another spoke's gateway; SSO callers (the hub gateway's delegator sends no subject_issuer).</div>`
+},
+];
+
+let i = 0;
+const $ = id => document.getElementById(id);
+
+function tokenCard(k) {
+  const t = T[k];
+  return `<div class="token ${t.c}"><div class="tt"><span>${t.name}</span><span class="k">${t.life}</span></div><pre>${t.body.replace(/</g, "&lt;")}</pre></div>`;
+}
+const list = (h, items) => items && items.length ? `<div class="box"><h3>${h}</h3><ul>${items.map(x => `<li>${x}</li>`).join("")}</ul></div>` : "";
+
+function render() {
+  const s = STEPS[i];
+  $("counter").textContent = `${i + 1} / ${STEPS.length}`;
+  $("prev").disabled = i === 0;
+  $("next").disabled = i === STEPS.length - 1;
+  $("dots").innerHTML = STEPS.map((x, j) => `<button class="${j === i ? "on" : ""}" data-j="${j}" title="${x.title}">${j}</button>`).join("");
+  $("lane").innerHTML = ENT.map(([id, label]) => {
+    let c = "ent";
+    if (id === "kc") c += " kc";
+    if (s.from === id) c += " from";
+    else if (s.to === id) c += " to";
+    else if ((s.touch || []).includes(id)) c += " touch";
+    return `<div class="${c}">${label}</div>`;
+  }).join("");
+
+  let body = `<h2>${i}. ${s.title}</h2><div class="who">${s.who}</div><p class="sum">${s.sum}</p>`;
+  const left = [];
+  if (s.inTok && s.inTok.length) left.push(`<div class="box"><h3>Token received</h3>${s.inTok.map(tokenCard).join("")}</div>`);
+  if (s.validates) left.push(list("Checks", s.validates));
+  const mid = [];
+  if (s.client) mid.push(`<div class="box"><h3>Client used</h3><div style="font-size:14px">${s.client}</div></div>`);
+  if (s.req) mid.push(`<div class="box"><h3>Request</h3><pre class="req">${s.req.replace(/</g, "&lt;")}</pre></div>`);
+  if (s.connects) mid.push(list("Connects to", s.connects));
+  const right = [];
+  if (s.out) right.push(`<div class="box"><h3>Token obtained</h3>${s.out.map(tokenCard).join("")}</div>`);
+  if (s.fwd || s.fwdHtml) right.push(`<div class="box"><h3>Forwarded</h3><div style="font-size:14px">${s.fwdHtml || s.fwd}</div></div>`);
+  const cols = [left, mid, right].filter(c => c.length).map(c => `<div style="display:flex;flex-direction:column;gap:14px">${c.join("")}</div>`);
+  if (cols.length) body += `<div class="cols">${cols.join("")}</div>`;
+  if (s.html) body += `<div style="margin-top:14px">${s.html}</div>`;
+  if (s.notes) body += s.notes.map(n => `<div class="note">${n}</div>`).join("");
+  $("slide").innerHTML = body;
+  history.replaceState(null, "", `#${i}`);
+}
+
+$("prev").onclick = () => { if (i > 0) { i--; render(); } };
+$("next").onclick = () => { if (i < STEPS.length - 1) { i++; render(); } };
+$("dots").onclick = e => { const j = e.target.dataset.j; if (j !== undefined) { i = +j; render(); } };
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight" || e.key === "PageDown") $("next").click();
+  if (e.key === "ArrowLeft" || e.key === "PageUp") $("prev").click();
+});
+const h = parseInt(location.hash.slice(1), 10);
+if (h >= 0 && h < STEPS.length) i = h;
+render();
+</script>
+</body>
+</html>

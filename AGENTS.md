@@ -63,6 +63,9 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
   `LIGHTSPEED_IMPLEMENTATION_PLAN.md` (historical design docs for the
   removed OLS backend -- cross-check before trusting),
   `docs/ARCHITECTURE.md` (design + decisions + hard-won lessons).
+- `docs/agentic-architecture-overview.html` / `docs/agentic-e2e-token-flow.html`
+  -- component diagram and step-by-step token walkthrough (ACME -> MAS ->
+  lightspeed-hub). Update them when a client, audience or hop changes.
 
 ## Where do I change X?
 

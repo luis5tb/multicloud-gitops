@@ -555,6 +555,10 @@ the gateway's fixed operator-configured endpoint and verified CA/SNI.
 
 ## A2A upstream (Task B request leg)
 
+Where the hub and spoke gateways sit in the token chain:
+`docs/agentic-architecture-overview.html`, `docs/agentic-e2e-token-flow.html`
+(steps 5, 10 and 11) and `agents/AUTHENTICATION.md`.
+
 `a2aUpstream` (disabled by default; **empty by default renders nothing and
 the default render is byte-identical to the pre-block one** — pinned by
 `tests/chart/test_praxis_a2a_upstream.py`) is the hub-gateway hop of the

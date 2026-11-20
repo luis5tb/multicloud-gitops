@@ -7,6 +7,13 @@ to real clusters. [AGENTS.md](../AGENTS.md) is the concise orientation and the
 in each `charts/all/<name>/README.md`; the human deployment walkthrough is in
 [README.md](../README.md).
 
+Diagrams: [agentic-architecture-overview.html](agentic-architecture-overview.html)
+(all components, Keycloak clients and token flows) and
+[agentic-e2e-token-flow.html](agentic-e2e-token-flow.html) (one ACME ->
+lightspeed-hub investigation, hop by hop: token received, client used, exchange,
+token forwarded). The per-hop authentication reference is
+[agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md).
+
 ## What this repo is
 
 `multicloud-gitops` is a Red Hat Validated Patterns GitOps repo: ArgoCD's

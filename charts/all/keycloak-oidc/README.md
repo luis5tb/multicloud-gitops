@@ -678,6 +678,10 @@ so use whatever admin login you currently have.
 
 ## Hub gateway exchange (`keycloak.hubGatewayExchanger`)
 
+Diagrams of every client and exchange: `docs/agentic-architecture-overview.html`
+and `docs/agentic-e2e-token-flow.html`; per-client reference in
+`agents/AUTHENTICATION.md` ("The Keycloak clients").
+
 Chain (see `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md` s2): each token's
 audience names the client that exchanges it next, so every exchange needs a
 single audience.

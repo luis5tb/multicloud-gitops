@@ -15,6 +15,12 @@ document is Option B made concrete. It adds what live testing showed is needed:
 audience clients, role-scoped `groups`, and dropping spoke management in
 gateway mode.
 
+**Diagrams:** [`agentic-architecture-overview.html`](agentic-architecture-overview.html)
+(components and token flows) and
+[`agentic-e2e-token-flow.html`](agentic-e2e-token-flow.html) (the chain in s2,
+step by step). Per-hop reference for this deployment:
+[`agents/AUTHENTICATION.md`](../agents/AUTHENTICATION.md).
+
 ---
 
 ## 0. Who owns what
@@ -269,32 +275,46 @@ grants nothing on east.
 
 ### 4.4 Example tokens
 
-Token A (real, decoded live):
+Token A (decoded live, after the hub-gateway cutover):
 
 ```json
 { "sub": "bb366787-080c-4d98-b69e-2774e15855cb", "azp": "acme-agent",
-  "aud": ["lightspeed-hub-adapter", "mas-a2a", "praxis-spoke-gateway"],
+  "aud": "mas-a2a",
   "preferred_username": "service-account-acme-agent", "groups": ["acme-agent-rca"] }
 ```
 
-Exchange A→H (by the adapter):
+Exchange A→H (by the hub gateway; Praxis sends the client credentials as
+HTTP Basic):
 
 ```
 POST /realms/rca/protocol/openid-connect/token
+  Authorization: Basic base64(mas-a2a:<secret>)
   grant_type=urn:ietf:params:oauth:grant-type:token-exchange
   subject_token=<A>  subject_token_type=urn:ietf:params:oauth:token-type:access_token
-  requested_token_type=urn:ietf:params:oauth:token-type:access_token
-  audience=lightspeed-hub-a2a  client_id=lightspeed-hub-adapter  client_secret=...
+  audience=lightspeed-hub-a2a
 ```
 
-| | H before | H now [live] | U before | U now [live] |
+H→R (adapter, as `lightspeed-hub-a2a`, `audience=praxis-spoke-gateway`) and
+R→U (spoke gateway, as `praxis-spoke-gateway`, `audience=praxis-spoke-<id>`)
+have the same shape.
+
+| | A | H [live] | R [live] | U [live] |
 |---|---|---|---|---|
 | `sub` | `bb366787-…` | same | same | same |
-| `azp` | `lightspeed-hub-adapter` | same | `praxis-spoke-gateway` | same |
-| `aud` | `lightspeed-hub-a2a` | same | `praxis-spoke-hub` | same |
-| `groups` | `["acme-agent-rca"]` | `["lightspeed-hub-a2a:agenticrun-creator"]` | `["acme-agent-rca"]` | `["praxis-spoke-hub:reader"]` |
+| `azp` | `acme-agent` | `mas-a2a` | `lightspeed-hub-a2a` | `praxis-spoke-gateway` |
+| `aud` | `mas-a2a` | `lightspeed-hub-a2a` | `praxis-spoke-gateway` | `praxis-spoke-hub` |
+| `groups` | `["acme-agent-rca"]` | `["lightspeed-hub-a2a:agenticrun-creator"]` | none | `["praxis-spoke-hub:reader"]` |
 
-Verified live (2026-11-20), same fresh Token A, both exchanges replayed:
+The `azp` column matters: an exchanged token's `azp` is the client that
+exchanged it, so any `azp` allow-list after an exchange must name that
+client (the spoke gateways allow-list `lightspeed-hub-a2a`; verified broken
+live when they inherited `acme-agent`).
+
+Before the hub gateway took over A→H, the adapter exchanged A itself as
+client `lightspeed-hub-adapter` (since retired), and A had to carry
+`lightspeed-hub-adapter` and `praxis-spoke-gateway` in `aud` as well.
+Verified live (2026-11-20) with that earlier shape, same fresh Token A, both
+exchanges replayed:
 
 ```
 H: aud lightspeed-hub-a2a  azp lightspeed-hub-adapter  groups [lightspeed-hub-a2a:agenticrun-creator]

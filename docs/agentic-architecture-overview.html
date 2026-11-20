@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic pattern · component overview</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: light-dark(#f4f6fa, #0c1421);
+    --panel: light-dark(#ffffff, #131f30);
+    --subtle: light-dark(#edf1f7, #1b2a3f);
+    --text: light-dark(#17263b, #edf3fc);
+    --muted: light-dark(#52627a, #adbed5);
+    --border: light-dark(#ced7e4, #354962);
+    --accent: light-dark(#175eb3, #8cbfff);
+    --tokA: light-dark(#1a5a9d, #98c9ff);
+    --tokH: light-dark(#8a4b08, #f5c37a);
+    --tokR: light-dark(#6b3fa0, #cfb1f4);
+    --tokU: light-dark(#14654f, #89ddc2);
+    --kc: light-dark(#a3293c, #ffa9b5);
+    --ext: light-dark(#5b6b80, #9fb0c6);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); }
+  main { max-width: 1560px; margin: auto; padding: 28px clamp(14px, 3vw, 40px) 56px; }
+  h1 { font-size: clamp(24px, 2.6vw, 36px); letter-spacing: -.03em; margin: 4px 0 8px; }
+  h2 { font-size: 20px; margin: 36px 0 10px; }
+  p.lead { color: var(--muted); max-width: 980px; margin: 0 0 18px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { fill: var(--text); font-family: inherit; }
+  svg .muted { fill: var(--muted); }
+  svg .box { fill: var(--panel); stroke: var(--border); stroke-width: 1.5; }
+  svg .grp { fill: var(--subtle); stroke: var(--border); stroke-dasharray: 6 5; stroke-width: 1.2; }
+  svg .kcbox { fill: var(--panel); stroke: var(--kc); stroke-width: 2; }
+  svg .extbox { fill: var(--panel); stroke: var(--ext); stroke-width: 1.5; stroke-dasharray: 4 4; }
+  svg .pxbox { fill: var(--panel); stroke: var(--accent); stroke-width: 2; }
+  svg .chip { fill: var(--subtle); stroke: var(--border); }
+  svg .t { font-size: 15px; font-weight: 650; }
+  svg .s { font-size: 12px; }
+  svg .xs { font-size: 11px; }
+  svg .lbl { font-size: 12px; font-weight: 600; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+  .A { stroke: var(--tokA); } .H { stroke: var(--tokH); } .R { stroke: var(--tokR); } .U { stroke: var(--tokU); }
+  .KC { stroke: var(--kc); } .EXT { stroke: var(--ext); }
+  svg path.flow { fill: none; stroke-width: 3; }
+  svg path.aux { fill: none; stroke-width: 1.8; stroke-dasharray: 6 5; }
+  .fA { fill: var(--tokA); } .fH { fill: var(--tokH); } .fR { fill: var(--tokR); } .fU { fill: var(--tokU); } .fKC { fill: var(--kc); } .fEXT { fill: var(--ext); }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 12px 4px 0; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .legend i { display: inline-block; width: 30px; height: 0; border-top: 3px solid; }
+  .legend i.d { border-top-style: dashed; border-top-width: 2px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--subtle); font-weight: 650; }
+  code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: .92em; background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
+  .tok { font-weight: 700; padding: 1px 8px; border-radius: 999px; border: 2px solid; }
+  .tA { color: var(--tokA); border-color: var(--tokA); } .tH { color: var(--tokH); border-color: var(--tokH); }
+  .tR { color: var(--tokR); border-color: var(--tokR); } .tU { color: var(--tokU); border-color: var(--tokU); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+  .grid .card h3 { margin: 0 0 4px; font-size: 16px; }
+  .grid .card p { margin: 4px 0; font-size: 14px; color: var(--muted); }
+  .grid .card ul { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
+  footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+<div style="font-size:13px;color:var(--muted)">multicloud-gitops · branch rca-mao-praxis-hub · standalone variant</div>
+<h1>Agentic pattern: how the components fit together</h1>
+<p class="lead">ACME asks MAS; MAS delegates cluster investigations to the lightspeed-hub over A2A,
+through the <b>Praxis hub gateway</b>; the lightspeed-agentic-operator runs a sandbox that reads the
+cluster through the <b>Praxis spoke gateway</b>. Keycloak (realm <code>rca</code>) issues and exchanges
+every token on the way, so each hop carries a token scoped to exactly that hop, always for the same
+<code>sub</code>. The step-by-step token walkthrough is in
+<a href="agentic-e2e-token-flow.html">agentic-e2e-token-flow.html</a>.</p>
+
+<div class="card">
+<svg viewBox="0 0 1500 960" role="img" aria-label="Component diagram">
+  <defs>
+    <marker id="mA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fA"/></marker>
+    <marker id="mH" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fH"/></marker>
+    <marker id="mR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fR"/></marker>
+    <marker id="mU" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fU"/></marker>
+    <marker id="mKC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fKC"/></marker>
+    <marker id="mEXT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fEXT"/></marker>
+  </defs>
+
+  <!-- ===== Top row: SPIRE, Keycloak, Red Hat SSO ===== -->
+  <rect x="30" y="30" width="260" height="100" rx="12" class="extbox"/>
+  <text x="46" y="58" class="t">SPIRE / ZTWIM</text>
+  <text x="46" y="80" class="s muted">Zero Trust Workload Identity Manager</text>
+  <text x="46" y="100" class="s muted">JWT-SVID for the acme-agent SA</text>
+  <text x="46" y="118" class="xs muted">aud = Keycloak realm issuer</text>
+
+  <rect x="330" y="20" width="800" height="160" rx="12" class="kcbox"/>
+  <text x="348" y="46" class="t">Keycloak (RHBK) · realm rca · ns keycloak-system</text>
+  <text x="1112" y="46" class="xs muted" text-anchor="end">token endpoint (issue + RFC 8693 exchange) · JWKS</text>
+  <g class="xs">
+    <rect x="348" y="60" width="250" height="50" rx="8" class="chip"/>
+    <text x="358" y="80" font-weight="650">acme-agent</text>
+    <text x="358" y="98" class="muted">federated-jwt (SPIFFE) → mints A</text>
+    <rect x="608" y="60" width="250" height="50" rx="8" class="chip"/>
+    <text x="618" y="80" font-weight="650">mas-a2a</text>
+    <text x="618" y="98" class="muted">A's aud · hub gateway exchanger A→H</text>
+    <rect x="868" y="60" width="250" height="50" rx="8" class="chip"/>
+    <text x="878" y="80" font-weight="650">lightspeed-hub-a2a</text>
+    <text x="878" y="98" class="muted">H's aud · adapter exchanger H→R</text>
+    <rect x="348" y="118" width="250" height="50" rx="8" class="chip"/>
+    <text x="358" y="138" font-weight="650">praxis-spoke-gateway</text>
+    <text x="358" y="156" class="muted">R's aud · spoke gateway exchanger R→U</text>
+    <rect x="608" y="118" width="250" height="50" rx="8" class="chip"/>
+    <text x="618" y="138" font-weight="650">praxis-spoke-hub</text>
+    <text x="618" y="156" class="muted">U's aud (audience-only) · role reader</text>
+    <rect x="868" y="118" width="250" height="50" rx="8" class="chip"/>
+    <text x="878" y="138" font-weight="650">openshift-console</text>
+    <text x="878" y="156" class="muted">Native OIDC for the kube APIs / console</text>
+  </g>
+
+  <rect x="1170" y="30" width="300" height="100" rx="12" class="extbox"/>
+  <text x="1186" y="58" class="t">Red Hat SSO (external)</text>
+  <text x="1186" y="80" class="s muted">sso[.stage].redhat.com · redhat-external</text>
+  <text x="1186" y="100" class="s muted">aud api.ask_red_hat (Ask Red Hat path)</text>
+  <text x="1186" y="118" class="xs muted">alt issuer; not used by the hub chain</text>
+
+  <!-- ===== Middle row ===== -->
+  <rect x="30" y="250" width="240" height="170" rx="12" class="box"/>
+  <text x="46" y="278" class="t">ACME agent</text>
+  <text x="46" y="298" class="s muted">ns acme-agent · chat UI + ADK agent</text>
+  <text x="46" y="322" class="s">client <tspan font-weight="650">acme-agent</tspan></text>
+  <text x="46" y="342" class="s">gets Token <tspan class="fA" font-weight="700" style="fill:var(--tokA)">A</tspan> (aud mas-a2a, 5 min)</text>
+  <text x="46" y="364" class="xs muted">optionally a Red Hat SSO token</text>
+  <text x="46" y="380" class="xs muted">for the Ask Red Hat specialists</text>
+  <text x="46" y="404" class="xs muted">LLM: LiteLLM (acme-agent-litellm)</text>
+
+  <rect x="310" y="226" width="340" height="240" rx="14" class="grp"/>
+  <text x="326" y="248" class="s muted" font-weight="650">MAS orchestrator · ns mao</text>
+  <rect x="330" y="262" width="300" height="70" rx="10" class="box"/>
+  <text x="344" y="286" class="t">MAS A2A (front door)</text>
+  <text x="344" y="306" class="xs muted">validates A (JWKS, aud mas-a2a, sub allow-list)</text>
+  <text x="344" y="322" class="xs muted">seals A (Fernet, mao-run-credentials) into the task</text>
+  <rect x="330" y="342" width="300" height="56" rx="10" class="box"/>
+  <text x="344" y="366" class="t">mas-worker</text>
+  <text x="344" y="386" class="xs muted">orchestrator; remote agent "Hub Cluster Investigator"</text>
+  <rect x="330" y="408" width="300" height="46" rx="10" class="box"/>
+  <text x="344" y="430" class="s">Temporal · MongoDB · Redis</text>
+  <text x="344" y="446" class="xs muted">durable tasks; streams capped at 1200 s</text>
+
+  <rect x="690" y="250" width="250" height="180" rx="12" class="pxbox"/>
+  <text x="706" y="278" class="t">Praxis hub gateway</text>
+  <text x="706" y="298" class="s muted">deploy praxis-proxy · ns praxis-proxy</text>
+  <text x="706" y="322" class="s">validates A · azp allow-list</text>
+  <text x="706" y="342" class="s">delegate as <tspan font-weight="650">mas-a2a</tspan>: A → H</text>
+  <text x="706" y="362" class="s">routes to the hub adapter</text>
+  <text x="706" y="386" class="xs muted">agent card: public passthrough</text>
+  <text x="706" y="402" class="xs muted">of the adapter's own card</text>
+
+  <rect x="980" y="226" width="500" height="484" rx="14" class="grp"/>
+  <text x="996" y="248" class="s muted" font-weight="650">ns lightspeed-hub</text>
+  <rect x="1000" y="262" width="220" height="150" rx="10" class="box"/>
+  <text x="1014" y="286" class="t">hub A2A adapter</text>
+  <text x="1014" y="306" class="xs muted">deploy lightspeed-hub</text>
+  <text x="1014" y="328" class="s">receives H; creates the run</text>
+  <text x="1014" y="348" class="s">as <tspan font-weight="650">lightspeed-hub-a2a</tspan>: H → R</text>
+  <text x="1014" y="370" class="xs muted">watches runs with its own SA;</text>
+  <text x="1014" y="386" class="xs muted">maps status to A2A task events</text>
+  <rect x="1245" y="262" width="215" height="150" rx="10" class="box"/>
+  <text x="1259" y="286" class="t">Run Secrets</text>
+  <text x="1259" y="308" class="xs">ls-run-token-&lt;uid&gt;</text>
+  <text x="1259" y="324" class="xs muted">key token-a, holds R (30 min)</text>
+  <text x="1259" y="346" class="xs">ls-sandbox-kubeconfig-…</text>
+  <text x="1259" y="362" class="xs muted">server = spoke gateway Service,</text>
+  <text x="1259" y="378" class="xs muted">tokenFile = mounted R</text>
+  <text x="1259" y="398" class="xs muted">+ CA Secret praxis-gateway</text>
+
+  <rect x="1000" y="520" width="220" height="170" rx="10" class="box"/>
+  <text x="1014" y="544" class="t">agentic operator</text>
+  <text x="1014" y="562" class="xs muted">lightspeed-hub-agentic-operator</text>
+  <text x="1014" y="584" class="s">reconciles AgenticRun</text>
+  <text x="1014" y="604" class="xs">Agent default · LLMProvider vertex</text>
+  <text x="1014" y="620" class="xs">ApprovalPolicy cluster</text>
+  <text x="1014" y="642" class="xs muted">gateway credential mode: no</text>
+  <text x="1014" y="658" class="xs muted">spoke SA, no spoke kubeconfig;</text>
+  <text x="1014" y="674" class="xs muted">sandbox gets R only</text>
+  <rect x="1245" y="520" width="215" height="170" rx="10" class="box"/>
+  <text x="1259" y="544" class="t">sandbox pod</text>
+  <text x="1259" y="562" class="xs muted">ls-analysis-&lt;uid&gt;</text>
+  <text x="1259" y="584" class="s">investigation agent</text>
+  <text x="1259" y="604" class="xs">kubectl with Bearer R</text>
+  <text x="1259" y="626" class="xs muted">LLM: Gemini on Vertex AI</text>
+  <text x="1259" y="642" class="xs muted">(llm-creds-vertex)</text>
+  <text x="1259" y="664" class="xs muted">tool output safety inspection</text>
+
+  <rect x="690" y="520" width="250" height="150" rx="12" class="box"/>
+  <text x="706" y="546" class="t">Hub kube API</text>
+  <text x="706" y="566" class="xs muted">OpenShift Native OIDC → Keycloak</text>
+  <text x="706" y="590" class="s">H ⇒ user keycloak:&lt;sub&gt;</text>
+  <text x="706" y="608" class="xs">group keycloak:lightspeed-hub-a2a:</text>
+  <text x="706" y="622" class="xs">agenticrun-creator → create runs</text>
+  <text x="706" y="644" class="xs muted">VAP …-agenticrun-target-authz</text>
+  <text x="706" y="658" class="xs muted">checks the run's target</text>
+
+  <rect x="310" y="560" width="340" height="90" rx="12" class="extbox"/>
+  <text x="326" y="588" class="t">Vertex AI (Gemini)</text>
+  <text x="326" y="610" class="s muted">mas-worker and the sandbox</text>
+  <text x="326" y="630" class="xs muted">same credentials (llm-creds-vertex) and model</text>
+
+  <rect x="30" y="560" width="240" height="140" rx="12" class="extbox"/>
+  <text x="46" y="588" class="t">Vault + External Secrets</text>
+  <text x="46" y="610" class="xs muted">secret/global/* → ExternalSecrets:</text>
+  <text x="46" y="628" class="xs">praxis-hub-exchange-client</text>
+  <text x="46" y="644" class="xs">praxis-spoke-gateway-client</text>
+  <text x="46" y="660" class="xs">adapter KEYCLOAK_CLIENT_SECRET</text>
+  <text x="46" y="676" class="xs">llm-creds-vertex · mao-run-credentials</text>
+  <text x="46" y="692" class="xs muted">(Praxis secrets: alphanumeric only)</text>
+
+  <!-- ===== Bottom row ===== -->
+  <rect x="990" y="780" width="260" height="160" rx="12" class="pxbox"/>
+  <text x="1006" y="806" class="t">Praxis spoke gateway</text>
+  <text x="1006" y="826" class="xs muted">praxis-spoke-hub · ns praxis-proxy · :8443</text>
+  <text x="1006" y="848" class="s">validates R · azp lightspeed-hub-a2a</text>
+  <text x="1006" y="868" class="s">delegate as <tspan font-weight="650">praxis-spoke-gateway</tspan></text>
+  <text x="1006" y="886" class="s">R → U, per call</text>
+  <rect x="1006" y="898" width="230" height="30" rx="7" class="chip"/>
+  <text x="1016" y="918" class="xs"><tspan style="fill:var(--kc)" font-weight="700">⇄ Keycloak</tspan> exchange · 32 MiB responses</text>
+
+  <rect x="690" y="780" width="250" height="160" rx="12" class="box"/>
+  <text x="706" y="806" class="t">Spoke kube API</text>
+  <text x="706" y="826" class="xs muted">here: the hub, as its own spoke</text>
+  <text x="706" y="850" class="s">U ⇒ user keycloak:&lt;sub&gt;</text>
+  <text x="706" y="870" class="xs">group keycloak:praxis-spoke-hub:reader</text>
+  <text x="706" y="888" class="xs">→ cluster-reader,</text>
+  <text x="706" y="904" class="xs">  cluster-monitoring-view</text>
+  <text x="706" y="926" class="xs muted">TLS verified against the spoke CA</text>
+
+  <rect x="310" y="780" width="340" height="160" rx="12" class="grp"/>
+  <text x="326" y="806" class="t">Return path</text>
+  <text x="326" y="830" class="s muted">sandbox result → AgenticRun status</text>
+  <text x="326" y="850" class="s muted">→ adapter (watch) → A2A task completed</text>
+  <text x="326" y="870" class="s muted">→ hub gateway → mas-worker (SSE)</text>
+  <text x="326" y="890" class="s muted">→ MAS A2A → ACME → user</text>
+  <text x="326" y="914" class="xs muted">run-token Secret deleted after the</text>
+  <text x="326" y="930" class="xs muted">terminal grace period</text>
+
+  <!-- ===== Auxiliary (Keycloak, identity, LLM) ===== -->
+  <path d="M120,130 V250" class="aux EXT" marker-end="url(#mEXT)"/>
+  <text x="128" y="200" class="lbl xs">JWT-SVID</text>
+
+  <path d="M220,250 V150 H330" class="aux KC" marker-end="url(#mKC)"/>
+  <text x="228" y="222" class="lbl">① A (client_credentials)</text>
+
+  <path d="M800,250 V180" class="aux KC" marker-start="url(#mKC)" marker-end="url(#mKC)"/>
+  <text x="808" y="222" class="lbl">④ A→H</text>
+
+  <path d="M1110,262 V180" class="aux KC" marker-start="url(#mKC)" marker-end="url(#mKC)"/>
+  <text x="1118" y="222" class="lbl">⑥ H→R</text>
+
+  <path d="M1300,130 V200 H900 V250" class="aux EXT" marker-end="url(#mEXT)"/>
+  <text x="1150" y="194" class="lbl xs">trusted alt issuer (SSO callers)</text>
+
+  <path d="M480,466 V560" class="aux EXT" marker-end="url(#mEXT)"/>
+  <text x="488" y="520" class="lbl xs">LLM</text>
+
+  <!-- ===== Main request path ===== -->
+  <path d="M270,297 H330" class="flow A" marker-end="url(#mA)"/>
+  <text x="276" y="288" class="lbl">② A</text>
+
+  <path d="M630,370 H690" class="flow A" marker-end="url(#mA)"/>
+  <text x="636" y="362" class="lbl">③ A</text>
+
+  <path d="M940,337 H1000" class="flow H" marker-end="url(#mH)"/>
+  <text x="950" y="328" class="lbl">H</text>
+
+  <path d="M1000,395 H962 V560 H940" class="flow H" marker-end="url(#mH)"/>
+  <text x="900" y="500" class="lbl">⑤ create run (H)</text>
+
+  <path d="M940,630 H1000" class="flow EXT" style="stroke-width:2" marker-end="url(#mEXT)"/>
+  <text x="944" y="622" class="lbl xs">watch</text>
+
+  <path d="M1220,337 H1245" class="flow R" marker-end="url(#mR)"/>
+  <text x="1222" y="328" class="lbl xs">R</text>
+
+  <path d="M1220,600 H1245" class="flow EXT" style="stroke-width:2" marker-end="url(#mEXT)"/>
+  <text x="1212" y="592" class="lbl xs">⑦ pod</text>
+
+  <path d="M1352,412 V520" class="flow R" marker-end="url(#mR)"/>
+  <text x="1360" y="470" class="lbl xs">mounted</text>
+
+  <path d="M1352,690 V860 H1250" class="flow R" marker-end="url(#mR)"/>
+  <text x="1360" y="780" class="lbl">⑧ kubectl + R</text>
+
+  <path d="M990,860 H940" class="flow U" marker-end="url(#mU)"/>
+  <text x="948" y="850" class="lbl">⑨ U</text>
+</svg>
+<div class="legend">
+  <span><i style="border-color:var(--tokA)"></i>Token A · caller (acme-agent)</span>
+  <span><i style="border-color:var(--tokH)"></i>Token H · run creation</span>
+  <span><i style="border-color:var(--tokR)"></i>Token R · run credential</span>
+  <span><i style="border-color:var(--tokU)"></i>Token U · spoke reads</span>
+  <span><i class="d" style="border-color:var(--kc)"></i>Keycloak token endpoint</span>
+  <span><i class="d" style="border-color:var(--ext)"></i>identity / LLM / control</span>
+  <span>Blue-bordered boxes: Praxis instances</span>
+</div>
+</div>
+
+<h2>The four tokens</h2>
+<p class="lead">Rule: each token's audience is the client that exchanges or consumes it next, so every
+exchange asks for one audience, and Keycloak's "exchanger must be in the subject token's aud" holds by
+construction. All four carry the same <code>sub</code> (the caller: token exchange keeps the subject and only changes <code>azp</code>, <code>aud</code>, <code>groups</code> and lifetime), so every hop acts on behalf of the same identity.</p>
+<table>
+  <tr><th>Token</th><th>Minted by (client)</th><th><code>sub</code></th><th><code>azp</code></th><th><code>aud</code></th><th><code>groups</code></th><th>Lifetime</th><th>Accepted by</th></tr>
+  <tr><td><span class="tok tA">A</span></td><td>Keycloak for ACME (<code>acme-agent</code>, SPIFFE)</td><td><code>bb366787-…</code><br><span style="color:var(--muted);font-size:12px">service-account-acme-agent (the caller)</span></td><td>acme-agent</td><td>mas-a2a</td><td>acme-agent-rca</td><td>300 s</td><td>MAS A2A, Praxis hub gateway</td></tr>
+  <tr><td><span class="tok tH">H</span></td><td>hub gateway exchange as <code>mas-a2a</code></td><td><code>bb366787-…</code> (same)<br><span style="color:var(--muted);font-size:12px">kube user <code>keycloak:bb366787-…</code></span></td><td>mas-a2a</td><td>lightspeed-hub-a2a</td><td>lightspeed-hub-a2a:agenticrun-creator</td><td>300 s</td><td>adapter, hub kube API</td></tr>
+  <tr><td><span class="tok tR">R</span></td><td>adapter exchange as <code>lightspeed-hub-a2a</code></td><td><code>bb366787-…</code> (same)</td><td>lightspeed-hub-a2a</td><td>praxis-spoke-gateway</td><td>none</td><td>1800 s</td><td>only the spoke gateway (401 at every kube API)</td></tr>
+  <tr><td><span class="tok tU">U</span></td><td>spoke gateway exchange as <code>praxis-spoke-gateway</code>, per call</td><td><code>bb366787-…</code> (same)<br><span style="color:var(--muted);font-size:12px">kube user <code>keycloak:bb366787-…</code></span></td><td>praxis-spoke-gateway</td><td>praxis-spoke-hub</td><td>praxis-spoke-hub:reader</td><td>300 s</td><td>spoke kube API</td></tr>
+</table>
+
+<h2>Components</h2>
+<div class="grid">
+  <div class="card"><h3>ACME agent</h3><p>Chat agent (ns <code>acme-agent</code>). Answers Red Hat questions by delegating to MAS.</p>
+    <ul><li>Keycloak client <code>acme-agent</code>, authenticated with its SPIFFE JWT-SVID (no static secret)</li><li>Calls MAS A2A with Token A</li><li>LLM through LiteLLM</li></ul></div>
+  <div class="card"><h3>MAS (mao)</h3><p>Multi-agent orchestrator. The A2A endpoint is the pattern's front door.</p>
+    <ul><li>MAS A2A validates A and seals it (Fernet) into the Temporal task</li><li>mas-worker routes to the remote agent "Hub Cluster Investigator" and forwards A</li><li>Gemini on Vertex AI</li></ul></div>
+  <div class="card"><h3>Praxis hub gateway</h3><p><code>praxis-proxy</code> Deployment and Route (ns <code>praxis-proxy</code>).</p>
+    <ul><li>Validates A (Keycloak, or Red Hat SSO as alt issuer), azp allow-list</li><li>RFC 8693 delegation as <code>mas-a2a</code>: A → H</li><li>Routes A2A to the adapter; serves the adapter's agent card publicly</li></ul></div>
+  <div class="card"><h3>lightspeed-hub A2A adapter</h3><p>Translates A2A tasks into AgenticRuns (repo lightspeed-hub).</p>
+    <ul><li>Creates the AgenticRun with H (the user's identity)</li><li>Exchanges H → R as <code>lightspeed-hub-a2a</code>; stores R in <code>ls-run-token-&lt;uid&gt;</code></li><li>Watches runs with its own ServiceAccount; renewal via A2A auth-required</li></ul></div>
+  <div class="card"><h3>lightspeed-agentic-operator</h3><p>Runs the investigation (repo lightspeed-agentic-operator, gateway credential mode).</p>
+    <ul><li>Agent <code>default</code>, LLMProvider <code>vertex</code>, ApprovalPolicy <code>cluster</code></li><li>Creates the sandbox pod with a kubeconfig pointing at the spoke gateway, token = R</li><li>No spoke ServiceAccount, no spoke-management kubeconfig</li></ul></div>
+  <div class="card"><h3>Praxis spoke gateway</h3><p>One per spoke: <code>praxis-spoke-&lt;id&gt;</code> (here <code>praxis-spoke-hub</code>).</p>
+    <ul><li>Validates R (aud praxis-spoke-gateway, azp lightspeed-hub-a2a)</li><li>Per call, exchanges R → U as <code>praxis-spoke-gateway</code> (aud per spoke)</li><li>Fixed upstream: the spoke API, TLS verified; IPv4-only DNS sidecar</li></ul></div>
+  <div class="card"><h3>Keycloak (RHBK)</h3><p>Realm <code>rca</code>, imported by charts/all/keycloak-oidc.</p>
+    <ul><li>Issues A; performs the three exchanges</li><li>Client roles projected into <code>groups</code> per audience</li><li>Issuer for OpenShift Native OIDC on the kube APIs</li></ul></div>
+  <div class="card"><h3>Kube APIs</h3><p>OpenShift Native OIDC maps <code>sub</code> → <code>keycloak:&lt;sub&gt;</code>, <code>groups</code> → <code>keycloak:&lt;group&gt;</code>.</p>
+    <ul><li>Hub: H's group may create AgenticRuns (plus a ValidatingAdmissionPolicy on the target)</li><li>Spoke: U's group gets cluster-reader and cluster-monitoring-view</li><li>A and R are rejected (401)</li></ul></div>
+  <div class="card"><h3>Vault, ESO, Red Hat SSO, Vertex</h3><p>Supporting services.</p>
+    <ul><li>Vault + External Secrets deliver every client secret and the Vertex credentials</li><li>Red Hat SSO: alternative issuer (aud api.ask_red_hat) for SSO callers and Ask Red Hat</li><li>Vertex AI: one credential and model for MAS and the sandbox</li></ul></div>
+</div>
+
+<footer>Source of truth: docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md, docs/ARCHITECTURE.md, and the chart
+READMEs. Token values reflect the live verification of 2026-11-20.</footer>
+</main>
+</body>
+</html>

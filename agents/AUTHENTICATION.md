@@ -3,7 +3,22 @@
 This documents the full per-request authentication path from a user typing a
 message in the ACME agent's UI through to the MAS orchestrator and its
 downstream A2A agents. There is one Keycloak grant and one passthrough hop
-per request, each with its own identity and failure mode.
+(ACME -> MAS -> Praxis) per request. When the downstream agent is the
+**lightspeed-hub** (cluster investigations), three RFC 8693 token exchanges
+follow, each minting a token for exactly the next hop (A -> H -> R -> U).
+
+Visual companions:
+
+- [`docs/agentic-architecture-overview.html`](../docs/agentic-architecture-overview.html):
+  every component, the Keycloak clients and which token flows where.
+- [`docs/agentic-e2e-token-flow.html`](../docs/agentic-e2e-token-flow.html):
+  a step-by-step walkthrough of one investigation, showing per hop the token
+  received, the checks, the client used, the exchange request and the token
+  forwarded.
+
+The design rationale for the exchange chain, and what belongs to the
+lightspeed-agentic-operator versus the lightspeed-hub, is in
+[`docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`](../docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md).
 
 ## Two unrelated credential systems
 
@@ -28,6 +43,8 @@ questions and must not be confused when debugging:
    identity) to call the MAS A2A endpoint; MAS validates that token and
    passes it through unchanged to the orchestrator's delegated A2A calls,
    so every downstream hop is attributable to the ACME caller, not to MAS.
+   Past MAS, the Praxis gateways and the lightspeed-hub adapter *exchange*
+   it for narrower tokens, but every one keeps the same `sub`.
 
 In short: the LiteLLM key decides *whether an agent can talk to its LLM at
 all*; the SPIFFE/Keycloak chain decides *what the agent is allowed to do,
@@ -92,6 +109,81 @@ sequenceDiagram
   `mas-orchestrator`
 - No changes to Praxis policy needed for the MAS hop
 - MAS is **invisible** to the authentication chain
+- For the lightspeed-hub agent, the Praxis **hub gateway** does not forward
+  Token A: it exchanges it (next section)
+
+### Hub investigation flow: MAS → lightspeed-hub → cluster APIs (token exchange chain)
+
+Live since 2026-11-20 on the standalone variant. MAS's remote agent "Hub
+Cluster Investigator" points at the Praxis hub gateway. From there, **each
+token's audience is the client that exchanges or consumes it next**, so every
+exchange asks for exactly one audience. That is required twice over: Keycloak
+only lets a client exchange a token that names it in `aud`, and Praxis's
+`delegate()` takes a single audience.
+
+| Token | Minted by (client) | `sub` | `azp` | `aud` | `groups` | Life | Accepted by |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **A** | Keycloak for `acme-agent` (SPIFFE) | caller | `acme-agent` | `mas-a2a` | `acme-agent-rca` | 300 s | MAS A2A, hub gateway |
+| **H** | hub gateway, as `mas-a2a` | same | `mas-a2a` | `lightspeed-hub-a2a` | `lightspeed-hub-a2a:agenticrun-creator` | 300 s | adapter, hub kube API |
+| **R** | adapter, as `lightspeed-hub-a2a` | same | `lightspeed-hub-a2a` | `praxis-spoke-gateway` | none | 1800 s | spoke gateway only |
+| **U** | spoke gateway, as `praxis-spoke-gateway`, per call | same | `praxis-spoke-gateway` | `praxis-spoke-<id>` | `praxis-spoke-<id>:reader` | 300 s | spoke kube API |
+
+```mermaid
+sequenceDiagram
+    participant MAS as mas-worker
+    participant PH as Praxis hub gateway
+    participant KC as Keycloak (rca)
+    participant AD as lightspeed-hub adapter
+    participant HAPI as Hub kube API
+    participant OP as agentic operator
+    participant SBX as sandbox pod
+    participant PS as Praxis spoke gateway
+    participant SAPI as Spoke kube API
+
+    MAS->>PH: A2A message/stream<br/>Bearer A
+    Note over PH: validate A (JWKS, aud mas-a2a)<br/>azp in allowedCallers
+    PH->>KC: token-exchange as mas-a2a<br/>subject=A, audience=lightspeed-hub-a2a
+    KC-->>PH: H (groups lightspeed-hub-a2a:agenticrun-creator)
+    PH->>AD: A2A message/stream<br/>Bearer H
+    AD->>HAPI: create AgenticRun (Bearer H)
+    Note over HAPI: user keycloak:<sub><br/>group keycloak:lightspeed-hub-a2a:agenticrun-creator<br/>RBAC + ValidatingAdmissionPolicy (target)
+    AD->>KC: token-exchange as lightspeed-hub-a2a<br/>subject=H, audience=praxis-spoke-gateway
+    KC-->>AD: R (1800 s, no groups)
+    AD->>HAPI: Secret ls-run-token-<uid> (token-a = R)
+    OP->>SBX: create pod, kubeconfig tokenFile = R
+    SBX->>PS: kubectl ... Bearer R
+    Note over PS: validate R (aud praxis-spoke-gateway)<br/>azp = lightspeed-hub-a2a
+    PS->>KC: token-exchange as praxis-spoke-gateway<br/>subject=R, audience=praxis-spoke-<id>
+    KC-->>PS: U (groups praxis-spoke-<id>:reader)
+    PS->>SAPI: forward, Bearer U
+    Note over SAPI: group keycloak:praxis-spoke-<id>:reader<br/>cluster-reader, cluster-monitoring-view
+    SAPI-->>SBX: responses (via gateway)
+    OP-->>AD: AgenticRun Analyzed=True (adapter watches with its own SA)
+    AD-->>PH: A2A task completed + artifact
+    PH-->>MAS: stream events
+```
+
+**Key points:**
+
+- The adapter never sees Token A, and A is useless past the hub gateway (it
+  gets `401` at every kube API, as does R).
+- The run is created **as the caller** (H), not as the adapter's
+  ServiceAccount; the adapter's own SA only watches runs and manages the
+  run-token Secret.
+- R exists so a long investigation survives A's and H's 5-minute lifetime: an
+  exchanged token takes the **exchanging client's** `access.token.lifespan`
+  (1800 s on `lightspeed-hub-a2a`), even past the subject token's expiry.
+  Beyond that, the adapter parks the A2A task in `auth-required`; MAS replies
+  with a fresh A, which becomes a fresh H and R.
+- An exchanged token's `azp` is the **exchanging** client. So the spoke
+  gateways allow-list `lightspeed-hub-a2a` (`spokeGatewayConfig.allowedCallers`),
+  not `acme-agent`.
+- Kubernetes tells run creation (H) and investigation reads (U) apart by
+  group, because each exchanger projects audience-scoped client roles into
+  `groups` (`charts/all/keycloak-oidc` `exchangeRoles`).
+- In gateway credential mode the agentic operator creates no spoke
+  ServiceAccount and no spoke-management kubeconfig: every read is made as
+  the caller, through the spoke gateway.
 
 ## Praxis policy mode (standalone: policy enforcement)
 
@@ -220,6 +312,13 @@ and then only read from cache on the hot path:
    through this path can ever produce a bare `system:...` group name. Don't
    remove it to match examples that use an empty prefix.
 
+   With `exchangeRoles`, the exchanged tokens H and U also carry
+   audience-scoped client roles as `<client>:<role>` group values, so the
+   API server sees `keycloak:lightspeed-hub-a2a:agenticrun-creator` for H
+   and `keycloak:praxis-spoke-<id>:reader` for U. Kubernetes RBAC binds
+   groups, not audiences, so this is how run creation and investigation
+   reads get different permissions for the same `sub`.
+
 3. **RBAC**: bindings such as `admin-rbac.yaml`'s
    `<adminGroupName>-cluster-admin` `ClusterRoleBinding` target
    `Group:keycloak:<adminGroupName>` directly. There is no separate
@@ -251,11 +350,17 @@ these breaks the flow -- see that chart's README for the exact rationale.
 | --- | --- | --- | --- |
 | `openshift-cli` | public | Browser / `oc login` | Native OIDC login only, unrelated to the agent request flow. Registered as the `cli` OIDC platform client. Cannot authenticate itself. |
 | `openshift-console` | confidential | Web console | Registered as the `console` OIDC platform client. Needs the `groups` protocol mapper (see Troubleshooting) or RBAC group membership never reaches the console. |
-| `acme-agent` | confidential | acme-agent | Client-credentials-style grant authenticated with acme-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. Its service account belongs to the `acme-agent-rca` group, so its tokens carry a `groups` claim RBAC can key on. |
+| `acme-agent` | confidential | acme-agent | Client-credentials-style grant authenticated with acme-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. Its service account belongs to the `acme-agent-rca` group, so its tokens carry a `groups` claim RBAC can key on. Only audience: `mas-a2a`. `fullScopeAllowed: false`, so Keycloak's audience-resolve cannot add other clients' audiences. |
+| `mas-a2a` | confidential, exchange only | Praxis hub gateway | Token A's audience (MAS validates it) **and** the hub gateway's exchanger: A -> H, audience `lightspeed-hub-a2a`. Secret `praxis-hub-exchange-client` (Vault `praxis-hub-exchange`, alphanumeric). `keycloak.hubGatewayExchanger`. |
+| `lightspeed-hub-a2a` | confidential, exchange only | lightspeed-hub adapter | H's audience (the hub kube API accepts it) and the adapter's exchanger: H -> R, audience `praxis-spoke-gateway`. `access.token.lifespan` 1800 s gives R its lifetime. Client role `agenticrun-creator` lands in H's `groups`. `keycloak.hubExchange`. |
+| `praxis-spoke-gateway` | confidential, exchange only | Praxis spoke gateways | R's audience and the spoke gateways' exchanger: R -> U, audience `praxis-spoke-<id>`. Secret `praxis-spoke-gateway-client` (Vault `praxis-spoke-gateway`, alphanumeric). `keycloak.spokeGatewayExchanger`. |
+| `praxis-spoke-<id>` | audience only | spoke kube APIs | U's audience, one per spoke. Exists because a token-exchange `audience` must name an existing client (`400 Audience not found` otherwise). Client role `reader` lands in U's `groups`. |
 
-The clients are distinct from custom **audience values**: the optional MAS A2A
-service has its own separate custom audience (`keycloak.masA2aAudience`,
-default `mas-a2a`); it is not another Keycloak client.
+`mas-a2a` used to be a plain custom audience string with no client behind
+it. It became a client when the hub gateway started exchanging Token A,
+because Keycloak only lets a client exchange a token whose `aud` names it.
+The retired `lightspeed-hub-adapter` client (the adapter's exchanger before
+the hub gateway took over A -> H) is not rendered any more.
 
 `acme-agent` authenticates via Keycloak's federated
 client authentication feature against the `spiffe` identity provider this
@@ -328,10 +433,11 @@ behalf" story in one column.
    `service-account-acme-agent` string (that only appears in
    `preferred_username`). If per-user attribution is ever needed, a user
    identity has to be captured before this hop and folded into this token.
-   `mas-a2a` appears in `aud` because MAS's inbound check needs it (a
-   plain custom-audience string, no client behind it --
-   `keycloak.masA2aAudience`) -- it is a protocol mapper on the
-   `acme-agent` client, see `charts/all/keycloak-oidc`.
+   `mas-a2a` appears in `aud` because MAS's inbound check needs it and
+   because client `mas-a2a` (the hub gateway's exchanger) must find itself
+   there to exchange the token (`keycloak.masA2aAudience`, an audience
+   protocol mapper on the `acme-agent` client, see
+   `charts/all/keycloak-oidc`).
 4. **MAS validates the inbound token** (the MAO A2A endpoint's multi-issuer
    OIDC middleware): verifies the RS256 signature via the issuer's JWKS,
    exact issuer, `mas-a2a` audience, and token lifetime/subject, then checks
@@ -345,6 +451,42 @@ behalf" story in one column.
    delegated A2A call (`a2a_agent_node` with an empty `bearer_token` reads
    `RunContext.auth_token`), so downstream services (Praxis and anything
    behind it) still see `azp=acme-agent`, never a MAS identity.
+5. **Praxis hub gateway** (`charts/all/praxis-proxy`,
+   `a2aUpstream.exchangeAtPraxis`): validates A (signature, issuer, audience
+   `mas-a2a`, `azp` in `policy.allowedCallers`), then
+   `delegate(hub-delegator, target: hub-adapter, audience: lightspeed-hub-a2a)`
+   as client `mas-a2a` (HTTP Basic). Forwards **H**:
+
+   ```json
+   { "sub": "<same>", "azp": "mas-a2a", "aud": "lightspeed-hub-a2a",
+     "groups": ["lightspeed-hub-a2a:agenticrun-creator"] }
+   ```
+6. **lightspeed-hub adapter** (`charts/all/lightspeed-hub`,
+   `adapter.inboundHubToken`): creates the AgenticRun with H. The hub kube API
+   (OpenShift Native OIDC) sees user `keycloak:<sub>` in group
+   `keycloak:lightspeed-hub-a2a:agenticrun-creator`, which RBAC allows to
+   create runs and the ValidatingAdmissionPolicy checks against the run's
+   target. The adapter then exchanges H as `lightspeed-hub-a2a`
+   (`adapter.runTokenAudience`) and stores **R** in `ls-run-token-<uid>`:
+
+   ```json
+   { "sub": "<same>", "azp": "lightspeed-hub-a2a", "aud": "praxis-spoke-gateway" }
+   ```
+7. **Sandbox** (lightspeed-agentic-operator, gateway credential mode): its
+   kubeconfig points at `https://praxis-spoke-<id>.praxis-proxy.svc:8443`
+   with `tokenFile: /var/run/secrets/run-identity/token-a` (R).
+8. **Praxis spoke gateway** (`spokeGateways.<id>`): validates R (audience
+   `praxis-spoke-gateway`, `azp` in `spokeGatewayConfig.allowedCallers`), then
+   per call `delegate(spoke-delegator, target: spoke-api, audience: praxis-spoke-<id>)`
+   as `praxis-spoke-gateway`. Forwards **U** to its one fixed spoke API:
+
+   ```json
+   { "sub": "<same>", "azp": "praxis-spoke-gateway", "aud": "praxis-spoke-hub",
+     "groups": ["praxis-spoke-hub:reader"] }
+   ```
+9. **Spoke kube API**: user `keycloak:<sub>`, group
+   `keycloak:praxis-spoke-<id>:reader`, bound to `cluster-reader` and
+   `cluster-monitoring-view` (`charts/all/lightspeed-hub` `spokeReaderRBAC`).
 
 ## Tracing a live request
 
@@ -363,6 +505,15 @@ oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy -f
 # 3. Keycloak's own record of every grant against a client --
 #    enable this once: Admin Console -> Realm Settings -> Events -> Save Events
 #    then Realm -> Sessions / Events, filtered by client (acme-agent)
+
+# 3b. Hub investigation chain: adapter (run submitted, run-token stored),
+#     spoke gateway (403 = azp allow-list; 401 = token validation), operator
+oc logs -n lightspeed-hub deploy/lightspeed-hub | grep '^{'
+oc logs -n praxis-proxy deploy/praxis-spoke-hub -c praxis-spoke-gateway | grep -E 'WARN|ERROR'
+oc logs -n lightspeed-hub deploy/lightspeed-hub-agentic-operator | grep -v DEBUG
+#     decode the stored run token's claims (never print the token itself):
+oc get secret -n lightspeed-hub ls-run-token-<uid> -o jsonpath='{.data.token-a}' \
+  | base64 -d | cut -d. -f2 | base64 -d 2>/dev/null | jq '{aud, azp, groups, exp, iat}'
 
 # 4. What the API server currently trusts
 oc get authentication.config.openshift.io cluster -o jsonpath='{.spec.oidcProviders[0].issuer.audiences}'
@@ -623,6 +774,33 @@ has been validated on a live deployment of this Pattern.
   `reason="user info call failure"`. A direct userinfo request with that token
   returns HTTP 403. Request `openid api.ask_red_hat` from Red Hat SSO instead;
   userinfo then returns the service-account `sub`.
+- **Token exchange returns `400 invalid_client "Audience not found"`.** Hit
+  live on the first hub exchange: in Keycloak 26 standard token exchange the
+  `audience` parameter must name an existing client, not just a string a
+  mapper emits. Every exchange audience is now a client
+  (`praxis-spoke-<id>` as audience-only clients).
+- **Token exchange is refused although the subject token is valid.** The
+  exchanging client must be in the subject token's `aud`. That is why every
+  token's `aud` names its next exchanger (A -> `mas-a2a`, H ->
+  `lightspeed-hub-a2a`, R -> `praxis-spoke-gateway`).
+- **Praxis's exchange fails with `unauthorized_client: Unexpected error when
+  authenticating client`** (Keycloak event `clientId="null"`): the pinned
+  Praxis delegator sends HTTP Basic credentials without URL-encoding, so a
+  `%` in the client secret breaks Keycloak's decoding. Every secret Praxis
+  presents uses `alphaNumericPolicy` in `values-secret.yaml.template`.
+- **Every sandbox `kubectl` call gets `403 "not an allow-listed caller"` at
+  the spoke gateway.** Hit live right after the hub-gateway cutover: R's
+  `azp` is `lightspeed-hub-a2a` (the client that exchanged it), but the spoke
+  gateway inherited the hub gateway's `allowedCallers` (`acme-agent`). Fixed
+  with `spokeGatewayConfig.allowedCallers`. The Keycloak-only replay test had
+  checked `aud` and `groups`, never Praxis's `azp` gate.
+- **Investigations die about 5 minutes in.** The adapter used to store the
+  caller's own 300 s Token A as the run credential. It now stores R (1800 s).
+- **Token A carries kube API audiences it never asked for.** With
+  `fullScopeAllowed: true`, Keycloak's "audience resolve" adds the audience of
+  every client whose roles the token holds, so once the exchangers had
+  client roles, A was accepted by the kube APIs. `acme-agent` now has
+  `fullScopeAllowed: false`; A gets `401` at every kube API.
 - **A successful external-token login can still fail RBAC as
   `User "keycloak:<uuid>"` if the token has no `groups` claim.** Hit live
   after enabling Red Hat SSO: the API server mapped the brokered subject

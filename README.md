@@ -10,6 +10,15 @@ If you've followed a link to this repository, but are not really sure what it co
 or how to use it, head over to [Multicloud GitOps](https://validatedpatterns.io/patterns/multicloud-gitops/)
 for additional context and installation instructions
 
+For this branch's agentic pattern (ACME -> MAS -> lightspeed-hub, behind
+Praxis and Keycloak), start with the diagrams:
+[`docs/agentic-architecture-overview.html`](docs/agentic-architecture-overview.html)
+(components and how they connect) and
+[`docs/agentic-e2e-token-flow.html`](docs/agentic-e2e-token-flow.html)
+(an investigation step by step, with the token at every hop). The written
+references are [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) and
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ## Rationale
 
 The goal for this pattern is to:

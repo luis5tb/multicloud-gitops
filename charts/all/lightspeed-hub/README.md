@@ -314,6 +314,10 @@ both); and the sandbox's Gemini support is untested live.
 
 ## Tokens the adapter handles (hub-gateway chain)
 
+Diagrams: `docs/agentic-architecture-overview.html` and the step-by-step
+`docs/agentic-e2e-token-flow.html`; per-hop reference in
+`agents/AUTHENTICATION.md`.
+
 With `adapter.inboundHubToken` the adapter's inbound bearer is **Token H**,
 already exchanged from the caller's Token A by the praxis hub gateway. The
 adapter creates the AgenticRun with it directly (no exchange) and, with
