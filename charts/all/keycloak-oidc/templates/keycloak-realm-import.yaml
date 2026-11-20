@@ -387,6 +387,48 @@ spec:
               userinfo.token.claim: "true"
           {{- end }}
       {{- end }}
+      {{- /* Audience-only clients: one per audience an exchanger REQUESTS
+             (hubExchange.hubAudience, each spokeGatewayExchanger
+             spokeAudiences entry). */}}
+      {{- $audienceClients := list }}
+      {{- if .Values.keycloak.hubExchange.enabled }}
+      {{- $audienceClients = append $audienceClients .Values.keycloak.hubExchange.hubAudience }}
+      {{- end }}
+      {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
+      {{- range .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
+      {{- $audienceClients = append $audienceClients . }}
+      {{- end }}
+      {{- end }}
+      {{- $otherClientIds := list .Values.keycloak.clientId .Values.keycloak.acmeClientId .Values.keycloak.consoleClientId .Values.keycloak.spokeGatewayExchanger.clientId .Values.keycloak.hubExchange.clientId }}
+      {{- range $aud := $audienceClients | uniq }}
+      {{- if has $aud $otherClientIds }}
+      {{- fail (printf "exchange audience %q collides with an existing client ID in the realm; audience-only clients must have their own names" $aud) }}
+      {{- end }}
+      # AUDIENCE-ONLY CLIENT {{ $aud | quote }}: represents a RESOURCE SERVER
+      # (a hub/spoke kube API that accepts this audience via
+      # openshiftOIDC.extraAudiences), not an application. It exists ONLY so
+      # Keycloak 26 standard token exchange accepts `audience={{ $aud }}`:
+      # the requested audience must be the client ID of an existing client,
+      # otherwise the exchange fails with 400 invalid_client "Audience not
+      # found". VERIFIED-BROKEN LIVE (2026-11): the lightspeed-hub adapter's
+      # A->H exchange failed exactly that way while the audience was only a
+      # custom string in a mapper. The exchanged token's aud still comes
+      # from the exchanging client's audience mapper; this client just makes
+      # the name resolvable. Every flow is disabled, so nothing can log in or
+      # mint tokens as it. One-shot realm import only -- an already-imported
+      # realm needs it created manually (see chart README "Audience-only
+      # clients").
+      - clientId: {{ $aud | quote }}
+        name: {{ printf "Audience: %s" $aud | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        serviceAccountsEnabled: false
+        frontchannelLogout: false
+      {{- end }}
       # Confidential client registered as the web console's OIDC platform
       # client when openshiftOIDC.enabled is true.
       #

@@ -233,7 +233,13 @@ def test_variant_has_no_static_card_overrides() -> None:
     ]["overrides"]
     names = [o["name"] for o in overrides]
     assert not [n for n in names if n.startswith("agentCard.")]
-    assert {o["name"]: o["value"] for o in overrides}["a2aUpstream.enabled"] == "true"
+    values = {o["name"]: o["value"] for o in overrides}
+    assert values["a2aUpstream.enabled"] == "true"
+    # This gateway fronts the hub adapter, so local-Keycloak tokens must be
+    # meant for the adapter -- not mas-a2a (MAS validates that itself; no
+    # Praxis sits in front of MAS). Red Hat SSO issuers stay for SSO callers.
+    assert values["identity.keycloak.audience"] == "lightspeed-hub-adapter"
+    assert values["identity.oidcIssuers[0].audience"] == "api.ask_red_hat"
 
 
 @pytest.mark.skipif(
@@ -452,6 +458,76 @@ def test_keycloak_hub_exchange_wiring() -> None:
         m["protocolMapper"] == "oidc-group-membership-mapper"
         for m in hub_ng["protocolMappers"]
     )
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_keycloak_exchange_audiences_are_clients() -> None:
+    """Every audience an exchanger REQUESTS exists as a client.
+
+    VERIFIED-BROKEN LIVE (2026-11): Keycloak 26 standard token exchange
+    requires the `audience` parameter to name an existing client; the
+    adapter's A->H exchange (audience=lightspeed-hub-a2a, then only a custom
+    mapper string) failed with 400 invalid_client "Audience not found". The
+    hub audience and each spoke audience render as audience-only clients
+    (all flows off, no service account), absent when their exchanger is off,
+    and a name colliding with a real client fails the render.
+    """
+    def realm_clients(*args: str) -> dict[str, dict]:
+        out = subprocess.run(
+            [
+                "helm", "template", "keycloak-oidc", str(KEYCLOAK_CHART),
+                "-f", str(VARIANT),
+                "--set", "keycloak.spiffeIdentityProvider.enabled=false",
+                *args,
+            ],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        realm = next(d for d in _resources(out) if d["kind"] == "KeycloakRealmImport")
+        return {c["clientId"]: c for c in realm["spec"]["realm"]["clients"]}
+
+    hub = [
+        "--set", "keycloak.hubExchange.enabled=true",
+        "--set", "keycloak.hubExchange.vaultKey=secret/data/global/lightspeed-hub-adapter",
+        "--set", "keycloak.hubExchange.hubAudience=lightspeed-hub-a2a",
+    ]
+    spoke = [
+        "--set", "keycloak.spokeGatewayExchanger.enabled=true",
+        "--set", "keycloak.spokeGatewayExchanger.vaultKey=secret/data/global/praxis-spoke-gateway",
+        "--set", "keycloak.spokeGatewayExchanger.spokeAudiences[0]=praxis-spoke-hub",
+    ]
+
+    base = realm_clients()
+    assert "lightspeed-hub-a2a" not in base and "praxis-spoke-hub" not in base
+
+    clients = realm_clients(*hub, *spoke)
+    for aud in ("lightspeed-hub-a2a", "praxis-spoke-hub"):
+        c = clients[aud]
+        assert c["enabled"] is True and c["publicClient"] is False
+        for flow in (
+            "standardFlowEnabled", "implicitFlowEnabled",
+            "directAccessGrantsEnabled", "serviceAccountsEnabled",
+        ):
+            assert c[flow] is False, f"{aud}.{flow} must be off (audience-only)"
+        assert "secret" not in c and "protocolMappers" not in c
+
+    # Only the enabled exchanger's audience renders.
+    assert "praxis-spoke-hub" not in realm_clients(*hub)
+    assert "lightspeed-hub-a2a" not in realm_clients(*spoke)
+
+    collide = subprocess.run(
+        [
+            "helm", "template", "keycloak-oidc", str(KEYCLOAK_CHART),
+            "-f", str(VARIANT),
+            "--set", "keycloak.spiffeIdentityProvider.enabled=false",
+            *spoke[:4],
+            "--set", "keycloak.spokeGatewayExchanger.spokeAudiences[0]=acme-agent",
+        ],
+        check=False, capture_output=True, text=True,
+    )
+    assert collide.returncode != 0
+    assert "collides with an existing client ID" in collide.stderr
 
 
 @pytest.mark.skipif(

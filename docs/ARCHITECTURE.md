@@ -92,6 +92,31 @@ Application).
 > the reasoning and live findings behind them still apply to the
 > replacement backend design (Task B).
 
+- **Current (Task B) request path and who checks which audience.** Verified
+  live 2026-11-20:
+
+  ```
+  ACME --A--> MAS A2A (public Route, NO Praxis)        checks aud mas-a2a (local KC) / api.ask_red_hat (SSO)
+                 | MAS forwards A verbatim
+                 v
+              praxis-proxy (main gateway) --> hub adapter --H--> hub kube API   (aud lightspeed-hub-a2a)
+              checks aud lightspeed-hub-adapter (local KC) / api.ask_red_hat (SSO), azp allow-list
+                                                 | stores A for the run
+                                                 v
+              AgenticRun sandbox --A--> praxis-spoke-<id> --U--> spoke kube API (aud praxis-spoke-<id>)
+  ```
+
+  There are exactly two Praxis instances; none fronts MAS. MAS validates its
+  own `mas-a2a` audience and principal allow-list, so no Praxis is needed
+  there unless MAS's Route is made internal-only. Each gateway checks that
+  the token was meant for the hop it fronts. Token A carries
+  `mas-a2a` + `lightspeed-hub-adapter` + `praxis-spoke-gateway` because
+  Keycloak 26 requires every exchanger to be in the subject token's `aud`,
+  and MAS cannot exchange per delegation yet. That multi-audience Token A is
+  a **stopgap**: the target is ACME minting `mas-a2a` only, MAS exchanging
+  for `lightspeed-hub-adapter`, and the adapter exchanging for the run's
+  `praxis-spoke-gateway` token (upstream MAS work).
+
 - **The identity chain is the point.** ACME authenticates to Keycloak as
   itself (SPIFFE JWT-SVID, `client_credentials`), gets "Token A", sends it
   through Praxis to OLS, and OLS (with its OIDC authentication module and
@@ -200,6 +225,21 @@ the A2A 0.3 lightspeed-hub adapter (a2a-go v0.3.15: `message/stream` /
 found"; toggling `streaming` did not help. Praxis now routes discovery to the
 adapter's own card (which must carry the Praxis `/a2a` url). See
 `charts/all/praxis-proxy/README.md` "Agent card".
+
+Live Keycloak finding (2026-11-20): in Keycloak 26 standard token exchange
+the `audience` parameter must name an EXISTING CLIENT. The adapter's A->H
+exchange (`audience=lightspeed-hub-a2a`, then only a custom mapper string)
+failed with `400 invalid_client "Audience not found"` -- which reads like a
+bad client secret, but the secret was fine. Multiple audiences on Token A
+were not the cause. Exchange target audiences now render as audience-only
+clients (keycloak-oidc README "Audience-only clients"); one-shot realm import
+means live realms need them created by hand.
+
+Live Praxis audience finding (2026-11-20): the main gateway still validated
+local-Keycloak tokens for `mas-a2a`, left over from when ACME called Praxis
+directly. It now fronts the hub adapter, so it checks `lightspeed-hub-adapter`
+(Red Hat SSO issuers kept). When a gateway's backend changes, re-check its
+audience, not just its routes.
 
 Live Praxis TLS finding: a same-cluster `global.olsClusters` entry was pointed
 at the OLS public Route while Praxis trusted only the cluster service-ca; the

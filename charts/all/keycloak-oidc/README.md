@@ -601,10 +601,13 @@ client ID, and every `spokeGatewayExchanger.spokeAudiences` entry — a
 collision would make a token minted for one consumer silently valid for
 another.
 
-**UNCONFIRMED GUESS (plan spike item #5):** whether mappers on the
-exchanger client apply to RFC 8693-*exchanged* tokens on this Keycloak
-build must be validated against a live realm before relying on H carrying
-the hub audience and groups. **Claim-map note:** if a Praxis policy ever
+**CONFIRMED LIVE (2026-11-20, was plan spike item #5):** mappers on the
+exchanger client DO apply to RFC 8693-*exchanged* tokens on this Keycloak
+build. Exchanging a freshly minted acme-agent Token A as
+`lightspeed-hub-adapter` (no `audience` parameter) returned H with
+`aud: "lightspeed-hub-a2a"`, `azp: lightspeed-hub-adapter`, the caller's
+`sub`/`preferred_username` (`service-account-acme-agent`) and
+`groups: ["acme-agent-rca"]`. **Claim-map note:** if a Praxis policy ever
 inspects H's groups, PPE's `keycloak` claim_mapper preset maps *realm
 roles*, not groups — an explicit claim_map entry would be needed; nothing
 on this leg reads H's groups at Praxis (the hub API's OIDC group mapping
@@ -616,3 +619,68 @@ first created. On the standalone cluster, whose realm already imported,
 the client, secret, and mappers must be created manually in the Admin
 Console when this is enabled; the realm-secrets-reconciler does not
 re-assert them.
+
+## Audience-only clients (exchange target audiences)
+
+Keycloak 26 standard token exchange requires the `audience` request
+parameter to be the **client ID of an existing client**. The hub and spoke
+audiences (`hubExchange.hubAudience`, each
+`spokeGatewayExchanger.spokeAudiences` entry) name *resource servers* -- the
+hub/spoke kube API servers that accept them via
+`openshiftOIDC.extraAudiences` -- not applications, so they used to exist
+only as custom strings in audience mappers. The realm import now renders one
+**audience-only client** per requested audience: enabled, confidential, with
+every flow off (no standard/implicit/direct grants, no service account), so
+nothing can log in or mint tokens as it. A name that collides with a real
+client ID fails the render. The exchanged token's `aud` still comes from the
+exchanging client's audience mapper; the client only makes the name
+resolvable.
+
+**VERIFIED-BROKEN LIVE (2026-11-20), how it was hit:** after the A2A card
+fix let MAS reach the adapter, every delegation logged `token exchange
+failed ... kind=invalid_client http=400`. The client's own credentials were
+fine (client_credentials succeeded) and Token A carried
+`lightspeed-hub-adapter`; replaying the adapter's exact request against
+Keycloak returned `{"error":"invalid_client","error_description":"Audience
+not found"}` for `audience=lightspeed-hub-a2a`, while the same exchange
+without `audience` succeeded. Multiple audiences on Token A are NOT the
+problem. **Why nothing caught it sooner:** the chart tests only checked the
+rendered mapper strings, the adapter's exchange tests use a fake token
+endpoint, and Keycloak reports this as `invalid_client` -- which reads like
+a bad client secret. `praxis-spoke-hub` (the spoke gateway's requested
+audience) had the same gap and would have failed next.
+
+**Live realm (one-shot import): create them once by hand.** On a realm
+that has already imported, add each client in the Admin Console (realm
+`rca` -> Clients -> Create client):
+
+1. Client type `OpenID Connect`, Client ID `lightspeed-hub-a2a` (then again
+   for `praxis-spoke-hub`), Next.
+2. Client authentication **On**; uncheck **every** authentication flow
+   (Standard flow, Direct access grants, Implicit, Service accounts, OAuth
+   2.0 Device, OIDC CIBA), Next, Save.
+
+Or with `kcadm.sh` from the Keycloak pod, after `kcadm.sh config
+credentials` with a working admin login:
+
+```bash
+for aud in lightspeed-hub-a2a praxis-spoke-hub; do
+  kcadm.sh create clients -r rca -s clientId=$aud -s enabled=true \
+    -s publicClient=false -s standardFlowEnabled=false \
+    -s implicitFlowEnabled=false -s directAccessGrantsEnabled=false \
+    -s serviceAccountsEnabled=false
+done
+```
+
+Note: the `keycloak-system/keycloak-admin-user` secret's password was found
+stale on the standalone cluster (2026-11-20, `invalid_grant` for `admin`),
+so use whatever admin login you currently have.
+
+**Known gap -- SSO callers on the hub leg:** Praxis still accepts Red Hat SSO
+tokens (`api.ask_red_hat`) on this leg, and Keycloak trusts the SSO IdPs
+(`externalOidcProviders`), but the adapter's exchanger never sends
+`subject_issuer`, which external-token exchange needs (see "External Red Hat
+SSO token exchange" above). An SSO-authenticated request reaching the
+adapter is therefore expected to fail its A->H exchange until the adapter
+sets `subject_issuer` from the token's `iss` -- UNCONFIRMED, not yet tested
+live.

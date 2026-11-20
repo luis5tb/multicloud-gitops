@@ -257,10 +257,16 @@ Set `identity.keycloak.issuerUrl` to the exact token issuer and `route.host` to
 the public A2A hostname (both derive from `global.clusterBaseDomain` by
 default). In single-issuer mode (`identity.oidcIssuers` empty),
 `identity.keycloak.audience` must name the audience this gateway's callers'
-Keycloak tokens carry -- the chart `fail`s loudly when it is empty. There is
-currently no per-cluster registry and no routed upstream: when a backend is
-re-introduced (Task B of the migration plan), its Service coordinates and
-TLS trust must come from operator-controlled values, never caller input.
+Keycloak tokens carry -- the chart `fail`s loudly when it is empty. With
+`a2aUpstream` fronting the lightspeed-hub adapter, that is the audience of
+the hop this gateway protects: the standalone variant sets
+`lightspeed-hub-adapter` (Token A carries it via keycloak-oidc's
+`hubExchange.subjectTokenAudienceMapper`). It used to be `mas-a2a`, left over
+from when ACME called Praxis directly; MAS validates `mas-a2a` itself and no
+Praxis fronts MAS (see `docs/ARCHITECTURE.md` "Current (Task B) request
+path"). The Red Hat SSO issuers (`api.ask_red_hat`) stay so SSO callers that
+MAS forwards are admitted. The backend's Service coordinates and TLS trust
+come from operator-controlled values (`a2aUpstream.*`), never caller input.
 
 The pinned Praxis AI 0.4.1 build only provides the filter-wide
 `allow_private_idp` option, exposed as `policy.allowPrivateIdp` here. It is

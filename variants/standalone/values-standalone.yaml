@@ -433,14 +433,22 @@ clusterGroup:
         # token whose aud array is
         # ["cloud-services","api.graphql","api.ask_red_hat","api.console"];
         # api.ask_red_hat is the narrowest value that fits the assistant use case.
-        # Audience on local-Keycloak caller tokens: acme-agent's
-        # client-credentials token carries the mas-a2a audience (the
-        # acme-agent client's surviving audience mapper in keycloak-oidc --
-        # keycloak.masA2aAudience, default mas-a2a). Required even with
+        # Audience on local-Keycloak caller tokens: THIS gateway fronts the
+        # lightspeed-hub adapter (MAS -> praxis-proxy -> adapter), so it
+        # checks that Token A was meant for the adapter. acme-agent's token
+        # carries lightspeed-hub-adapter via keycloak-oidc's
+        # hubExchange.subjectTokenAudienceMapper (MAS forwards Token A
+        # verbatim -- it cannot exchange per delegation yet). It used to be
+        # mas-a2a, a leftover from when ACME called Praxis directly; mas-a2a
+        # is validated by MAS itself (mao-a2a MULTI_ISSUER_OIDC_ISSUERS_JSON +
+        # A2A_ALLOWED_PRINCIPALS), and there is no Praxis in front of MAS.
+        # The Red Hat SSO issuers below stay (api.ask_red_hat): MAS may
+        # forward an SSO caller token, which Keycloak trusts via
+        # keycloak-oidc externalOidcProviders. Required even with
         # identity.oidcIssuers set: the chart appends the local Keycloak
         # issuer with this audience and fails loud if it is empty.
         - name: identity.keycloak.audience
-          value: mas-a2a
+          value: lightspeed-hub-adapter
         - name: identity.oidcIssuers[0].name
           value: red-hat-sso-prod
         - name: identity.oidcIssuers[0].issuerUrl
