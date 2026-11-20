@@ -924,6 +924,12 @@ clusterGroup:
           value: quay.io/ltomasbo/lightspeed-agentic-operator
         - name: agenticOperator.image.tag
           value: "a2a-gw"
+        # Sandbox image the operator runs each step in (same image as the
+        # earlier mao-poc-rca setup; Konflux floating tag -- upstream has no
+        # versioned release yet). Without a sandbox-pod-spec every run failed
+        # with `base PodSpec with at least one container is required`.
+        - name: agenticOperator.sandbox.image
+          value: quay.io/redhat-user-workloads/crt-nshift-lightspeed-tenant/lightspeed-agentic-sandbox:main
         # Agent configuration (LLMProvider + Agent named adapter.runAgent +
         # ApprovalPolicy "cluster" with Analysis Automatic). Without it every
         # run failed live with `Agent "default" not found` (2026-11-20).

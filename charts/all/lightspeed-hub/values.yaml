@@ -310,6 +310,21 @@ agenticOperator:
     # (design §2.3).
     terminalTTLDays: 14
 
+  # Sandbox pod the operator runs each step in (ConfigMap keys sandbox-mode /
+  # sandbox-pod-spec). image has no default (deployment-owned; set it in the
+  # variant) and the render fails when empty.
+  sandbox:
+    mode: bare-pod
+    image: ""
+    imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
   # Agent configuration the operator needs to run anything (all three are
   # CLUSTER-scoped CRs; adapted from the mao-poc-rca branch's
   # lightspeed-agentic-operator chart). VERIFIED-BROKEN LIVE (2026-11-20):

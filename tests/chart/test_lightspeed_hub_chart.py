@@ -34,6 +34,7 @@ ENABLE_SETS = [
     "--set",
     "agenticOperator.config.gatewayServerURLTemplate=https://praxis-spoke-{targetCluster}.praxis-proxy.svc.cluster.local:8443",
     "--set", "agenticOperator.config.gatewayCASecret=praxis-spoke-gateway-ca",
+    "--set", "agenticOperator.sandbox.image=quay.io/example/lightspeed-agentic-sandbox:test",
 ]
 
 
@@ -919,3 +920,36 @@ def test_spoke_reader_rbac_binds_role_groups() -> None:
             "name": "keycloak:praxis-spoke-hub:reader",
         }]
     assert _helm(*ENABLE_SETS, "--set", "spokeReaderRBAC.enabled=true", check=False).returncode != 0
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
+def test_operator_configmap_carries_sandbox_pod_spec() -> None:
+    """sandbox-pod-spec is a valid one-container PodSpec JSON; image required.
+
+    VERIFIED-BROKEN LIVE (2026-11-20): without it every run failed at
+    analysis with `build pod spec: base PodSpec with at least one container
+    is required`.
+    """
+    import json
+    docs = _resources(_helm(*ENABLE_SETS).stdout)
+    cm = next(
+        d for d in docs
+        if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "lightspeed-agentic-configuration"
+    )
+    assert cm["data"]["sandbox-mode"] == "bare-pod"
+    spec = json.loads(cm["data"]["sandbox-pod-spec"])
+    assert len(spec["containers"]) == 1
+    c = spec["containers"][0]
+    assert c["image"] == "quay.io/example/lightspeed-agentic-sandbox:test"
+    assert c["securityContext"]["allowPrivilegeEscalation"] is False
+    assert c["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+    assert spec["securityContext"]["runAsNonRoot"] is True
+    # No image -> fail loud.
+    sets = []
+    it = iter(ENABLE_SETS)
+    for flag, val in zip(it, it):
+        if not val.startswith("agenticOperator.sandbox.image="):
+            sets += [flag, val]
+    assert _helm(*sets, check=False).returncode != 0

@@ -9,6 +9,10 @@
 {{- fail "agenticOperator.config.gatewayCASecret is required when sandboxCredentialMode=gateway (repo C's ConfigMap load fails loudly without it -- pkg/configuration/config.go)" }}
 {{- end }}
 {{- end }}
+{{- $sb := .Values.agenticOperator.sandbox }}
+{{- if not $sb.image }}
+{{- fail "agenticOperator.sandbox.image is required: the operator builds every sandbox pod from sandbox-pod-spec and fails each step with 'base PodSpec with at least one container is required' without it" }}
+{{- end }}
 # The configuration ConfigMap repo C reads by well-known name
 # (pkg/configuration/constants.go: ConfigMapName). Key names are repo C's
 # contract, verbatim.
@@ -26,6 +30,26 @@ data:
   gateway-ca-secret: {{ .Values.agenticOperator.config.gatewayCASecret | quote }}
   {{- end }}
   terminal-ttl-days: {{ .Values.agenticOperator.config.terminalTTLDays | quote }}
+  # Sandbox workload shape (repo C KeySandboxMode / KeySandboxPodSpec). The
+  # base PodSpec is JSON; the operator adds the run's env, mounts (gateway
+  # kubeconfig, run identity) and service account on top. VERIFIED-BROKEN
+  # LIVE (2026-11-20): without sandbox-pod-spec every run failed at analysis
+  # with `build pod spec: base PodSpec with at least one container is
+  # required`. Ported from the mao-poc-rca branch's operator chart.
+  sandbox-mode: {{ $sb.mode | quote }}
+  sandbox-pod-spec: {{ (dict
+      "containers" (list (dict
+        "name" "agent"
+        "image" $sb.image
+        "imagePullPolicy" $sb.imagePullPolicy
+        "resources" $sb.resources
+        "securityContext" (dict
+          "allowPrivilegeEscalation" false
+          "runAsNonRoot" true
+          "capabilities" (dict "drop" (list "ALL"))
+          "seccompProfile" (dict "type" "RuntimeDefault"))))
+      "securityContext" (dict "runAsNonRoot" true "seccompProfile" (dict "type" "RuntimeDefault"))
+    ) | toJson | quote }}
 ---
 apiVersion: v1
 kind: ServiceAccount
