@@ -561,15 +561,20 @@ is enabled; the realm-secrets-reconciler does not re-assert them.
 
 ## Hub A2A adapter token exchanger (Task B / Phase 1, disabled)
 
+> **Standalone runs the hub-gateway mode instead** (`hubGatewayExchanger`,
+> section "Hub gateway exchange" below): Praxis exchanges A→H as `mas-a2a`,
+> and this `hubExchange` client (`lightspeed-hub-a2a` there) becomes H's
+> audience and the adapter's **H→R** exchanger. The description below is the
+> earlier mode, where the adapter exchanged A→H itself as
+> `lightspeed-hub-adapter`; it still renders when `hubGatewayExchanger` is
+> off. Flow diagrams: `docs/agentic-e2e-token-flow.html`.
+
 `keycloak.hubExchange` (disabled by default) renders the H-side Keycloak
 prerequisites for the hub A2A adapter's A→H token exchange
 (`charts/all/lightspeed-hub`'s `adapter.keycloak.clientId`; see
-`PLAN-lightspeed-hub-migration.md` Phase 1 "First exchange" and
-`docs/lightspeed-hub-plan.html` s3). On this leg the **adapter** performs
-the exchange — Praxis validates Token A and routes only (see
-charts/all/praxis-proxy's `a2aUpstream.exchangeAtPraxis` for why the
-Praxis-side exchange is unsupported). When enabled it adds to the realm
-import:
+`PLAN-lightspeed-hub-migration.md` Phase 1 "First exchange"). In this mode
+the **adapter** performs the exchange and Praxis validates Token A and
+routes only. When enabled it adds to the realm import:
 
 - a confidential client (`lightspeed-hub-adapter` by default, must equal
   the lightspeed-hub chart's `adapter.keycloak.clientId`) with

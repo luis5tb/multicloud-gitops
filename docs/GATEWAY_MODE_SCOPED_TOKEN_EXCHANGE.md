@@ -19,7 +19,8 @@ gateway mode.
 (components and token flows) and
 [`agentic-e2e-token-flow.html`](agentic-e2e-token-flow.html) (the chain in s2,
 step by step). Per-hop reference for this deployment:
-[`agents/AUTHENTICATION.md`](../agents/AUTHENTICATION.md).
+[`agents/AUTHENTICATION.md`](../agents/AUTHENTICATION.md). Presentation:
+[`lightspeed-hub-architecture-deck.html`](lightspeed-hub-architecture-deck.html).
 
 ---
 

@@ -185,6 +185,36 @@ sequenceDiagram
   ServiceAccount and no spoke-management kubeconfig: every read is made as
   the caller, through the spoke gateway.
 
+**Credential renewal across MAS and the hub.** No refresh tokens are
+involved: ACME re-authenticates for a fresh A, and H, R and U are re-derived
+from it.
+
+- MAS checks a credential's remaining validity before each graph node
+  (default minimum 60 s) and, when it is too short or a downstream call
+  returns 401/auth-required, opens a renewal request in its Mongo mailbox.
+  The worker waits inside the same Temporal activity (heartbeats continue);
+  the inbound A2A side shows the outer task as `AUTH_REQUIRED` to ACME.
+- ACME answers on the **same task**, with a new `message_id` and a fresh
+  Authorization. MAS stores the sealed replacement and the waiting node
+  continues: no new workflow, no second submit, completed nodes are not
+  re-run.
+- 401 and `AUTH_REQUIRED` differ: a 401 before the request was accepted
+  means resend with fresh credentials; a downstream task already in
+  `AUTH_REQUIRED` gets a credential-only follow-up on that task. A 403 is a
+  denial, never a renewal trigger, and fresh credentials do not revive
+  terminal tasks or bypass approvals.
+- On the hub, the adapter parks its task in `auth-required`; the fresh A
+  arrives through the hub gateway as a fresh H, which the adapter exchanges
+  for a fresh R written to the same `ls-run-token-<uid>` Secret. The sandbox
+  reads `tokenFile` per request, so it picks up the new R in place. Seen
+  live: `task paused for credential renewal` then `renewed run credential`
+  five seconds later.
+- Renewal is not exactly-once execution: a worker crash can retry an
+  in-flight activity, and a command may have changed the cluster before its
+  response was lost. Only a known pre-dispatch auth rejection is a safe
+  retry.
+- Open: steps that outlive one R (30 min), especially behind long approvals.
+
 ## Praxis policy mode (standalone: policy enforcement)
 
 Praxis has two modes, selected by `policy.enabled` (default `true`) in

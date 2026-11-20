@@ -11,8 +11,11 @@ Diagrams: [agentic-architecture-overview.html](agentic-architecture-overview.htm
 (all components, Keycloak clients and token flows) and
 [agentic-e2e-token-flow.html](agentic-e2e-token-flow.html) (one ACME ->
 lightspeed-hub investigation, hop by hop: token received, client used, exchange,
-token forwarded). The per-hop authentication reference is
-[agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md).
+token forwarded), plus the slide deck
+[lightspeed-hub-architecture-deck.html](lightspeed-hub-architecture-deck.html)
+for presenting the design. The per-hop authentication reference is
+[agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md); the original options
+analysis is [LIGHTSPEED_HUB_IDENTITY_DESIGN.md](LIGHTSPEED_HUB_IDENTITY_DESIGN.md).
 
 ## What this repo is
 
@@ -202,8 +205,9 @@ Local render lesson: Praxis multi-OIDC output is YAML nested inside a ConfigMap
 string. Helm whitespace trimming once joined the last external JWKS URL to the
 local issuer item; parse `data.policy.yaml` itself, not only the outer Helm YAML.
 
-Local browser lesson: `docs/lightspeed-hub-plan.html` passed HTML nesting checks
-but rendered three Mermaid error diagrams in Chrome because message/note labels
+Local browser lesson: a Mermaid-based plan page (since folded into
+`docs/agentic-e2e-token-flow.html` and `agents/AUTHENTICATION.md`) passed HTML
+nesting checks but rendered three Mermaid error diagrams in Chrome because message/note labels
 contained statement-separating semicolons; validate actual SVG rendering with the
 pinned Mermaid runtime, not just HTML syntax.
 

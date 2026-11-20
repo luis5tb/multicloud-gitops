@@ -245,10 +245,11 @@ keycloak:
   # TASK B / PHASE 1 H-SIDE WIRING (DISABLED BY DEFAULT): Keycloak
   # prerequisites for the hub A2A adapter's A->H token exchange
   # (charts/all/lightspeed-hub's adapter.keycloak.clientId; see
-  # PLAN-lightspeed-hub-migration.md Phase 1 "First exchange" and
-  # docs/lightspeed-hub-plan.html s3). DESIGN DECISION on this leg: the
-  # ADAPTER performs the exchange (Praxis validates Token A and routes
-  # only -- see charts/all/praxis-proxy's a2aUpstream.exchangeAtPraxis).
+  # PLAN-lightspeed-hub-migration.md Phase 1 "First exchange"). Without
+  # hubGatewayExchanger the ADAPTER performs A->H itself; with it (the
+  # standalone variant) Praxis exchanges A->H as mas-a2a and this client
+  # becomes H's audience and the adapter's H->R exchanger (see
+  # hubGatewayExchanger below and docs/agentic-e2e-token-flow.html).
   #
   # This block mints the adapter's confidential exchange client, the hub
   # audience on exchanged Token H, and the group mappers that put the

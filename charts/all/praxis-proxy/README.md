@@ -562,8 +562,8 @@ Where the hub and spoke gateways sit in the token chain:
 `a2aUpstream` (disabled by default; **empty by default renders nothing and
 the default render is byte-identical to the pre-block one** — pinned by
 `tests/chart/test_praxis_a2a_upstream.py`) is the hub-gateway hop of the
-lightspeed-hub request leg (leg 2; `docs/lightspeed-hub-plan.html` s3
-"Praxis stays the front door"): the main gateway forwards A2A traffic to
+lightspeed-hub request leg (leg 2; `docs/agentic-e2e-token-flow.html`
+step 5): the main gateway forwards A2A traffic to
 the hub A2A adapter (charts/all/lightspeed-hub) instead of answering 404.
 
 **Design (current): this main gateway is the praxis HUB gateway and

@@ -408,7 +408,7 @@ spokeGatewayConfig:
         memory: 128Mi
 
 # TASK B / lightspeed-hub REQUEST LEG (leg 2 of the architecture; see
-# docs/lightspeed-hub-plan.html s3 "Praxis stays the hub gateway"). DISABLED
+# docs/agentic-e2e-token-flow.html step 5, the hub gateway). DISABLED
 # BY DEFAULT: while disabled, the main gateway keeps its NO-UPSTREAM shape
 # (see the long comment in files/praxis.yaml) and this block renders
 # nothing -- the disabled render is byte-identical to the pre-block one
