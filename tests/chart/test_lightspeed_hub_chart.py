@@ -475,6 +475,13 @@ def test_admission_policy_binding_references_param_configmap() -> None:
     ops = policy["spec"]["matchConstraints"]["resourceRules"][0]
     assert ops["operations"] == ["CREATE", "UPDATE"]
     assert ops["resources"] == ["agenticruns"]
+    # UPDATEs that leave spec.targetCluster unchanged pass (the operator's
+    # finalizer update was denied live without this -- runs never started);
+    # setting/changing the target on UPDATE still hits the allow-list.
+    expr = policy["spec"]["validations"][0]["expression"]
+    assert 'request.operation == "UPDATE"' in expr
+    assert "oldObject.spec.targetCluster == object.spec.targetCluster" in expr
+    assert "has(oldObject.spec.targetCluster)" in expr
     # ...and the binding references it by name, denying when it is missing
     # (never fail open).
     assert binding["spec"]["policyName"] == policy["metadata"]["name"]

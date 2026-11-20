@@ -14,7 +14,8 @@
 # SKELETON / SAFE DEFAULT: DENY-ALL. The exact authorization mapping (which
 # principal may target which spoke) is an OPEN DESIGN ITEM (design §4.3);
 # until admissionPolicy.allowTargets lists the requester, every
-# create/update of an AgenticRun with spec.targetCluster set is denied. A
+# create of an AgenticRun with spec.targetCluster set (and every update
+# that sets or changes it) is denied. A
 # missing param ConfigMap also denies (parameterNotFoundAction: Deny) --
 # the policy never fails open. Keys of the param ConfigMap are authenticated
 # usernames or group names (e.g. keycloak:acme-agent-rca); values are
@@ -42,6 +43,18 @@ spec:
     # spoke runs require an explicit allow-list match on the authenticated
     # requester's username or one of their groups.
     #
+    # The check governs who CHOOSES the target, so an UPDATE that leaves
+    # spec.targetCluster unchanged is allowed for anyone with update RBAC
+    # -- in particular the agentic operator adding its finalizer.
+    # VERIFIED-BROKEN LIVE (2026-11-20): without this clause the policy
+    # denied the operator's own finalizer update ("add finalizer: ...
+    # not authorized for requester
+    # system:serviceaccount:lightspeed-hub:lightspeed-hub-agentic-operator"),
+    # so every AgenticRun the adapter created sat with an empty status and
+    # no pods. An UPDATE that sets or CHANGES the target is still checked
+    # against the allow-list. (Status writes go through agenticruns/status,
+    # which this policy does not match.)
+    #
     # ConfigMap keys cannot contain ':' (Kubernetes data-key validation,
     # regex [-._a-zA-Z0-9]+), but group names do (keycloak:<group>): the
     # chart sanitizes map keys at render time (':' -> '.') and this
@@ -49,6 +62,9 @@ spec:
     # before lookup.
     - expression: >-
         !has(object.spec.targetCluster)
+        || (request.operation == "UPDATE"
+          && has(oldObject.spec.targetCluster)
+          && oldObject.spec.targetCluster == object.spec.targetCluster)
         || params.data.exists(k, k == request.userInfo.username.replace(":", ".")
           && params.data[k].split(',').exists(t, t.trim() == object.spec.targetCluster))
         || request.userInfo.groups.exists(g,

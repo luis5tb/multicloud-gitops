@@ -235,6 +235,26 @@ were not the cause. Exchange target audiences now render as audience-only
 clients (keycloak-oidc README "Audience-only clients"); one-shot realm import
 means live realms need them created by hand.
 
+Live Vault/Keycloak drift finding (2026-11-20): never `vault kv put` a single
+field into a multi-field secret -- KV v2 `put` REPLACES the whole secret; use
+`vault kv patch`. On 2026-11-19 11:10 a one-field `put` of
+`secret/global/rhbk admin-password=...` dropped `db-password` and
+`console-client-secret`; the next `make load-secrets` then regenerated both
+(`onMissingValue: generate` fills missing fields). Keycloak, however, applies
+the bootstrap admin password only once, to an empty database, and keeps
+client secrets from the one-shot realm import -- so the ExternalSecrets
+followed Vault while Keycloak kept the old values: the `keycloak-admin-user`
+Secret stopped working (`invalid_grant`), the realm-secrets-reconciler that
+would re-assert secrets logs in with that same Secret, and OpenShift console
+OIDC broke (`openshift-console` client secret in Keycloak != the one in
+`openshift-config/openshift-console-oidc`). The DB password survived because
+the PostgreSQL image re-applies `POSTGRESQL_PASSWORD` on every start.
+Recovered by reading the original admin password from Vault's version history
+(`vault kv metadata get` / `kv get -version=N`), then setting Keycloak's admin
+password and console client secret to the CURRENT Vault values via the admin
+API. Rotating a Keycloak credential means changing it in Keycloak too, not
+only in Vault.
+
 Live Praxis audience finding (2026-11-20): the main gateway still validated
 local-Keycloak tokens for `mas-a2a`, left over from when ACME called Praxis
 directly. It now fronts the hub adapter, so it checks `lightspeed-hub-adapter`
