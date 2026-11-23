@@ -847,7 +847,7 @@ clusterGroup:
         # SCRIPT emits; replacing the live blueprint is the separate runtime
         # cutover (G3) in that plan.
         - name: a2a.blueprintId
-          value: "93ed0707-c309-4f6b-978d-1165b4e5f025"
+          value: "bdf07d00-a104-47b1-99fb-47af1a7a8e04"
         # Must match the route host OpenShift generates for this Service.
         # With route.host unset, the host derives from the generated route
         # name (<release>-<chart>-<ns>): mao-a2a-mas-a2a-mao.apps...
