@@ -10,7 +10,7 @@
 # clusterBaseDomain empty and edit nothing here at all. Any derived value is still
 # explicitly overridable in the per-app overrides below.
 global:
-  clusterBaseDomain: cluster-jq8zh.dyn.redhatworkshops.io
+  clusterBaseDomain: bm-cluster.e2e.bos.redhat.com
   # Keycloak realm the issuer URLs derive from; must equal the keycloak-oidc
   # Application's keycloak.realm override below (default rca).
   keycloakRealm: rca
@@ -299,9 +299,12 @@ clusterGroup:
           value: secret/data/global/praxis-spoke-gateway
         # One entry per registered spoke, matching each spoke gateway's
         # exchangeAudience. The hub cluster doubles as its own spoke
-        # ("hub"): its U-audience is praxis-spoke-hub:
+        # ("hub"): its U-audience is praxis-spoke-hub; mario-ipi is the
+        # second registered spoke:
         - name: keycloak.spokeGatewayExchanger.spokeAudiences[0]
           value: praxis-spoke-hub
+        - name: keycloak.spokeGatewayExchanger.spokeAudiences[1]
+          value: praxis-spoke-mario-ipi
         # TASK B / PHASE 1 H-SIDE WIRING (DISABLED): Keycloak prerequisites
         # for the hub A2A adapter's A->H exchange (charts/all/lightspeed-hub
         # adapter.keycloak.clientId; the ADAPTER performs the exchange --
@@ -433,10 +436,11 @@ clusterGroup:
         #   -o jsonpath='{.spec.template.spec.containers[?(@.name=="dns")].image}'
         - name: dnsIPv4Only.image
           value: "quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:2168f78e98dee245b93011b4af41970f4e2e64ae46ece6ce7742dc3c2a0cd1cd"
-        # NOT the universal OpenShift SDN default (172.30.0.10): this cluster's
-        # service network is 172.231.0.0/16, so dns-default is 172.231.0.10.
-        # A hardcoded 172.30.0.10 here silently NXDOMAINs every in-cluster
-        # lookup from the dnsIPv4Only sidecar (observed live: it broke the
+        # This cluster's (bm-cluster) service network IS the universal
+        # OpenShift default, so dns-default is 172.30.0.10 (verified live:
+        # `oc get svc dns-default -n openshift-dns`). A wrong value here
+        # silently NXDOMAINs every in-cluster lookup from the dnsIPv4Only
+        # sidecar (observed live on the previous cluster: it broke the
         # Praxis->lightspeed-hub upstream with "Name does not resolve", not
         # just the sso.redhat.com egress path this was added for -- see
         # README). Re-derive per cluster: oc get svc dns-default
@@ -444,9 +448,9 @@ clusterGroup:
         #   oc get network.config cluster -o jsonpath='{.spec.serviceNetwork}'
         #   and use .10 in that CIDR.
         - name: dnsIPv4Only.clusterDnsIP
-          value: "172.231.0.10"
+          value: "172.30.0.10"
         - name: dnsIPv4Only.extraSearches[0]
-          value: cluster-jq8zh.dyn.redhatworkshops.io
+          value: bm-cluster.e2e.bos.redhat.com
         # No agent-card overrides: Praxis has no card of its own; with
         # a2aUpstream enabled (below) it routes discovery to the
         # lightspeed-hub adapter's own card (see the chart README "Agent
@@ -495,9 +499,12 @@ clusterGroup:
         # charts/all/praxis-proxy/README.md "Spoke gateways (B1,
         # proposed)" for the remaining live-cluster items). The hub
         # cluster doubles as its own spoke ("hub"): the remote API is the
-        # hub's own API server:
+        # hub's own API server. A second spoke, mario-ipi, is registered
+        # below (its key MUST stay identical to lightspeed-hub's
+        # adapter.allowedTargets, the admissionPolicy allowTargets and
+        # the MAS blueprint's HUB_ADAPTER_CLUSTERS):
         - name: spokeGateways.hub.remoteAPIServer
-          value: https://api.cluster-jq8zh.dyn.redhatworkshops.io:6443
+          value: https://api.bm-cluster.e2e.bos.redhat.com:6443
         - name: spokeGateways.hub.exchangeAudience
           value: praxis-spoke-hub
         # Secret in the praxis-proxy namespace holding the hub API
@@ -506,6 +513,16 @@ clusterGroup:
         # runbook A4); never commit the real CA to this repo.
         - name: spokeGateways.hub.remoteCACert.secretName
           value: praxis-spoke-hub-api-ca
+        - name: spokeGateways.mario-ipi.remoteAPIServer
+          value: https://api.mario-ipi.e2e.bos.redhat.com:6443
+        - name: spokeGateways.mario-ipi.exchangeAudience
+          value: praxis-spoke-mario-ipi
+        # Secret in the praxis-proxy namespace holding the mario-ipi API
+        # server's CA bundle (key ca.crt) -- created manually from that
+        # spoke's kubeconfig certificate-authority-data (runbook A4a);
+        # never commit the real CA to this repo.
+        - name: spokeGateways.mario-ipi.remoteCACert.secretName
+          value: praxis-spoke-mario-ipi-api-ca
         # Shared cross-spoke settings live in spokeGatewayConfig (NOT
         # under spokeGateways, which is purely per-spoke).
         # exchangeClient.clientId/secretName and the derived token URL
@@ -575,7 +592,7 @@ clusterGroup:
         #   export HUB_ADAPTER_AGENT_NAME="Hub Cluster Investigator"
         #   export HUB_ADAPTER_TARGET_HEADER="X-Hub-Cluster"
         #   #   ^ must equal a2aUpstream.targetHeader above
-        #   export HUB_ADAPTER_CLUSTERS="east,west"
+        #   export HUB_ADAPTER_CLUSTERS="hub,mario-ipi"
         #   #   ^ closed list of target cluster names; must equal the
         #   #     spokeGateways keys above (and lightspeed-hub's
         #   #     adapter.allowedTargets). With it set, the orchestrator
@@ -639,7 +656,7 @@ clusterGroup:
         - name: a2a.remoteAgents[0].description
           value: "MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat. Use for all Red Hat-related requests; MAO selects the appropriate specialist(s)."
         - name: a2a.remoteAgents[0].endpoint
-          value: "https://mao-a2a-mas-a2a-mao.apps.cluster-jq8zh.dyn.redhatworkshops.io"
+          value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
         # Allow 60s beyond the analysis for polling and returning the
         # final A2A response.
         - name: a2a.requestTimeout
@@ -839,7 +856,7 @@ clusterGroup:
         # via the mao-a2a route above, so publicBaseUrl must be the SAME
         # origin, not a differently-named route.)
         - name: a2a.publicBaseUrl
-          value: "https://mao-a2a-mas-a2a-mao.apps.cluster-jq8zh.dyn.redhatworkshops.io"
+          value: "https://mao-a2a-mas-a2a-mao.apps.bm-cluster.e2e.bos.redhat.com"
         # Must be a real list: the chart applies toJson so the app can JSON-decode
         # the A2A_ALLOWED_PRINCIPALS env var into a list. Use indexed keys (not a
         # JSON string) so the clusterGroup override builds an actual YAML list.
@@ -867,7 +884,7 @@ clusterGroup:
         - name: route.enabled
           value: "true"
         # - name: route.host
-        #   value: "mas-a2a.apps.cluster-jq8zh.dyn.redhatworkshops.io"
+        #   value: "mas-a2a.apps.bm-cluster.e2e.bos.redhat.com"
         # Long-running delegations (lightspeed-hub investigations): the
         # chart default 300s stream cap made MAS end ACME's stream with "The
         # stream time limit was reached. Query the task for its current
@@ -905,9 +922,9 @@ clusterGroup:
         - name: identity.oidcIssuers[1].username_claim
           value: preferred_username
         - name: identity.oidcIssuers[2].issuer_url
-          value: https://keycloak.apps.cluster-jq8zh.dyn.redhatworkshops.io/realms/rca
+          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
         - name: identity.oidcIssuers[2].jwks_url
-          value: https://keycloak.apps.cluster-jq8zh.dyn.redhatworkshops.io/realms/rca/protocol/openid-connect/certs
+          value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca/protocol/openid-connect/certs
         - name: identity.oidcIssuers[2].audience
           value: mas-a2a
         - name: identity.oidcIssuers[2].username_claim
@@ -1015,9 +1032,11 @@ clusterGroup:
         # Fail-fast allow-list of target clusters (the adapter's
         # --allowed-targets; the unknown-target message is the model-facing
         # spelling guard). MUST stay identical to the spokeGateways keys
-        # (here: the hub cluster as its own spoke):
+        # (here: the hub cluster as its own spoke plus mario-ipi):
         - name: adapter.allowedTargets[0]
           value: hub
+        - name: adapter.allowedTargets[1]
+          value: mario-ipi
         # Token H's AUDIENCE-SCOPED role group (keycloak-oidc exchangeRoles:
         # H carries only "lightspeed-hub-a2a:agenticrun-creator", mapped to
         # Group keycloak:lightspeed-hub-a2a:agenticrun-creator). Was
@@ -1029,6 +1048,8 @@ clusterGroup:
         # allowed targetCluster names):
         - name: admissionPolicy.allowTargets.keycloak\:lightspeed-hub-a2a\:agenticrun-creator[0]
           value: hub
+        - name: admissionPolicy.allowTargets.keycloak\:lightspeed-hub-a2a\:agenticrun-creator[1]
+          value: mario-ipi
         # "Only the configured group can create AgenticRuns": the group bound
         # to a Role granting create on agenticruns in the run namespace. The
         # admission policy above additionally restricts WHICH targetCluster:
