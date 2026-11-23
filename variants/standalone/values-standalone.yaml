@@ -878,7 +878,8 @@ clusterGroup:
           #value: "14a43a22-01f8-4fe3-81fd-f34cce3d745f"
           #value: "409d044c-4119-430b-9ec8-9388d127210b"
           #value: "94510bf9-b826-402b-a242-d4547e948d76"
-          value: "bb366787-080c-4d98-b69e-2774e15855cb"
+          #value: "bb366787-080c-4d98-b69e-2774e15855cb"
+          value: "bae292cb-d792-4bb1-a1b4-8e18fbaad924"
         - name: a2a.allowedPrincipals[1]
           value: "b6daf56c-157a-418a-b6bf-7a6c18c667a7"
         - name: route.enabled
