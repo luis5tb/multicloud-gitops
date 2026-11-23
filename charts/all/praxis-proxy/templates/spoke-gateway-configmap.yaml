@@ -66,6 +66,16 @@ metadata:
   labels:
     {{- include "praxis-proxy.labels" $ | nindent 4 }}
   annotations:
+    # Wave -2, same as the sync script ConfigMap: this source ConfigMap
+    # MUST land before the spoke-ca-bootstrap Sync hook (wave -1) reads
+    # it. With the default wave 0 the hook 404s on a greenfield install
+    # (the ConfigMap is only applied after the hook phase), failing the
+    # whole sync and leaving every wave-0+ resource Missing -- seen live
+    # on bm-cluster 2026-11-23 (the old cluster never hit it because the
+    # ConfigMap pre-dated the bridge). The service-ca operator populates
+    # service-ca.crt asynchronously after creation; the Job's pod
+    # backoff retries cover that short delay.
+    argocd.argoproj.io/sync-wave: "-2"
     # The CA the SANDBOX must trust for the gateway's serving certificate:
     # OpenShift's service-ca-operator injects the current cluster
     # service-serving CA bundle into this ConfigMap's `service-ca.crt` key.
