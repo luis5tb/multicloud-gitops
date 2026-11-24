@@ -6,6 +6,11 @@ downstream A2A agents. There is one Keycloak grant and one passthrough hop
 (ACME -> MAS -> Praxis) per request. When the downstream agent is the
 **lightspeed-hub** (cluster investigations), three RFC 8693 token exchanges
 follow, each minting a token for exactly the next hop (A -> H -> R -> U).
+To watch a live request hop by hop — identities, each exchange, and on whose
+behalf — run `bash scripts/monitor.sh` (see
+[`scripts/README.md`](../scripts/README.md#flow-monitor)); the Keycloak
+realm-event feed it uses (`--kc`) is the authoritative record of the
+exchanges described below.
 
 Visual companions:
 
@@ -562,8 +567,10 @@ request id and ACME's `X-Request-Id` never reappears downstream -- observed
 live: the MAO A2A endpoint's middleware logged its own dashed-UUID id for an
 inbound POST. Trace the orchestrated flow by time window
 instead -- `scripts/monitor.sh` timestamps every card for exactly this --
-or by Keycloak Realm Events (below), which records each grant
-regardless of header propagation.
+or across hops by the caller's `sub` (identical in A/H/R/U, printed on every
+exchange card) and the token `fp:...` fingerprint, or by Keycloak Realm
+Events, which record each grant regardless of header propagation -- the
+monitor's `--kc` feed reads exactly those events.
 
 ## Separate trust boundary: inbound MAS A2A (with token passthrough)
 

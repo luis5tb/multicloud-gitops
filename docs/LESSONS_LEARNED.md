@@ -401,7 +401,38 @@ re-check each when the image is bumped.
   `lightspeed-service` PR #2866 added A2A *transport* with no authentication,
   which does not address per-caller delegated identity.
 
-## 9. Documentation process
+## 9. Flow monitor (`scripts/monitor.sh`)
+
+- **Observing the chain means reading Keycloak; a pod log is corroboration.**
+  "Which token is this" cannot be derived from the hop a line was seen at:
+  the same `sub` wears A, H, R and U, and each hop's log level and format
+  differ. The monitor now reads Keycloak realm events (`--kc`) as the
+  exchange record -- client that exchanged, principal, audience -- and matches
+  tokens by ACME's `fp:` fingerprint across hops. *(used live 2026-11-23/24;
+  the feed itself was exercised against fake `curl`/`oc`, not yet replayed
+  from a real cluster by the author)*
+- **A verification only counts if it checks the observed value.** An early
+  version printed an identity line unconditionally and a spoke-gateway
+  pre-scan labelled any bearer it saw, then reported it as consistent with the
+  hop. A Token-A regression at the adapter therefore looked verified. Cards
+  now derive the hop's expected token from the pod (`praxis-spoke-<id>` vs the
+  hub gateway) and compare the bearer's *fingerprint*: `IDENTITY`/`VERIFY`
+  print `matches`, `MISMATCH`, `UNIDENTIFIED` or `RETIRED`. If a check cannot
+  see the value, it must say so. *(found while reviewing, not live)*
+- **A one-shot `oc logs -f` goes dark when a pod is replaced** (every ArgoCD
+  sync), and a follower loop that ignores SIGTERM outlives a `timeout` or a
+  closed terminal. The monitor re-attaches to re-resolved pods and stops at
+  its next wake-up on TERM/INT. Related: `timeout 25 kc_curl ...` never ran,
+  because `timeout` execs a program, not a shell function. *(live while
+  testing the Keycloak feed against fake `curl`/`oc`)*
+- **Two classic parsing traps, both now pinned by replay tests.** An
+  unanchored timestamp matcher stamped ACME's dispatch card with the token's
+  `exp=` (an ISO date later in the line); a whitespace-IFS `read` collapsed
+  empty Keycloak event fields and shifted `grant_type` into the audience slot.
+  `tests/scripts/test_monitor.py` replays each hop's line shape through the
+  same parser the live monitor uses. *(found while wiring the Keycloak feed)*
+
+## 10. Documentation process
 
 - **Docs are part of the architecture.** Several of the above were made worse
   by a stale or overconfident README -- the `/health/ready` path was copied

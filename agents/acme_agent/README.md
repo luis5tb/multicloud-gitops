@@ -310,8 +310,11 @@ values) and `exp=<iso>` — the token's expiry decoded unverified, display
 only — and a renewal logs `"renew Token A"` with `renewed_from=fp:…`
 → `token=fp:…` and `override=retired`. `bash scripts/monitor.sh` renders
 these as **ACME DISPATCH** (with an EXPIRED marker on the expires line)
-and **ACME TOKEN RENEWAL** cards, and MAS's
-answering 401 as **MAS TOKEN REJECTED**.
+and **ACME TOKEN RENEWAL** cards, MAS's answering 401 (or its
+`AUTH_REQUIRED` pause) as **MAS TOKEN REJECTED** / **MAS AWAITING FRESH
+CREDENTIAL**, and the downstream `A→H`, `H→R`, `R→U` exchanges from
+Keycloak's own events — see the flow-monitor section of
+[`scripts/README.md`](../../scripts/README.md#flow-monitor).
 
 `python -m acme_agent.mint_token [--provider redhat --environment stage]`
 prints a freshly minted Token A inside the pod. It is used by

@@ -134,271 +134,334 @@ python3 -m venv /tmp/mas-query-tests
 
 # Flow monitor
 
-Real-time view of the agentic identity chain on an OpenShift
-cluster, following the caller's token at every stage:
+Real-time view of the agentic identity chain on an OpenShift cluster,
+following the caller's identity at every stage and showing **who acts, what
+token it wears, and on whose behalf**. The chain (standalone, live
+2026-11-24, two spokes registered) is one passthrough followed by three
+exchanges, one per hop:
 
 ```
-acme-agent ──Token A──▶ MAO A2A endpoint ──Token A──▶ MAS orchestrator
-  ──Token A──▶ praxis (routing to downstream agents)
+acme-agent ──A──▶ MAO A2A ──A──▶ MAS orchestrator ──A──▶ praxis HUB gateway
+    ──H──▶ lightspeed-hub adapter ──▶ hub kube API (AgenticRun created as the caller)
+    ──R──▶ praxis SPOKE gateway ──U──▶ spoke kube API
 ```
 
-(The MAS orchestrator can also delegate to **Ask Red Hat** directly —
-`access.stage.redhat.com` — carrying the same Token A; that branch has no
-Praxis hop.)
-
-Adapted from the Docker/Postgres monitor in
-[agentic-partners-integration](https://github.com/rh-ai-quickstart/agentic-partners-integration/blob/main/scripts/monitor.sh).
-This pattern has no local audit database; correlation uses greppable log lines:
-
-- ACME emits `acme_audit request_id=…` (Token A mint + dispatch)
-- the MAO A2A endpoint logs structured `context={…}` dicts
-  (`inbound.a2a.middleware`, `mas.session.service`)
-- the MAS worker logs the delegation lifecycle (`tool.execute`,
-  `a2a_agent_node_factory`, `a2a_client.provider`, `a2a.delegated`)
-- Praxis (Rust `tracing`) logs router decisions (`route matched` /
-  `no route matched` / `request rejected by filter`) with embedded ANSI
-  colour codes, which the script strips before matching
-
-The MAS and Praxis patterns were **confirmed against live logs on
-bm-cluster (2026-10-23, mas image `a80e09316564`)** by replaying captured
-lines through `parse_line`; see [Log patterns](#log-patterns) for the
-routine-noise exclusions and how to refine after a MAS image bump.
-
-## Token map (what the monitor is actually tracking)
-
-| Stage | Token | Who touches it | What to watch |
+| Token | Minted/exchanged by (client) | `aud` | Used at |
 | --- | --- | --- | --- |
-| 1. `acme-agent` | **Token A minted** — Keycloak `client_credentials` + SPIFFE JWT-SVID (`azp=acme-agent`, `aud=mas-a2a`, `groups=acme-agent-rca`) **or** a Red Hat SSO prod/stage agent token (`aud=api.ask_red_hat`) | ACME (mint), sent as `Authorization: Bearer` to the MAO A2A Route | `TOKEN A MINT` cards, then `ACME DISPATCH` |
-| 2. MAO A2A endpoint (`mao/mas-a2a`) | **Token A validated, never exchanged** — multi-issuer OIDC (Keycloak `mas-a2a` / Red Hat SSO `api.ask_red_hat`), then `sub` checked against `a2a.allowedPrincipals`; kept in `RunContext.credentials` | MAS validates only | `MAS A2A INBOUND` / `MAS SESSION START` / `MAS A2A AUTH DENY` |
-| 3. MAS orchestrator (`mao/mas-worker`, via Temporal) | **Token A passed through** — `a2a_agent_node` with empty `bearer_token` reads `RunContext.auth_token`; the orchestrator LLM decides which specialist agents to call | MAS forwards verbatim | `TOKEN A PASSTHROUGH` / `ORCHESTRATOR PLAN` / `MAS OUTBOUND A2A` / `MAS DELEGATED` |
-| 4. `praxis-proxy` | **Token A validated + routed** — standalone runs policy enforcement (`policy.enabled=true`): the policy filter validates the caller JWT and enforces the `azp` allow-list (`acme-agent` + Red Hat SSO client), then routes to the configured downstream backend, fail-closed | Praxis validates + routes | `PRAXIS ROUTE` / `PRAXIS NO ROUTE` / `PRAXIS REJECT` |
+| **A** | Keycloak for `acme-agent` (SPIFFE JWT-SVID) | `mas-a2a` | MAS, hub gateway |
+| **H** | hub gateway, as client `mas-a2a` | `lightspeed-hub-a2a` | adapter, hub kube API |
+| **R** | adapter, as client `lightspeed-hub-a2a` | `praxis-spoke-gateway` | spoke gateways only |
+| **U** | spoke gateway, as client `praxis-spoke-gateway` | `praxis-spoke-<id>` | spoke kube API |
 
-Tokens themselves are never printed (by design of `acme_audit` and of
-the MAS matchers — the monitor only ever names the token stage; ACME audit
-lines carry short SHA-256 fingerprints `fp:…` that identify a token without
-being usable as one). One further
-credential appears on the worker cards and is deliberately labelled as
-**not** Token A: the orchestrator's planning LLM uses its own static Vertex
-ADC grant (`PLANNING LLM GRANT`), the separate credential system described
-in `agents/AUTHENTICATION.md`.
+Two spokes are registered on the live standalone cluster (2026-11-24):
+`hub` (the hub cluster as its own spoke) and `mario-ipi`. Each has its own
+spoke gateway, its own U audience (`praxis-spoke-hub`, `praxis-spoke-mario-ipi`)
+and its own reader role group; the monitor names the spoke on every spoke
+card and lists both in `--endpoint`-style diagnostics via the Pod name.
+
+All four carry the same `sub`; each token's `aud` names the client that
+exchanges or consumes it next. The design is
+[docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md](../docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md);
+the per-hop reference is [agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md).
+
+## Where each answer comes from
+
+The monitor shows three kinds of fact, and it is deliberate that they do not
+all come from the same place:
+
+- **Identities and exchanges** come from **Keycloak's realm events**
+  (`--kc`, on by default). Keycloak signed every grant: the event names the
+  client that performed it (`clientId`), the principal it was for (`userId`),
+  the audience it asked for, and any error. That is the authoritative answer
+  to "who did what on behalf of whom", independent of any pod's log level. If
+  realm events are disabled the monitor prints that up front instead of
+  silently showing nothing.
+- **What each hop did with its token** comes from the pod logs (below).
+  Tokens are matched **by fingerprint** (`fp:`…) across hops, so a card can
+  say "this is still A" or "this is H, which Keycloak minted for you".
+- **Rejections and anomalies** come from whichever hop logs them; the monitor
+  additionally flags a token presented at a hop that should already have
+  exchanged it (`SUSPECT` / `IMPOSSIBLE` cards).
+
+Log sources:
+
+- ACME emits `acme_audit request_id=… actor=… action=… outcome=… token=fp:…`
+  for Token A mint, dispatch and renewal.
+- MAO A2A logs structured `context={…}` dicts (`inbound.a2a.middleware`,
+  `mas.session.service`), including the `AUTH_REQUIRED` renewal pause.
+- the MAS worker logs the delegation lifecycle (`tool.execute`,
+  `a2a_agent_node_factory`, `a2a_client.provider`, `a2a.delegated`).
+- Praxis (Rust `tracing`) logs router/policy decisions for the hub gateway and
+  every `praxis-spoke-<id>` gateway; the monitor tells them apart by the pod
+  name in `oc logs --prefix`, so one `--praxis` stream covers both.
+- the lightspeed-hub adapter (run creation, `ls-run-token-*`, renewals,
+  duplicate/unknown-target) and the agentic operator (gateway credential
+  mode, sandbox lifecycle, run-credential problems).
+- with `--api`, the API server's own bearer rejects and `Forbidden` lines;
+  the `audit` username `keycloak:<sub>` is shown there, which is the only
+  place the *Kubernetes* identity of H and U becomes visible.
+
+The ACME, MAS and Praxis patterns were **confirmed against live logs on
+bm-cluster (2026-10-23/26, mas image `a80e09316564`)**. The Praxis log level
+that was confirmed is `praxis_filter=debug`; the delegator crate's level for
+the exchange line is *not* among the confirmed ones, so a delegator card
+labelled UNCONFIRMED means the variant's `logLevel` needs that crate's module
+added — the Keycloak card is unaffected and remains authoritative. The lightspeed-hub
+adapter/operator patterns and the Praxis delegator line are marked
+**UNCONFIRMED WATCHER** in `scripts/monitor-lib.sh` until a live sample is
+replayed; see [Log patterns](#log-patterns) for how to tighten them.
+
+## Files
+
+| File | What it is |
+| --- | --- |
+| `scripts/monitor.sh` | entry point: follows the hops, polls Keycloak events |
+| `scripts/monitor-lib.sh` | all parsing and card rendering; sourced by both the monitor and the tests |
+| `tests/scripts/test_monitor.py` | replays captured lines for every hop through the real parser (`python3 -m unittest tests.scripts.test_monitor -v`) |
 
 ## Prerequisites
 
 - `oc` on `PATH`, logged into the target cluster (`oc whoami`)
-- GNU `grep` (`grep -oP`; Fedora/RHEL default)
-- Pattern apps deployed (namespaces below from `variants/standalone/values-standalone.yaml`)
-- For the MAS hops: `mao-a2a` activated (`a2a.enabled: true`) and `mao-worker`
-  running. If `mas-a2a` is dormant the script warns and skips that hop.
+- GNU `grep` (`grep -oP`; Fedora/RHEL default) and `python3` (stdlib only)
+- For the Keycloak feed: read access to the `keycloak-admin-user` Secret in
+  `keycloak-system` (the keycloak-oidc chart creates it), and realm events
+  enabled (`Realm settings → Events`). `KC_URL` / `KC_CA` for a private Route.
+- Pattern apps deployed (namespaces below from
+  `variants/standalone/values-standalone.yaml`)
+- `mas-a2a` activated (`a2a.enabled: true`) and `mao-worker` running; a
+  dormant `mas-a2a` is skipped with a warning
 - For the `TOKEN A PASSTHROUGH` / `MAS OUTBOUND A2A` cards: mas-worker at
-  `logLevel: DEBUG` (the standalone variant sets this; those lines are
-  DEBUG-level and disappear at INFO).
+  `logLevel: DEBUG` (the standalone variant sets this)
+- Praxis `logLevel` from the variant
+  (`info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug`) — the
+  router/policy cards need it
 - For `--api`: cluster-admin (reading `openshift-kube-apiserver` logs)
-
-Optional for richer Praxis cards: raise `logLevel` on the praxis-proxy chart
-(wired to `RUST_LOG`). The standalone variant already sets a scoped demo
-value in `variants/standalone/values-standalone.yaml`:
-
-```text
-info,praxis_filter=debug,praxis_policy_plugin_identity_jwt=debug
-```
-
-Override there (or clear it) for quieter environments. Router decisions
-(`PRAXIS ROUTE` / `PRAXIS NO ROUTE`) need `praxis_filter=debug`, which that
-value already includes.
 
 ## Quick start
 
-From the repo root:
-
 ```bash
-bash scripts/monitor.sh
+bash scripts/monitor.sh              # everything, including Keycloak events
+bash scripts/monitor.sh --no-kc      # pod logs only
 ```
 
-Send a chat message through the ACME UI. With the Phase-3 (MAS) routing you
-should see, in order:
+Send a chat message through the ACME UI. Expect, in order:
 
-1. `TOKEN A MINT` (Keycloak or Red Hat SSO) and `ACME DISPATCH` from acme-agent
-2. `MAS SESSION START` (auth=True) and eventually `MAS A2A INBOUND` (200) as
-   the endpoint validates Token A and hands it to the orchestrator
-3. `ORCHESTRATOR PLAN`, `TOKEN A PASSTHROUGH`, `MAS OUTBOUND A2A`,
-   `MAS DELEGATED` as the worker plans and dispatches
-4. `PRAXIS ROUTE` (or `PRAXIS NO ROUTE` / `PRAXIS REJECT`) when the
-   delegated call goes through Praxis
-5. An `ACME TOKEN RENEWAL` if a downstream refused Token A and ACME
-   re-minted and resent it
+1. `TOKEN A MINT` / `ACME DISPATCH` (ACME; A, aud `mas-a2a`), then Keycloak's
+   `MINT A` event.
+2. `MAS A2A INBOUND` → `MAS SESSION START` → `TOKEN A PASSTHROUGH` →
+   `MAS OUTBOUND A2A` (A unchanged all the way to the hub gateway).
+3. `PRAXIS HUB ROUTE`, then `TOKEN EXCHANGE A ──▶ H` (client `mas-a2a`) —
+   the Keycloak event is the authoritative copy; a delegator log copy is
+   suppressed once Keycloak confirms it.
+4. `ADAPTER AGENTICRUN` (created as the caller with H), `TOKEN EXCHANGE H ──▶ R`,
+   `ADAPTER RUN-TOKEN SECRET` (R in `ls-run-token-<uid>`).
+5. `OPERATOR: GATEWAY CREDENTIAL MODE` / `OPERATOR SANDBOX` — explicitly no
+   exchange.
+6. `PRAXIS SPOKE ROUTE` and `TOKEN EXCHANGE R ──▶ U` per kube call; with
+   `--api`, `API IDENTITY` shows `keycloak:<sub>` and RBAC denials.
+7. An `ACME TOKEN RENEWAL` if a token was refused; the adapter's
+   `ADAPTER PAUSED: auth-required` is the hub half of the same renewal.
 
-Note the MAS requests are long-running: one `POST /a2a/jsonrpc` was
-observed taking 122 seconds, and the whole chain can run for minutes — the
-`MAS A2A INBOUND` card for a request only appears when it *completes*.
+MAS requests are long-running: one `POST /a2a/jsonrpc` was observed taking
+122 s, and an investigation can run for minutes — `MAS A2A INBOUND` appears
+only when the request completes.
 
 ## Modes
 
 | Command | What it tails |
 | --- | --- |
-| `bash scripts/monitor.sh` | All tailable hops (ACME, MAS A2A, worker, Praxis) |
-| `bash scripts/monitor.sh --join` | Same as default |
-| `bash scripts/monitor.sh --acme` | ACME only |
-| `bash scripts/monitor.sh --mas` | MAO A2A endpoint only |
-| `bash scripts/monitor.sh --worker` | MAS orchestrator (Temporal worker) only |
-| `bash scripts/monitor.sh --praxis` | Praxis only |
-| `bash scripts/monitor.sh --api` | OCP API server token rejects (cluster-admin; not in the default join) |
-| `bash scripts/monitor.sh --since 10m` | Start from logs of the last 10m (`oc --since`) |
+| `bash scripts/monitor.sh` / `--join` | ACME, MAS A2A, worker, Praxis (hub+spokes), adapter, operator, Keycloak events |
+| `--acme` / `--mas` / `--worker` | that hop only |
+| `--praxis` | hub gateway + every spoke gateway |
+| `--hub` | lightspeed-hub adapter + agentic operator |
+| `--kc` | Keycloak realm events only (authoritative exchanges) |
+| `--api` | OCP API server rejects (cluster-admin; not in the default join) |
+| `--no-kc` | skip the Keycloak feed |
+| `--since 10m` | start from logs of the last 10m (`oc --since`) |
+| `--endpoint` | print namespaces/selectors and exit (works without a cluster) |
 
-Filter one request after you copy an id from an ACME card:
+Filter one request after copying an id from a card:
 
 ```bash
 REQUEST_ID=<request_id> bash scripts/monitor.sh
 ```
 
+`REQUEST_ID` only matches hops that log that id. ACME's `X-Request-Id` stops
+at MAS — later hops mint their own ids — so end-to-end correlation is by
+fingerprint, `sub`, and time; `--kc` records the exchanges independently.
+
 ## Namespaces and selectors
 
-| Hop | Namespace | Label selector | Default override env |
+| Hop | Namespace | Label selector | Override env |
 | --- | --- | --- | --- |
 | ACME | `acme-agent` | `app.kubernetes.io/name=acme-agent` | `NS_ACME`, `SEL_ACME` |
 | MAO A2A endpoint | `mao` | `app.kubernetes.io/name=mas-a2a` | `NS_MAS`, `SEL_MAS` |
 | MAS orchestrator | `mao` | `app.kubernetes.io/name=mas-worker` | `NS_WORKER`, `SEL_WORKER` |
-| Praxis | `praxis-proxy` | `app.kubernetes.io/name=praxis-proxy` | `NS_PRAXIS`, `SEL_PRAXIS` |
+| Praxis hub + spokes | `praxis-proxy` | `app.kubernetes.io/name=praxis-proxy` | `NS_PRAXIS`, `SEL_PRAXIS` |
+| lightspeed-hub adapter | `lightspeed-hub` | `app.kubernetes.io/name=lightspeed-hub` | `NS_HUB`, `SEL_HUB` |
+| agentic operator | `lightspeed-hub` | `app.kubernetes.io/name=lightspeed-hub-agentic-operator` | `NS_OPERATOR`, `SEL_OPERATOR` |
+| Keycloak events | `keycloak-system` | Secret `keycloak-admin-user` → Admin REST `admin-events` (realm `rca`) | `KC_REALM`, `KC_ADMIN_SECRET`, `KC_URL`, `KC_CA` |
 | OCP API | `openshift-kube-apiserver` | `app=openshift-kube-apiserver` | `NS_API`, `SEL_API` |
 
-All selectors were verified live on bm-cluster (2026-10-23), including the
-kube-apiserver static-pod label. Also: `MONITOR_SINCE` (same as `--since`),
-`REQUEST_ID` (filter).
+Other knobs: `MONITOR_SINCE` (same as `--since`), `MONITOR_KC_POLL` (seconds
+between event polls, default 3), `MONITOR_CHAIN_MODE=1` (one ongoing
+"request" label instead of a new one per request), `MONITOR_STATE_FILE` (pin
+the cross-hop state file, e.g. to inspect it).
 
-Verify labels on a live cluster before debugging empty streams:
+Verify labels before debugging empty streams:
 
 ```bash
-oc get pods -n acme-agent,praxis-proxy,mao --show-labels
+bash scripts/monitor.sh --endpoint
+oc get pods -n acme-agent,praxis-proxy,mao,lightspeed-hub --show-labels
 ```
-
-If a selector matches no pods, the script prints a warning and skips that hop
-(`mas-a2a` renders no pods at all until `a2a.enabled: true`).
 
 ## What you will see
 
-| Card | Meaning |
-| --- | --- |
-| **TOKEN A MINT** | ACME obtained (or failed to obtain) Token A via Keycloak `client_credentials` (`acme_audit` … `action="mint Keycloak Token A"`), with the new token's fingerprint (`token=fp:…`) |
-| **TOKEN A MINT (Red Hat SSO)** | Same, but minted by Red Hat SSO prod/stage as a confidential-client agent token (`action="mint Red Hat SSO … agent Token A"`) |
-| **ACME DISPATCH** | ACME stamped `X-Request-Id` and sent Token A toward the remote agent (`acme_audit` … `outcome=sent token=fp:… source=… exp=…`) — `source=pasted_override` (yellow) marks a UI-pasted token, `source=minted` a real Token A; `expires` shows the token's `exp` (decoded unverified, display-only) and flags it red when already in the past |
-| **ACME TOKEN RENEWAL** | A downstream refused the current token (HTTP 401 / `TASK_STATE_AUTH_REQUIRED`); ACME minted a fresh Token A and resent (`action="renew Token A"`, `renewed_from=fp:…` → `token=fp:…`, `override=retired` when a pasted token was the one refused) |
-| **MAS SESSION START** | The endpoint submitted an orchestrator session with `auth=True` — Token A attached to the run context |
-| **MAS TOKEN REJECTED** | No configured issuer validated the bearer (`Token validation failed for all … issuers`) — a token problem (sig/iss/exp/aud), explicitly not the principal allow-list (that is 403); expect a 401 and, from ACME, an **ACME TOKEN RENEWAL**. When the preceding dispatch carried the pasted override, the card says so and points at the dispatch's `expires` line |
-| mas issuer probe miss (dim) | `Failed to resolve signing key` — **benign**: the multi-issuer validator probing the next issuer's JWKS; the same ERROR appears on fully successful requests (confirmed live 2026-10-29) |
-| **MAS A2A INBOUND** | The endpoint completed a JSON-RPC call carrying Token A (method/path/status/duration; 401=bad token, 403=principal not allow-listed) |
-| **MAS A2A AUTH DENY** | Validation failure logged outside the middleware line (best-effort fallback) |
-| **ORCHESTRATOR PLAN** | `workplan.plan_and_delegate` — the LLM routed the request to its specialist agents; carded once per planning call (the `tool_args` line — MAS also logs the bare tool name and phase-timing tables, which are skipped) |
-| **TOKEN A PASSTHROUGH** | `a2a_agent_node` with an empty `bearer_token` using `RunContext.auth_token` — the literal Token A passthrough (DEBUG-level) |
-| **MAS OUTBOUND A2A** | `A2A stream_message to agent=… auth=True` — the outbound call carrying Token A |
-| **MAS DELEGATED** | The work item was dispatched to the remote agent |
-| **MAS DELEGATION LOST (404)** | An outbound A2A call came back 404 — usually a Praxis routing/policy failure |
-| **MAS OUTBOUND TLS FAILURE** | Agent-card fetch / A2A call hit an untrusted Route CA — check `identity.keycloakCaTrust.enabled` |
-| **ORCHESTRATOR ERROR** | ERROR-level or Traceback lines from the worker — failures are matched by log *level*, not keyword, because INFO lines legitimately contain `'error': None` in context dicts (e.g. `final_answer` on a successful flow) |
-| **PLANNING LLM GRANT (static)** | The orchestrator's own Vertex ADC token fetch — a separate static credential, deliberately *not* Token A |
-| **AUTH FAILURE** | Inbound JWT reject, exchange failure, SPIFFE error, etc. |
-| **PRAXIS ROUTE** | Router matched the request to a downstream backend; Token A forwarded unchanged |
-| **PRAXIS NO ROUTE** | No backend matched the request — Praxis fail-closes with no default backend |
-| **PRAXIS REJECT** | A filter rejected the request with 4xx/5xx (the benign `static_response` 200 that serves the agent card is not shown) |
-| **API TOKEN REJECT** (`--api`) | The API server's own OIDC authenticator rejected a bearer (audience/issuer/signature) |
-| **API AUTHZ DENY** (`--api`) | A `Forbidden` line from the API server |
+| Card | Identity | Exchange | Meaning |
+| --- | --- | --- | --- |
+| **TOKEN A MINT** / **(Red Hat SSO)** | ACME as `acme-agent` | none (A is the root) | A minted; `azp`, `aud`, fingerprint shown |
+| **ACME DISPATCH** | on behalf of the caller | none | A sent to MAS |
+| **ACME TOKEN RENEWAL** | ACME as itself | refused A → fresh A | a downstream refused A; same task resent |
+| **MAS A2A INBOUND / SESSION START** | caller wearing A | none | validated + sealed into the run context |
+| **MAS TOKEN REJECTED / A2A AUTH DENY** | — | none | token invalid (401) or principal not allow-listed (403) |
+| **MAS AWAITING FRESH CREDENTIAL** | — | none | MAS paused in `AUTH_REQUIRED`; the caller must renew |
+| **TOKEN A PASSTHROUGH / MAS OUTBOUND A2A** | MAS for the caller | none | A forwarded verbatim |
+| **ORCHESTRATOR PLAN** | the planner's own static grant | none | LLM route choice — *not* the caller's token |
+| **PRAXIS HUB ROUTE / PRAXIS NO ROUTE / PRAXIS REJECT** | MAS wearing A | A → H next | policy + target routing at the hub gateway |
+| **TOKEN EXCHANGE A ──▶ H** | client `mas-a2a`, subject unchanged | yes | authoritative copy from Keycloak (`--kc`) |
+| **ADAPTER AGENTICRUN** | created as the caller, wearing H | none | hub API sees `keycloak:<sub>` + role group |
+| **TOKEN EXCHANGE H ──▶ R** | client `lightspeed-hub-a2a` | yes | run credential for the spoke gateway |
+| **ADAPTER RUN-TOKEN SECRET** | adapter SA writes R | none | `ls-run-token-<uid>`, removed at terminal state |
+| **ADAPTER PAUSED / RENEWED RUN CREDENTIAL** | adapter | H → R (renewal) | credential-pause path for long runs |
+| **ADAPTER UNKNOWN TARGET / DUPLICATE SUPPRESSED / EXCHANGE FAILED** | — | — | fail-fast, idempotency, Keycloak refusal |
+| **OPERATOR: GATEWAY CREDENTIAL MODE / OPERATOR SANDBOX** | operator's own SA | **no exchange** | mounts R; no spoke SA or kubeconfig |
+| **OPERATOR RUN CREDENTIAL PROBLEM** | — | none | mounted R missing/expired |
+| **PRAXIS SPOKE ROUTE / REJECT** | sandbox wearing R | R → U next | per-call exchange at the spoke gateway |
+| **TOKEN EXCHANGE R ──▶ U** | client `praxis-spoke-gateway` | yes | authoritative copy from Keycloak |
+| **KEYCLOAK MINT / TOKEN_EXCHANGE / …_ERROR** | the acting client + subject | yes | the authoritative grant record |
+| **API IDENTITY** (`--api`) | `keycloak:<sub>` | — | the Kubernetes identity of H/U |
+| **API TOKEN REJECT / API AUTHZ DENY** (`--api`) | — | — | expected for A/R; a finding for H/U |
+| **IDENTITY / VERIFY** | the token the hop may see | — | on hops that log the bearer (ACME, Praxis hub/spoke, adapter, API): names the token and checks its fingerprint against the hop's expected token |
+| **PRAXIS EXCHANGE REJECTED** | client `mas-a2a` | A → H failed | Keycloak refused the hub gateway's exchange (`delegation.idp_rejected`, `unauthorized_client`) — see the 2026-11-24 note below |
+| **OPERATOR: RUN HAS NO CREDENTIAL** | — | H → R incomplete | `CredentialsExpired=True` / `ls-run-token-… not found`: the run exists but its Secret was never written |
+| **SUSPECT / IMPOSSIBLE** | — | — | a token shown at the wrong hop, an unlabelled bearer, or a fingerprint that does not match the hop (see below) |
 
-### The final hop (OCP API / RBAC) is indirect by design
+### SUSPECT and IMPOSSIBLE cards
 
-RBAC decisions are not in any pod log this script can normally read. Confirm
-a deny yourself:
+These are fingerprint checks, not heuristics. On any hop that logs the bearer
+(ACME, the hub/spoke gateways, the adapter, the API server), the card prints
+`IDENTITY` (the token that hop may see) and `VERIFY`:
 
-```bash
-oc auth can-i get pods --as-group=keycloak:acme-agent-rca -n <namespace>
-oc get authentication.config.openshift.io cluster \
-  -o jsonpath='{.spec.oidcProviders[0].issuer.audiences}'
-```
+- `matches the hop — this is H` — the fingerprint is the token this hop is
+  supposed to hold;
+- `MISMATCH — this is A, the hop expects H` — a token crossed the boundary
+  without being exchanged (e.g. Token A reaching the adapter);
+- `UNIDENTIFIED` — a bearer no hop labelled: it was never minted, exchanged
+  or recorded by Keycloak. This is deliberately *not* treated as "fine";
+- `RETIRED` — the token was superseded by a renewal.
 
-`--api` additionally tails `openshift-kube-apiserver` for token-reject and
-`Forbidden` lines (needs cluster-admin, so it is not part of the default
-join).
+`IMPOSSIBLE` still flags a later token (H/R/U) on an earlier leg.
+
+
+
+These are the "who did what on behalf of whom" checks, and they only fire
+when the monitor can *identify* the token (fingerprint, or a hop whose bearer
+is fixed):
+
+- **IMPOSSIBLE** — a later token (H/R/U) appears on an earlier leg. It cannot
+  be produced by this chain, so treat it as a forged/replayed token.
+- **SUSPECT A STILL WORN AT THE ADAPTER** — the hub gateway exchanges A→H;
+  a valid A reaching the adapter means the exchange did not happen and the
+  caller's original token travelled past its boundary.
+- **SUSPECT … AT THE SPOKE GATEWAY** — only R is accepted there.
+- **SUSPECT A/R AT A KUBE API** — both are rejected there by design.
 
 ## Log patterns
 
-Patterns for ACME (`acme_audit`) come from this repo's own source. The MAS
-(private `uie-mas-hosted`) and Praxis patterns were confirmed against captured
-live logs on bm-cluster (2026-10-23 and 2026-10-26, mas image `a80e09316564`,
-worker at `logLevel: DEBUG`):
+Patterns for ACME come from this repo's source. MAS and Praxis were confirmed
+against captured live logs on bm-cluster (2026-10-23/26, mas image
+`a80e09316564`). The lightspeed-hub and delegator matchers are **UNCONFIRMED
+WATCHERS** — broad, labelled on every card they emit, and backed by the
+Keycloak feed.
 
-- MAO A2A endpoint: `A2A HTTP request completed context={'request_id': …,
-  'method': 'POST', 'path': '/a2a/jsonrpc', 'status_code': 200,
-  'duration_ms': …}` and `Submitting session=… auth=True …`
-- worker: `tool.execute … workplan.plan_and_delegate`, `A2A agent node
-  […]: using user auth token`, `A2A stream_message to agent=… auth=True`,
-  `a2a.delegated`
-- Praxis (ANSI-stripped): `route matched path=/a2a cluster=…`,
-  `no route matched path=/a2a`, `request rejected by filter filter="router"
-  status=404`
-
-Routine noise that is deliberately **not** carded:
-
-- `Failed to resolve signing key` (ERROR, ~once per request) — the MAS
-  multi-issuer validator tries each issuer's JWKS in turn and logs every
-  miss, even when a later issuer validates the token successfully.
-- `Task … already exists. Ignoring task replacement.` — A2A task polling.
-- `/.well-known/agent-card.json` requests on every hop — the public,
-  unauthenticated card fetches carry no token (the middleware line for them
-  is skipped along with the card-resolver body dumps).
-- INFO-level lines whose context dicts merely contain `'error': None` —
-  worker failures are matched by log level, not keyword.
-- `/readyz` + `/healthz` probes on every hop, giant agent-card dumps,
-  `temporalio.worker._activity` payload dumps and other multi-line log
-  continuations (whitespace-led lines after the `--prefix` tag).
-- Praxis's `static_response` "request rejected … status=200" — that is the
-  public agent card being served, not a rejection.
-
-If a MAS image bump changes the vocabulary (new/renamed loggers, changed
-`context=` keys), capture and replay to refine:
+If a hop's vocabulary changes (new image, renamed logger, changed `context=`
+keys), capture and replay:
 
 ```bash
 oc logs -n mao -l app.kubernetes.io/name=mas-a2a  --since 15m > /tmp/mas-a2a.log
 oc logs -n mao -l app.kubernetes.io/name=mas-worker --since 15m > /tmp/mas-worker.log
 oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy --since 15m > /tmp/praxis.log
+oc logs -n lightspeed-hub -l app.kubernetes.io/name=lightspeed-hub --since 15m > /tmp/adapter.log
+oc logs -n lightspeed-hub -l app.kubernetes.io/name=lightspeed-hub-agentic-operator --since 15m > /tmp/operator.log
 ```
 
-Then tighten the `src == "mas"` / `src == "worker"` /
-`src == "praxis"` blocks in `scripts/monitor.sh`'s
-`parse_line` against the real lines, and
-update this section — per the repo convention, a confirmed pattern replaces
-the guess immediately.
+Then tighten the matching block in `scripts/monitor-lib.sh` (`parse_mas`,
+`parse_worker`, `parse_praxis`, `parse_adapter`, `parse_operator`,
+`parse_kc_event`), add the line to `tests/scripts/test_monitor.py`, and —
+per the repo convention — replace the guess immediately.
+
+Routine noise that is deliberately **not** carded:
+
+- `Failed to resolve signing key` (ERROR, ~once per request) — the MAS
+  multi-issuer validator probes each issuer's JWKS in turn and logs a miss
+  even when a later issuer validates the token. The real rejection signal is
+  `Token validation failed for all … issuers` + 401.
+- `Task … already exists. Ignoring task replacement.` — A2A task polling.
+- `/.well-known/agent-card.json`, `/readyz`, `/healthz`, `/readiness` —
+  public, unauthenticated requests. They must never open a chain.
+- INFO-level worker lines whose context dicts merely contain `'error': None`.
+- `temporalio.worker._activity` payload dumps and other multi-line
+  continuations.
+- Praxis's `static_response` "request rejected … status=200" (the agent card).
+- Keycloak events for clients outside the chain (e.g. `security-admin-console`).
 
 ## Correlating hops
 
-ACME stamps `X-Request-Id` on its outbound POST and logs it on the
-`acme_audit` line. With MAS in the middle the join is broken — **observed
-live** on the same request (2026-10-23, 14:11): the MAO endpoint's inbound
-middleware logged its own dashed-UUID `request_id` (`db37d282-…`). Each MAS
-stage mints its own id and does not propagate ACME's. Practical
-consequences:
-
-- `REQUEST_ID=<id>` isolates one hop's lines (mostly useful for `--acme`).
-- End-to-end tracing across the MAS stages is by **time window**: every card
-  carries a wall-clock timestamp, and the chain is slow enough (tens of
-  seconds to minutes per hop) that the ordering is unambiguous. Card stamps
-  are taken from the **pod's own log line** (converted to local time) so
-  cross-hop order is truthful; a leading `~` marks cards where the line had
-  no timestamp and only the monitor's receipt time is known — those can
-  interleave with same-second cards from other hops (each hop is a separate
-  `oc logs -f` pipeline with independent delivery latency).
+ACME stamps `X-Request-Id` on its outbound POST and logs it, but MAS mints
+its own request id for the same request and the hub/spoke hops have theirs,
+so `REQUEST_ID` isolates one hop's lines rather than joining them end to end.
+The joins that do work across the whole chain:
 
 ```bash
+# every acme_audit line for one UI request
 oc logs -n acme-agent -l app.kubernetes.io/name=acme-agent --since=30m | grep acme_audit
-oc logs -n mao -l app.kubernetes.io/name=mas-worker --since=30m | grep -aE "using user auth token|stream_message|delegated"
+
+# the worker's delegation lifecycle (DEBUG level in standalone)
+oc logs -n mao -l app.kubernetes.io/name=mas-worker --since=30m \
+  | grep -aE "using user auth token|stream_message|delegated"
+
+# the authoritative exchange record for the window
+# live exchanges (Keycloak realm events); --since seeds the event window
+bash scripts/monitor.sh --kc --since 30m
 ```
 
-- Keycloak's Admin Console (Realm Events, filtered by client `acme-agent`)
-  records every grant regardless of header propagation — see
-  `agents/AUTHENTICATION.md`.
+- `sub` is identical in A/H/R/U, so it ties the whole chain together; it is
+  printed on every exchange card (Keycloak's `userId` is that same `sub`).
+- The `fp:…` fingerprint is the same token at every hop that logs it.
+- Keycloak's Admin Console (Realm Events, filtered by client) records every
+  grant — the monitor's `--kc` feed reads the same data.
 
-## Lab note: no human login in these logs
+## Keycloak event feed details
 
-The ACME UI Route is unauthenticated by design in this pattern. The monitor
-shows **workload identity** (SPIFFE → Keycloak Token A → MAS passthrough),
-not an end-user OIDC login. Anyone who can reach ACME acts as the
-`acme-agent` client (or the Red Hat SSO confidential client).
+`--kc` (and the default join) polls
+`/admin/realms/<KC_REALM>/admin-events` with the `keycloak-admin-user` Secret
+and prints one card per grant:
+
+| Event | Card | What it proves |
+| --- | --- | --- |
+| `LOGIN` for `acme-agent`, `client_credentials` | **KEYCLOAK MINT A** | the minting client and the principal A carries |
+| `TOKEN_EXCHANGE` by `mas-a2a` | **TOKEN EXCHANGE A ──▶ H** | A→H, for `lightspeed-hub-a2a` |
+| `TOKEN_EXCHANGE` by `lightspeed-hub-a2a` | **TOKEN EXCHANGE H ──▶ R** | H→R, for `praxis-spoke-gateway` |
+| `TOKEN_EXCHANGE` by `praxis-spoke-gateway` | **TOKEN EXCHANGE R ──▶ U** | R→U, for `praxis-spoke-<id>` |
+| `TOKEN_EXCHANGE_ERROR` | red card | which hop failed and Keycloak's error (`invalid_client`, …) |
+
+If no cards appear: the monitor prints the realm's event configuration at
+start-up. `eventsEnabled=false` (or an `enabledEventTypes` list that omits
+token exchange) is the usual cause — enable it under
+**Realm settings → Events → Save events**. An unreachable Keycloak prints a
+warning and the pod-log hops continue. Do **not** rely on a pod missing the
+delegator line: the exchange card comes from Keycloak, and the delegator line
+is only a corroborating extra when it exists.
 
 ## Approval and token renewal scenarios
 
@@ -429,10 +492,41 @@ Prerequisites:
   --scenario all
 ```
 
+## Upstream failure modes the monitor explains (2026-11-24)
+
+The `rca-mao-praxis-hub` branch was advanced with fixes for four live
+failures. Each is observable through the monitor, and the card text names the
+likely cause so the next debugging session starts from the finding:
+
+| Symptom in the monitor | Cause (upstream lesson) | Where the monitor says it |
+| --- | --- | --- |
+| `MAS A2A INBOUND … 403`, `sub` is the new principal | `a2a.allowedPrincipals` is injected from a Secret and read **at process startup**; a synced Secret is not a refreshed environment. Restart MAS A2A only. | the 403 footer of `MAS A2A INBOUND` (prints the exact `oc rollout restart`) |
+| `PRAXIS EXCHANGE REJECTED` / `KEYCLOAK TOKEN_EXCHANGE_ERROR` for `mas-a2a` (`invalid_client_credentials`) | the registered exchanger secret is a literal `${NAME}`/`$(NAME)` realm-import placeholder. Align the client's secret to its Vault-backed Secret; do not rotate or re-import. | `PRAXIS EXCHANGE REJECTED` + the Keycloak card |
+| `ADAPTER AGENTICRUN` created, then `OPERATOR: RUN HAS NO CREDENTIAL` (`ls-run-token-… not found`) | the adapter could not complete H→R or write the Secret (often an untrusted Keycloak CA, surfaced as a generic `request_failed`). A run existing proves nothing about its credential. | the adapter `SEQUENCE` line, `ADAPTER PAUSED`, `OPERATOR: RUN HAS NO CREDENTIAL` |
+| a kube read denied on `mario-ipi` only | per-spoke U audiences and role groups; RBAC binds `keycloak:praxis-spoke-<id>:reader`, never `keycloak:<sub>` | `PRAXIS SPOKE ROUTE (spoke:mario-ipi)` + `API IDENTITY` |
+
+The monitor shows these identities and failures; it does not fix them. The
+chart-side explanations are in `charts/all/mao/mas-a2a/README.md`,
+`charts/all/keycloak-oidc/README.md` and `charts/all/lightspeed-hub/README.md`.
+
+## Troubleshooting the monitor
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `warn: no pods ... skip <hop>` | selector/namespace wrong — or the chart is dormant on purpose (`mas-a2a` with `a2a.enabled=false`, all of `lightspeed-hub` with `enabled=false`). Check `--endpoint`, then `oc get pods -n <ns> --show-labels`. |
+| No Keycloak cards | the monitor prints the realm event config at start; `eventsEnabled=false` is the usual cause (Realm settings → Events). A failed admin login prints a warning about the `keycloak-admin-user` Secret. |
+| Keycloak cards but no pod cards | `oc logs` permission, or the hop does not log at that level (worker `logLevel=DEBUG`, Praxis `praxis_filter=debug`). |
+| A hop goes quiet after an ArgoCD sync | handled: `oc logs -f` ends when a pod is replaced, so the monitor re-attaches and prints `log stream closed … reattaching`. |
+| Two requests' cards interleave | expected with concurrent chat messages; the `A/H/R/U` tag and `sub` separate them. `MONITOR_CHAIN_MODE=1` keeps one running label. |
+| `SUSPECT` / `IMPOSSIBLE` cards | a token shown at a hop that should already have exchanged it — a finding, not noise (see "SUSPECT and IMPOSSIBLE cards"). |
+| Praxis hub vs spoke cards look wrong | the split is the pod name (`praxis-spoke-<id>`); it needs `oc logs --prefix` intact. `--praxis` alone is the quickest check. |
+
 ## Related docs
 
 - [agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md) — full identity chain (orchestrated/passthrough flow), claim shapes, Troubleshooting (including Keycloak Admin Events for grants)
 - [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — why the chain is shaped this way
 - [docs/LESSONS_LEARNED.md](../docs/LESSONS_LEARNED.md) — every live finding, symptom and workaround
 - [charts/all/mao/mas-a2a/README.md](../charts/all/mao/mas-a2a/README.md) — MAS A2A trust boundary, principal allow-list, activation prerequisites
-- [charts/all/praxis-proxy/README.md](../charts/all/praxis-proxy/README.md) — Praxis `logLevel` / JWT enforcement quirks
+- [charts/all/praxis-proxy/README.md](../charts/all/praxis-proxy/README.md) — Praxis `logLevel` / JWT enforcement quirks (hub gateway + spoke gateways)
+- [charts/all/lightspeed-hub/README.md](../charts/all/lightspeed-hub/README.md) — adapter/operator wiring the monitor `--hub` hop reads
+- [docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md](../docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md) — the per-hop exchange chain and why each `aud` is what it is

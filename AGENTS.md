@@ -40,6 +40,8 @@ host. Chart scripts under `charts/all/*/files/*.py` are stdlib-only.
 | Syntax-check a chart's Python helper | `python3 -I -m py_compile charts/all/<name>/files/<script>.py` |
 | Run the test suite | `make run-ci-tests` (pytest lives under `tests/`) |
 | Check all ArgoCD apps are synced | `make argo-healthcheck` |
+| Watch the identity/exchange chain live | `bash scripts/monitor.sh` (add `--help`; `--endpoint` prints selectors without a cluster) |
+| Replay-test the monitor parser | `python3 -m unittest tests.scripts.test_monitor -v` |
 | Install the pattern onto a cluster | `make install` |
 | List all Make targets | `make help` |
 
