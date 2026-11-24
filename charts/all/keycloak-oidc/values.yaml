@@ -209,7 +209,9 @@ keycloak:
     # materialized into BOTH keycloak.namespace (for the realm import's
     # placeholder substitution) and targetNamespace (where the spoke
     # gateway pods read it) -- see spoke-gateway-exchanger-secret.yaml.
-    # Required when enabled.
+    # Required when enabled. Fresh imports use ${NAME} interpolation;
+    # the PostSync realm-secrets-reconciler also repairs/verifies this
+    # credential on existing clients from the Keycloak-namespace Secret.
     vaultKey: ""
     vaultProperty: praxis-spoke-gateway-client-secret
     # Namespace the gateway-facing copy of the client-secret Secret lands
@@ -256,7 +258,8 @@ keycloak:
   # principal's Keycloak groups on H. One-shot realm import only: on a
   # realm that already imported (like this branch's live cluster), the
   # client and mappers must be created manually in the Admin Console (see
-  # the chart README).
+  # the chart README). The PostSync reconciler repairs/verifies only the
+  # existing client's secret, using the Vault-backed Kubernetes value.
   hubExchange:
     enabled: false
     # Confidential client ID. Must match charts/all/lightspeed-hub's
@@ -334,7 +337,8 @@ keycloak:
   # audience client), both subjectTokenAudienceMapper flags must be false
   # (Token A = [masA2aAudience]), and hubExchange.runTokenAudience is
   # required. One-shot realm import: existing realms need the client created
-  # via the admin API (README "Hub gateway exchange").
+  # via the admin API (README "Hub gateway exchange"). Its secret is then
+  # repaired/verified by the PostSync reconciler, without client recreation.
   hubGatewayExchanger:
     enabled: false
     # Empty = keycloak.masA2aAudience (must equal it).

@@ -154,7 +154,7 @@ spec:
   {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.hubExchange.enabled .Values.keycloak.hubGatewayExchanger.enabled }}
   placeholders:
     {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
-    # Resolves $(PRAXIS_SPOKE_EXCHANGER_SECRET) below into the spoke
+    # Resolves ${PRAXIS_SPOKE_EXCHANGER_SECRET} below into the spoke
     # gateway exchanger client's secret (Vault-backed, see
     # spoke-gateway-exchanger-secret.yaml).
     PRAXIS_SPOKE_EXCHANGER_SECRET:
@@ -163,7 +163,7 @@ spec:
         key: client-secret
     {{- end }}
     {{- if .Values.keycloak.hubExchange.enabled }}
-    # Resolves $(HUB_EXCHANGE_SECRET) below into the hub adapter's
+    # Resolves ${HUB_EXCHANGE_SECRET} below into the hub adapter's
     # exchange client secret (Vault-backed, see hub-exchange-secret.yaml).
     HUB_EXCHANGE_SECRET:
       secret:
@@ -171,7 +171,7 @@ spec:
         key: client-secret
     {{- end }}
     {{- if .Values.keycloak.hubGatewayExchanger.enabled }}
-    # Resolves $(HUB_GATEWAY_EXCHANGE_SECRET) below into the Praxis hub
+    # Resolves ${HUB_GATEWAY_EXCHANGE_SECRET} below into the Praxis hub
     # gateway exchanger's secret (Vault-backed, hub-gateway-exchanger-secret.yaml).
     HUB_GATEWAY_EXCHANGE_SECRET:
       secret:
@@ -192,7 +192,7 @@ spec:
     {{- end }}
     {{- end }}
     {{- if .Values.keycloak.consoleClientSecretVaultKey }}
-    # Resolves $(CONSOLE_CLIENT_SECRET) below into openshift-console's client
+    # Resolves ${CONSOLE_CLIENT_SECRET} below into openshift-console's client
     # secret, sourced from the same Secret/Vault value
     # openshiftOIDC.consoleClientSecretName reads (see console-client-secret.yaml)
     # -- see that file's comment for why this needs its own copy of the
@@ -204,7 +204,7 @@ spec:
         key: clientSecret
     {{- end }}
     {{- if .Values.keycloak.consoleAdminUser.enabled }}
-    # Resolves $(CONSOLE_ADMIN_PASSWORD) below into consoleAdminUser's
+    # Resolves ${CONSOLE_ADMIN_PASSWORD} below into consoleAdminUser's
     # initial password (see console-admin-user-secret.yaml).
     CONSOLE_ADMIN_PASSWORD:
       secret:
@@ -435,7 +435,7 @@ spec:
         standardFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: true
-        secret: $(PRAXIS_SPOKE_EXCHANGER_SECRET)
+        secret: ${PRAXIS_SPOKE_EXCHANGER_SECRET}
         {{- if $er.enabled }}
         fullScopeAllowed: false
         {{- end }}
@@ -498,7 +498,7 @@ spec:
         directAccessGrantsEnabled: false
         # Exchange-only in hub-gateway mode (H -> R): no client_credentials.
         serviceAccountsEnabled: {{ not $hgEnabled }}
-        secret: $(HUB_EXCHANGE_SECRET)
+        secret: ${HUB_EXCHANGE_SECRET}
         {{- if or $er.enabled $hgEnabled }}
         fullScopeAllowed: false
         {{- end }}
@@ -588,7 +588,7 @@ spec:
         implicitFlowEnabled: false
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: false
-        secret: $(HUB_GATEWAY_EXCHANGE_SECRET)
+        secret: ${HUB_GATEWAY_EXCHANGE_SECRET}
         fullScopeAllowed: false
         attributes:
           standard.token.exchange.enabled: "true"
@@ -674,7 +674,7 @@ spec:
         directAccessGrantsEnabled: false
         serviceAccountsEnabled: false
         {{- if .Values.keycloak.consoleClientSecretVaultKey }}
-        secret: $(CONSOLE_CLIENT_SECRET)
+        secret: ${CONSOLE_CLIENT_SECRET}
         {{- end }}
         {{- if .Values.openshiftOIDC.enabled }}
         redirectUris:
@@ -716,7 +716,7 @@ spec:
         enabled: true
         credentials:
           - type: password
-            value: $(CONSOLE_ADMIN_PASSWORD)
+            value: ${CONSOLE_ADMIN_PASSWORD}
             temporary: true
         groups:
           - {{ printf "/%s" .Values.keycloak.adminGroupName | quote }}
@@ -752,8 +752,8 @@ spec:
         {{- $config := include "keycloak-oidc.externalProviderConfig" $provider | fromJson }}
         {{- $credentials := default dict $provider.credentials }}
         {{- if or $credentials.vaultKey $credentials.existingSecretName }}
-        {{- $_ := set $config "clientId" (printf "$(EXTERNAL_IDP_%d_CLIENT_ID)" $index) }}
-        {{- $_ := set $config "clientSecret" (printf "$(EXTERNAL_IDP_%d_CLIENT_SECRET)" $index) }}
+        {{- $_ := set $config "clientId" (printf "${EXTERNAL_IDP_%d_CLIENT_ID}" $index) }}
+        {{- $_ := set $config "clientSecret" (printf "${EXTERNAL_IDP_%d_CLIENT_SECRET}" $index) }}
         {{- end }}
         config:
           {{- toYaml $config | nindent 10 }}

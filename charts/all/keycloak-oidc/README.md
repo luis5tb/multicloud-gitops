@@ -229,12 +229,12 @@ Two things must both be correct, not just the issuer:
    also fully automated when `keycloak.consoleClientSecretVaultKey` is set
    (see below); leave it empty to fall back to the manual step.
 
-   `KeycloakRealmImport`'s `$(CONSOLE_CLIENT_SECRET)` placeholder substitution
-   (used to set this automatically) only ever gets one shot, at import time --
-   if it loses a startup race against the Secret it reads from (observed in
-   practice on a fresh cluster: `ClusterSecretStore` wasn't `Ready` yet), it
-   silently bakes in the literal placeholder text as the client's real secret
-   instead, with `KeycloakRealmImport` still reporting `Done: True`.
+   `KeycloakRealmImport`'s `${CONSOLE_CLIENT_SECRET}` placeholder substitution
+   only ever gets one shot, at import time. Older chart versions incorrectly
+   used `$(...)`, storing literal placeholders despite `Done: True` (initially
+   attributed to a Secret-readiness race; see the verified 2026-11-24 finding
+   below). Even with correct syntax, later Vault changes do not update an
+   existing realm through the import CR.
    `realm-secrets-reconciler-job.yaml`, an ArgoCD `PostSync` hook, re-asserts
    this value (and `consoleAdminUser`'s password, below) directly against the
    running realm on every sync using `keycloak.adminUser`'s master-realm
@@ -363,8 +363,8 @@ doesn't have this limitation.
 
 Unlike the group itself, `consoleAdminUser`'s *password* is covered by
 `realm-secrets-reconciler-job.yaml` (see above): if the initial
-`$(CONSOLE_ADMIN_PASSWORD)` substitution ever loses its startup race and gets
-baked in literally, or the underlying Vault value changes later, this
+`${CONSOLE_ADMIN_PASSWORD}` substitution was previously stored literally
+because an older chart used `$(...)`, or the Vault value changes later, this
 PostSync hook resets it back to the current Vault value on the next sync.
 The user itself still isn't retroactively created if `consoleAdminUser` is
 enabled after the realm already imported -- only its password self-heals
@@ -421,11 +421,11 @@ once the user exists.
    - **If `keycloak.consoleClientSecretVaultKey` is set** (recommended for a
      fresh install): nothing to do here -- `console-client-secret.yaml`
      already created it via External Secrets Operator, and
-     `keycloak-realm-import.yaml`'s `$(CONSOLE_CLIENT_SECRET)` placeholder set
+      `keycloak-realm-import.yaml`'s `${CONSOLE_CLIENT_SECRET}` placeholder sets
      the same value on the client at import time, with
      `realm-secrets-reconciler-job.yaml` re-asserting it on every sync as a
-     backstop (see above) if that one-shot substitution ever loses its
-     startup race. Confirm it exists, and that the two actually match:
+      backstop for older imports and subsequent Vault changes. Confirm the
+      Secret exists and that the registered client credential matches it:
 
      ```bash
      oc get secret <openshiftOIDC.consoleClientSecretName, default "openshift-console-oidc"> \
@@ -553,11 +553,12 @@ hub/spoke policy must key on `sub`/groups and record `azp` as provenance
 only. Whether mappers on the exchanging client apply to *exchanged* tokens
 is an UNCONFIRMED GUESS -- validate against a live realm.
 
-**One-shot realm import.** Like everything in `keycloak-realm-import.yaml`,
-these changes only apply when the realm is first created. On the standalone
-cluster, whose realm already imported, the client, secret, and mappers must
-be created manually in the Admin Console (or the realm re-imported) when B1
-is enabled; the realm-secrets-reconciler does not re-assert them.
+**One-shot realm import.** Clients and mappers are created only when the
+realm is first imported. If enabling this on an existing realm, create the
+client and mappers once through the Admin Console/API; do not delete or
+re-import the realm. The PostSync reconciler then aligns and verifies the
+existing client's secret from its Vault-backed Kubernetes Secret on every
+sync (see "Setting and repairing exchanger credentials" below).
 
 ## Hub A2A adapter token exchanger (Task B / Phase 1, disabled)
 
@@ -618,12 +619,10 @@ roles*, not groups — an explicit claim_map entry would be needed; nothing
 on this leg reads H's groups at Praxis (the hub API's OIDC group mapping
 does).
 
-**One-shot realm import.** Like everything in
-`keycloak-realm-import.yaml`, these changes only apply when the realm is
-first created. On the standalone cluster, whose realm already imported,
-the client, secret, and mappers must be created manually in the Admin
-Console when this is enabled; the realm-secrets-reconciler does not
-re-assert them.
+**One-shot realm import.** Clients and mappers are created only on the first
+import. On an existing realm, create them once through the Admin Console/API;
+the PostSync reconciler repairs and verifies the existing client's secret on
+every sync. It does not create clients or change their mappers or permissions.
 
 ## Audience-only clients (exchange target audiences)
 
@@ -721,6 +720,112 @@ Guards enforce the contract: `hubGatewayExchanger.clientId` equals
 After cutover, remove the old Token A audience mappers from `acme-agent`
 (`lightspeed-hub-adapter`, `praxis-spoke-gateway`) and its lifespan override
 (back to 300 s). The `lightspeed-hub-adapter` client is then unused.
+
+### Setting and repairing exchanger credentials
+
+Vault is the source of truth; do not paste real credentials into chart values,
+Git, shell arguments or troubleshooting logs. The standalone variant uses:
+
+| Client | Vault path (under `secret/data/global/`) | Vault property | Kubernetes Secret |
+|---|---|---|---|
+| `mas-a2a` | `praxis-hub-exchange` | `praxis-hub-exchange-client-secret` | `praxis-hub-exchange-client` |
+| `lightspeed-hub-a2a` | `lightspeed-hub-adapter` | `lightspeed-hub-adapter-client-secret` | `lightspeed-hub-adapter-client` |
+| `praxis-spoke-gateway` | `praxis-spoke-gateway` | `praxis-spoke-gateway-client-secret` | `praxis-spoke-gateway-client` |
+
+1. Keep these entries from `values-secret.yaml.template` in your local
+   `~/.config/hybrid-cloud-patterns/values-secret-multicloud-gitops.yaml`, then
+   run `./pattern.sh make load-secrets`. The template generates **missing**
+   values; preserve existing Vault values when repairing an imported realm.
+   Both Praxis credentials require `alphaNumericPolicy` because the pinned
+   delegator does not form-URL-encode Basic-auth credentials.
+2. Configure each enabled exchanger's `vaultKey`, `vaultProperty`,
+   `secretName` and `targetNamespace` in the variant's Application overrides.
+   ExternalSecrets create a `client-secret` key in both `keycloak.namespace`
+   and the consumer namespace (`praxis-proxy` or `lightspeed-hub`). Check that
+   both ExternalSecrets are Ready and their values match; do not print them.
+3. Sync the `keycloak-oidc` Application **with these chart changes**. Fresh
+   realms use `${NAME}` references resolved by Keycloak from `spec.placeholders`;
+   the PostSync `<realm>-realm-secrets-reconciler` also handles existing realms.
+   It runs when any exchanger is enabled, even without console or external IdP
+   configuration. Its `reconcile_exchange_secrets.py` helper resolves exact
+   client IDs, checks the registered secrets through the Admin API, updates
+   only mismatches, and verifies read-back without logging credentials. No
+   client-secret regeneration endpoint is used. All clients must already
+   exist; a missing client fails the hook instead of creating an incomplete
+   exchanger. Check ArgoCD's sync/hook result; successful hook Jobs are deleted
+   by `HookSucceeded`, so an absent Job alone is not a failure.
+4. After a Vault change, wait for ExternalSecrets to refresh, then explicitly
+   sync `keycloak-oidc` again: this is a **PostSync hook**, not a periodic
+   credential watcher. Consumers reading secrets through environment variables
+   need a separately coordinated rollout **if the credential value changed**.
+   Correcting only Keycloak's literal placeholder to the value already used by
+   consumers does not require restarting them or Keycloak.
+
+The reconciler uses the master-realm credentials in `keycloak.adminUser` and
+the TLS settings in `realmSecretsReconciler`. Preserve certificate verification;
+configure `caBundleConfigMapName` for a private issuer. To repair before a chart
+sync, perform the same narrow Admin API operation: resolve the exact client
+with `GET /admin/realms/<realm>/clients?clientId=<client-id>`, then
+`PUT /admin/realms/<realm>/clients/<uuid>` with only a `secret` field loaded
+in memory from the existing Kubernetes Secret, and verify with
+`GET .../<uuid>/client-secret`. Never rotate credentials or delete/re-import
+the realm just to correct a stored placeholder.
+
+### Troubleshooting: Praxis 403 with `delegation.idp_rejected` (2026-11-24)
+
+**Observed live:** after fixing MAS's stale principal allow-list, asking ACME
+to investigate namespace `payments` on target `mario-ipi` reached the MAS
+workflow, but Praxis rejected `POST /a2a` with 403 and no AgenticRun was
+created. A diagnostic request using an unknown JSON-RPC method (no
+investigation submitted) returned
+`delegation.idp_rejected: token exchange rejected: unauthorized_client`.
+Keycloak logged `TOKEN_EXCHANGE_ERROR`, client `mas-a2a`, with
+`error="invalid_client_credentials"`. This is the hub gateway's A -> H
+exchange, not namespace RBAC or the optional `realm_access.roles` mapping.
+
+Read-only Admin API checks found **all three** exchanger client secrets set
+to literal import placeholders: `$(HUB_GATEWAY_EXCHANGE_SECRET)`,
+`$(HUB_EXCHANGE_SECRET)`, and `$(PRAXIS_SPOKE_EXCHANGER_SECRET)` for
+`mas-a2a`, `lightspeed-hub-a2a`, and `praxis-spoke-gateway`, respectively.
+The hub gateway's environment matched its current Kubernetes Secret, and
+the Secret copies in `keycloak-system` and `praxis-proxy` matched, but the
+client credential registered in Keycloak did not.
+
+Keycloak realm import environment substitution uses **`${NAME}`**, not
+`$(NAME)` (see the [Keycloak 26.4 import guide](https://github.com/keycloak/keycloak/blob/26.4.0/docs/guides/server/importExport.adoc#using-environment-variables-within-the-realm-configuration-files)).
+Do not assume every literal placeholder is a Secret-readiness race. The
+import reported `Done=True`, `HasErrors=False`; Helm rendering and import
+status did not verify the stored credentials or exercise token exchange.
+At diagnosis, the PostSync reconciler repaired console and external IdP
+credentials but did not reassert the exchanger client secrets. The earlier
+2026-11-20 verification used Admin API-configured clients, so it did not
+prove that a fresh import would configure these credentials correctly.
+
+Recovery requires aligning each affected client's registered secret with
+its existing Vault-backed Kubernetes Secret through the Admin API; restarting
+Praxis or Keycloak cannot fix a literal value stored in the realm. Do not
+rotate secrets unnecessarily or delete/re-import the realm. Correct the
+import placeholder syntax for future installs and extend reconciliation
+for existing realms; changing the one-shot import alone does not repair
+them. Compare credentials in memory and report only match/mismatch, never
+print secret values or access tokens.
+
+**Repair verified (2026-11-24):** with approval, all three registered client
+secrets were aligned to their existing Kubernetes values and verified through
+Admin API read-back; namespace Secret copies matched before repair. No secrets
+were rotated and no workloads restarted. The same unknown-method probe then
+returned HTTP 200 with JSON-RPC `-32601` (`method not found`) from the adapter,
+instead of the exchange 403. A separate fresh-token replay with the issuer CA
+trusted verified A -> H -> R -> U for `praxis-spoke-mario-ipi` (all HTTP 200;
+R lifetime 1800 seconds), without submitting an investigation. This does not
+verify namespace RBAC or the adapter's own TLS trust (see the lightspeed-hub
+README's missing-run-token finding). The accompanying chart
+fix changes **all** realm credential placeholders (including console, admin
+password and external IdP credentials) to `${NAME}` and extends PostSync
+reconciliation to enabled exchanger secrets. Regression tests cover the
+interpolation syntax, Secret wiring, existing-realm repair, verification,
+idempotence and missing-credential/client failures. The chart changes have
+not yet been deployed by this repair.
 
 ## Audience-scoped exchange roles (`keycloak.exchangeRoles`)
 

@@ -446,7 +446,7 @@ def test_keycloak_hub_exchange_wiring() -> None:
 
     hub = clients["lightspeed-hub-adapter"]
     assert hub["publicClient"] is False
-    assert hub["secret"] == "$(HUB_EXCHANGE_SECRET)"
+    assert hub["secret"] == "${HUB_EXCHANGE_SECRET}"
     assert hub["attributes"] == {"standard.token.exchange.enabled": "true"}
     mappers = {
         (m["name"], m["protocolMapper"]): m.get("config", {})
@@ -690,13 +690,13 @@ def test_keycloak_hub_gateway_exchange_chain() -> None:
     assert auds(acme) == ["mas-a2a"] and acme["fullScopeAllowed"] is False
 
     hg = clients["mas-a2a"]
-    assert hg["secret"] == "$(HUB_GATEWAY_EXCHANGE_SECRET)"
+    assert hg["secret"] == "${HUB_GATEWAY_EXCHANGE_SECRET}"
     assert hg["attributes"]["standard.token.exchange.enabled"] == "true"
     assert hg["serviceAccountsEnabled"] is False and hg["fullScopeAllowed"] is False
     assert auds(hg) == ["lightspeed-hub-a2a"]
 
     adapter = clients["lightspeed-hub-a2a"]
-    assert adapter["secret"] == "$(HUB_EXCHANGE_SECRET)"
+    assert adapter["secret"] == "${HUB_EXCHANGE_SECRET}"
     assert adapter["serviceAccountsEnabled"] is False
     assert adapter["attributes"]["access.token.lifespan"] == "1800"
     assert auds(adapter) == ["praxis-spoke-gateway"]

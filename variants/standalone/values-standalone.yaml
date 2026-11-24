@@ -289,10 +289,9 @@ clusterGroup:
         # prerequisites" and charts/all/praxis-proxy/README.md "Spoke
         # gateways (B1, proposed)". Requires the Vault entry below in
         # values-secret.yaml.template (praxis-spoke-gateway) to exist
-        # first. One-shot realm import only: on this cluster, whose realm
-        # already imported, the client and mappers must be created
-        # manually in the Admin Console (see charts/all/keycloak-oidc
-        # README).
+        # first. Existing realms need the client and mappers created once
+        # through the Admin Console/API; the PostSync reconciler then aligns
+        # and verifies its Vault-backed secret (keycloak-oidc README).
         - name: keycloak.spokeGatewayExchanger.enabled
           value: "true"
         - name: keycloak.spokeGatewayExchanger.vaultKey
@@ -305,14 +304,14 @@ clusterGroup:
           value: praxis-spoke-hub
         - name: keycloak.spokeGatewayExchanger.spokeAudiences[1]
           value: praxis-spoke-mario-ipi
-        # TASK B / PHASE 1 H-SIDE WIRING (DISABLED): Keycloak prerequisites
-        # for the hub A2A adapter's A->H exchange (charts/all/lightspeed-hub
-        # adapter.keycloak.clientId; the ADAPTER performs the exchange --
-        # see the a2aUpstream block under praxis-proxy above). Requires a
+        # Keycloak prerequisites for the adapter's H->R exchange in the
+        # hub-gateway chain below (charts/all/lightspeed-hub
+        # adapter.keycloak.clientId). Requires a
         # Vault entry (lightspeed-hub-adapter) in values-secret.yaml.template
         # first. One-shot realm import only: on this cluster, whose realm
         # already imported, the client and mappers must be created manually
-        # in the Admin Console (see charts/all/keycloak-oidc README). The
+        # in the Admin Console; the PostSync reconciler repairs/verifies
+        # the existing client's secret (keycloak-oidc README). The
         # hubAudience must equal the lightspeed-hub chart's
         # adapter.hubAudience and stay distinct from every other audience.
         - name: keycloak.hubExchange.enabled

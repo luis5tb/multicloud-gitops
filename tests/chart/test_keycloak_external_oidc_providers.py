@@ -263,7 +263,7 @@ def test_standalone_external_oidc_credentials_and_endpoints() -> None:
             ("clientSecret", "CLIENT_SECRET", "client-secret"),
         ]:
             var = f"EXTERNAL_IDP_{index}_{suffix}"
-            assert config[field] == f"$({var})"
+            assert config[field] == "${" + var + "}"
             reference = realm["placeholders"][var]["secret"]
             assert reference == env[var]["valueFrom"]["secretKeyRef"]
             assert reference["key"] == key

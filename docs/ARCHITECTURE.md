@@ -532,6 +532,30 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   the standalone allow-list had been populated with the OAuth client UUID.
   Decode a real non-secret test token and copy only its `sub` into
   `a2a.allowedPrincipals`.
+- **A synced Secret is not a refreshed process environment.** Hit live
+  (2026-11-24): MAS A2A kept the old principal allow-list after its Secret
+  updated, returning 403 despite ArgoCD Synced/Healthy. Restarting only MAS
+  A2A loaded the correct list; chart-managed allow-list changes need a
+  pod-template rollout trigger (see the MAS A2A README).
+- **Realm import placeholders use `${NAME}`, not `$(NAME)`.** Hit live
+  (2026-11-24): all three exchanger secrets were stored as literal `$(...)`
+  strings despite a successful realm import; Praxis's A -> H exchange
+  returned 403 `delegation.idp_rejected` / `unauthorized_client`. Prior
+  Admin API-configured verification masked the fresh-import defect. Repair
+  existing registered credentials without re-importing the realm; fix the
+  import and reconciliation separately. All three credentials were aligned
+  to the existing Vault-backed Secrets without rotation/restarts; the
+  unknown-method probe then reached the adapter (HTTP 200, JSON-RPC -32601).
+  The chart now uses `${...}` for all credential placeholders and PostSync
+  reconciliation verifies enabled exchanger secrets (see the Keycloak/OIDC
+  README; chart changes still need deployment).
+- **Creating a run does not prove its run credential was written.** Hit live
+  (2026-11-24): the adapter created AgenticRuns as H, then could not complete
+  their credential handoff; the operator paused on missing `ls-run-token-*`
+  Secrets. Keycloak HTTPS from the adapter failed on the untrusted ingress
+  CA; supplying the existing CA made discovery succeed. The full exchange
+  chain worked separately with the CA trusted. Add outbound issuer trust,
+  not Secret privileges or TLS bypasses (lightspeed-hub README; not yet deployed).
 - **An exchanged token's `azp` is the exchanger, not the caller.** Hit live
   (2026-11-20) right after the hub-gateway cutover: every sandbox kube call got
   403 "not an allow-listed caller" at the spoke gateway, which still inherited

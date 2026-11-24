@@ -440,7 +440,7 @@ def test_keycloak_spoke_gateway_exchanger_client() -> None:
 
     exchanger = clients["praxis-spoke-gateway"]
     assert exchanger["publicClient"] is False
-    assert exchanger["secret"] == "$(PRAXIS_SPOKE_EXCHANGER_SECRET)"
+    assert exchanger["secret"] == "${PRAXIS_SPOKE_EXCHANGER_SECRET}"
     assert exchanger["attributes"] == {"standard.token.exchange.enabled": "true"}
     assert [m["config"]["included.custom.audience"] for m in exchanger["protocolMappers"]] == [
         "praxis-spoke-east"

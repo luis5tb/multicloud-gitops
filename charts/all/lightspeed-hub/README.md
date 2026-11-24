@@ -79,6 +79,50 @@ built adapter actually does (a2a-adapter README "RBAC notes" in the lightspeed-h
 Escalation checks for CI (`oc auth can-i` probes, design §8.1 item 2) are an
 M4 hardening item — not yet wired.
 
+### Troubleshooting: AgenticRun exists, but its run-token Secret does not (2026-11-24)
+
+**Observed live:** after repairing Keycloak's literal-placeholder exchanger
+credentials, MAS created three `payments` / `mario-ipi` AgenticRuns. Each
+paused immediately with `CredentialsExpired=True` and `Secret not found` for
+`ls-run-token-<run UID>`. No run-token Secrets were present. The adapter logged
+`task paused for credential renewal`, and MAS received a generic stream
+`internal error`. That pause message is the adapter's watch of the operator's
+condition, not evidence that token exchange or Secret creation succeeded.
+
+The adapter's submission sequence is **create AgenticRun as H -> exchange
+H for run token R -> write the Secret as its ServiceAccount**. Failure between
+the first and last operations leaves a real run without credentials. A brief
+initial missing-Secret pause can be a creation race; persistent absence across
+reconciles requires checking the adapter's exchange and Secret-write path.
+The adapter ServiceAccount's `create secrets` grant was confirmed with
+`oc auth can-i`; the live namespace and expected Secret names matched.
+
+A concrete blocker was reproduced **inside the adapter container**: Keycloak
+discovery failed with `curl: (60) SSL certificate problem: self-signed
+certificate in certificate chain`. The pod mounted only its serving cert and
+Kubernetes ServiceAccount projection, with no ingress CA for the Keycloak
+Route. Its Go token exchanger uses the default HTTP client's TLS trust; its
+transport-error path returns a generic `request_failed` without the warning
+logged for an OAuth response. Repeating discovery with the existing ingress
+CA supplied via stdin returned HTTP 200. Separately, all three exchanges
+A -> H -> R -> U succeeded with that CA trusted (including `mario-ipi`), so
+the repaired registered credentials were no longer the demonstrated blocker.
+
+**Required follow-up, not deployed during diagnosis:** supply the Keycloak
+Route's ingress CA to the adapter's outbound HTTPS trust, preserving system
+roots, then roll out the adapter and retry through its normal A2A path. Its
+inbound service-serving cert and Kubernetes API CA are different trust paths;
+neither automatically trusts the public Keycloak Route. Do not disable TLS
+verification, widen Secret RBAC, or manually inject administrator tokens into
+the run-token Secrets. Decide explicitly whether to renew existing tasks or
+start a fresh request; credential repair alone does not resume these runs.
+
+**Why nothing caught it earlier:** Helm tests checked wiring, the exchanger
+unit tests inject an HTTP client that trusts their test server, and the
+unknown-method probe validates A -> H at Praxis but never exercises H -> R
+inside the adapter. No investigations, token Secrets, restarts or deployment
+changes were submitted as part of this diagnosis.
+
 ## Run-creators RBAC ("only the configured group can create AgenticRuns")
 
 `run-creators-rbac.yaml` (rendered only when `adapter.hubRunCreatorsGroup`
