@@ -108,20 +108,100 @@ CA supplied via stdin returned HTTP 200. Separately, all three exchanges
 A -> H -> R -> U succeeded with that CA trusted (including `mario-ipi`), so
 the repaired registered credentials were no longer the demonstrated blocker.
 
-**Required follow-up, not deployed during diagnosis:** supply the Keycloak
-Route's ingress CA to the adapter's outbound HTTPS trust, preserving system
-roots, then roll out the adapter and retry through its normal A2A path. Its
+**Chart fix:** `adapter.keycloak.caTrust` supplies outbound issuer trust,
+preserving system roots (see below). The standalone Application enables it
+and adds `lightspeed-hub` to the Keycloak CA-sync targets. These changes still
+need deployment; the diagnosis itself made no workload changes. The adapter's
 inbound service-serving cert and Kubernetes API CA are different trust paths;
 neither automatically trusts the public Keycloak Route. Do not disable TLS
 verification, widen Secret RBAC, or manually inject administrator tokens into
 the run-token Secrets. Decide explicitly whether to renew existing tasks or
-start a fresh request; credential repair alone does not resume these runs.
+start a fresh request; CA trust alone does not provision old runs' credentials.
 
 **Why nothing caught it earlier:** Helm tests checked wiring, the exchanger
 unit tests inject an HTTP client that trusts their test server, and the
 unknown-method probe validates A -> H at Praxis but never exercises H -> R
 inside the adapter. No investigations, token Secrets, restarts or deployment
 changes were submitted as part of this diagnosis.
+
+## Adapter outbound Keycloak CA trust
+
+`adapter.keycloak.caTrust.enabled` is **off by default**, independently of
+inbound `adapter.tls.enabled` and secret-versus-SVID client authentication.
+For a private-CA-signed Keycloak Route, enable it and configure:
+
+| Value under `adapter.keycloak.caTrust` | Meaning |
+| --- | --- |
+| `caBundleConfigMapName` | Required namespace-local ConfigMap containing the issuer CA; this chart does not create it |
+| `caBundleKey` | Source key (default `ca-bundle.crt`), projected to a fixed filename |
+| `publicBundlePath` | Optional system/public PEM bundle path **inside the adapter image**; empty searches common RHEL/Debian/Alpine locations |
+| `resources` | CPU/memory requests and limits for the bundle-building init container |
+
+The `build-keycloak-ca-bundle` init container reuses the **same image and
+tag/digest** as the adapter. It runs `files/build_keycloak_ca_bundle.sh` to
+copy that image's system/public bundle plus the mounted issuer CA into an
+`emptyDir`. The adapter mounts only the combined output, read-only, and gets
+`SSL_CERT_FILE=/var/run/adapter-keycloak-trust/ca-bundle.crt`. The Go default
+HTTPS client uses this file; no adapter binary change or new image is needed.
+This extends default outbound trust; Kubernetes clients with their explicitly
+configured API CA continue using that CA. TLS/hostname verification stays on.
+
+The image must contain `/bin/sh`, `cat`, `grep`, and public PEM roots (the
+current UBI-minimal adapter has them). An explicit `publicBundlePath` is not
+silently ignored if it is wrong. Missing/empty inputs or missing PEM markers
+stop init; the script checks PEM boundaries, not certificate cryptographic
+validity. Go still verifies the actual HTTPS chain/signatures/hostname. The
+source ConfigMap and key are mandatory Kubernetes projections: a missing
+source prevents startup rather than silently dropping the private CA. A
+missing public bundle never falls back to private-CA-only trust. The init
+container is non-root, has a read-only root filesystem, drops all capabilities,
+and writes only to the shared `emptyDir`. No adapter RBAC changes are needed.
+
+### Initial deployment (GitOps, no manual CA patch)
+
+The standalone variant configures both ends:
+
+1. `keycloak-oidc`'s existing CA bootstrap Sync hook and refresh CronJob copy
+   the managed ingress signer to `lightspeed-hub/keycloak-oidc-ca`, in addition
+   to the existing targets. Only that sync account receives namespace-local
+   ConfigMap write permissions; the adapter just mounts the result.
+2. `lightspeed-hub` enables `adapter.keycloak.caTrust` with that ConfigMap and
+   the current adapter's `/etc/pki/tls/certs/ca-bundle.crt` public bundle.
+
+After committing and pushing, sync the parent Application and ensure **both
+`keycloak-oidc` and `lightspeed-hub` child Applications sync the new revision**.
+The changed Deployment pod template triggers the adapter rollout; no manual
+CA creation, Deployment patch or initial `rollout restart` is needed. Child
+Applications may sync concurrently: the new pod waits for its required
+ConfigMap until the Keycloak bootstrap hook creates it. A different issuer
+signer requires changing the CA-sync source, not disabling verification.
+
+Check the adapter rollout and the `build-keycloak-ca-bundle` init container
+status/logs, then submit a **fresh ACME request**. Success means more than
+Argo Healthy: verify that its AgenticRun receives `ls-run-token-<UID>` and
+progresses past credential waiting. Previously stranded tasks are not
+automatically repaired. If diagnosing with curl, pass
+`--cacert "$SSL_CERT_FILE"` explicitly inside the adapter; Go's environment
+setting should not be assumed to configure curl's TLS backend.
+
+### CA rotation
+
+The Keycloak CronJob refreshes the source ConfigMap on its configured schedule.
+It does **not** rebuild an already-running pod's init-container output or
+reload Go's cached system roots. After confirming that the namespace-local
+ConfigMap has the rotated CA, replace the adapter pods (preferably during
+the old/new CA overlap window):
+
+```bash
+oc -n lightspeed-hub rollout restart deployment/lightspeed-hub
+oc -n lightspeed-hub rollout status deployment/lightspeed-hub --timeout=180s
+```
+
+Each new pod reruns init and loads the refreshed combined bundle. A GitOps
+pod-template change can trigger the same replacement instead. Restarting
+only the process/container within an existing pod does not rerun a completed
+init container. Neither ConfigMap projection refresh nor a no-op Argo sync is
+an automatic trust-reload mechanism; this chart adds no restart controller.
 
 ## Run-creators RBAC ("only the configured group can create AgenticRuns")
 

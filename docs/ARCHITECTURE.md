@@ -554,8 +554,12 @@ Routes require their own trusted ingress CA bundle (never turn verification off)
   their credential handoff; the operator paused on missing `ls-run-token-*`
   Secrets. Keycloak HTTPS from the adapter failed on the untrusted ingress
   CA; supplying the existing CA made discovery succeed. The full exchange
-  chain worked separately with the CA trusted. Add outbound issuer trust,
-  not Secret privileges or TLS bypasses (lightspeed-hub README; not yet deployed).
+  chain worked separately with the CA trusted. The chart now syncs the issuer
+  CA into `lightspeed-hub` and combines it with the adapter image's system
+  roots in init, selected by `SSL_CERT_FILE`; not Secret privileges or TLS
+  bypasses. The standalone variant enables it (deployment still required).
+  After CA rotation replace the pods: a ConfigMap refresh neither reruns init
+  nor reloads Go's cached trust roots (lightspeed-hub README).
 - **An exchanged token's `azp` is the exchanger, not the caller.** Hit live
   (2026-11-20) right after the hub-gateway cutover: every sandbox kube call got
   403 "not an allow-listed caller" at the spoke gateway, which still inherited

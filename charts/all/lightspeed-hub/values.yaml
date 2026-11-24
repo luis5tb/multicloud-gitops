@@ -185,6 +185,28 @@ adapter:
     clientSecretSecret:
       name: ""
       key: client-secret
+    # Outbound HTTPS trust (independent of adapter.tls serving and SVID auth).
+    # Opt in when the issuer Route uses a private CA. Reuses the adapter image:
+    # it must contain /bin/sh, cat, grep and a system/public PEM CA bundle.
+    # An init container combines that bundle with this namespace-local
+    # ConfigMap; SSL_CERT_FILE points Go at the result. Never private-CA-only.
+    # Provision the ConfigMap separately, e.g. keycloak-oidc's caBundleSync.
+    # On CA rotation replace the pods: init output and Go roots do not reload
+    # merely because the source ConfigMap changes (see README).
+    caTrust:
+      enabled: false
+      caBundleConfigMapName: ""
+      caBundleKey: ca-bundle.crt
+      # Empty auto-detects common system bundle paths; a nonempty override
+      # must exist and contain PEM certificates (no silent fallback).
+      publicBundlePath: ""
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
 
   # SPIFFE SVID client auth for the A->H exchange (alternative to the
   # confidential client above; mirrors the adapter's --svid-socket flag /

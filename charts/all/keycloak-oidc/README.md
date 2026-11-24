@@ -273,7 +273,8 @@ Two things must both be correct, not just the issuer:
 
     `caBundleSync.additionalTargetNamespaces` is an opt-in list for other
     workloads that must trust this same ingress signer. For example, set it to
-    `[mao]` when MAS Keycloak CA trust is enabled; the bootstrap Job and
+    `[mao, lightspeed-hub]` for the standalone MAS callers and hub adapter;
+    the bootstrap Job and
     rotation CronJob will publish the same `keycloak-oidc-ca` ConfigMap there,
     and this chart creates namespace-local Roles (plus the existing source
     read Role). `get`/`patch` are restricted to the named ConfigMap, but
@@ -282,6 +283,10 @@ Two things must both be correct, not just the issuer:
     namespaces where that bootstrap permission is acceptable. The list
     defaults empty; no extra namespace receives the bundle or permissions
     unless explicitly configured.
+    The lightspeed-hub adapter also builds a combined bundle from this source;
+    replace its pods after CA rotation to rerun init and reload Go's cached
+    trust roots (see that chart's README). Source ConfigMap refresh alone is
+    not a workload restart or TLS-context reload.
     MAS consumes that ConfigMap through a read-only volume and builds a bundle
     that extends its image's existing trust roots, with TLS verification still
     enabled. The CronJob refreshes the ConfigMap on its schedule after signer

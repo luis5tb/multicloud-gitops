@@ -119,15 +119,18 @@ clusterGroup:
           value: mas-api
         # Bootstrap the managed ingress CA into openshift-config (for the
         # Authentication OIDC provider), keycloak-system (for the realm
-        # reconciler), and mao (for outbound MAS HTTPS to private cluster
-        # Routes), then refresh those copies periodically for CA rotation.
-        # Each MAS caller still enables its own combined trust bundle below.
+        # reconciler), mao (for outbound MAS HTTPS to private cluster Routes),
+        # and lightspeed-hub (for adapter H -> R exchange), then refresh those
+        # copies periodically. Each caller enables its combined bundle below;
+        # replace adapter pods after CA rotation to rebuild/reload its trust.
         - name: openshiftOIDC.caConfigMapName
           value: keycloak-oidc-ca
         - name: openshiftOIDC.caBundleSync.enabled
           value: "true"
         - name: openshiftOIDC.caBundleSync.additionalTargetNamespaces[0]
           value: mao
+        - name: openshiftOIDC.caBundleSync.additionalTargetNamespaces[1]
+          value: lightspeed-hub
         - name: realmSecretsReconciler.caBundleConfigMapName
           value: keycloak-oidc-ca
         # Native OIDC is cluster-wide and switches Authentication/cluster's
@@ -965,6 +968,15 @@ clusterGroup:
           value: lightspeed-hub-a2a
         - name: adapter.keycloak.clientSecretSecret.name
           value: lightspeed-hub-adapter-client
+        # Outbound Keycloak Route trust is separate from the adapter's serving
+        # cert. CA sync above creates/refreshes the namespace-local source;
+        # the init container preserves the adapter image's public roots.
+        - name: adapter.keycloak.caTrust.enabled
+          value: "true"
+        - name: adapter.keycloak.caTrust.caBundleConfigMapName
+          value: keycloak-oidc-ca
+        - name: adapter.keycloak.caTrust.publicBundlePath
+          value: /etc/pki/tls/certs/ca-bundle.crt
         # Inbound bearer is already Token H (no A->H in the adapter); store
         # the run token R (aud praxis-spoke-gateway, 1800s) for the sandbox
         # instead of the inbound token.

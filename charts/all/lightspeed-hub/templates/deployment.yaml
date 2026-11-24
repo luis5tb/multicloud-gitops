@@ -21,6 +21,10 @@
 {{- fail "adapter.keycloak.clientSecretSecret.name must reference the Secret (key client-secret by default) holding the exchange client's secret" }}
 {{- end }}
 {{- end }}
+{{- if .Values.adapter.keycloak.caTrust.enabled }}
+{{- $_ := required "adapter.keycloak.caTrust.caBundleConfigMapName is required when CA trust is enabled" .Values.adapter.keycloak.caTrust.caBundleConfigMapName }}
+{{- $_ := required "adapter.keycloak.caTrust.caBundleKey is required when CA trust is enabled" .Values.adapter.keycloak.caTrust.caBundleKey }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +56,39 @@ spec:
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.adapter.keycloak.caTrust.enabled }}
+      initContainers:
+        - name: build-keycloak-ca-bundle
+          image: {{ include "lightspeed-hub.adapterImage" . | quote }}
+          imagePullPolicy: {{ .Values.adapter.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              {{- .Files.Get "files/build_keycloak_ca_bundle.sh" | nindent 14 }}
+          env:
+            - name: PUBLIC_CA_BUNDLE
+              value: {{ .Values.adapter.keycloak.caTrust.publicBundlePath | quote }}
+            - name: KEYCLOAK_CA_BUNDLE
+              value: /var/run/adapter-keycloak-ca/ca-bundle.crt
+            - name: COMBINED_CA_BUNDLE
+              value: /var/run/adapter-keycloak-trust/ca-bundle.crt
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.adapter.keycloak.caTrust.resources | nindent 12 }}
+          volumeMounts:
+            - name: keycloak-ca
+              mountPath: /var/run/adapter-keycloak-ca
+              readOnly: true
+            - name: keycloak-ca-trust
+              mountPath: /var/run/adapter-keycloak-trust
       {{- end }}
       containers:
         - name: adapter
@@ -137,14 +174,24 @@ spec:
             - name: SPIFFE_SOCKET
               value: {{ .Values.adapter.svid.socketPath | quote }}
             {{- end }}
-          {{- if .Values.adapter.tls.enabled }}
-          # Service-serving cert (tls.crt/tls.key, service-ca-rotated) for
-          # --tls-cert-file/--tls-key-file; the Service annotation mints
-          # it. Omitted entirely in the plain-HTTP local-dev override.
+            {{- if .Values.adapter.keycloak.caTrust.enabled }}
+            - name: SSL_CERT_FILE
+              value: /var/run/adapter-keycloak-trust/ca-bundle.crt
+            {{- end }}
+          {{- if or .Values.adapter.tls.enabled .Values.adapter.keycloak.caTrust.enabled }}
           volumeMounts:
+            {{- if .Values.adapter.tls.enabled }}
+            # Service-serving cert for --tls-cert-file/--tls-key-file;
+            # omitted entirely in the plain-HTTP local-dev override.
             - name: serving-cert
               mountPath: {{ dir .Values.adapter.tls.certFile }}
               readOnly: true
+            {{- end }}
+            {{- if .Values.adapter.keycloak.caTrust.enabled }}
+            - name: keycloak-ca-trust
+              mountPath: /var/run/adapter-keycloak-trust
+              readOnly: true
+            {{- end }}
           {{- end }}
           # Probes: path + timings come from values; the port NAME and
           # scheme are derived from adapter.tls so they can never drift
@@ -176,14 +223,24 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if .Values.adapter.tls.enabled }}
-      # Service-serving cert for --tls-cert-file/--tls-key-file; minted and
-      # rotated by the service-ca operator via the Service annotation.
-      # Omitted entirely in the plain-HTTP local-dev override.
+      {{- if or .Values.adapter.tls.enabled .Values.adapter.keycloak.caTrust.enabled }}
       volumes:
+        {{- if .Values.adapter.tls.enabled }}
+        # Minted/rotated by the service-ca operator via the Service annotation.
         - name: serving-cert
           secret:
             secretName: {{ include "lightspeed-hub.servingCertSecretName" . }}
+        {{- end }}
+        {{- if .Values.adapter.keycloak.caTrust.enabled }}
+        - name: keycloak-ca
+          configMap:
+            name: {{ .Values.adapter.keycloak.caTrust.caBundleConfigMapName | quote }}
+            items:
+              - key: {{ .Values.adapter.keycloak.caTrust.caBundleKey | quote }}
+                path: ca-bundle.crt
+        - name: keycloak-ca-trust
+          emptyDir: {}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
