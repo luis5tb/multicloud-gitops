@@ -432,6 +432,7 @@ Prerequisites:
 ## Related docs
 
 - [agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md) — full identity chain (orchestrated/passthrough flow), claim shapes, Troubleshooting (including Keycloak Admin Events for grants)
-- [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — why the chain is shaped this way; hard-won lessons
+- [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) — why the chain is shaped this way
+- [docs/LESSONS_LEARNED.md](../docs/LESSONS_LEARNED.md) — every live finding, symptom and workaround
 - [charts/all/mao/mas-a2a/README.md](../charts/all/mao/mas-a2a/README.md) — MAS A2A trust boundary, principal allow-list, activation prerequisites
 - [charts/all/praxis-proxy/README.md](../charts/all/praxis-proxy/README.md) — Praxis `logLevel` / JWT enforcement quirks

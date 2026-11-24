@@ -7,12 +7,12 @@ drives, on the hub cluster. This is the replacement investigation backend
 for the removed OLS (`PLAN-lightspeed-hub-migration.md` Task A; this chart
 is Task B).
 
-**Status: M4 SKELETON, DISABLED BY DEFAULT.** The Go adapter is being built
-in parallel (milestones M1-M3). With `enabled: false` (the default) this
-chart renders **no Kubernetes resources** — the pattern can carry it dormant
-exactly like `charts/all/mao/mas-a2a`'s `a2a.enabled` gating. Every
-PLACEHOLDER / UNCONFIRMED GUESS is listed at the bottom of this README;
-each one is a slot the M1-M3 outputs must fill before activation.
+**Status: M4 SKELETON, DISABLED BY DEFAULT.** With `enabled: false` (the
+default) this chart renders **no Kubernetes resources**, like
+`charts/all/mao/mas-a2a`'s `a2a.enabled` gating. Every PLACEHOLDER /
+UNCONFIRMED item is listed in the register at the bottom; each is a slot to
+fill before activation. Live findings from bringing this up are in
+[`docs/LESSONS_LEARNED.md` §8](../../../docs/LESSONS_LEARNED.md#8-lightspeed-hub--agentic-operator).
 
 ## Contents
 
@@ -79,50 +79,18 @@ built adapter actually does (a2a-adapter README "RBAC notes" in the lightspeed-h
 Escalation checks for CI (`oc auth can-i` probes, design §8.1 item 2) are an
 M4 hardening item — not yet wired.
 
-### Troubleshooting: AgenticRun exists, but its run-token Secret does not (2026-11-24)
+### Troubleshooting: AgenticRun exists, but its run-token Secret does not
 
-**Observed live:** after repairing Keycloak's literal-placeholder exchanger
-credentials, MAS created three `payments` / `mario-ipi` AgenticRuns. Each
-paused immediately with `CredentialsExpired=True` and `Secret not found` for
-`ls-run-token-<run UID>`. No run-token Secrets were present. The adapter logged
-`task paused for credential renewal`, and MAS received a generic stream
-`internal error`. That pause message is the adapter's watch of the operator's
-condition, not evidence that token exchange or Secret creation succeeded.
-
-The adapter's submission sequence is **create AgenticRun as H -> exchange
-H for run token R -> write the Secret as its ServiceAccount**. Failure between
-the first and last operations leaves a real run without credentials. A brief
-initial missing-Secret pause can be a creation race; persistent absence across
-reconciles requires checking the adapter's exchange and Secret-write path.
-The adapter ServiceAccount's `create secrets` grant was confirmed with
-`oc auth can-i`; the live namespace and expected Secret names matched.
-
-A concrete blocker was reproduced **inside the adapter container**: Keycloak
-discovery failed with `curl: (60) SSL certificate problem: self-signed
-certificate in certificate chain`. The pod mounted only its serving cert and
-Kubernetes ServiceAccount projection, with no ingress CA for the Keycloak
-Route. Its Go token exchanger uses the default HTTP client's TLS trust; its
-transport-error path returns a generic `request_failed` without the warning
-logged for an OAuth response. Repeating discovery with the existing ingress
-CA supplied via stdin returned HTTP 200. Separately, all three exchanges
-A -> H -> R -> U succeeded with that CA trusted (including `mario-ipi`), so
-the repaired registered credentials were no longer the demonstrated blocker.
-
-**Chart fix:** `adapter.keycloak.caTrust` supplies outbound issuer trust,
-preserving system roots (see below). The standalone Application enables it
-and adds `lightspeed-hub` to the Keycloak CA-sync targets. These changes still
-need deployment; the diagnosis itself made no workload changes. The adapter's
-inbound service-serving cert and Kubernetes API CA are different trust paths;
-neither automatically trusts the public Keycloak Route. Do not disable TLS
-verification, widen Secret RBAC, or manually inject administrator tokens into
-the run-token Secrets. Decide explicitly whether to renew existing tasks or
-start a fresh request; CA trust alone does not provision old runs' credentials.
-
-**Why nothing caught it earlier:** Helm tests checked wiring, the exchanger
-unit tests inject an HTTP client that trusts their test server, and the
-unknown-method probe validates A -> H at Praxis but never exercises H -> R
-inside the adapter. No investigations, token Secrets, restarts or deployment
-changes were submitted as part of this diagnosis.
+The adapter creates the AgenticRun as H, exchanges H for R, then writes
+`ls-run-token-<run UID>` as its own ServiceAccount. A failure between steps
+leaves a real run with `CredentialsExpired=True` / `Secret not found`; a brief
+initial pause can be a creation race, persistent absence is a real failure.
+Check, in order: `oc auth can-i create secrets` for the adapter SA and the
+expected Secret names; then the adapter's outbound Keycloak trust (below) --
+without it the H->R exchange fails with a generic `request_failed` and no
+Secret is written. Do not widen Secret RBAC, disable TLS verification, or
+hand-inject tokens; decide explicitly whether to renew stranded tasks or start
+a fresh request. Full write-up: [`docs/LESSONS_LEARNED.md` §8](../../../docs/LESSONS_LEARNED.md#8-lightspeed-hub--agentic-operator).
 
 ## Adapter outbound Keycloak CA trust
 
@@ -146,25 +114,22 @@ HTTPS client uses this file; no adapter binary change or new image is needed.
 This extends default outbound trust; Kubernetes clients with their explicitly
 configured API CA continue using that CA. TLS/hostname verification stays on.
 
-The image must contain `/bin/sh`, `cat`, `grep`, and public PEM roots (the
-current UBI-minimal adapter has them). An explicit `publicBundlePath` is not
-silently ignored if it is wrong. Missing/empty inputs or missing PEM markers
-stop init; the script checks PEM boundaries, not certificate cryptographic
-validity. Go still verifies the actual HTTPS chain/signatures/hostname. The
-source ConfigMap and key are mandatory Kubernetes projections: a missing
-source prevents startup rather than silently dropping the private CA. A
-missing public bundle never falls back to private-CA-only trust. The init
-container is non-root, has a read-only root filesystem, drops all capabilities,
-and writes only to the shared `emptyDir`. No adapter RBAC changes are needed.
+The image needs `/bin/sh`, `cat`, `grep` and public PEM roots (the UBI-minimal
+adapter has them). Fail-closed by design: a wrong `publicBundlePath`, missing
+or empty inputs, or a bundle without PEM markers stops init; the source
+ConfigMap and key are required projections; there is never a private-CA-only
+fallback. Go still performs the real chain/signature/hostname checks. The init
+container is non-root, read-only rootfs, all capabilities dropped, writing only
+the shared `emptyDir`; no adapter RBAC changes are needed.
 
 ### Initial deployment (GitOps, no manual CA patch)
 
 The standalone variant configures both ends:
 
-1. `keycloak-oidc`'s existing CA bootstrap Sync hook and refresh CronJob copy
-   the managed ingress signer to `lightspeed-hub/keycloak-oidc-ca`, in addition
-   to the existing targets. Only that sync account receives namespace-local
-   ConfigMap write permissions; the adapter just mounts the result.
+1. `keycloak-oidc`'s CA bootstrap Sync hook and refresh CronJob copy the
+   managed ingress signer to `lightspeed-hub/keycloak-oidc-ca` (the
+   `caBundleSync.additionalTargetNamespaces` entry); the adapter only mounts
+   it.
 2. `lightspeed-hub` enables `adapter.keycloak.caTrust` with that ConfigMap and
    the current adapter's `/etc/pki/tls/certs/ca-bundle.crt` public bundle.
 
@@ -177,31 +142,27 @@ ConfigMap until the Keycloak bootstrap hook creates it. A different issuer
 signer requires changing the CA-sync source, not disabling verification.
 
 Check the adapter rollout and the `build-keycloak-ca-bundle` init container
-status/logs, then submit a **fresh ACME request**. Success means more than
-Argo Healthy: verify that its AgenticRun receives `ls-run-token-<UID>` and
-progresses past credential waiting. Previously stranded tasks are not
-automatically repaired. If diagnosing with curl, pass
-`--cacert "$SSL_CERT_FILE"` explicitly inside the adapter; Go's environment
-setting should not be assumed to configure curl's TLS backend.
+logs, then submit a **fresh ACME request**. Success means more than Argo
+Healthy: its AgenticRun must receive `ls-run-token-<UID>` and progress past
+credential waiting. Stranded tasks are not repaired automatically. When
+diagnosing with curl inside the adapter, pass `--cacert "$SSL_CERT_FILE"`
+explicitly -- Go's env var does not configure curl's TLS backend.
 
 ### CA rotation
 
-The Keycloak CronJob refreshes the source ConfigMap on its configured schedule.
-It does **not** rebuild an already-running pod's init-container output or
-reload Go's cached system roots. After confirming that the namespace-local
-ConfigMap has the rotated CA, replace the adapter pods (preferably during
-the old/new CA overlap window):
+The Keycloak CronJob refreshes the source ConfigMap, but that does **not**
+rerun init or reload Go's cached roots. After confirming the rotated CA in the
+namespace-local ConfigMap, replace the adapter pods (during the old/new CA
+overlap window):
 
 ```bash
 oc -n lightspeed-hub rollout restart deployment/lightspeed-hub
 oc -n lightspeed-hub rollout status deployment/lightspeed-hub --timeout=180s
 ```
 
-Each new pod reruns init and loads the refreshed combined bundle. A GitOps
-pod-template change can trigger the same replacement instead. Restarting
-only the process/container within an existing pod does not rerun a completed
-init container. Neither ConfigMap projection refresh nor a no-op Argo sync is
-an automatic trust-reload mechanism; this chart adds no restart controller.
+Each new pod reruns init with the refreshed bundle (a pod-template change also
+works). Restarting only the container does not rerun a completed init
+container; a ConfigMap refresh or no-op sync is not a trust reload.
 
 ## Run-creators RBAC ("only the configured group can create AgenticRuns")
 
@@ -261,27 +222,19 @@ hide Token A from the adapter, which needs A for the run leg (no
 protected-A handoff exists on the pinned Praxis image).
 
 **Praxis→adapter TLS (implemented; live issuance UNCONFIRMED):** the
-adapter now serves TLS (a2a-adapter `--tls-cert-file`/`--tls-key-file`,
-which its `config.Validate` requires to be set together or both empty).
-This chart's default (`adapter.tls.enabled=true`, port 8443) wires it to
-an OpenShift service-serving cert: the Service carries
-`service.beta.openshift.io/serving-cert-secret-name`, and the Deployment
-mounts the minted Secret (`tls.crt`/`tls.key`) for the two flags — the
-shape praxis-proxy's `a2aUpstream` expects (TLS on 8443, verified
-against the service-serving CA). Remaining UNCONFIRMED: live-cluster
-confirmation that the service-ca operator actually issues the cert for
-this Service (the annotation is standard OpenShift, but issuance has not
-been observed on a live install). `adapter.tls.enabled=false` (plain
-HTTP, both flags omitted) is a **local dev only** override. The
-NetworkPolicy (praxis-proxy namespace only) remains the in-cluster
-compensating control.
+adapter serves TLS (`--tls-cert-file`/`--tls-key-file`, which
+`config.Validate` requires together or both empty). The default
+(`adapter.tls.enabled=true`, port 8443) wires an OpenShift service-serving
+cert: the Service carries `serving-cert-secret-name` and the Deployment
+mounts the minted `tls.crt`/`tls.key`. Not yet observed: the service-ca
+operator issuing the cert on a live install. `adapter.tls.enabled=false`
+(plain HTTP) is **local dev only**; the NetworkPolicy remains the
+in-cluster compensating control.
 
-**Duplicate target headers:** the pinned Praxis router OR-matches
-repeated header values (source-verified against Core v0.7.0 — see
-praxis-proxy's `files/praxis.yaml` comment), so the gateway cannot reject
-a multi-valued target header. The ADAPTER must reject
-duplicate/multi-valued target headers itself (plan adapter-scope item 5),
-and the admission policy gates what a smuggled request achieves anyway.
+**Duplicate target headers:** the pinned Praxis router OR-matches repeated
+header values, so the gateway cannot reject a multi-valued target header. The
+adapter must reject duplicates itself (plan adapter-scope item 5), and the
+admission policy gates what a smuggled request achieves.
 
 ## Admission policy (design §4.3) — SKELETON, deny-all default
 
@@ -336,12 +289,9 @@ the chart alone brings up a working repo C installation:
   repo convention); repo C's actual manager flags are UNCONFIRMED (see
   the register).
 - **Webhook serving cert** (`<fullname>-agentic-operator-webhook` Service):
-  repo C's manager registers its admission webhooks
-  (`/mutate-agenticrunapproval`, `/validate-agent`) **unconditionally**
-  (no disable gate in its `cmd/main.go`), so it exits at startup
-  ("setup problem running manager") without `tls.crt` at its CertDir. The
-  chart provisions an OpenShift service-ca serving cert via the webhook
-  Service's annotation and mounts it read-only at
+  repo C's manager registers its admission webhooks unconditionally and exits
+  at startup without `tls.crt` at its CertDir. The chart provisions an
+  OpenShift service-ca serving cert and mounts it at
   `/tmp/k8s-webhook-server/serving-certs` (port 9443).
   **KNOWN LIMITATION**: no Mutating/ValidatingWebhookConfiguration is
   rendered yet, so the endpoints are served but never invoked — the
@@ -422,15 +372,11 @@ The standalone variant uses the same model as the MAS orchestrator
 `redhat-marketplace-dev`, region `global` -- `setup-mas-blueprint.sh`
 defaults); keep them in sync.
 
-**VERIFIED-BROKEN LIVE (2026-11-20), how it was hit:** once the target policy
-stopped blocking the operator's finalizer, every adapter-created run failed
-terminally with `workflow resolution failed: Agent "default" not found` --
-the chart installed the CRDs and operator but no Agent/LLMProvider. Four
-`AgenticRunApproval`s had also accumulated: without an ApprovalPolicy the
-operator auto-approves only Escalation (`controller/agenticrun/approval.go`),
-so Analysis would have waited for a human even with an Agent. **Why nothing
-caught it sooner:** no run had ever got past admission before, and the chart
-tests only checked the operator Deployment and ConfigMap.
+The chart installs what the operator needs to run: CRDs, operator, and an
+Agent/LLMProvider -- without them every run fails terminally with
+`Agent "default" not found`, and without an ApprovalPolicy Analysis waits for
+a human (only Escalation auto-approves). Both were missed until a run first
+got past admission; see [`docs/LESSONS_LEARNED.md` §8](../../../docs/LESSONS_LEARNED.md#8-lightspeed-hub--agentic-operator).
 
 UNCONFIRMED: the Vault record is a gcloud `authorized_user` ADC, not the
 service-account key the operator's API comment describes (google-auth accepts
@@ -455,9 +401,9 @@ operator's contract name, now holding R).
   gateway, which exchanges it per call for U.
 - **Renewal:** a fresh H from the caller is exchanged into a fresh R the same
   way.
-- **Why:** the previous version stored the caller's 5-minute Token A, so
-  investigations died about 5 minutes in (live 2026-11-20). See
-  `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md` s2.
+- **Why:** storing the caller's 5-minute Token A made investigations die
+  about 5 minutes in. See `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md` s2 and
+  [`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients).
 
 ## Identity-scoped RBAC (run creation vs spoke reads)
 
@@ -469,12 +415,11 @@ audience-scoped role groups, and this chart binds each to its own job:
 | `keycloak:lightspeed-hub-a2a:agenticrun-creator` | H | `adapter.hubRunCreatorsGroup`, `admissionPolicy.allowTargets` | create AgenticRuns in the run namespace, for allowed targets |
 | `keycloak:praxis-spoke-hub:reader` | U | `spokeReaderRBAC` (hub as its own spoke) | `cluster-reader`, `cluster-monitoring-view` |
 
-Before this, both were `keycloak:acme-agent-rca`, which both tokens carried.
-And nothing granted spoke reads, so every investigation read would have been
-denied (live finding 2026-11-20). In gateway credential mode the operator
-creates no spoke ServiceAccounts or bindings: these group bindings are the
-only spoke authorization. For a separate spoke, `spokeReaderRBAC`'s
-equivalent belongs on that cluster, keyed on its own audience's role group.
+In gateway credential mode the operator creates no spoke ServiceAccounts or
+bindings: these group bindings are the only spoke authorization (and before
+them, nothing granted spoke reads at all). For a separate spoke, the
+equivalent binding belongs on that cluster, keyed on its own audience's role
+group.
 See `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
 
 ## Adapter Deployment contract (reconciled M4)
@@ -565,22 +510,3 @@ this register in the M4 reconciliation pass):
    principal→spokes mapping is the open design item (design §4.3).
 9. **`oc auth can-i` escalation probes** in CI — design §8.1 item 2, M4
    hardening.
-
-Resolved in the M4 reconciliation (kept for the history):
-
-- ~~CRD + operator RBAC vendoring~~ — both vendored
-  (`agentic-operator-crds.yaml`, `agentic-operator-rbac.yaml`) from repo C
-  `a2a-support` with provenance headers; values-gated templates + sync-wave
-  −1, not Helm's `crds/` dir (ArgoCD never applies it — see "CRD source").
-- ~~Adapter env var names~~ — the Deployment now carries the adapter's
-  real flags (`--listen`, `--namespace`, `--keycloak-*`, `--hub-audience`,
-  card flags, M3 bound flags); the secret rides `KEYCLOAK_CLIENT_SECRET`
-  via `secretKeyRef`.
-- ~~Probe paths~~ — `/healthz` is the adapter's real endpoint
-  (`server.HealthHandler`), unauthenticated by design.
-- ~~Adapter watch/patch RBAC verbs~~ — re-derived from the M3
-  implementation (see the RBAC table above): `delete` on secrets added,
-  `agenticruns/status` dropped, `agenticrunapprovals` reduced to `get`,
-  `update` on `agenticruns` for the pause-count annotation.
-- ~~Card name default drift~~ — chart aligned to the adapter flag default
-  `lightspeed-hub`.

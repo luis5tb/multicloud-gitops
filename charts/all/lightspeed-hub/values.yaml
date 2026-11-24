@@ -57,7 +57,7 @@ service:
 adapter:
   # PLACEHOLDER image pending a published adapter build (source: lightspeed-hub repo, branch a2a). The final pin
   # must be an immutable digest or exact tag, QUOTED in the variant (the
-  # all-digit-tag/scientific-notation trap -- see docs/ARCHITECTURE.md).
+  # all-digit-tag/scientific-notation trap -- see docs/LESSONS_LEARNED.md).
   # The adapter gets its OWN image, separate from repo B / repo C images
   # (design §8.2: independent upgrade cadence).
   image:

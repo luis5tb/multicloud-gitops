@@ -50,7 +50,7 @@ DENIED = {401, 403}
 
 
 def _ssl_context():
-    # Extend the default trust store, never replace it (AGENTS.md hard-won
+    # Extend the default trust store, never replace it (docs/LESSONS_LEARNED.md
     # lesson): a public-CA-signed Keycloak Route must still verify when no
     # internal bundle is supplied.
     ctx = ssl.create_default_context()

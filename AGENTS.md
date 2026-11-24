@@ -2,11 +2,12 @@
 
 Concise orientation for any agent (AI or human) about to change code here.
 Read this first; it says *where* things live and lists the commands. For the
-full design narrative, the architecture decisions behind this pattern, and the
-hard-won lessons from deploying it live, see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) -- read the relevant lesson there
-before touching adjacent code. Chart-specific caveats live in each
-`charts/all/<name>/README.md`; the human deployment walkthrough is in
+design narrative and the architecture decisions behind this pattern, see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Every live finding, render
+failure and known image quirk is in
+[docs/LESSONS_LEARNED.md](docs/LESSONS_LEARNED.md) -- read the relevant
+section there before touching adjacent code. Chart-specific caveats live in
+each `charts/all/<name>/README.md`; the human deployment walkthrough is in
 [README.md](README.md).
 
 ## What this repo is
@@ -59,10 +60,10 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 - `agents/acme_agent/` -- the ACME agent's Python source;
   `agents/AUTHENTICATION.md` is the authoritative identity-chain + auth
   troubleshooting write-up.
-- `README.md` (deploy walkthrough), `LIGHTSPEED_DESIGN.md` /
-  `LIGHTSPEED_IMPLEMENTATION_PLAN.md` (historical design docs for the
-  removed OLS backend -- cross-check before trusting),
-  `docs/ARCHITECTURE.md` (design + decisions + hard-won lessons).
+- `README.md` (deploy walkthrough), `docs/ARCHITECTURE.md` (design +
+  decisions), `docs/LESSONS_LEARNED.md` (all live findings and workarounds),
+  `LIGHTSPEED_DESIGN.md` / `LIGHTSPEED_IMPLEMENTATION_PLAN.md` (historical
+  design docs for the removed OLS backend -- cross-check before trusting).
 - `docs/agentic-architecture-overview.html` / `docs/agentic-e2e-token-flow.html`
   -- component diagram and step-by-step token walkthrough (ACME -> MAS ->
   lightspeed-hub). Update them when a client, audience or hop changes.
@@ -89,11 +90,12 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
   cluster, update that comment/README immediately -- otherwise the next person
   re-does the same investigation from scratch.
 - When you find a bug by actually running something (not just reading code),
-  write down *how it was actually hit* and *why nothing caught it sooner* in
-  the relevant README/Troubleshooting section (see `agents/AUTHENTICATION.md`
-  and each chart's README for the style), and add a one-liner to
-  `docs/ARCHITECTURE.md`'s "Hard-won lessons" -- that context is what makes the
-  next debugging session fast instead of a repeat investigation.
+  add an entry to `docs/LESSONS_LEARNED.md` saying *how it was actually hit*
+  and *why nothing caught it sooner* -- that context is what makes the next
+  debugging session fast instead of a repeat investigation. Keep the
+  surrounding README to the rule/configuration it implies, with at most a
+  one-line pointer to the entry; do not paste the story into the README, the
+  chart comment and the lessons doc. Keep code comments to the invariant.
 - Temporary/bridge mechanisms must
   say so explicitly in both the chart's `values.yaml` comment and its README,
   including the exact condition under which they should be deleted.

@@ -20,14 +20,10 @@ calls the remote with `message/stream` and yields each remote event
 `message/stream` response, so the downstream workflow's progress and final
 answer stream straight to the caller.
 
-`AgentTool` was used here before, but `AgentTool.run_async` buffers the
-sub-agent down to a single return value -- under `message/stream` that emits
-nothing until the entire investigation finishes, starving long runs. We do
-**not** set `mode="task"` (that needs ADK's `finish_task` handshake, which
-the downstream A2A endpoint does not implement);
-the default mode streams events and treats stream end /
-`TASK_STATE_COMPLETED` as completion. See `agents/AUTHENTICATION.md` for
-the identity chain on each delegated call.
+We do **not** set `mode="task"` (it needs ADK's `finish_task` handshake, which
+the downstream A2A endpoint does not implement); the default mode streams
+events and treats stream end / `TASK_STATE_COMPLETED` as completion. See
+`agents/AUTHENTICATION.md` for the identity chain on each delegated call.
 
 The current ACME → MAO deployment does not validate a cluster URL at ACME's
 entrypoint. MAO selects and validates the target cluster for its own
@@ -248,17 +244,11 @@ by MAS (`api.ask_red_hat` by default). Add the resulting
 client-credentials principal (`sub` or `user_id`, not the client ID) to MAS
 A2A's `a2a.allowedPrincipals`; MAS remains the inbound allow-list boundary.
 
-**Live finding (2026-10-23):** selecting Red Hat SSO stage in the UI made ADK
-report an agent-card fetch failure ending in `HTTP 401`, but the real failing
-request was ACME's call to `sso.stage.redhat.com/.../token`. Reproducing that
-one request with the synced Secret returned
-`unauthorized_client: Client not enabled to retrieve service account`. The
-stage client registration must enable service accounts (the
-`client_credentials` grant); a confidential client secret alone is not enough.
-Nothing caught this sooner because the unit tests mock a successful token
-response and Helm can verify Secret syncing but not the external IdP's client
-policy. ACME now surfaces the OAuth `error_description` in its exception and
-audit line.
+Selecting Red Hat SSO stage can show only as an agent-card `HTTP 401`, when
+the failing request is ACME's call to the SSO token endpoint
+(`Client not enabled to retrieve service account`). Enable the client's
+service account / `client_credentials` grant; ACME surfaces the OAuth
+`error_description` in its exception and audit line.
 
 With `auth.tokenDebug.enabled=true`, the UI generates a private nonce, ACME
 stores the outbound token under that nonce, and the UI retrieves it once from
@@ -329,13 +319,11 @@ prints a freshly minted Token A inside the pod. It is used by
 
 ### Audit logging
 
-`acme_audit` lines are INFO-level on the `acme_agent.*` loggers. Uvicorn's
-default log config only configures the `uvicorn.*` loggers, so the app
-installs its own stdout handler for `acme_agent` at import time
-(`agent.py::_configure_logging`) — without it every INFO record is dropped by
-Python's last-resort handler and the pod log shows *zero* audit lines even
-for flows that clearly logged them. `ACME_LOG_LEVEL` (default `INFO`)
-overrides the level.
+`acme_audit` lines are INFO-level on the `acme_agent.*` loggers. Because
+uvicorn's default log config only covers `uvicorn.*`, the app installs its own
+stdout handler at import time (`agent.py::_configure_logging`) — do not remove
+it, or every INFO record is dropped and the pod log shows zero audit lines.
+`ACME_LOG_LEVEL` (default `INFO`) overrides the level.
 
 **TODO: Red Hat IdP user tokens.** Use authorization-code flow with PKCE, a
 per-user token cache keyed by the browser session, redirect URI registration,

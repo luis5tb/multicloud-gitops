@@ -321,35 +321,23 @@ non-production namespace. The upstream implementation's full rollout checklist
 is `uie-mas-hosted/docs/a2a-inbound-verification.md`; local Helm rendering does
 not replace a cluster-level Redis, Mongo, Route, restart, or multi-replica test.
 
-## Troubleshooting: updated allow-list Secret, stale process (2026-11-24)
+## Troubleshooting: `Principal is not allowed to invoke this agent`
 
-**Observed live:** ACME minted a valid local-Keycloak token but MAS returned
-403, `Principal is not allowed to invoke this agent`, before any downstream
-delegation. The token's service-account `sub` had changed; both the standalone
-values and the generated `A2A_ALLOWED_PRINCIPALS` Secret already contained the
-new subject, while the running MAS A2A pod's environment still held the old
-allow-list. ArgoCD reported Synced/Healthy because the Secret had converged
-and readiness did not exercise caller authorization.
-
-The chart injects the Secret through `secretKeyRef` into an environment
-variable, which is read at process startup, not refreshed on Secret updates.
-At diagnosis there was no pod-template checksum for the generated allow-list
-Secret, and render tests did not check that changing the list changes the
-Deployment's pod template. A rolling restart of **MAS A2A only** loaded the
-updated list and let the same request reach the MAS workflow; restarting
-`mas-api`, `mas-worker`, or ACME was not necessary. In the standalone
-deployment the recovery command is:
+The allow-list arrives as a `secretKeyRef` environment variable, read at
+process start. Updating `a2a.allowedPrincipals` (or the generated
+`A2A_ALLOWED_PRINCIPALS` Secret) does **not** change a running pod, and ArgoCD
+still reports Synced/Healthy. After any allow-list change, restart MAS A2A and
+verify the effective list:
 
 ```bash
 oc -n mao rollout restart deployment/mao-a2a-mas-a2a
 oc -n mao rollout status deployment/mao-a2a-mas-a2a --timeout=180s
 ```
 
-After future allow-list updates, verify the process's effective list, not just
-the Secret or ArgoCD status. A durable chart fix should trigger a rollout when
-the chart-managed list changes; externally managed Secret changes still need
-an explicit restart or a separate reload mechanism. This diagnostic did not
-implement that chart fix.
+`mas-api`, `mas-worker` and ACME do not need restarting. An externally managed
+Secret also needs this explicit restart (or a reload mechanism); the chart's
+durable fix is a pod-template checksum over chart-managed list changes. See
+[`docs/LESSONS_LEARNED.md` §4](../../../../docs/LESSONS_LEARNED.md#4-identity-chain-and-token-propagation).
 
 ## Rollback and removal
 

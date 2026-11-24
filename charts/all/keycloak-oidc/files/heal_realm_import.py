@@ -4,8 +4,8 @@ A KeycloakRealmImport gets exactly one shot: on a fresh install it can race
 the Keycloak CR's own creation (the controller GETs the Keycloak CR, gets a
 404, and records HasErrors) and then sits in HasErrors forever -- it does
 not retry on its own, even once the Keycloak CR exists and is Ready
-(observed live; see AGENTS.md "Hard-won lessons" and
-keycloak-realm-import.yaml).
+(observed live; see docs/LESSONS_LEARNED.md "Keycloak: realm import and
+clients" and keycloak-realm-import.yaml).
 
 The documented manual recovery is `oc delete keycloakrealmimport <realm>`,
 which lets ArgoCD's self-heal recreate it against the now-Ready Keycloak CR.

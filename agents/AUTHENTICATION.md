@@ -303,16 +303,11 @@ nonce is deliberately different from the logged `X-Request-Id`. The resulting
 UI section is collapsible and has a copy button. Disable token debug when not
 actively inspecting a token.
 
-**Live finding:** the first live Red Hat SSO stage attempt surfaced only as an
-ADK agent-card `HTTP 401`, while the actual failing request was the SSO token
-mint. Calling the stage token endpoint with the synced client credentials
-returned `unauthorized_client: Client not enabled to retrieve service account`.
-The fix is in the external SSO client registration, not ACME: enable that
-client's service account / `client_credentials` grant, then confirm the issued
-principal is in MAS's allow-list. ACME now includes the OAuth
-`error_description` in its error. This was not caught sooner because local
-tests mock a successful token response and Helm cannot validate an external
-IdP's client policy.
+**Gotcha:** an SSO `A2A` failure shown only as an ADK agent-card `HTTP 401`
+is often the SSO token mint, not the card. If the token endpoint says
+`Client not enabled to retrieve service account`, enable that client's
+`client_credentials` grant in the external registration; ACME now surfaces the
+OAuth `error_description`.
 
 ## Keycloak <-> OpenShift group mapping (pre-provisioned, not per-request)
 
@@ -658,185 +653,69 @@ until that reattachment or the approval gate's timeout. See the
 `uie-mas-hosted/docs/a2a-inbound.md` for the protocol details. None of this
 has been validated on a live deployment of this Pattern.
 
-## Troubleshooting (bugs actually hit building this)
+## Troubleshooting
+
+Symptom -> cause, for bugs actually hit while building this. Long-form write-ups
+(how it was hit, why nothing caught it) are in
+[`docs/LESSONS_LEARNED.md`](../docs/LESSONS_LEARNED.md).
 
 - **`litellm.InternalServerError: ... Missing credentials`, or `Model
-  openai/... not found`**: this is the *LLM inference* credential (see
-  above), not the SPIFFE/Keycloak chain -- don't go looking in Keycloak
-  Events for this one. `LiteLlm` forwards `**kwargs` straight to
-  `litellm.completion()`, which does not read `LITELLM_API_BASE`/
-  `LITELLM_API_KEY` on its own; those are this repo's own env var names, not
-  something litellm auto-detects for the `openai/` model prefix (it only
-  auto-reads `OPENAI_API_KEY`). `agent.py` must pass them explicitly as
-  `base_url=`/`api_key=` kwargs to `LiteLlm(...)` -- note the kwarg is
-  `base_url`, not `api_base`.
+  openai/... not found`**: LLM-inference credential, not the identity chain.
+  `LiteLlm` forwards `**kwargs` to `litellm.completion()` and does not read
+  `LITELLM_API_BASE`/`LITELLM_API_KEY`; pass `base_url=`/`api_key=` (not
+  `api_base`) explicitly.
 - **Console/CLI users authenticate but land in no RBAC groups**: the
-  `openshift-console` client needs its own `groups` protocol mapper. It is
-  easy to add the mapper only to the public login client (`openshift-cli`) and
-  forget the console has a separate client with its own, independent set of
-  protocol mappers.
-- **acme-agent logs `Failed to resolve remote A2A agent …:
-  Agent card URL must use https, or http on a loopback host:
-  http://...`**: this is neither Keycloak nor SPIFFE -- google-adk's
-  `RemoteA2aAgent` refuses to fetch an agent card (and, separately, refuses
-  to trust the RPC url *inside* a card it did fetch) over plain http on a
-  non-loopback host. The in-cluster Service DNS name is non-loopback plain
-  http, so it no longer qualifies once a real caller in a different pod
-  resolves it. Fix: route through Praxis's edge-TLS Route (`route.enabled`)
-  and set `a2a.remoteAgents[0].endpoint` to that route's https origin, never
-  an in-cluster Service DNS name.
-- **acme-agent logs a 401 from Keycloak's `/token` endpoint while fetching
-  the downstream agent's card** (the https error above is fixed, but
-  the fetch itself then 401s): the agent card fetch is unauthenticated, but
-  acme-agent's httpx client attaches its Keycloak bearer token to *every*
-  outbound request via an event hook -- so this is actually the
-  client_credentials + jwt-spiffe grant failing, not the card fetch. Reproduce
-  directly against Keycloak's token endpoint from inside the pod (fetch a
-  JWT-SVID via `spiffe.WorkloadApiClient`, POST it as `client_assertion`) to
-  see the real Keycloak error body instead of a generic httpx exception. In
-  order encountered, debugging this surfaced three separate, unrelated causes
-  -- all now fixed in the charts, but worth knowing if this ever regresses:
-  - `{"errorMessage":"Invalid trust domain name"}` when creating the `spiffe`
-    identity provider via the Admin REST API with `config.trustDomain` set:
-    on Keycloak 26.4.16 (RHBK), `SpiffeIdentityProviderConfig.getTrustDomain()`
-    actually reads the generic `config.issuer` key, not `config.trustDomain`
-    -- upstream `main` renamed this field, but this repo's Keycloak build
-    predates that rename. `charts/all/keycloak-oidc` now emits `issuer`.
-  - `{"error":"unauthorized_client","error_description":"Invalid client or
-    Invalid client credentials"}`: the `spiffe` identity provider referenced
-    by `jwt.credential.issuer` didn't exist in the realm at all. Now
-    templated in `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml`'s
-    `identityProviders` list.
-  - `{"error":"invalid_client","error_description":"client_id parameter does
-    not match sub claim"}`: both agents' code sent a `client_id` form
-    parameter alongside `client_assertion`. Keycloak's generic JWT client
-    validator (`AbstractJWTClientValidator.validateClient`) rejects the
-    request outright whenever `client_id` is present and differs from the
-    assertion's `sub` -- and for a SPIFFE assertion `sub` is always a SPIFFE
-    ID, never the Keycloak client_id, by design. Fixed by omitting `client_id`
-    entirely in `acme_agent/auth.py`'s `_keycloak_token()` -- the client is
-    resolved from the assertion's `sub` instead.
-  - Also relevant once the above three are fixed: the SPIFFE JWT-SVID used as
-    `client_assertion` must be requested with **the Keycloak realm issuer
-    URL** as its audience (`SPIFFE_JWT_AUDIENCE`) --
-    `FederatedJWTClientValidator.getExpectedAudiences()` defaults to
-    `Urls.realmIssuer(...)` when no explicit audience list is configured.
-    Requesting an audience like `acme-agent` (the workload's own name) fails
-    this check.
-- **acme-agent's calls downstream get a generic `401` or
-  `403` after previously working**: inspect `praxis-proxy` logs first. Its
-  embedded Praxis Policy Engine validates the Keycloak JWT and applies the
-  APL allow-list before forwarding; unknown clients and identity/policy
-  errors fail closed. Confirm `policy.allowedCallers` in
-  `charts/all/praxis-proxy/values.yaml` includes the token's `azp`, the
-  issuer and audience match the token (`identity.keycloak.audience` must be
-  `mas-a2a`, not an old `rca-agent`-era value), and the Praxis pod can
-  fetch Keycloak's JWKS. If Praxis reports `no public address` or `private
-  address (RFC 1918)`, enable its `policy.allowPrivateIdp` only for the
-  static issuer configuration; if it reports `UnknownIssuer`, configure
-  `policy.caBundleSync` so the proxy trusts the managed ingress CA. These are
-  separate egress and TLS-trust checks.
-- **Praxis's policy allow-list silently admits every caller, not just the
-  allow-listed one, even though `policy.allowedCallers` is set correctly**:
-  this is the pinned Praxis image's own defect, not a config mistake, and it
-  was found and fixed building this flow -- see the long comments on the
-  `jwt-client` plugin's `role` field and the catch-all route in
-  `charts/all/praxis-proxy/files/policy.yaml` for the full empirical
-  write-up. Two independent causes, both on `ghcr.io/praxis-proxy/ai:0.4.1`
-  (embedded Praxis Policy Engine 0.3.1): (1) with `role: client` (the
-  semantically "correct" role for an OAuth client/service-account token),
-  the resulting `client.*` claim bag never becomes visible to route
-  predicates in this build regardless of granted capabilities --
-  `exists(client.claim.azp)` evaluates false for a token that demonstrably
-  has `azp` set. `role: user` populates `subject.*`/`claim.*` instead, and
-  those *are* visible. (2) a bare predicate with no explicit action (e.g.
-  `"claim.azp == 'acme-agent'"` on its own) is a documented no-op
-  fallthrough in this engine's effects model, not an implicit allow/deny --
-  and wrapping it in `require(...)` is *separately* broken on this exact
-  build (observed to deny unconditionally regardless of the claim compared).
-  The only form verified to work is `role: user` plus an explicit
-  `deny(...)` action on the negated condition (`claim.azp != '<allowed>':
-  deny(...)`) -- which is what the chart renders now. Revalidate both quirks
-  before relying on either form again on a future Praxis image.
-- **Praxis's policy denies a request with `claim.azp` undefined even though
-  the decoded token clearly has an `azp` claim**: a *different*, now-fixed
-  bug from the one above, worth knowing if it resurfaces on a future image.
-  The `identity/jwt` plugin's `claim_mapper` (`keycloak` and `standard`
-  presets alike) is documented to normalize the client claim -- `azp`,
-  `client_id`, or the pre-2023 Keycloak `clientId` -- into one mapped field
-  named `client_id`; `azp` is only ever an input candidate to that mapping,
-  never the field name APL sees. On the pinned build, however, that mapped
-  `client_id` field was never actually visible to route predicates either
-  (see the `role: client` note above) -- so compare the raw `claim.azp`
-  value directly (available via `role: user` + `read_claims`), not a mapped
-  field, regardless of which claim_mapper preset is configured.
-- **acme-agent logs `Failed to resolve remote A2A agent …:
-  ... [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to
-  get issuer certificate`** fetching Praxis's agent card, or the
-  `rca-realm-secrets-reconciler` PostSync Job hits the identical error
-  against Keycloak's own issuer URL: both used
-  `ssl.create_default_context(cafile=ca_bundle)` (or httpx's
-  `verify=<path>`, which does the same thing internally) to trust the
-  synced managed-ingress-CA bundle -- this *replaces* the default trust
-  store with only that bundle instead of adding to it. Harmless when the
-  cluster's ingress uses a self-signed internal CA (a single root cert is
-  trust anchor enough on its own), but this specific cluster's ingress
-  certificate is issued by a real public CA (ZeroSSL, chaining through
-  Sectigo to a USERTrust root) and the synced bundle only contains the
-  leaf's intermediate certificates, not the actual trusted root -- so the
-  chain can never complete no matter how valid the certificate actually is.
-  Fixed everywhere this pattern was used for a connection that could ever
-  hit a public-CA-signed endpoint (`acme_agent/auth.py`'s
-  `_tls_context_trusting`, `charts/all/keycloak-oidc`'s
-  `realm-secrets-reconciler-job.yaml`) by calling
-  `ssl.create_default_context()` first (keeps public-CA trust) and layering
-  the custom bundle on top via `load_verify_locations()`. Not changed in the
-  CA-sync scripts themselves (`sync_keycloak_ca.py`/`sync_ingress_ca.py`),
-  since those only ever
-  talk to the in-cluster Kubernetes API server, whose certificate always
-  chains to exactly the projected service-account CA -- an exclusive
-  `cafile=` there is correct, not a latent copy of this bug.
-- **Red Hat SSO agent tokens need `openid` for Keycloak 26.4 validation.**
-  Keycloak's standard validation of an external subject token uses
-  introspection **and** userinfo. A client-credentials token requested with
-  only `api.ask_red_hat` still reaches MAS, but validation of the external
-  token fails with a generic error; Keycloak's event log then shows
-  `reason="user info call failure"`. A direct userinfo request with that token
-  returns HTTP 403. Request `openid api.ask_red_hat` from Red Hat SSO instead;
-  userinfo then returns the service-account `sub`.
-- **Token exchange returns `400 invalid_client "Audience not found"`.** Hit
-  live on the first hub exchange: in Keycloak 26 standard token exchange the
-  `audience` parameter must name an existing client, not just a string a
-  mapper emits. Every exchange audience is now a client
-  (`praxis-spoke-<id>` as audience-only clients).
-- **Token exchange is refused although the subject token is valid.** The
-  exchanging client must be in the subject token's `aud`. That is why every
-  token's `aud` names its next exchanger (A -> `mas-a2a`, H ->
-  `lightspeed-hub-a2a`, R -> `praxis-spoke-gateway`).
-- **Praxis's exchange fails with `unauthorized_client: Unexpected error when
-  authenticating client`** (Keycloak event `clientId="null"`): the pinned
-  Praxis delegator sends HTTP Basic credentials without URL-encoding, so a
-  `%` in the client secret breaks Keycloak's decoding. Every secret Praxis
-  presents uses `alphaNumericPolicy` in `values-secret.yaml.template`.
-- **Every sandbox `kubectl` call gets `403 "not an allow-listed caller"` at
-  the spoke gateway.** Hit live right after the hub-gateway cutover: R's
-  `azp` is `lightspeed-hub-a2a` (the client that exchanged it), but the spoke
-  gateway inherited the hub gateway's `allowedCallers` (`acme-agent`). Fixed
-  with `spokeGatewayConfig.allowedCallers`. The Keycloak-only replay test had
-  checked `aud` and `groups`, never Praxis's `azp` gate.
-- **Investigations die about 5 minutes in.** The adapter used to store the
-  caller's own 300 s Token A as the run credential. It now stores R (1800 s).
-- **Token A carries kube API audiences it never asked for.** With
-  `fullScopeAllowed: true`, Keycloak's "audience resolve" adds the audience of
-  every client whose roles the token holds, so once the exchangers had
-  client roles, A was accepted by the kube APIs. `acme-agent` now has
-  `fullScopeAllowed: false`; A gets `401` at every kube API.
-- **A successful external-token login can still fail RBAC as
-  `User "keycloak:<uuid>"` if the token has no `groups` claim.** Hit live
-  after enabling Red Hat SSO: the API server mapped the brokered subject
-  as an individual user, while RBAC targets `Group:keycloak:acme-agent-rca`.
-  The fix is a `Hardcoded Group` mapper on the external IdP (name
-  `acme-agent-rca`, sync mode `Force`, group `/acme-agent-rca`), now
-  automated by `keycloak.externalOidcProviders[].hardcodedGroups`. Reconcile
-  it, then repeat the request so a fresh token carries the claim; an
-  already-issued token cannot gain the claim retroactively.
+  `openshift-console` client needs its own `groups` mapper; adding it only to
+  `openshift-cli` is not enough.
+- **`Agent card URL must use https, or http on a loopback host`**: google-adk
+  refuses plain HTTP to a non-loopback host; point ACME at the Praxis/agent
+  TLS Route, not an in-cluster Service name.
+- **401 from Keycloak `/token` while fetching a card**: the card fetch is
+  unauthenticated, but ACME's httpx hook attaches its bearer token to every
+  request -- this is the `client_credentials` + JWT-SVID grant failing.
+  Reproduce against the token endpoint inside the pod. Known causes (all
+  fixed): SPIFFE IdP created with `config.trustDomain` instead of
+  `config.issuer` (`Invalid trust domain name`); SPIFFE IdP missing from the
+  realm (`Invalid client or Invalid client credentials`); a `client_id` form
+  parameter sent alongside `client_assertion` (`client_id parameter does not
+  match sub claim`); JWT-SVID requested with the workload name instead of the
+  realm issuer as audience.
+- **A 401/403 downstream that used to work**: check `praxis-proxy` first.
+  Confirm `policy.allowedCallers` contains the token's `azp`, the issuer and
+  audience match (`identity.keycloak.audience` is `mas-a2a`, not an old
+  `rca-agent` value), and Praxis can fetch JWKS. `UnknownIssuer` is TLS trust
+  (`policy.caBundleSync`); `no public address` / private-address errors are
+  the egress guard (`policy.allowPrivateIdp`, static issuers only).
+- **Praxis admits every caller despite `policy.allowedCallers`**: pinned-image
+  defect, not config. Only `role: user` plus an explicit `deny(...)` on the
+  negated `claim.azp` check works; `role: client` populates claims the engine
+  cannot see, bare predicates are no-ops, and `require(...)` denies
+  unconditionally. The `enforcement-check` PostSync Job guards a regression.
+- **`claim.azp` appears undefined although the token has it**: different,
+  fixed bug -- the claim mapper's `client_id` field is not visible to route
+  predicates on this build. Compare raw `claim.azp` with `role: user` +
+  `read_claims`.
+- **`CERTIFICATE_VERIFY_FAILED: unable to get issuer certificate`**: a CA
+  bundle passed as `cafile=`/`verify=` *replaced* the system roots. Extend
+  them instead (`create_default_context()` then `load_verify_locations()`).
+  Not a bug in the CA-sync scripts, which only talk to the in-cluster API.
+- **Red Hat SSO tokens fail Keycloak 26.4 exchange / userinfo 403**: request
+  `openid api.ask_red_hat`; send the external issuer as `subject_issuer`.
+- **Token exchange `400 invalid_client "Audience not found"`**: every exchange
+  audience must be an existing client (audience-only clients).
+- **Token exchange refused although the subject token is valid**: the
+  exchanging client must be in the subject token's `aud`.
+- **`unauthorized_client: Unexpected error when authenticating client`**
+  (Keycloak event `clientId="null"`): a `%` in a Praxis-presented secret
+  (delegator Basic auth is not URL-encoded); all such secrets use
+  `alphaNumericPolicy`.
+- **Every sandbox `kubectl` call gets 403 "not an allow-listed caller"**: R's
+  `azp` is the exchanger (`lightspeed-hub-a2a`), not `acme-agent`; set
+  `spokeGatewayConfig.allowedCallers`.
+- **Investigations die about 5 minutes in**: the run stored Token A; it now
+  stores the exchanged run token R (1800 s).
+- **Token A carries kube API audiences it never asked for**: `fullScopeAllowed`
+  must be `false` on `acme-agent` (audience resolve).
+- **Successful external login still fails RBAC as `User "keycloak:<uuid>"`**:
+  no `groups` claim; add the external IdP's `hardcodedGroups` mapper and repeat
+  the request with a fresh token.

@@ -4,12 +4,10 @@ This companion chart is installed after the validated pattern's `rhbk` chart.
 It imports the `rca` realm, its three clients, a SPIFFE identity provider, and
 its groups into the deployed Keycloak.
 
-> Historical note: this chart previously also created the `lightspeed-mcp` /
-> `openshift-mcp` clients and `templates/lightspeed-mcp-rbac.yaml` for the
-> OpenShift Lightspeed investigation backend. That backend was removed (see
-> `PLAN-lightspeed-hub-migration.md` Task A); the realm import is one-shot, so
-> cleaning those out of a live realm is a manual Admin API step covered by
-> that plan's teardown runbook.
+> OLS-era note: this chart also used to create `lightspeed-mcp`/`openshift-mcp`
+> clients; OLS was removed (`PLAN-lightspeed-hub-migration.md` Task A), and
+> cleaning a live realm is a manual Admin API step in that plan's teardown
+> runbook.
 
 The three clients serve distinct purposes and must not be conflated:
 
@@ -48,20 +46,14 @@ override. Get any of those values wrong and Keycloak rejects the assertion with
 a generic "Invalid client or Invalid client credentials" -- there is no more
 specific error surfaced to the caller.
 
-Two related gotchas, both baked into this chart's templates already but
-worth knowing when debugging directly against Keycloak:
+Two client-auth rules are already baked into the templates (both hit live;
+details in [`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients)):
 
-- Keycloak's JWT client validators reject the token request outright
-  ("client_id parameter does not match sub claim") if a `client_id` form
-  parameter is present and differs from the assertion's `sub` -- which it
-  always will for a SPIFFE assertion, since `sub` is a SPIFFE ID, never the
-  Keycloak client_id. The agent's code omits `client_id` from these
-  requests entirely; the client is resolved from the assertion's `sub`.
-- The SPIFFE JWT-SVID used as `client_assertion` must itself be requested
-  with the Keycloak realm issuer URL as its audience (`SPIFFE_JWT_AUDIENCE`
-  in the agent chart) -- that is what Keycloak's federated-jwt validator
-  checks the assertion's `aud` claim against by default, not the workload's
-  own name.
+- omit the `client_id` form parameter on federated-JWT requests -- Keycloak
+  rejects it when it differs from the assertion's `sub`, and a SPIFFE `sub`
+  never equals a Keycloak client id;
+- request the JWT-SVID with the **realm issuer URL** as its audience
+  (`SPIFFE_JWT_AUDIENCE`), which is what the federated-jwt validator checks.
 
 ## Dedicated audience for MAS inbound A2A
 
@@ -112,28 +104,12 @@ The exchanging caller should send the external issuer URL as
 the issuer URL directly, which avoids depending on an imported IdP alias that
 can drift from chart values on a one-shot realm import.
 
-**Live finding (2026-10-29, historical -- recorded while the removed
-lightspeed-mcp exchange path still existed; the introspection requirement it
-established still applies to any caller of these IdPs): stage introspection
-also needs the external
-client secret in Keycloak's IdP configuration.** Requests at 15:31, 15:33,
-and 15:34 UTC reached Keycloak as `lightspeed-mcp` (the since-removed
-exchanging client) using `federated-jwt`
-authentication and the correct stage `subject_issuer`, but failed with
-`Introspection endpoint call failure. Introspection response status: 401`.
-Red Hat SSO returned `Authentication failed.` The live `red-hat-sso-stage`
-IdP had the same client ID as ACME but no `config.clientSecret`. A direct
-probe with a freshly minted stage token reproduced HTTP 401 using the IdP's
-credentials; the same token returned HTTP 200 with `active: true` using
-ACME's stage client ID and secret. Userinfo also returned HTTP 200, ruling
-out the separate missing-`openid` failure above.
-
-The chart previously rendered only the external client ID and some endpoints;
-the PostSync hook managed only group mappers. The old chart tests checked
-those rendered fields without exercising authenticated introspection, so they
-passed despite the missing credential. Authorization and token URLs were also
-absent. Native Keycloak subject tokens avoid this external hop, explaining why
-that path worked.
+**Introspection needs the external client secret too.** Stage exchange reached
+Keycloak with valid SPIFFE client authentication but Red Hat SSO introspection
+returned 401 (`Introspection endpoint call failure`) because the live IdP had
+the client ID but no secret. The chart now renders the full endpoint set and
+reuses ACME's Vault record for the IdP credentials, so discovery/authorization/
+token/introspection/userinfo and the secret all come from one source.
 
 The pattern now supplies the IdP client ID and secret from the **same Vault
 record ACME uses**, with no new credentials to provision:
@@ -200,19 +176,12 @@ wide, with `ExternalOIDCControllerDegraded` reporting an issuer/token error.
 Do not enable it speculatively; walk the checklist below in order.
 
 There is no supported way to keep the internal OAuth server active
-alongside OIDC -- `spec.type` is a single mutually exclusive field, and
-switching to `OIDC` replaces the console/CLI login flow entirely rather than
-adding to it. Two things do soften this in practice, and are worth relying
-on rather than treating the switch as one-way: existing `IdentityProvider`
-entries on `oauth.config.openshift.io/cluster` are not deleted when you
-enable OIDC, so switching `spec.type` back to `""` (see "Recovering if it
-breaks anyway" below) restores them immediately with no reconfiguration; and
-client-certificate/kubeconfig-based admin access (for example a
-`system:admin` context from the installer) never goes through the OAuth/OIDC
-login flow at all, so it keeps working even if the console and `oc login`
-are both broken. **Before ever setting `openshiftOIDC.enabled=true`,
-confirm you have such a break-glass kubeconfig available** -- it is what
-makes recovery possible if something in the checklist below was missed.
+alongside OIDC (`spec.type` is mutually exclusive). Recovery is possible:
+existing `IdentityProvider` entries on `oauth.config.openshift.io/cluster`
+are not deleted, so `spec.type: ""` (see "Recovering if it breaks anyway"
+below) restores them, and certificate/kubeconfig admin access never goes
+through OAuth/OIDC. **Before setting `openshiftOIDC.enabled=true`, confirm
+you have that break-glass kubeconfig** -- it is what makes recovery possible.
 
 Two things must both be correct, not just the issuer:
 
@@ -505,65 +474,44 @@ Keycloak operator does not continuously reconcile edits made after import.
 
 ### Console shows an invalid redirect URI after enabling OIDC
 
-
-On a live cluster, the console route and Keycloak issuer both returned HTTP
-200, the operators reported Available, and `KeycloakRealmImport/rca` reported
-Done. Yet browser login failed: Keycloak logged `LOGIN_ERROR` with
-`clientId="openshift-console"`, `error="invalid_redirect_uri"`, and the
-console's `/auth/callback` URL. The live client's `redirectUris` was `[]`,
-while the current import CR already contained the correct URL. The realm had
-been imported before OIDC was enabled, when the template's conditional
-`redirectUris` block did not render; updating that one-shot CR later did not
-update the client. At the time, the pre-flight checks only covered the issuer
-and client secret, and the post-sync reconciler only reasserted secrets, so
-neither caught this mismatch.
-
-The fix is to repair the **existing client**, never the realm import (do not
-delete the realm or re-import it to repair a client's redirect list). This is
-now automated: `realm-secrets-reconciler-job.yaml` re-asserts the
-`openshift-console` client's `redirectUris` to
-`<effective console route>/auth/callback` on every sync whenever
-`openshiftOIDC.enabled` is true, so a plain ArgoCD sync repairs it -- no manual
-step. If you need it fixed before the next sync (e.g. to log in right now), do
-the same thing by hand in the Keycloak Admin Console: Clients →
-`openshift-console` → Settings → Valid redirect URIs, add the exact
-`https://<console-route>/auth/callback` value and save. Then retry console
-login; if it still fails, check Keycloak events for a different error.
+`invalid_redirect_uri` with `clientId="openshift-console"` means the live
+client's `redirectUris` is empty -- typical when the realm was imported while
+`openshiftOIDC.enabled` was false. Never delete the realm or re-import it;
+`realm-secrets-reconciler-job.yaml` repairs the client on every sync, or add
+`https://<console-route>/auth/callback` in the Admin Console to fix it right
+now. See [`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients).
 
 ## Spoke-gateway token exchanger (B1, proposed)
 
 `keycloak.spokeGatewayExchanger` (disabled by default) renders the Keycloak
-prerequisites for the per-spoke Praxis spoke-gateways' RFC 8693 token
-exchange (`charts/all/praxis-proxy`'s `spokeGateways`; see
-`PLAN-lightspeed-hub-migration.md` "B1 wiring" and the praxis-proxy chart
-README's UNCONFIRMED GUESS list). When enabled it adds to the realm import:
+prerequisites for the per-spoke Praxis gateways' RFC 8693 exchange
+(`charts/all/praxis-proxy`'s `spokeGateways`). When enabled it adds to the
+realm import:
 
 - a confidential client (`praxis-spoke-gateway` by default) with
   `standard.token.exchange.enabled: "true"` and a Vault-backed secret
-  (`vaultKey`), materialized into both `keycloak.namespace` (realm-import
-  placeholder) and `targetNamespace` (`praxis-proxy`, where the gateway
-  pods read it) via `spoke-gateway-exchanger-secret.yaml`;
+  (`vaultKey`), materialized into `keycloak.namespace` (realm-import
+  placeholder) and `targetNamespace` (`praxis-proxy`) via
+  `spoke-gateway-exchanger-secret.yaml`;
 - one audience mapper per `spokeAudiences` entry on that client (the
   per-spoke audiences for exchanged Token U);
 - optionally (`subjectTokenAudienceMapper`, default true) an audience mapper
   on the **acme-agent** client putting the exchanger's client ID on Token A
-  -- per the plan's documented exchange prerequisite, the subject token must
-  already carry the exchanging client as an audience; the `audience`
-  request parameter only ever narrows, never adds.
+  -- the subject token must already carry the exchanger as an audience; the
+  `audience` request parameter only narrows, never adds.
 
 Caveats recorded from the plan: omit `client_id` for SVID
 client-assertion flows (a SPIFFE `sub` never equals a Keycloak `client_id`);
 after an exchange `sub` is preserved but **`azp` becomes the exchanger**, so
 hub/spoke policy must key on `sub`/groups and record `azp` as provenance
-only. Whether mappers on the exchanging client apply to *exchanged* tokens
-is an UNCONFIRMED GUESS -- validate against a live realm.
+only. Exchanger-client mappers **do** apply to exchanged tokens on this
+Keycloak build (confirmed for `hubExchange`; see §2 of the lessons doc).
 
-**One-shot realm import.** Clients and mappers are created only when the
-realm is first imported. If enabling this on an existing realm, create the
-client and mappers once through the Admin Console/API; do not delete or
-re-import the realm. The PostSync reconciler then aligns and verifies the
-existing client's secret from its Vault-backed Kubernetes Secret on every
-sync (see "Setting and repairing exchanger credentials" below).
+**One-shot realm import.** Clients and mappers are created only on the first
+import; on an existing realm create them once through the Admin Console/API
+(never delete/re-import). The PostSync reconciler then aligns and verifies the
+existing client's secret on every sync -- see "Setting and repairing
+exchanger credentials" below.
 
 ## Hub A2A adapter token exchanger (Task B / Phase 1, disabled)
 
@@ -612,17 +560,10 @@ client ID, and every `spokeGatewayExchanger.spokeAudiences` entry — a
 collision would make a token minted for one consumer silently valid for
 another.
 
-**CONFIRMED LIVE (2026-11-20, was plan spike item #5):** mappers on the
-exchanger client DO apply to RFC 8693-*exchanged* tokens on this Keycloak
-build. Exchanging a freshly minted acme-agent Token A as
-`lightspeed-hub-adapter` (no `audience` parameter) returned H with
-`aud: "lightspeed-hub-a2a"`, `azp: lightspeed-hub-adapter`, the caller's
-`sub`/`preferred_username` (`service-account-acme-agent`) and
-`groups: ["acme-agent-rca"]`. **Claim-map note:** if a Praxis policy ever
-inspects H's groups, PPE's `keycloak` claim_mapper preset maps *realm
-roles*, not groups — an explicit claim_map entry would be needed; nothing
-on this leg reads H's groups at Praxis (the hub API's OIDC group mapping
-does).
+**Confirmed:** mappers on the exchanger client DO apply to RFC 8693-exchanged
+tokens on this Keycloak build, so the audience and group mappers above land on
+H. Re-check after a Keycloak upgrade (see
+[`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients)).
 
 **One-shot realm import.** Clients and mappers are created only on the first
 import. On an existing realm, create them once through the Admin Console/API;
@@ -645,32 +586,17 @@ client ID fails the render. The exchanged token's `aud` still comes from the
 exchanging client's audience mapper; the client only makes the name
 resolvable.
 
-**VERIFIED-BROKEN LIVE (2026-11-20), how it was hit:** after the A2A card
-fix let MAS reach the adapter, every delegation logged `token exchange
-failed ... kind=invalid_client http=400`. The client's own credentials were
-fine (client_credentials succeeded) and Token A carried
-`lightspeed-hub-adapter`; replaying the adapter's exact request against
-Keycloak returned `{"error":"invalid_client","error_description":"Audience
-not found"}` for `audience=lightspeed-hub-a2a`, while the same exchange
-without `audience` succeeded. Multiple audiences on Token A are NOT the
-problem. **Why nothing caught it sooner:** the chart tests only checked the
-rendered mapper strings, the adapter's exchange tests use a fake token
-endpoint, and Keycloak reports this as `invalid_client` -- which reads like
-a bad client secret. `praxis-spoke-hub` (the spoke gateway's requested
-audience) had the same gap and would have failed next.
+Why these clients exist, and the `invalid_client "Audience not found"` you see
+without them, are explained in
+[`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients).
 
-**Live realm (one-shot import): create them once by hand.** On a realm
-that has already imported, add each client in the Admin Console (realm
-`rca` -> Clients -> Create client):
-
-1. Client type `OpenID Connect`, Client ID `lightspeed-hub-a2a` (then again
-   for `praxis-spoke-hub`), Next.
-2. Client authentication **On**; uncheck **every** authentication flow
-   (Standard flow, Direct access grants, Implicit, Service accounts, OAuth
-   2.0 Device, OIDC CIBA), Next, Save.
-
-Or with `kcadm.sh` from the Keycloak pod, after `kcadm.sh config
-credentials` with a working admin login:
+**Live realm (one-shot import): create them once by hand.** On a realm that
+already imported, add each audience client (defaults `lightspeed-hub-a2a` and
+`praxis-spoke-hub`; use whatever your `spokeGateways` keys/exchanger audiences
+are) in the Admin Console: realm `rca` -> Clients -> Create client, type OpenID
+Connect, client authentication **On**, then uncheck every authentication flow
+(Standard, Direct access grants, Implicit, Service accounts, Device, CIBA) and
+save. If your current admin login works, the same thing from the pod:
 
 ```bash
 for aud in lightspeed-hub-a2a praxis-spoke-hub; do
@@ -680,10 +606,6 @@ for aud in lightspeed-hub-a2a praxis-spoke-hub; do
     -s serviceAccountsEnabled=false
 done
 ```
-
-Note: the `keycloak-system/keycloak-admin-user` secret's password was found
-stale on the standalone cluster (2026-11-20, `invalid_grant` for `admin`),
-so use whatever admin login you currently have.
 
 ## Hub gateway exchange (`keycloak.hubGatewayExchanger`)
 
@@ -708,12 +630,12 @@ Guards enforce the contract: `hubGatewayExchanger.clientId` equals
 `hubExchange.runTokenAudience` is set. Boolean flags are normalized, so
 `--set-string ...=false` is handled correctly.
 
-**Verified live (2026-11-20):**
-- Exchanged tokens get the exchanging client's lifespan, even past the
-  subject's expiry, so R (1800 s) outlives A (300 s).
-- The full chain A→H→R→U, replayed with fresh tokens, gives H, then
-  `keycloak:lightspeed-hub-a2a:agenticrun-creator`, U, then
-  `keycloak:praxis-spoke-hub:reader` at the kube API. R and A both get 401.
+**Verified live (2026-11-20):** exchanged tokens get the exchanging client's
+lifespan, so R (1800 s) outlives A (300 s); replaying A->H->R->U with fresh
+tokens yields the expected audiences and `keycloak:*` groups, and R and A both
+get 401 at the kube APIs. Failure modes to expect if this regresses (wrong
+audience parameter, missing `openid` on SSO tokens, URL-encoded secrets) are in
+[`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients).
 
 **Live realm (one-shot import):** configured on 2026-11-20 via the admin API:
 - the `mas-a2a` client (secret from Vault `praxis-hub-exchange`), with its
@@ -762,9 +684,8 @@ Git, shell arguments or troubleshooting logs. The standalone variant uses:
 4. After a Vault change, wait for ExternalSecrets to refresh, then explicitly
    sync `keycloak-oidc` again: this is a **PostSync hook**, not a periodic
    credential watcher. Consumers reading secrets through environment variables
-   need a separately coordinated rollout **if the credential value changed**.
-   Correcting only Keycloak's literal placeholder to the value already used by
-   consumers does not require restarting them or Keycloak.
+   need a separately coordinated rollout **if the value changed**. Repairing a
+   literal placeholder to the value consumers already use needs no restart.
 
 The reconciler uses the master-realm credentials in `keycloak.adminUser` and
 the TLS settings in `realmSecretsReconciler`. Preserve certificate verification;
@@ -776,61 +697,16 @@ in memory from the existing Kubernetes Secret, and verify with
 `GET .../<uuid>/client-secret`. Never rotate credentials or delete/re-import
 the realm just to correct a stored placeholder.
 
-### Troubleshooting: Praxis 403 with `delegation.idp_rejected` (2026-11-24)
+### Troubleshooting: Praxis 403 `delegation.idp_rejected` / `unauthorized_client`
 
-**Observed live:** after fixing MAS's stale principal allow-list, asking ACME
-to investigate namespace `payments` on target `mario-ipi` reached the MAS
-workflow, but Praxis rejected `POST /a2a` with 403 and no AgenticRun was
-created. A diagnostic request using an unknown JSON-RPC method (no
-investigation submitted) returned
-`delegation.idp_rejected: token exchange rejected: unauthorized_client`.
-Keycloak logged `TOKEN_EXCHANGE_ERROR`, client `mas-a2a`, with
-`error="invalid_client_credentials"`. This is the hub gateway's A -> H
-exchange, not namespace RBAC or the optional `realm_access.roles` mapping.
-
-Read-only Admin API checks found **all three** exchanger client secrets set
-to literal import placeholders: `$(HUB_GATEWAY_EXCHANGE_SECRET)`,
-`$(HUB_EXCHANGE_SECRET)`, and `$(PRAXIS_SPOKE_EXCHANGER_SECRET)` for
-`mas-a2a`, `lightspeed-hub-a2a`, and `praxis-spoke-gateway`, respectively.
-The hub gateway's environment matched its current Kubernetes Secret, and
-the Secret copies in `keycloak-system` and `praxis-proxy` matched, but the
-client credential registered in Keycloak did not.
-
-Keycloak realm import environment substitution uses **`${NAME}`**, not
-`$(NAME)` (see the [Keycloak 26.4 import guide](https://github.com/keycloak/keycloak/blob/26.4.0/docs/guides/server/importExport.adoc#using-environment-variables-within-the-realm-configuration-files)).
-Do not assume every literal placeholder is a Secret-readiness race. The
-import reported `Done=True`, `HasErrors=False`; Helm rendering and import
-status did not verify the stored credentials or exercise token exchange.
-At diagnosis, the PostSync reconciler repaired console and external IdP
-credentials but did not reassert the exchanger client secrets. The earlier
-2026-11-20 verification used Admin API-configured clients, so it did not
-prove that a fresh import would configure these credentials correctly.
-
-Recovery requires aligning each affected client's registered secret with
-its existing Vault-backed Kubernetes Secret through the Admin API; restarting
-Praxis or Keycloak cannot fix a literal value stored in the realm. Do not
-rotate secrets unnecessarily or delete/re-import the realm. Correct the
-import placeholder syntax for future installs and extend reconciliation
-for existing realms; changing the one-shot import alone does not repair
-them. Compare credentials in memory and report only match/mismatch, never
-print secret values or access tokens.
-
-**Repair verified (2026-11-24):** with approval, all three registered client
-secrets were aligned to their existing Kubernetes values and verified through
-Admin API read-back; namespace Secret copies matched before repair. No secrets
-were rotated and no workloads restarted. The same unknown-method probe then
-returned HTTP 200 with JSON-RPC `-32601` (`method not found`) from the adapter,
-instead of the exchange 403. A separate fresh-token replay with the issuer CA
-trusted verified A -> H -> R -> U for `praxis-spoke-mario-ipi` (all HTTP 200;
-R lifetime 1800 seconds), without submitting an investigation. This does not
-verify namespace RBAC or the adapter's own TLS trust (see the lightspeed-hub
-README's missing-run-token finding). The accompanying chart
-fix changes **all** realm credential placeholders (including console, admin
-password and external IdP credentials) to `${NAME}` and extends PostSync
-reconciliation to enabled exchanger secrets. Regression tests cover the
-interpolation syntax, Secret wiring, existing-realm repair, verification,
-idempotence and missing-credential/client failures. The chart changes have
-not yet been deployed by this repair.
+Praxis rejecting `POST /a2a` while Keycloak logs `TOKEN_EXCHANGE_ERROR` with
+`invalid_client_credentials` means the registered client secret in Keycloak
+does not match the value Praxis sends -- for example a realm that imported
+with older `$(...)` placeholders stored literally. Compare in memory, never
+print secrets; then align the client through the steps in "Setting and
+repairing exchanger credentials" above (no rotation, no realm re-import).
+Restarting Praxis or Keycloak cannot fix a literal value stored in the realm.
+Background: [`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients).
 
 ## Audience-scoped exchange roles (`keycloak.exchangeRoles`)
 
@@ -847,14 +723,15 @@ H could read the whole cluster. With `exchangeRoles.enabled`:
   audience's roles** into `groups`, prefixed `"<audience>:"`. This replaces
   the hub exchanger's raw group mapper.
 
-**CONFIRMED LIVE (2026-11-20):** from one fresh Token A, H carried
-`groups: ["lightspeed-hub-a2a:agenticrun-creator"]` and U carried
-`["praxis-spoke-hub:reader"]`. The hub API's `SelfSubjectReview` mapped them
-to `keycloak:lightspeed-hub-a2a:agenticrun-creator` and
-`keycloak:praxis-spoke-hub:reader` (same user). Bind RBAC to those groups
-(charts/all/lightspeed-hub `adapter.hubRunCreatorsGroup`,
-`admissionPolicy.allowTargets`, `spokeReaderRBAC`), never to the user. Full
-design: `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
+**Confirmed live (2026-11-20):** from one fresh Token A, H carries
+`groups: ["lightspeed-hub-a2a:agenticrun-creator"]` and U carries
+`["praxis-spoke-hub:reader"]`; the hub API's `SelfSubjectReview` maps them to
+`keycloak:lightspeed-hub-a2a:agenticrun-creator` and
+`keycloak:praxis-spoke-hub:reader`. Bind RBAC to those groups
+(`adapter.hubRunCreatorsGroup`, `admissionPolicy.allowTargets`,
+`spokeReaderRBAC` in `charts/all/lightspeed-hub`), never to the user. Why this
+replaced plain group mappers: [`docs/LESSONS_LEARNED.md` §2](../../../docs/LESSONS_LEARNED.md#2-keycloak-realm-import-and-clients).
+Full design: `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
 
 **Live realm (one-shot import):** applied via the admin API on 2026-11-20.
 For another already-imported realm, for each `(audience, role, exchanger)`:

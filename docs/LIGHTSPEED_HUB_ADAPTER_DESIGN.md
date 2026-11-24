@@ -54,8 +54,9 @@ exactly the boundary OLS used to occupy (plan `:459-464`). Reasons:
 - Praxis is the caller allow-list. The hub API's OIDC re-authentication
   (Token H) enforces issuer/audience/groups but **does not enforce Praxis's
   caller restrictions** — "an OIDC-valid token alone is not proof that the
-  caller was admitted by Praxis" (`docs/ARCHITECTURE.md:110-115`, historical
-  but the reasoning stands). The adapter's Service gets no public Route and a
+  caller was admitted by Praxis"
+  (`docs/ARCHITECTURE.md`, "Core architecture decisions"; the reasoning
+  stands). The adapter's Service gets no public Route and a
   NetworkPolicy admitting only the Praxis pods' namespace/pod selector.
 - Trade-off: internal-only means every debugging session needs a port-forward
   or must go through Praxis. We accept that; the alternative (public adapter
@@ -199,14 +200,16 @@ and Keycloak-mapped groups — an audience mapper alone cannot do this, and by
 contract even Keycloak-issued A has no groups). Preferred placement: Praxis,
 after inbound policy passes. Fallback: the adapter receives and validates A
 itself and exchanges it for H, exactly as OLS's `a2a_auth.py` did
-(`docs/ARCHITECTURE.md:95-103`, historical). Which one ships first is gated
+(`docs/ARCHITECTURE.md`, "Current (Task B) request path"). Which one ships
+first is gated
 by the PPE version gate (§10, Q2/Q3).
 
 If the adapter performs the exchange, it reuses the documented Keycloak
 prerequisites verbatim (plan `:894-905`): `standard.token.exchange.enabled`
 on the exchanging client; **A must already carry the exchanging client as an
 audience** (audience mappers on the caller's client, as `lightspeed-mcp`'s
-did — `docs/ARCHITECTURE.md:345-352`); SVID `client_assertion` requested with
+did -- `docs/LESSONS_LEARNED.md`, "Keycloak: realm import and clients"); SVID
+`client_assertion` requested with
 the realm issuer as audience; omit `client_id` from the token request; after
 exchange `sub` is preserved but **`azp` becomes the exchanger** — key
 hub-side policy on `sub`/groups, record `azp` as provenance. The
@@ -303,7 +306,7 @@ Decisions and trade-offs:
 
 The header lesson is the oldest live finding in this repo: the MAS planning
 LLM emitted `X_OLS_Cluster` (underscores) in a fraction of delegations and
-each miss became a silent 404 (`docs/ARCHITECTURE.md:353-381`). The durable
+each miss became a silent 404 (`docs/LESSONS_LEARNED.md`, "MAS"). The durable
 rules, restated as adapter requirements:
 
 1. **The model never constructs header names.** The re-authored blueprint
@@ -572,7 +575,7 @@ The adapter watches (informer-based) in the run namespace:
 - **Result CRs** (`AnalysisResult`, `ExecutionResult`, `VerificationResult`,
   `EscalationResult` — `api/v1alpha1/`, each with Started/Completed
   conditions, `result_types.go:26-36`) referenced from `status.steps`.
-- **AgenticRunApproval** (approval gates, repo C `ARCHITECTURE.md:76-84`):
+- **AgenticRunApproval** (approval gates, repo C `ARCHITECTURE.md`):
   when a step waits on a manual approval, the adapter surfaces the A2A task
   as `INPUT_REQUIRED` — the exact pattern MAS already implements for its own
   HITL (structured decision DataPart `approve`/`reject`/`modify`/`redirect`,
@@ -621,7 +624,7 @@ from the Result CR's UID so they are stable across adapter restarts.
 
 Contents (all net-new; registered in the clusterGroup and parameterized in
 `variants/standalone/values-standalone.yaml` — the only place
-cluster-specific values go, per `docs/ARCHITECTURE.md:52-57`):
+cluster-specific values go, per `AGENTS.md` and `docs/ARCHITECTURE.md`):
 
 1. **Adapter Deployment** (the Go service from this doc) + internal Service
    + NetworkPolicy admitting only Praxis.
@@ -665,7 +668,8 @@ cluster-specific values go, per `docs/ARCHITECTURE.md:52-57`):
 
 - The adapter gets its **own image**, own build pipeline, own immutable pin
   (digest or exact tag, quoted — the all-digit-tag/scientific-notation trap,
-  `docs/ARCHITECTURE.md:300-309`). Separate build artifacts/entrypoints from
+  `docs/LESSONS_LEARNED.md`, "Rendering"). Separate build artifacts/entrypoints
+  from
   repo B and repo C images: the adapter changes on A2A/auth cadence; repo C
   changes on sandbox/execution cadence; pinning them together would force
   lockstep upgrades (plan `:649-652`).
@@ -706,7 +710,7 @@ Praxis.
   ACME service-account principal, not the human behind the chat
   (`AUTHENTICATION.md:323-330`). Audit lines carry token fingerprints
   (`fp:…`), never token values — the pattern ACME already uses
-  (`docs/ARCHITECTURE.md:177-187`).
+  (see `docs/LESSONS_LEARNED.md`, "Praxis gateway").
 - **Spoke-side: none in Phase 1** (plan `:658-659`). The spoke sees Token U
   minted by the PPE from A; U carries the mapped principal's groups, so
   spoke RBAC decisions *are* attributable, but spoke-side audit cannot join
@@ -715,8 +719,8 @@ Praxis.
   semantics, plan `:903-905`, so this is a query/joinability limitation, not
   an attribution fabrication).
 - Request-id joins do **not** cross MAS (live finding,
-  `docs/ARCHITECTURE.md:382-391`): trace the orchestrated flow by time
-  window or Keycloak Realm Events. The adapter mints its own request id per
+  `docs/LESSONS_LEARNED.md`, "`request_id` does not join"): trace the
+  orchestrated flow by time window or Keycloak Realm Events. The adapter mints its own request id per
   inbound A2A call and logs it with the task/run IDs — expected, and
   documented here so nobody burns an afternoon looking for ACME's
   `X-Request-Id` inside the hub.

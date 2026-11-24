@@ -1,8 +1,9 @@
 {{- if and .Values.realmImport.enabled .Values.realmImport.selfHeal.enabled }}
 # Heals a KeycloakRealmImport that lost the fresh-install race against the
 # Keycloak CR's creation and is stuck in HasErrors (the controller never
-# retries on its own). See files/heal_realm_import.py and AGENTS.md
-# "Hard-won lessons". A CronJob rather than a one-shot hook so it also heals
+# retries on its own). See files/heal_realm_import.py and
+# docs/LESSONS_LEARNED.md (Keycloak: realm import and clients). A CronJob
+# rather than a one-shot hook so it also heals
 # any later recurrence, not just the install-time race.
 apiVersion: batch/v1
 kind: CronJob

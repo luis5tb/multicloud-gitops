@@ -16,8 +16,10 @@ Praxis and Keycloak), start with the diagrams:
 (components and how they connect) and
 [`docs/agentic-e2e-token-flow.html`](docs/agentic-e2e-token-flow.html)
 (an investigation step by step, with the token at every hop). The written
-references are [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md) and
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+references are [`agents/AUTHENTICATION.md`](agents/AUTHENTICATION.md),
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and -- for every bug and
+workaround found on a live cluster --
+[`docs/LESSONS_LEARNED.md`](docs/LESSONS_LEARNED.md).
 
 ## Rationale
 
@@ -32,6 +34,12 @@ The goal for this pattern is to:
 
 Deploy from whatever branch carries this pattern's commits in your fork/remote
 (the steps below call it `<your-branch>`).
+
+> **Bugs, workarounds and "why does it behave like that".** Symptoms that
+> took a live cluster to find -- Keycloak realm-import races, Praxis image
+> quirks, token-exchange errors, TLS trust -- are collected in
+> [`docs/LESSONS_LEARNED.md`](docs/LESSONS_LEARNED.md). Check it first when
+> something fails in a way this walkthrough does not explain.
 
 ### Phase 0 — Before touching the cluster
 
@@ -377,276 +385,33 @@ short version:
 
 ### Phase 4 (Optional) — Enable MAS A2A Routing
 
-By default, ACME routes through Praxis → OLS. To route through MAS A2A instead
-(ACME → MAS A2A → OLS), follow these steps:
+By default ACME delegates straight to Praxis (the hub gateway) and the MAS A2A
+front door stays dormant. To route through MAS A2A instead, follow the chart
+guide [`charts/all/mao/mas-a2a/README.md`](charts/all/mao/mas-a2a/README.md):
+safe-activation prerequisites, blueprint preparation, Keycloak audience and
+principal allow-list, private-Route CA trust, and the deploy/verify steps.
 
-**Step 1: Obtain ACME Agent's Token Subject**
+In short, activation needs four things, all in
+`variants/standalone/values-standalone.yaml`:
 
-ACME authenticates with Keycloak using its service account. Get the `sub` claim:
+1. a persisted blueprint (`a2a.blueprintId`) created with
+   `./setup-mas-blueprint.sh multi-cluster` (or `simple` for
+   Ask-Red-Hat-only); the script prints the ID,
+2. ACME's Keycloak service-account `sub` (an opaque UUID, not its SPIFFE ID)
+   in `a2a.allowedPrincipals`, read from the Keycloak Admin API,
+3. `a2a.enabled: "true"` with `a2a.publicBaseUrl` set to the MAS A2A Route,
+4. the image pinned to the A2A-enabled build (`uie-mas-hosted` branch
+   `a2a-inbound-review-pr8`) for `mao-api`, `mao-worker` and `mao-a2a` alike,
+   built with the same tag.
 
-```bash
-# Method 1: From Keycloak Admin Console
-# Navigate to: Realm 'rca' → Groups → 'acme-agent-rca' → Members
-# Open 'service-account-acme-agent' and copy its ID (UUID).
-# The chart adds this service-account user to the acme-agent-rca group.
-# An empty roles list is expected; no roles need to be assigned.
+Then point ACME at it by setting `a2a.remoteAgents[0].endpoint` to the MAS A2A
+base URL (default host `mao-a2a-mas-a2a-<namespace>.apps.<cluster>`, not
+`mas-a2a.apps.<cluster>`); comment that override out to fall back to Praxis.
 
-# Method 2: From ACME logs (if ACME has made at least one request)
-oc logs -n acme-agent deployment/acme-agent | grep acme_audit | jq -r .token_a_subject | head -1
-```
-
-Use the member's user ID as the `sub` in `a2a.allowedPrincipals`—not the
-username or the group's ID. If `keycloak.acmeGroupName` is overridden, use that
-configured group instead of `acme-agent-rca`.
-
-**Step 2: Create MAS Blueprint**
-
-Use the `setup-mas-blueprint.sh` script to register inventory resources and create
-a multi-cluster blueprint. The script handles:
-
-1. Registering an LLM and Orchestrator Node for multi-cluster routing
-2. Registering the OLS A2A Agent (multi-cluster only) and Ask Red Hat A2A Agent
-3. Creating the blueprint and saving it with the resulting ID
-
-Ask Red Hat defaults to `https://access.stage.redhat.com/api/ask/v1/a2a`;
-override it with `ASK_REDHAT_A2A_URL` when running the script. Its
-`bearer_token` is intentionally empty, so MAS uses the inbound request's
-execution-context credential rather than storing a static token in the
-blueprint.
-
-The script verifies the MAS Route's TLS certificate by default. If the cluster
-uses a private ingress CA, set `MAS_API_CA_BUNDLE` to a PEM bundle containing
-that CA before running the script. For temporary, non-production diagnosis
-only, `MAS_API_INSECURE_TLS=true` disables certificate verification for all
-MAS API requests; do not use this with production credentials.
-
-**For multi-cluster with orchestration:**
-
-The orchestrator LLM must emit well-formed OpenAI tool calls, because it
-delegates to the OLS agent via the `plan_and_delegate` tool. Two providers are
-supported via `LLM_PROVIDER`:
-
-*Recommended — Gemini on Vertex* (`LLM_PROVIDER=vertex`). Uses MAS's
-`google_genai` element in Vertex mode with the **same** Gemini-on-Vertex ADC
-credentials OLS uses. Enable `vertexCreds.enabled` on the `mao-worker`
-application first (already set in `values-standalone.yaml`): an ExternalSecret
-syncs the shared Vault ADC JSON (`secret/data/global/llm-creds-vertex`) into the
-`mao` namespace and the worker mounts it as `GOOGLE_APPLICATION_CREDENTIALS`. No
-API key is needed.
-
-```bash
-export LLM_PROVIDER=vertex
-# Optional overrides (defaults shown):
-export VERTEX_PROJECT=redhat-marketplace-dev
-export VERTEX_LOCATION=global
-export VERTEX_MODEL=gemini-3.8-flash
-
-./setup-mas-blueprint.sh multi-cluster
-```
-
-*Alternative — OpenAI/LiteLLM* (`LLM_PROVIDER=openai`, the default):
-
-```bash
-export LITELLM_API_KEY="your-litellm-api-key"
-export LITELLM_API_BASE="https://maas-rhdp.apps.maas.redhatworkshops.io/v1"
-export LITELLM_MODEL="gpt-oss-20b"
-
-./setup-mas-blueprint.sh multi-cluster
-```
-
-> **Caveat:** gpt-oss models served over this MaaS return their tool calls in
-> the "harmony" channel format, and the endpoint does not translate the
-> arguments into OpenAI `tool_calls.arguments`. The orchestrator then sees empty
-> tool-call arguments ("A new plan requires a summary and at least one item")
-> and never delegates. Use the Vertex provider unless your gpt-oss endpoint is
-> configured with a harmony/tool-call parser.
-
-**For simple single-cluster (no orchestrator):**
-
-```bash
-./setup-mas-blueprint.sh simple
-```
-
-The simple blueprint sends requests directly to Ask Red Hat (not OLS). It uses
-the same default Ask Red Hat endpoint and `ASK_REDHAT_A2A_URL` override as the
-multi-cluster blueprint.
-
-The script will output the `BLUEPRINT_ID` at the end. Save this for Step 3.
-
-**Important:** When `agentCard.enabled: true` (enabled by default in
-`values-standalone.yaml` for multi-cluster deployments), Praxis serves a static
-agent card with Praxis's own endpoint as `rpc_url`. This ensures MAS A2A routes
-through Praxis for actual calls (allowing `X-OLS-Cluster` header routing) instead
-of bypassing Praxis by calling OLS directly.
-
-**Blueprint Architecture:**
-
-The multi-cluster blueprint creates an orchestrator-based workflow:
-- **User Question** → **Orchestrator** (analyzes question, decides routing)
-- **Orchestrator** → **OLS Agent** for live cluster investigation and/or
-  **Ask Red Hat** for documentation/product guidance covered by its Agent Card
-  skills; results return to the **Orchestrator**
-- For mixed questions, the orchestrator can call both agents, then decide whether more information is needed or finalize
-- **Orchestrator** → **Final Answer**
-
-The orchestrator uses the registered LLM to select neither, either, or both
-specialists based on the request. OLS calls always include the configured
-`X-OLS-Cluster` header; Ask Red Hat calls do not. The orchestrator may loop back
-after either agent responds to gather the other perspective before finalizing.
-
-**Step 3: Enable MAS A2A**
-
-In `variants/standalone/values-standalone.yaml`, under the `mao-a2a` application,
-uncomment the PHASE 2 overrides and fill in the values.
-
-**For production (with multi-issuer OIDC authentication):**
-
-```yaml
-mao-a2a:
-  overrides:
-    # ... existing config ...
-    
-    # PHASE 2: Enable MAS A2A
-    - name: a2a.enabled
-      value: "true"
-    - name: a2a.blueprintId
-      value: "<blueprint-id-from-step-2>"  # Replace with $BLUEPRINT_ID from script
-    - name: a2a.publicBaseUrl
-      value: "https://mas-a2a-mao.apps.<your-cluster>"  # Replace with your cluster domain
-    # Use the indexed key (not a JSON-string value): the chart applies toJson,
-    # so a '["..."]' string would double-encode. The value is ACME's Keycloak
-    # service-account 'sub' (an opaque UUID), NOT its SPIFFE ID -- the SPIFFE ID
-    # only exists in the client_assertion used to authenticate TO Keycloak, never
-    # in the resulting access token. Get it from the Keycloak Admin API: the
-    # acme-agent client's service-account-user id
-    # (GET /admin/realms/<realm>/clients?clientId=acme-agent then
-    # .../clients/<uuid>/service-account-user -> .id).
-    - name: a2a.allowedPrincipals[0]
-      value: "<acme-keycloak-service-account-sub>"
-    - name: route.enabled
-      value: "true"
-    # route.host is optional - auto-derives from global.clusterBaseDomain
-    
-    # Multi-issuer OIDC (already configured in values-standalone.yaml)
-    - name: identity.oidcIssuers[0].issuer_url
-      value: https://sso.redhat.com/auth/realms/redhat-external
-    # ... (rest of oidcIssuers configuration)
-```
-
-**For dev/testing (simplified mode, no real authentication):**
-
-```yaml
-mao-a2a:
-  overrides:
-    # ... existing config ...
-    
-    # PHASE 2: Enable MAS A2A (DEV MODE)
-    - name: a2a.enabled
-      value: "true"
-    - name: a2a.blueprintId
-      value: "<blueprint-id-from-step-2>"
-    - name: a2a.publicBaseUrl
-      value: "https://mas-a2a-mao.apps.<your-cluster>"
-    # Indexed key (not a JSON string) so the chart builds a real list. In dev
-    # mode the validator maps any token to user_id "dev".
-    - name: a2a.allowedPrincipals[0]
-      value: "dev"
-    - name: identity.providerMode
-      value: dev  # Bypass OIDC validation for testing
-    - name: route.enabled
-      value: "true"
-```
-
-**Notes:**
-- `route.host` is **optional** and derives from `global.clusterBaseDomain` if not set
-- `identity.oidcIssuers` (production) and `identity.providerMode: dev` (testing) are **mutually exclusive**
-- The default `values-standalone.yaml` uses multi-issuer OIDC for production readiness
-- For initial testing, dev mode is simpler but provides no real authentication
-
-Commit and push the changes. Wait for ArgoCD to sync the `mao-a2a` application.
-
-**Step 4: Verify MAS A2A**
-
-```bash
-# Check MAS A2A pod is running
-oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
-
-# Test agent card endpoint
-MAS_A2A_URL="https://$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')"
-curl "${MAS_A2A_URL}/.well-known/agent-card.json" | jq .
-```
-
-**Step 5: Route ACME to MAS A2A**
-
-In `variants/standalone/values-standalone.yaml`, under the `acme-agent` application,
-uncomment the PHASE 3 override:
-
-```yaml
-acme-agent:
-  overrides:
-    # ... existing config ...
-    
-    # PHASE 3: Route to MAS A2A (uncomment)
-    # name must be a valid Python identifier (underscores, not hyphens)
-    - name: a2a.remoteAgents[0].name
-      value: mas_orchestrator
-    - name: a2a.remoteAgents[0].description
-      value: "MAO workflow for Red Hat questions, including product/project/documentation guidance through Ask Red Hat. Use for all Red Hat-related requests; MAO selects the appropriate specialist(s)."
-    - name: a2a.remoteAgents[0].endpoint
-      # Must equal the MAS A2A base URL from Step 4 (MAS_A2A_URL), which is the
-      # same value as mao-a2a's a2a.publicBaseUrl. With route.host unset, the
-      # generated host is mao-a2a-mas-a2a-<namespace>.apps.<cluster>, NOT
-      # mas-a2a.apps.<cluster>.
-      value: "https://mao-a2a-mas-a2a-mao.apps.<your-cluster>"
-```
-
-Commit and push. Wait for ArgoCD to sync the `acme-agent` application.
-
-**Step 6: Verify the Full Path**
-
-Send a test request:
-
-ACME's A2A JSON-RPC endpoint is the root path `/` (served by Google ADK's
-`to_a2a`), not `/a2a/jsonrpc`. Use the A2A `message/send` method. Include the
-cluster API URL in the text so MAO can route to OpenShift Lightspeed:
-
-```bash
-ACME_URL="https://$(oc get route acme-agent -n acme-agent -o jsonpath='{.spec.host}')"
-curl -X POST "${ACME_URL}/" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "message/send",
-    "params": {
-      "message": {
-        "messageId": "test-1",
-        "role": "user",
-        "parts": [{"kind": "text", "text": "For cluster https://api.example.com:6443, list pods in namespace default"}]
-      }
-    }
-  }'
-```
-
-The agent card itself is at `${ACME_URL}/.well-known/agent-card.json`.
-
-Check logs at each hop:
-
-```bash
-# ACME → MAS A2A
-oc logs -n acme-agent deployment/acme-agent | grep acme_audit | tail -5
-
-# MAS A2A → OLS
-oc logs -n mao deployment/mas-a2a | grep -E "validate|principal" | tail -10
-
-# OLS → MCP
-oc logs -n a2a-lightspeed -l app.kubernetes.io/component=application-server | grep a2a_audit | tail -5
-```
-
-**To Revert to Praxis:**
-
-Comment out the ACME `a2a.remoteAgents` override. ACME will fall back to
-deriving the endpoint from `global.clusterBaseDomain`, which points to Praxis.
+LLM choice for the orchestrator: `LLM_PROVIDER=vertex` (Gemini on Vertex, using
+the same ADC as the rest of the pattern) is the recommended path;
+`setup-mas-blueprint.sh` documents the LiteLLM/OpenAI alternative and its
+gpt-oss tool-call caveat.
 
 ## Accessing Argo CD
 
@@ -689,9 +454,8 @@ ACME delegates OpenShift questions and incident investigations to OpenShift
 Lightspeed, deployed via the OpenShift Lightspeed Operator and configured by
 this pattern's own `charts/all/openshift-lightspeed-config` chart (an
 `OLSConfig` using Gemini on Vertex AI, with its operator-managed,
-introspection-enabled OpenShift MCP server). See that chart's
-[README](charts/all/openshift-lightspeed-config/README.md) for what it
-configures and what remains an open, unresolved MCP-hardening gap, and
+introspection-enabled OpenShift MCP server). The chart itself is gone; its
+open MCP-hardening questions are carried in the lessons doc, and
 [`LIGHTSPEED_DESIGN.md`](LIGHTSPEED_DESIGN.md)/
 [`LIGHTSPEED_IMPLEMENTATION_PLAN.md`](LIGHTSPEED_IMPLEMENTATION_PLAN.md) for
 the full design and task breakdown. The A2A integration itself lives in the
@@ -814,478 +578,12 @@ values as needed.
 
 ### Optional inbound MAS A2A (registered, not active)
 
-`mao-a2a` points to [`charts/all/mao/mas-a2a`](charts/all/mao/mas-a2a), but
-the chart's `a2a.enabled: false` default renders **no resources**. No
-orchestrator blueprint ID, authorized Keycloak subject, caller token, or
-published image has been supplied for activation. Do not turn it on simply
-because its Argo CD Application appears Synced.
-
-**IMPORTANT:** The A2A functionality requires a custom-built MAS image from
-the `a2a-inbound-review-pr8` branch. The existing `mas-api` and `mas-worker`
-`latest` defaults do NOT contain A2A support. Follow the build and
-configuration steps below before enabling.
-
-#### Step 0 — Build the A2A-enabled MAS image
-
-The A2A runtime (`ROLE=a2a-serve`) is built into the same container image as
-the MAS API and worker. Build from the
-[`ltomasbo/uie-mas-hosted`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted)
-repository on branch `a2a-inbound-review-pr8` (the A2A PR stack, including the
-multi-issuer OIDC and Vertex ADC commits; the `a2a-inbound-review-pr0`..`pr8`
-branches are the chained PRs, so `pr8` contains all of them):
-
-```bash
-export QUAY_ORG=<your-quay-org>
-podman login quay.io
-
-# Clone the A2A-enabled source
-git clone --branch a2a-inbound-review-pr8 --single-branch \
-  git@gitlab.cee.redhat.com:ltomasbo/uie-mas-hosted.git /tmp/uie-mas-hosted
-cd /tmp/uie-mas-hosted
-
-# Tag with the source commit for reproducibility
-export MAS_TAG=$(git rev-parse --short=12 HEAD)
-
-# Build the unified image (contains API, worker, and A2A roles)
-podman build -f Dockerfile -t quay.io/${QUAY_ORG}/mas-api:${MAS_TAG} .
-podman push quay.io/${QUAY_ORG}/mas-api:${MAS_TAG}
-```
-
-This single image supports all three roles (`ROLE=serve` for API,
-`ROLE=temporal-worker` for worker, `ROLE=a2a-serve` for A2A) via the
-entrypoint. You **must** use the same image tag across all three deployments
-(`mas-api`, `mas-worker`, `mas-a2a`) to ensure compatible code and
-dependencies.
-
-After building, update `variants/standalone/values-standalone.yaml` with the
-new image coordinates in the `mao-api`, `mao-worker`, and `mao-a2a`
-application overrides:
-
-```yaml
-  - name: mao-api
-    overrides:
-      - name: image.repository
-        value: quay.io/<your-org>/mas-api
-      - name: image.tag
-        value: <MAS_TAG>
-      # ... other API overrides
-
-  - name: mao-worker
-    overrides:
-      - name: image.repository
-        value: quay.io/<your-org>/mas-api
-      - name: image.tag
-        value: <MAS_TAG>
-      # ... other worker overrides
-
-  - name: mao-a2a
-    overrides:
-      - name: a2a.enabled
-        value: "true"
-      - name: image.repository
-        value: quay.io/<your-org>/mas-api
-      - name: image.tag
-        value: <MAS_TAG>
-      # ... A2A configuration (see below)
-```
-
-#### Step 1 — Harden the MAS API before enabling A2A
-
-**Do not enable A2A while the existing `mas-api` Route accepts development-mode
-authentication.** The API is independently reachable with a public Route.
-
-**The `mao-api` application is now pre-configured with Keycloak authentication**
-in `variants/standalone/values-standalone.yaml`. You only need to add authorized
-admin users.
-
-1. Get Keycloak user subject IDs for authorized administrators:
-
-   ```bash
-   # Get user IDs from Keycloak
-   oc exec -n keycloak-system deploy/keycloak -- \
-     /opt/keycloak/bin/kcadm.sh config credentials \
-     --server http://localhost:8080 \
-     --realm master \
-     --user admin \
-     --password $(oc get secret keycloak-initial-admin -n keycloak-system -o jsonpath='{.data.password}' | base64 -d)
-   
-   oc exec -n keycloak-system deploy/keycloak -- \
-     /opt/keycloak/bin/kcadm.sh get users -r rca --fields id,username
-   
-   # Or from Keycloak Admin Console:
-   # Navigate to: Keycloak → Realm 'rca' → Users → select user → copy ID (UUID)
-   ```
-
-2. Update `variants/standalone/values-standalone.yaml` with authorized user IDs:
-
-   ```yaml
-   - name: mao-api
-     overrides:
-       # ... existing overrides ...
-       - name: identity.adminAllowedUsers
-         value: '["a1b2c3d4-e5f6-...", "g7h8i9j0-k1l2-..."]'  # Replace with actual user IDs
-   ```
-
-   **Important:** Use Keycloak user subject IDs (UUIDs from the `sub` claim),
-   not usernames. The validator checks the token's `sub` claim against this list.
-
-2. If switching the worker to Keycloak mode as well, configure its audience:
-
-   ```yaml
-   - name: mao-worker
-     overrides:
-       - name: identity.providerMode
-         value: keycloak
-       - name: identity.keycloakAudience
-         value: "<your-mas-worker-audience>"
-   ```
-
-3. Verify a real token from your Keycloak issuer contains the configured
-   audience before deploying. The issuer URL is derived from
-   `global.clusterBaseDomain` and `global.keycloakRealm` unless explicitly
-   overridden with `identity.keycloakIssuerUri`.
-
-#### Step 2 — Create and persist an orchestrator blueprint
-
-The A2A service publishes one MAS orchestrator blueprint. You must create this
-blueprint through the authenticated MAS API **before** enabling A2A.
-
-**For multi-cluster routing:** See [Multi-cluster routing with dynamic headers](#multi-cluster-routing-with-dynamic-headers)
-below for an orchestrator blueprint that routes to different OLS backends based
-on the user's prompt (requires Praxis static agent card and OLS external Routes).
-
-1. Use the MAS API's `POST /api/blueprints/blueprint.save` endpoint to save
-   an orchestrator blueprint:
-
-   ```bash
-   export MAO_API="https://$(oc get route mas-api -n mao -o jsonpath='{.spec.host}')"
-   export KEYCLOAK_TOKEN="<your-keycloak-token>"
-
-   BLUEPRINT_ID=$(curl -ksS -X POST "$MAO_API/api/blueprints/blueprint.save" \
-     -H "Authorization: Bearer $KEYCLOAK_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "blueprintRaw": "<your-orchestrator-blueprint-yaml-or-json>"
-     }' | jq -r '.blueprint_id')
-
-   echo "Blueprint ID: $BLUEPRINT_ID"
-   ```
-
-2. Verify the blueprint resolves:
-
-   ```bash
-   curl -ksS -H "Authorization: Bearer $KEYCLOAK_TOKEN" \
-     "$MAO_API/api/blueprints/available.blueprints.resolved.get?blueprintId=$BLUEPRINT_ID"
-   ```
-
-3. **Do not use** `uie-mas-hosted/run/fixtures/blueprint_a2a_agent.yml` as the
-   inbound blueprint — it is an outbound A2A client-node fixture, not a
-   publishable orchestrator.
-
-#### Step 3 — Configure A2A authentication and authorization
-
-MAS A2A uses **Keycloak token validation with passthrough** to downstream
-agents. The authenticated token is retained and passed through to a2a_agent_node
-instances in the orchestrator blueprint, enabling the full authentication chain:
-
-```
-ACME (SPIFFE) → MAS (passthrough) → Praxis → OLS (SPIFFE + RFC 8693) → MCP → API
-```
-
-**MAS does not need its own SPIFFE workload identity or Keycloak client
-registration.** It acts as a transparent orchestrator, validating the inbound
-token and passing it through to downstream services.
-
-##### How authentication works
-
-1. **Token validation**: The A2A service validates bearer tokens against the
-   Keycloak issuer's JWKS endpoint. It checks:
-   - Token signature (via JWKS)
-   - Expiration (`exp` claim)
-   - Audience (`aud` claim must contain the configured `identity.keycloakAudience`)
-   - Issuer (`iss` claim must match `identity.keycloakIssuerUri`)
-
-2. **Principal authorization**: After validation, the token's `sub` (subject)
-   claim is checked against `a2a.allowedPrincipals`. Only exact matches are
-   authorized. The `sub` claim is typically an opaque Keycloak user ID, **not**
-   a username or email.
-
-3. **Token passthrough**: After validation, MAS **retains the bearer token**
-   and passes it through to the MAS session execution context as
-   `RunContext.credentials`. When an `a2a_agent_node` in the orchestrator
-   blueprint has an empty `bearer_token` field, it automatically uses the
-   context token for outbound calls (this is already implemented in the
-   `a2a_agent_node_factory`).
-
-4. **Multi-audience support**: ACME (or any caller) can request a **single
-   token with multiple audiences** from Keycloak. Each downstream service
-   validates against its own expected audience from the array. This allows one
-   token to work for MAS, OLS, Ask Red Hat, and other agents without separate
-   token requests.
-
-##### Configuration steps
-
-1. **Choose an audience strategy:**
-
-   **Option A: Share the OLS audience** (recommended for simplicity)
-   - MAS validates `lightspeed-a2a` (same as OLS)
-   - ACME requests one token: `scope=openid lightspeed-a2a`
-   - Token works for both MAS inbound and OLS outbound (via passthrough)
-   - No changes to `acme-agent` Keycloak client needed
-
-   **Option B: Separate MAS audience** (for stronger isolation)
-   - MAS validates `mas-a2a`, OLS validates `lightspeed-a2a`
-   - ACME requests **multi-audience token**: `scope=openid mas-a2a lightspeed-a2a`
-   - Requires adding `mas-a2a-audience` mapper to `acme-agent` in Keycloak
-
-2. Obtain a test token from a caller that will use the A2A service. Decode the
-   token (e.g., at jwt.io) and note its `iss`, `aud`, and `sub` claims.
-   **Never log or commit the actual token.**
-
-3. Configure the A2A application with the validated values:
-
-   ```yaml
-   - name: mao-a2a
-     overrides:
-       - name: a2a.enabled
-         value: "true"
-       - name: a2a.blueprintId
-         value: "<BLUEPRINT_ID>"
-       - name: a2a.publicBaseUrl
-         value: "https://mas-a2a-mao.apps.<cluster-domain>"
-       # Indexed keys (not a JSON string) so the chart builds a real list.
-       # Each value is a validated Keycloak service-account 'sub' (opaque UUID).
-       - name: a2a.allowedPrincipals[0]
-         value: "<validated-keycloak-sub-1>"
-       - name: a2a.allowedPrincipals[1]
-         value: "<validated-keycloak-sub-2>"
-       - name: identity.providerMode
-         value: keycloak
-       - name: identity.keycloakAudience
-         value: "lightspeed-a2a"  # Option A: shared audience
-         # OR value: "mas-a2a"     # Option B: separate audience
-       - name: image.repository
-         value: quay.io/<your-org>/mas-api
-       - name: image.tag
-         value: <MAS_TAG>
-   ```
-
-4. **Keycloak audience mapper** (only for Option B - separate audience):
-
-   If using a separate `mas-a2a` audience, add the mapper to `acme-agent` in
-   `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml`:
-
-   ```yaml
-   - clientId: acme-agent
-     protocolMappers:
-       # Existing mappers...
-       - name: mas-a2a-audience
-         protocol: openid-connect
-         protocolMapper: oidc-audience-mapper
-         config:
-           included.custom.audience: "mas-a2a"
-           access.token.claim: "true"
-   ```
-
-   For an existing realm, add the mapper in the Keycloak Admin Console:
-   - Navigate to the `acme-agent` client (or the client your callers use)
-   - Add an **Audience** protocol mapper:
-     - Mapper Type: **Audience**
-     - Included Custom Audience: `mas-a2a`
-     - Add to Access Token: **ON**
-
-   ACME will then request multiple audiences: `scope=openid mas-a2a lightspeed-a2a`
-
-   **Option A (shared audience) requires no Keycloak changes** — the existing
-   `lightspeed-a2a-audience` mapper on `acme-agent` is sufficient.
-
-5. **Private Keycloak CA (optional)**: If the Keycloak Route uses a private
-   ingress CA, configure CA trust:
-
-   ```yaml
-   - name: mao-a2a
-     overrides:
-       - name: identity.keycloakCaTrust.enabled
-         value: "true"
-   ```
-
-   The `keycloak-oidc` application must have published the CA ConfigMap in the
-   `mao` namespace via `openshiftOIDC.caBundleSync.enabled: true` and
-   `openshiftOIDC.caBundleSync.additionalTargetNamespaces: [mao]`. Apply the
-   same setting to `mao-api` and `mao-worker` when switching them to Keycloak
-   mode.
-
-6. **Orchestrator blueprint configuration**: Create a blueprint with
-   `a2a_agent_node` instances that use **empty `bearer_token`** for passthrough:
-
-   ```yaml
-   nodes:
-     - rid: ols_agent_rid
-       name: OpenShift Lightspeed Agent
-       type: a2a_agent_node
-       config:
-         type: a2a_agent_node
-         base_url: https://praxis-proxy-praxis-proxy.apps.<cluster-domain>/
-         bearer_token: ""  # Empty = use inbound context token
-         verify_ssl: true
-   
-   plan:
-     - uid: user_input
-       node: user_question_node_rid
-     - uid: call_ols
-       after: user_input
-       node: ols_agent_rid
-     - uid: finalize
-       after: call_ols
-       node: final_answer_node_rid
-   ```
-
-   Save this blueprint via the MAS API and use its returned `blueprint_id` in
-   Step 2.
-
-#### Step 4 — Deploy and verify
-
-1. Ensure MongoDB, Redis, Temporal, and the Temporal worker are ready:
-
-   ```bash
-   oc get pods -n mao | grep -E 'mongo|redis|temporal|mas-worker'
-   ```
-
-2. Commit and sync the changes:
-
-   ```bash
-   git add variants/standalone/values-standalone.yaml
-   git commit -m "Enable MAS A2A with hardened authentication"
-   git push origin <your-branch>
-   make argo-healthcheck
-   ```
-
-3. Verify the A2A deployment:
-
-   ```bash
-   oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
-   oc logs -n mao -l app.kubernetes.io/name=mas-a2a
-   ```
-
-4. Test the Agent Card (public, no auth required):
-
-   ```bash
-   export A2A_HOST=$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')
-   curl -ksS "https://$A2A_HOST/.well-known/agent-card.json" | jq
-   ```
-
-5. Test authorization boundaries:
-
-   ```bash
-   # Unauthenticated request (expect 401)
-   curl -ksS -o /dev/null -w '%{http_code}\n' "https://$A2A_HOST/a2a/jsonrpc"
-
-   # Valid token, non-allow-listed subject (expect 403)
-   curl -ksS -o /dev/null -w '%{http_code}\n' \
-     -H "Authorization: Bearer <token-with-wrong-subject>" \
-     "https://$A2A_HOST/a2a/jsonrpc"
-
-   # Valid token, allow-listed subject (expect 200 or valid JSON-RPC response)
-   curl -ksS -H "Authorization: Bearer <valid-token>" \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tasks.list","params":{},"id":1}' \
-     "https://$A2A_HOST/a2a/jsonrpc"
-   ```
-
-#### What's NOT needed (passthrough design)
-
-Because MAS uses **token passthrough** rather than acting as an independent
-workload identity:
-
-- ❌ **No SPIFFE for MAS** — MAS doesn't fetch its own JWT-SVID
-- ❌ **No Keycloak client for MAS** — MAS is not registered in
-  `keycloak-realm-import.yaml`
-- ❌ **No Praxis policy changes** — Praxis still validates `azp=acme-agent`, not
-  `mas-orchestrator`
-- ❌ **No RBAC changes** — OpenShift RBAC still binds to
-  `Group:keycloak:acme-agent-rca`
-- ✅ **MAS validates and passes through** — The same token ACME fetched reaches
-  OLS unchanged
-
-From Praxis/OLS/MCP's perspective, MAS is invisible — they only see ACME's
-token.
-
-#### Human-in-the-loop (HITL) approvals
-
-When an orchestrator node requires human approval for a tool call, the task
-state becomes `TASK_STATE_INPUT_REQUIRED` (non-terminal). To resume:
-
-1. Send a follow-up A2A message with the **same `task_id`** and a **new
-   `message_id`**.
-2. Include a decision as either:
-   - **Structured**: `{"decision": "approve"|"reject"|"modify"|"redirect",
-     "feedback": "...", "modifiedArgs": {...}}`
-   - **Plain text**: Leading keyword `approve`/`yes` to approve,
-     `reject`/`no`/`deny` to reject, with the rest as feedback.
-3. Reattach/subscribe to the task's stream to observe the next event and clear
-   `INPUT_REQUIRED`. Polling alone may continue showing `INPUT_REQUIRED` until
-   a stream attachment observes a progress event.
-
-#### Verification and testing
-
-After deployment, test the passthrough flow:
-
-```bash
-# 1. Verify MAS A2A is running
-oc get pods -n mao -l app.kubernetes.io/name=mas-a2a
-export A2A_HOST=$(oc get route -n mao -l app.kubernetes.io/name=mas-a2a -o jsonpath='{.items[0].spec.host}')
-
-# 2. Test agent card (public, no auth)
-curl -ksS "https://$A2A_HOST/.well-known/agent-card.json" | jq
-
-# 3. Get a multi-audience token from ACME's perspective
-# (This would normally happen inside ACME's code)
-# For manual testing, use acme-agent's service account:
-oc exec -n acme-agent deploy/acme-agent -- \
-  python3 -c "
-import os
-from acme_agent.auth import get_keycloak_token
-token = get_keycloak_token(
-    scope='openid lightspeed-a2a mas-a2a',  # Multi-audience!
-)
-print(token)
-" > /tmp/acme-token.txt
-
-export ACME_TOKEN=$(cat /tmp/acme-token.txt)
-
-# 4. Decode and verify token has both audiences
-echo $ACME_TOKEN | cut -d. -f2 | base64 -d 2>/dev/null | jq '.aud'
-# Should show: ["lightspeed-a2a", "mas-a2a"]
-
-# 5. Test MAS A2A with the token
-curl -ksS -H "Authorization: Bearer $ACME_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "messages.send",
-    "params": {
-      "message": {
-        "role": "user",
-        "messageId": "'$(uuidgen)'",
-        "parts": [{"text": "What pods are running in namespace openshift-operators?"}]
-      }
-    },
-    "id": 1
-  }' \
-  "https://$A2A_HOST/a2a/jsonrpc" | jq
-
-# 6. Verify token passthrough: check Praxis/OLS logs
-oc logs -n praxis-proxy -l app.kubernetes.io/name=praxis-proxy --tail=50 | grep azp
-# Should show: azp=acme-agent (not mas-orchestrator!)
-
-oc logs -n a2a-lightspeed -l app=lightspeed-app-server --tail=50 | grep a2a_audit
-# Should show: on_behalf_of=acme-agent
-```
-
-See [`uie-mas-hosted/docs/a2a-inbound.md`](https://gitlab.cee.redhat.com/ltomasbo/uie-mas-hosted/-/blob/a2a-inbound-review-pr8/docs/a2a-inbound.md)
-for client examples and the [separate MAS auth boundary](agents/AUTHENTICATION.md#separate-trust-boundary-inbound-mas-a2a)
-for the full authentication flow. The [`mas-a2a` chart guide](charts/all/mao/mas-a2a/README.md)
-has deployment details and the full verification checklist.
+`mao-a2a` points to [`charts/all/mao/mas-a2a`](charts/all/mao/mas-a2a), but the
+chart's `a2a.enabled: false` default renders **no resources**, and it stays
+off until every prerequisite in that chart's README (blueprint, principal
+allow-list, audience, image pin) is satisfied. Do not turn it on because the
+Argo CD Application looks Synced. Activation is Phase 4 above; the chart guide
+is the detailed procedure.
 
 ### Multi-cluster routing with dynamic headers
 
@@ -1294,8 +592,6 @@ use this multi-cluster orchestrator blueprint instead of a simple pass-through
 blueprint if you have multiple OLS clusters registered in `global.olsClusters`.
 
 **Prerequisites:**
-- Praxis static agent card enabled (`agentCard.enabled: true` - already configured in values-standalone.yaml)
-- OLS external Routes configured for each cluster (completed in Phase 1)
 - Multiple clusters registered in `global.olsClusters` with different IDs
 - MAS image with per-task header forwarding (uie-mas-hosted `a2a-inbound-review-pr1` or later)
 
@@ -1331,11 +627,6 @@ for a complete multi-cluster orchestrator that:
 - Identifies cluster from user prompt
 - Delegates to Praxis with X-OLS-Cluster header
 - Falls back to asking user which cluster if ambiguous
-
-**Requirements:**
-- Praxis static agent card enabled (`agentCard.enabled: true` in values-standalone.yaml)
-- OLS external Routes configured for each cluster (see Phase 1)
-- MAS image with per-task header forwarding (`a2a-inbound-review-pr1` or later in uie-mas-hosted)
 
 **uie-mas-hosted changes:** The `a2a_agent_node` reads `task.data["headers"]`
 and passes them to `a2a_provider.set_call_headers()`, so they are sent with

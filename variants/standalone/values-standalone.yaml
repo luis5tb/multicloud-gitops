@@ -988,7 +988,7 @@ clusterGroup:
         # global.clusterBaseDomain + global.keycloakRealm; override only to
         # diverge.
         # Adapter image pin (own pipeline, immutable digest or exact QUOTED
-        # tag -- never all-digits unquoted; see docs/ARCHITECTURE.md).
+        # tag -- never all-digits unquoted; see docs/LESSONS_LEARNED.md).
         # Built from the lightspeed-hub repo, branch a2a (make
         # image-a2a-adapter):
         - name: adapter.image.repository

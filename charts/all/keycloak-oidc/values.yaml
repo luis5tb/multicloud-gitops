@@ -466,8 +466,9 @@ realmImport:
   # KeycloakRealmImport gets exactly one shot: on a fresh install it can lose
   # a race against the Keycloak CR's own creation ("keycloaks ... not
   # found"), land in HasErrors, and never retry on its own -- not even once
-  # the Keycloak CR becomes Ready (observed live; see AGENTS.md "Hard-won
-  # lessons"). This CronJob watches for exactly that state and deletes the
+  # the Keycloak CR becomes Ready (observed live; see
+  # docs/LESSONS_LEARNED.md, Keycloak: realm import and clients). This
+  # CronJob watches for exactly that state and deletes the
   # errored import so ArgoCD's self-heal recreates it against the now-Ready
   # Keycloak CR -- the same manual `oc delete keycloakrealmimport <realm>`
   # recovery, automated. It also heals any later recurrence (e.g. an

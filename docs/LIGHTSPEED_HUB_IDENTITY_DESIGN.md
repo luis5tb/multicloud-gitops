@@ -47,15 +47,13 @@ Answers to the open questions at the end, from running it:
 - **Approval semantics:** confirmed as "whether, not how much". In gateway
   mode approved execution RBAC is not materialized.
 
-Three findings shaped the implementation and are not in the proposal:
-
-1. A Keycloak exchange `audience` must name an existing client, and the
-   exchanging client must be in the subject token's `aud`. Hence one exchanger
-   client per hop, and each token's `aud` names the next one.
-2. Kubernetes RBAC binds groups, not audiences, so H and U (same `sub`) are
-   told apart by audience-scoped client roles projected into `groups`.
-3. An exchanged token's `azp` is the client that exchanged it, so any `azp`
-   allow-list after an exchange must name that client.
+Three findings shaped the implementation beyond the proposal (all in
+[`LESSONS_LEARNED.md`](LESSONS_LEARNED.md), "Keycloak"): an exchange `audience`
+must name an existing client and the exchanging client must be in the subject
+token's `aud`; Kubernetes RBAC binds groups, not audiences, so H and U are told
+apart by audience-scoped client roles projected into `groups`; and an exchanged
+token's `azp` is the exchanger, so any post-exchange `azp` allow-list must name
+that client.
 
 ## Why this is needed at all
 
