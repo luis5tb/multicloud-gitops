@@ -134,6 +134,30 @@ caught by rendering/validation, not at runtime.
   the live IdP had no `config.clientSecret`; the chart only rendered the client
   ID. The chart now reuses ACME's Vault record and reconciles complete IdP
   endpoints and credentials. *(live)*
+- **RHBK 26.4 rejects the jwt-typed subject token on the exchange grant; only
+  the explicit `subject_issuer` spelling works.**
+  `subject_token_type=urn:ietf:params:oauth:token-type:jwt` returns
+  `400 invalid_token "invalid token type"` before any IdP lookup -- even though
+  community 26.4.0's `AbstractTokenExchangeProvider.getSubjectIssuer()`
+  contains exactly that jwt-type iss-derivation (the error string is not even
+  findable in the community token-exchange sources, so this is RHBK-specific
+  or in a different layer; do not trust community source over the running
+  server). The external-to-internal exchange that works here is the OLS-era
+  spelling: `subject_token_type=...access_token` plus an explicit
+  `subject_issuer=<IdP issuer URL>` -- verified by minting a correct H from an
+  SSO stage token (imported `sub`, `azp=mas-a2a`, `aud=lightspeed-hub-a2a`,
+  `groups` from the exchanger's role mapper). Consequence: no Praxis
+  `delegator/oauth` configuration can express the working request -- there is
+  no `subject_issuer` field, and the only config-selectable external
+  discriminator (`subject_token_type: jwt`) is the value this server rejects.
+  Until praxis-policy grows `subject_issuer` support (or the JWT Authorization
+  Grant lands with mappers, keycloak/keycloak#53536), the external A->H
+  exchange has to be performed by a component that can send it -- the hub
+  adapter is the in-repo candidate. Found by running the documented pre-flight
+  curl only *after* the deployed conditional delegation failed; reading
+  community source first had said the jwt type should work. The reverted
+  twin-delegator attempt (`c7c6f205` and its revert) holds the full machinery
+  for whoever revisits. *(live 2026-11-25)*
 - **A successful external-token login can still fail RBAC as
   `User "keycloak:<uuid>"`.** Without a `groups` claim OpenShift authorizes the
   brokered subject as an individual, while RBAC targets
@@ -216,6 +240,25 @@ re-check each when the image is bumped.
   no-op, while `require(...)` denies unconditionally. Only `role: user` plus
   an explicit `deny(...)` works. The `enforcement-check` PostSync Job guards
   against a silent regression.
+- **The `keycloak` claim-mapper preset never maps `iss`, so `claim.iss`
+  predicates silently never match.** The preset maps exactly `sub`,
+  `realm_access.roles`, `scope`, `client_id`/`azp`/`clientId` and `aud` into
+  the attribute bag; the issuer is consumed by the `trusted_issuers`
+  validation and never lands in `claim.*`. So `claim.iss == '...'` is `==` on
+  a missing attribute (false) and an issuer-conditional `when:` silently falls
+  through to its negation, while `claim.iss != '...'` conjuncts silently
+  deny. The only issuer discriminator that is both mapped and live-verified
+  in predicates is `claim.azp` (SSO callers carry the SSO client's UUID,
+  local callers `acme-agent`). Hit live while testing the since-reverted
+  external-issuer delegation (`c7c6f205`): the SSO token took the internal
+  branch and the denial surfaced as
+  `delegation.idp_rejected: token exchange rejected: invalid_request` --
+  reading the 403 **body**, not just the status, is the fastest bisect
+  (403 = APL/plugin deny, 401 = authentication failure). Nothing caught it
+  earlier because the `when:/do:` machinery itself worked (internal traffic
+  through the conditionals verified live) and the grammar was checked against
+  the pinned parser source -- but the external predicate's attribute
+  visibility was the documented-but-not-run spike. *(live 2026-11-25)*
 - **Never serve a hand-maintained agent card.** The static card advertised A2A
   `protocolVersion: "1.0"`, so MAS (a2a-sdk 1.1.5) called
   `SendStreamingMessage` against the 0.3-only adapter (a2a-go v0.3.15

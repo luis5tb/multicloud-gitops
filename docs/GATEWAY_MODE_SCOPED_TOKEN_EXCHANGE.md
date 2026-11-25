@@ -440,6 +440,11 @@ hub needs only a minimal probe identity for health checks (B-full).
   exchanger clients and a per-target R audience.
 - **SSO callers:** the hub gateway's Praxis delegator sends no
   `subject_issuer`, so an SSO-issued Token A cannot be exchanged A->H.
+  Empirically ruled out 2026-11-25 (LESSONS_LEARNED §2/§5): the jwt-typed
+  alternative is rejected by this RHBK 26.4 and `claim.iss` is not in the
+  Praxis attribute bag anyway, so the working exchange needs `subject_issuer`
+  from a component that can send it -- adapter-side is the current candidate;
+  the reverted twin-delegator attempt (`c7c6f205`) holds the routing machinery.
 
 - Execution with the user's own RBAC vs approval-based elevation (3.2).
 - Token A lifetime vs long runs: the adapter's renewal bridge and
