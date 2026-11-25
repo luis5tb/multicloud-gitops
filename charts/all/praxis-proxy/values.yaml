@@ -486,3 +486,43 @@ a2aUpstream:
     # only: the delegator sends Basic auth without URL-encoding.
     secretName: praxis-hub-exchange-client
     secretKey: client-secret
+  # EXTERNAL-ISSUER A->H EXCHANGE (SSO callers). Off by default; empty/false
+  # renders nothing and the render is byte-identical to the pre-block one.
+  #
+  # When enabled (requires exchangeAtPraxis), the hub gateway gains a SECOND
+  # delegator/oauth plugin (hub-delegator-external) identical to the internal
+  # one (same exchanger client, secret and token endpoint) except
+  # subject_token_type: urn:ietf:params:oauth:token-type:jwt, and the
+  # catch-all route's delegate() step becomes issuer-conditional:
+  #   claim.iss in identity.oidcIssuers  -> delegate(hub-delegator-external)
+  #   otherwise (local Keycloak)         -> delegate(hub-delegator)
+  # A single delegator cannot serve both: Keycloak's standard exchange
+  # hard-rejects subject_token_type=jwt (realm-issued tokens only), while the
+  # external-internal path REQUIRES the jwt type so Keycloak can locate the
+  # external IdP from the token's own iss claim (no subject_issuer parameter
+  # exists in the delegator's config surface -- the gap this closes).
+  #
+  # Keycloak prerequisites (all already live in the standalone variant):
+  # the token-exchange-external-internal:v2 feature flag (rhbk
+  # keycloak.extraFeatures -- REMOVED in Keycloak 26.7, see the sunset note
+  # in the chart README "External-issuer A->H exchange") and the external
+  # OIDC IdPs (keycloak-oidc externalOidcProviders) whose registered
+  # issuerUrl must equal the SSO tokens' iss.
+  #
+  # VERIFICATION STATUS (chart conventions; see the README section for the
+  # full evidence and procedures):
+  #   * APL when:/do: conditional steps and `do: delegate(...)`: syntax and
+  #     semantics verified against the v0.3.1 parser SOURCE (Effect::When,
+  #     Delegate pass-through) -- NOT yet exercised at runtime against the
+  #     pinned image.
+  #   * claim.iss visibility to when: predicates: same claim.* bag as the
+  #     verified claim.azp predicate, not separately verified.
+  #   * Failure orientation is loud and fail-closed: if the conditional
+  #     never fires, no delegation runs and the adapter rejects every A2A
+  #     request; if claim.iss is invisible, `==` on a missing attribute is
+  #     false, so external callers fall to the internal delegator and are
+  #     denied by Keycloak while INTERNAL traffic keeps working.
+  # Run the README's pre-flight curl against the live Keycloak before the
+  # first gitops sync carrying this flag.
+  externalExchange:
+    enabled: false

@@ -50,6 +50,20 @@ data:
       Keycloak's subject-audience rule holds; H carries the hub audience. */}}
 {{- $fdValues := deepCopy .Values }}
 {{- $_ := set $fdValues "__delegation" (dict "plugin" "hub-delegator" "target" "hub-adapter" "audience" .Values.a2aUpstream.exchange.audience "clientId" .Values.a2aUpstream.exchange.clientId "secretEnv" "PRAXIS_HUB_EXCHANGE_CLIENT_SECRET" "tokenUrl" (include "praxis-proxy.hubExchangeTokenUrl" .)) }}
+{{- if .Values.a2aUpstream.externalExchange.enabled }}
+{{- /* External-issuer (SSO) callers: a SECOND delegator differing only in
+      subject_token_type (jwt), selected by claim.iss via when:/do: steps in
+      files/policy.yaml. Reuses the internal delegator's client, secret and
+      token endpoint (same mas-a2a exchange, different Keycloak handler).
+      The issuer list comes from identity.oidcIssuers -- the same values
+      that feed the jwt-client resolver's trusted_issuers, so the predicate
+      and the validation cannot drift apart. */}}
+{{- $issuers := list }}
+{{- range .Values.identity.oidcIssuers }}
+{{- $issuers = append $issuers (toString .issuerUrl) }}
+{{- end }}
+{{- $_ := set $fdValues "__delegation_external" (dict "plugin" "hub-delegator-external" "issuers" $issuers) }}
+{{- end }}
 {{ tpl (.Files.Get "files/policy.yaml") (dict "Values" $fdValues "Chart" .Chart "Release" .Release "Template" .Template) | indent 4 }}
 {{- else }}
 {{ tpl (.Files.Get "files/policy.yaml") . | indent 4 }}

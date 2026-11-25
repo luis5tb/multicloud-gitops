@@ -746,11 +746,17 @@ For another already-imported realm, for each `(audience, role, exchanger)`:
    `multivalued=true`, access token only; and delete any
    `oidc-group-membership-mapper` on the exchanger.
 
-**Known gap -- SSO callers on the hub leg:** Praxis still accepts Red Hat SSO
-tokens (`api.ask_red_hat`) on this leg, and Keycloak trusts the SSO IdPs
-(`externalOidcProviders`), but the adapter's exchanger never sends
-`subject_issuer`, which external-token exchange needs (see "External Red Hat
-SSO token exchange" above). An SSO-authenticated request reaching the
-adapter is therefore expected to fail its A->H exchange until the adapter
-sets `subject_issuer` from the token's `iss` -- UNCONFIRMED, not yet tested
-live.
+**SSO callers on the hub leg (enabled, runtime verification pending):** the
+hub gateway now carries a jwt-typed twin delegator for SSO-issuer tokens
+(`a2aUpstream.externalExchange.enabled` in charts/all/praxis-proxy): with
+`subject_token_type=urn:ietf:params:oauth:token-type:jwt`, Keycloak's
+external-to-internal handler (`token-exchange-external-internal:v2` feature)
+locates the `red-hat-sso-*` IdP from the token's own `iss` claim -- no
+`subject_issuer` is sent, which was the gap documented here previously (the
+delegator has no config field for it). The user is imported and the IdP
+mappers run, so the minted H carries the same group/role claims as the
+internal path. See charts/all/praxis-proxy/README.md "External-issuer A→H
+exchange" for the pre-flight curl, the pinned-image runtime spike, and the
+26.7 sunset (the feature is removed there; the exit is the JWT Authorization
+Grant, blocked on praxis-policy jwt-bearer support and
+keycloak/keycloak#53536).

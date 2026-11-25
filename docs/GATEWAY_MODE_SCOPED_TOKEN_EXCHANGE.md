@@ -438,11 +438,27 @@ hub needs only a minimal probe identity for health checks (B-full).
   compromised sandbox could present it at another spoke's gateway and get a
   U there (still within the user's own rights). Hardening: per-spoke
   exchanger clients and a per-target R audience.
-- **SSO callers:** the hub gateway's Praxis delegator sends no
-  `subject_issuer`, so an SSO-issued Token A cannot be exchanged A->H.
+- **SSO callers (bridge deployed, exit open):** the hub gateway now
+  exchanges SSO-issued Token A via a jwt-typed twin delegator
+  (`a2aUpstream.externalExchange.enabled`, charts/all/praxis-proxy): with
+  `subject_token_type=jwt`, Keycloak's external-to-internal handler locates
+  the IdP from the token's own `iss` claim, so the missing `subject_issuer`
+  no longer blocks the exchange. Runtime verification of the conditional
+  delegation on the pinned Praxis image is pending (chart README
+  "External-issuer A→H exchange"). **Sunset:** this rides the
+  `token-exchange-external-internal:v2` feature, REMOVED in Keycloak 26.7;
+  the supported exit is the JWT Authorization Grant, which needs
+  praxis-policy jwt-bearer support (praxis-proxy/policy#382) AND Keycloak
+  running IdP mappers on the grant (keycloak/keycloak#53536) or pre-linked
+  users in the reconciler. Interim fallback at 26.7 if neither lands: the
+  same jwt-type value against the legacy v1 external-internal handler
+  (`--features=token-exchange`, also deprecated).
+
+- SSO-brokered callers on the hub leg: superseded by the bridge above; the
+  jwt-bearer exit must preserve the ask-red-hat constraint (the raw SSO
+  token still has to reach MAS -- the exchange stays per-leg at the
+  gateway, never front-loaded at the caller).
 
 - Execution with the user's own RBAC vs approval-based elevation (3.2).
 - Token A lifetime vs long runs: the adapter's renewal bridge and
   `CredentialsExpired` pause exist, but haven't been exercised end to end.
-- SSO-brokered callers on the hub leg: the adapter's exchanger does not send
-  `subject_issuer`, which external-token exchange needs.

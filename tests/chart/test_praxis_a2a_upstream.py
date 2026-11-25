@@ -326,6 +326,125 @@ def test_exchange_at_praxis_renders_hub_gateway_delegation() -> None:
 @pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm is required to render chart"
 )
+def test_external_exchange_renders_jwt_delegator_and_conditionals() -> None:
+    """externalExchange: jwt-typed twin delegator + issuer-conditional steps.
+
+    SSO-issuer Token A reaches the hub gateway's delegate() with
+    subject_token_type=urn:ietf:params:oauth:token-type:jwt so Keycloak's
+    external-to-internal handler locates the IdP from the token's own iss
+    claim (the delegator config has no subject_issuer field -- the
+    documented gap this closes). One delegator cannot serve both caller
+    classes (the standard exchange hard-rejects the jwt type for
+    realm-issued tokens), so the catch-all route's single delegate() step
+    becomes two when:/do: steps on exact complement predicates: exactly
+    one delegation runs per request. when:/do: syntax and Delegate
+    pass-through are verified against the v0.3.1 parser source
+    (crates/ppe-apl-core/src/parser.rs: parse_when_do_rule ->
+    Effect::When); RUNTIME behavior on the pinned image is UNVERIFIED --
+    chart README "External-issuer A->H exchange". The flag OFF render must
+    stay byte-identical to the plain exchangeAtPraxis render.
+    """
+    base = [
+        "--set", "identity.keycloak.audience=mas-a2a",
+        "--set", "a2aUpstream.enabled=true",
+        *SPOKE_SETS,
+    ]
+    fd = [
+        "--set", "a2aUpstream.exchangeAtPraxis=true",
+        "--set", "a2aUpstream.exchange.clientId=mas-a2a",
+        "--set", "a2aUpstream.exchange.audience=lightspeed-hub-a2a",
+    ]
+    issuers = [
+        "--set", "identity.oidcIssuers[0].issuerUrl=https://sso.redhat.com/auth/realms/redhat-external",
+        "--set", "identity.oidcIssuers[0].audience=api.ask_red_hat",
+        "--set", "identity.oidcIssuers[0].jwksUrl=https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs",
+        "--set", "identity.oidcIssuers[1].issuerUrl=https://sso.stage.redhat.com/auth/realms/redhat-external",
+        "--set", "identity.oidcIssuers[1].audience=api.ask_red_hat",
+        "--set", "identity.oidcIssuers[1].jwksUrl=https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs",
+    ]
+    ext = ["--set", "a2aUpstream.externalExchange.enabled=true"]
+
+    docs = _resources(_helm(CHART, *base, *fd, *ext, *issuers).stdout)
+    main = _main_configmap(docs)["data"]["policy.yaml"]
+    policy = yaml.safe_load(main)
+    plugins = {p["name"]: p for p in policy["plugins"]}
+
+    # The twin delegator: same client/secret/endpoint, ONLY the token type
+    # differs -- and the internal one keeps the (access_token) default.
+    ext_plugin = plugins["hub-delegator-external"]
+    int_plugin = plugins["hub-delegator"]
+    assert ext_plugin["config"]["subject_token_type"] == "urn:ietf:params:oauth:token-type:jwt"
+    assert "subject_token_type" not in int_plugin["config"]
+    assert ext_plugin["config"]["client_id"] == int_plugin["config"]["client_id"] == "mas-a2a"
+    assert (
+        ext_plugin["config"]["client_secret_source"]
+        == int_plugin["config"]["client_secret_source"]
+    )
+
+    # The catch-all route: two conditional steps on EXACT complements, the
+    # external one naming the jwt-typed plugin, the internal one unchanged.
+    pre = policy["routes"][-1]["authorization"]["pre_invocation"]
+    conds = [s for s in pre if isinstance(s, dict) and "when" in s]
+    assert len(conds) == 2, "exactly the two conditional delegate steps"
+    ext_step, int_step = conds
+    assert "hub-delegator-external" in ext_step["do"]
+    assert int_step["do"] == "delegate(hub-delegator, target: hub-adapter, audience: lightspeed-hub-a2a)"
+    assert ext_step["do"] == "delegate(hub-delegator-external, target: hub-adapter, audience: lightspeed-hub-a2a)"
+    assert int_step["when"] == f"!({ext_step['when']})", "predicates must be exact complements"
+    for issuer in (
+        "https://sso.redhat.com/auth/realms/redhat-external",
+        "https://sso.stage.redhat.com/auth/realms/redhat-external",
+    ):
+        assert f"claim.iss == '{issuer}'" in ext_step["when"]
+    # No unconditional delegate step remains alongside the conditionals.
+    assert not [
+        s for s in pre
+        if isinstance(s, str) and s.startswith("delegate(")
+    ]
+
+    # Spoke gateways are untouched: no twin delegator, no conditionals.
+    spoke = next(
+        d for d in docs
+        if d["kind"] == "ConfigMap" and d["metadata"]["name"].startswith("praxis-spoke-")
+        and "policy.yaml" in (d.get("data") or {})
+    )["data"]["policy.yaml"]
+    assert "hub-delegator-external" not in spoke
+    assert "when:" not in spoke
+
+    # Flag OFF (explicitly false vs absent): byte-identical, and no twin
+    # delegator or conditionals leak into the render. (oidcIssuers is held
+    # constant on both sides -- it legitimately changes the jwt-client
+    # resolver's trusted_issuers section on its own.)
+    off_false = _main_configmap(_resources(
+        _helm(CHART, *base, *fd, *issuers, "--set", "a2aUpstream.externalExchange.enabled=false").stdout
+    ))["data"]["policy.yaml"]
+    off_absent = _main_configmap(_resources(
+        _helm(CHART, *base, *fd, *issuers).stdout
+    ))["data"]["policy.yaml"]
+    assert off_false == off_absent
+    assert "hub-delegator-external" not in off_false
+    assert "when:" not in off_false
+    assert '- "delegate(hub-delegator, target: hub-adapter, audience: lightspeed-hub-a2a)"' in off_false
+
+    # Fail loud: without the hub exchange, without external issuers, and on
+    # an issuer URL that could break out of the APL single-quoted literal.
+    r = _helm(CHART, *base, *ext, *issuers, check=False)
+    assert r.returncode != 0 and "requires a2aUpstream.exchangeAtPraxis=true" in r.stderr
+    r = _helm(CHART, *base, *fd, *ext, check=False)
+    assert r.returncode != 0 and "non-empty identity.oidcIssuers" in r.stderr
+    r = _helm(
+        CHART, *base, *fd, *ext,
+        "--set", "identity.oidcIssuers[0].issuerUrl=https://sso.example.test/r'x",
+        "--set", "identity.oidcIssuers[0].audience=api.ask_red_hat",
+        "--set", "identity.oidcIssuers[0].jwksUrl=https://sso.example.test/certs",
+        check=False,
+    )
+    assert r.returncode != 0 and "plain https:// URL" in r.stderr
+
+
+@pytest.mark.skipif(
+    shutil.which("helm") is None, reason="helm is required to render chart"
+)
 def test_enabled_requires_policy() -> None:
     """The hub gateway must keep validating: policy.enabled=false fails."""
     result = _helm(

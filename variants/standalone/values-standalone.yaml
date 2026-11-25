@@ -579,6 +579,24 @@ clusterGroup:
           value: mas-a2a
         - name: a2aUpstream.exchange.audience
           value: lightspeed-hub-a2a
+        # EXTERNAL-ISSUER (SSO) CALLERS: second jwt-typed delegator +
+        # issuer-conditional delegate() steps (see charts/all/praxis-proxy
+        # values.yaml externalExchange and its README "External-issuer A->H
+        # exchange"). Keycloak prerequisites are already live here (the
+        # token-exchange-external-internal:v2 feature flag above and the
+        # red-hat-sso-* IdPs). BEFORE the first sync carrying this, run the
+        # README's pre-flight curl (one request against the live Keycloak
+        # with an SSO stage token; it proves the iss-derived IdP lookup and
+        # shows the minted H's sub/azp/groups). Rollback if the conditional
+        # delegation misbehaves on the pinned image: set this to "false"
+        # (renders revert to the single unconditional internal delegator).
+        # SUNSET: the Keycloak feature this rides is REMOVED in 26.7 -- the
+        # exit is the JWT Authorization Grant once praxis-policy grows
+        # jwt-bearer support AND Keycloak runs IdP mappers on it (or the
+        # reconciler pre-links users). Track both in
+        # docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md.
+        - name: a2aUpstream.externalExchange.enabled
+          value: "true"
         # TASK B REQUEST LEG (leg 1 -- the MAS blueprint side; DISABLED --
         # everything commented). Once the front door above is enabled, the
         # persisted MAS blueprint must route investigation delegations

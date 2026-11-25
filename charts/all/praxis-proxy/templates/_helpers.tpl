@@ -126,6 +126,22 @@ the CA ConfigMap, the Deployment mount) triggers it.
 {{- fail "a2aUpstream.exchangeAtPraxis=true requires a2aUpstream.exchange.clientId (the exchanger client = Token A's audience, e.g. mas-a2a), .audience (Token H's audience, e.g. lightspeed-hub-a2a) and .secretName" -}}
 {{- end -}}
 {{- end -}}
+{{- if .Values.a2aUpstream.externalExchange.enabled -}}
+{{- /* External-issuer (SSO) A->H exchange: rides the hub-gateway exchange,
+      so it needs everything that needs, plus the external issuers whose
+      claim.iss the conditional delegate steps match. */}}
+{{- if not .Values.a2aUpstream.exchangeAtPraxis -}}
+{{- fail "a2aUpstream.externalExchange.enabled=true requires a2aUpstream.exchangeAtPraxis=true (it adds a second delegator to the hub-gateway A->H exchange)" -}}
+{{- end -}}
+{{- if or (not .Values.policy.enabled) (not .Values.identity.oidcIssuers) -}}
+{{- fail "a2aUpstream.externalExchange.enabled=true requires policy.enabled=true and a non-empty identity.oidcIssuers (the external issuers whose claim.iss selects the jwt-typed delegator)" -}}
+{{- end -}}
+{{- range .Values.identity.oidcIssuers -}}
+{{- if not (regexMatch "^https://[A-Za-z0-9._:/-]+$" (toString .issuerUrl)) -}}
+{{- fail (printf "identity.oidcIssuers entry %q must be a plain https:// URL (letters, digits, '.', '_', ':', '/', '-' only): it is interpolated into a single-quoted APL literal in the conditional delegate steps" (toString .issuerUrl)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.a2aUpstream.enabled -}}
 {{- if not .Values.a2aUpstream.targetHeader -}}
 {{- fail "a2aUpstream.targetHeader is required when a2aUpstream.enabled is true (must match the lightspeed-hub chart's adapter.targetHeader / the adapter's --target-header flag)" -}}

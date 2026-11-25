@@ -707,7 +707,11 @@ Symptom -> cause, for bugs actually hit while building this. Long-form write-ups
   them instead (`create_default_context()` then `load_verify_locations()`).
   Not a bug in the CA-sync scripts, which only talk to the in-cluster API.
 - **Red Hat SSO tokens fail Keycloak 26.4 exchange / userinfo 403**: request
-  `openid api.ask_red_hat`; send the external issuer as `subject_issuer`.
+  `openid api.ask_red_hat` (userinfo 403 otherwise). For the exchange
+  itself, send `subject_token_type=urn:ietf:params:oauth:token-type:jwt`
+  (the hub gateway's external delegator does): Keycloak then locates the
+  IdP from the token's own `iss` claim -- no `subject_issuer` parameter,
+  which no Praxis delegator config field can carry.
 - **Token exchange `400 invalid_client "Audience not found"`**: every exchange
   audience must be an existing client (audience-only clients).
 - **Token exchange refused although the subject token is valid**: the

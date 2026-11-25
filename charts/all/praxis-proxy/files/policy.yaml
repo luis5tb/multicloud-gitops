@@ -130,6 +130,50 @@ plugins:
       #     perform_http capability (the resolver for JWKS fetches, the
       #     delegator for the token-endpoint callout).
 {{- end }}
+{{- if .Values.__delegation_external }}
+  # External-issuer (SSO caller) twin of the delegator above, rendered ONLY
+  # alongside it (a2aUpstream.externalExchange.enabled on the hub gateway).
+  # Identical client, secret and token endpoint; the ONLY difference is
+  # subject_token_type: jwt, which routes the exchange into Keycloak's
+  # external-to-internal handler (the token-exchange-external-internal:v2
+  # feature): Keycloak parses the inbound SSO token's `iss` claim itself to
+  # locate the external IdP (AbstractTokenExchangeProvider.getSubjectIssuer,
+  # 26.4-26.6), imports/links the user and applies the IdP mappers -- no
+  # subject_issuer parameter is sent (or sendable: the delegator config has
+  # no field for it). Selected per-request by the when:/do: steps on the
+  # catch-all route below.
+  #
+  # SYNTAX/SEMANTICS evidence for the when:/do: steps (v0.3.1 parser source,
+  # crates/ppe-apl-core/src/parser.rs): parse_when_do_rule compiles to
+  # Effect::When (condition true -> run the do: effects, false -> skip) and
+  # step_to_top_level_effect passes Delegate effects through unchanged.
+  # RUNTIME-UNVERIFIED on the pinned image (ghcr.io/praxis-proxy/ai:0.4.1):
+  # neither a `do: delegate(...)` string nor a claim.iss predicate has been
+  # exercised against it -- see the chart README "External-issuer A->H
+  # exchange" for the spike procedure. Failure orientation: loud (no
+  # delegation -> adapter rejects) or fail-closed (claim.iss invisible ->
+  # `==` on a missing attribute is false -> SSO callers fall to the internal
+  # delegator and are denied by Keycloak while internal traffic continues).
+  - name: {{ .Values.__delegation_external.plugin }}
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    capabilities:
+      - read_inbound_credentials
+      - write_delegated_tokens
+      - perform_http
+    config:
+      token_endpoint: {{ .Values.__delegation.tokenUrl | quote }}
+      client_id: {{ .Values.__delegation.clientId | quote }}
+      client_secret_source:
+        kind: env_var
+        name: {{ .Values.__delegation.secretEnv }}
+      # The whole point of this delegator: with the jwt type Keycloak's
+      # external-internal handler parses the subject token's iss claim to
+      # find the IdP. The DEFAULT (access_token) type would send the SSO
+      # token to the standard exchange, which only accepts realm-issued
+      # tokens and rejects the request.
+      subject_token_type: "urn:ietf:params:oauth:token-type:jwt"
+{{- end }}
 
 routes:
   # The A2A discovery document is public by design. Its RPC URL points
@@ -235,5 +279,25 @@ routes:
         # delegate(<plugin>, target: <upstream cluster name>, audience:
         # <exchange audience>) -- a SINGLE audience, which is why every
         # token's audience names the client that exchanges it next.
+        {{- if .Values.__delegation_external }}
+        # External-issuer mode: the delegate step is issuer-conditional.
+        # SSO-issuer tokens (claim.iss matching an identity.oidcIssuers
+        # entry) go to the jwt-typed external delegator; everything else
+        # (local Keycloak) keeps the verified internal delegator. The two
+        # predicates are exact complements, so exactly one delegation runs.
+        # when:/do: SYNTAX verified against the v0.3.1 parser source
+        # (Effect::When; Delegate effects pass through step_to_top_level_effect);
+        # RUNTIME behavior on the pinned image is UNVERIFIED -- spike it via
+        # the chart README "External-issuer A->H exchange" before relying on
+        # it, and re-verify claim.iss visibility (same claim.* bag as the
+        # verified claim.azp predicate above).
+        {{- $iss := list }}{{ range .Values.__delegation_external.issuers }}{{ $iss = append $iss (printf "claim.iss == '%s'" .) }}{{ end }}
+        {{- $ext := join " | " $iss }}
+        - when: {{ $ext | quote }}
+          do: {{ printf "delegate(%s, target: %s, audience: %s)" .Values.__delegation_external.plugin .Values.__delegation.target .Values.__delegation.audience | quote }}
+        - when: {{ printf "!(%s)" $ext | quote }}
+          do: {{ printf "delegate(%s, target: %s, audience: %s)" .Values.__delegation.plugin .Values.__delegation.target .Values.__delegation.audience | quote }}
+        {{- else }}
         - {{ printf "delegate(%s, target: %s, audience: %s)" .Values.__delegation.plugin .Values.__delegation.target .Values.__delegation.audience | quote }}
+        {{- end }}
         {{- end }}
