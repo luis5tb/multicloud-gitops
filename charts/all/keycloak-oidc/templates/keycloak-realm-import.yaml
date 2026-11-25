@@ -216,6 +216,16 @@ spec:
     realm: {{ .Values.keycloak.realm | quote }}
     enabled: true
     displayName: {{ .Values.keycloak.displayName | quote }}
+    {{- if .Values.keycloak.realmEvents.enabled }}
+    # Realm event storage: scripts/monitor.sh --kc reads LOGIN/TOKEN_EXCHANGE
+    # events as the authoritative record of every token grant in the chain.
+    # Without eventsEnabled the feed is structurally empty (the monitor's
+    # kc_probe says so). jboss-logging also keeps grants in the Keycloak log.
+    eventsConfig:
+      eventsEnabled: true
+      eventsListeners:
+        - jboss-logging
+    {{- end }}
     groups:
       {{- $groupNames := list }}
       {{- if .Values.keycloak.adminGroupName }}

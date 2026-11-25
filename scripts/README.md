@@ -254,13 +254,25 @@ Send a chat message through the ACME UI. Expect, in order:
    the Keycloak event is the authoritative copy; a delegator log copy is
    suppressed once Keycloak confirms it.
 4. `ADAPTER AGENTICRUN` (created as the caller with H), `TOKEN EXCHANGE H ──▶ R`,
-   `ADAPTER RUN-TOKEN SECRET` (R in `ls-run-token-<uid>`).
+   `ADAPTER RUN-TOKEN SECRET (stored)` (R in `ls-run-token-<uid>`). The adapter
+   logs the Secret's *deletion* but never its creation or the H→R exchange, so
+   these two cards come from the runcred watcher (`oc get secrets -w` in the
+   hub namespace) and/or the Keycloak event — never from an adapter log line.
 5. `OPERATOR: GATEWAY CREDENTIAL MODE` / `OPERATOR SANDBOX` — explicitly no
-   exchange.
+   exchange. Reconcile-loop churn (`reconciling`, `already in progress,
+   waiting`, repeated `handling <phase>`) is silent: it carried no signal and
+   buried the real events.
 6. `PRAXIS SPOKE ROUTE` and `TOKEN EXCHANGE R ──▶ U` per kube call; with
    `--api`, `API IDENTITY` shows `keycloak:<sub>` and RBAC denials.
-7. An `ACME TOKEN RENEWAL` if a token was refused; the adapter's
+7. An `ACME TOKEN RENEWAL` if a token was refused (`HTTP 401`) or MAS paused
+   the ongoing task (`task auth-required`, near-expiry A — a resume of the
+   same task, not a new request); the adapter's
    `ADAPTER PAUSED: auth-required` is the hub half of the same renewal.
+
+The Keycloak feed needs **realm events enabled** (Realm settings → Events →
+Save events; the realm import sets `keycloak.realmEvents.enabled`). With
+events off, `--kc` is structurally empty — the monitor's probe line says so
+at startup.
 
 MAS requests are long-running: one `POST /a2a/jsonrpc` was observed taking
 122 s, and an investigation can run for minutes — `MAS A2A INBOUND` appears
@@ -273,11 +285,11 @@ only when the request completes.
 | `bash scripts/monitor.sh` / `--join` | ACME, MAS A2A, worker, Praxis (hub+spokes), adapter, operator, Keycloak events |
 | `--acme` / `--mas` / `--worker` | that hop only |
 | `--praxis` | hub gateway + every spoke gateway |
-| `--hub` | lightspeed-hub adapter + agentic operator |
+| `--hub` | lightspeed-hub adapter + agentic operator + the `ls-run-token-*` Secret watch |
 | `--kc` | Keycloak realm events only (authoritative exchanges) |
 | `--api` | OCP API server rejects (cluster-admin; not in the default join) |
 | `--no-kc` | skip the Keycloak feed |
-| `--since 10m` | start from logs of the last 10m (`oc --since`) |
+| `--since 10m` | start from logs of the last 10m (`oc --since`; default `1s` = attach from now — `0s` would replay ALL retained logs) |
 | `--endpoint` | print namespaces/selectors and exit (works without a cluster) |
 
 Filter one request after copying an id from a card:

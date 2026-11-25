@@ -40,6 +40,13 @@ keycloak:
   # realm is first created; on an existing realm set Clients > acme-agent >
   # Advanced > Access Token Lifespan.
   acmeAccessTokenLifespanSeconds: ""
+  # Store realm events (LOGIN, TOKEN_EXCHANGE, ...) so scripts/monitor.sh
+  # --kc can show every token grant — the authoritative record the monitor
+  # reads (its Keycloak poller). Without it the feed sees nothing. Applies on
+  # realm creation only; on an existing realm flip Realm settings > Events >
+  # Save events (or PUT /admin/realms/<realm>/events/config).
+  realmEvents:
+    enabled: true
   # Dedicated group for calls attributed to acme-agent -- named
   # <caller>-<callee> (not just "acme-agent") so it reads as
   # "acme-agent's rights in the RCA realm", not acme-agent's rights in

@@ -90,7 +90,8 @@ class MonitorHarness:
             done
             """
         )
-        env = dict(os.environ, STATE=self.state.name, RID=request_id, LIB=str(LIB))
+        env = dict(os.environ, STATE=self.state.name, RID=request_id, LIB=str(LIB),
+                   TZ="UTC")
         payload = "\n".join(f"{src}|{line}" for src, line in lines) + "\n"
         proc = subprocess.run(
             ["bash", "-c", script], input=payload, capture_output=True,
@@ -163,6 +164,25 @@ class MonitorReplayTest(unittest.TestCase):
         self.assertIn("ERROR   : invalid_client", out)
         self.assertIn("Keycloak refused the grant", out)
 
+    def test_client_login_mint_cards_and_event_ids_dedupe_refetches(self) -> None:
+        """client_credentials grants arrive as CLIENT_LOGIN (live 2026-11-25).
+
+        The poller's 30 s lookback re-fetches events, so every event carries
+        Keycloak's unique id and a re-fetch must not re-card (nor print a
+        "confirmed" corroboration for an already-carded exchange).
+        """
+        mint = json.dumps({"type": "CLIENT_LOGIN", "clientId": "acme-agent",
+                           "userId": SUB, "details": {"grant_type": "client_credentials"},
+                           "time": 1763632809000, "id": "ev-mint-1"})
+        exch = json.dumps({"type": "TOKEN_EXCHANGE", "clientId": "mas-a2a",
+                           "userId": SUB, "details": {"audience": "lightspeed-hub-a2a"},
+                           "time": 1763632810000, "id": "ev-exch-1"})
+        out = self.monitor.run([("kc", mint), ("kc", mint), ("kc", exch), ("kc", exch)])
+        self.assertEqual(out.count("KEYCLOAK MINT A"), 1)
+        self.assertIn("GRANT   : client_credentials", out)
+        self.assertEqual(out.count("TOKEN EXCHANGE A ──▶ H"), 1)
+        self.assertNotIn("hop already carded", out)
+
     def test_mint_event_reports_the_authenticating_client(self) -> None:
         out = self.monitor.run([
             ("kc", kc_event("LOGIN", "acme-agent", grant="client_credentials")),
@@ -224,6 +244,73 @@ class MonitorReplayTest(unittest.TestCase):
         self.assertIn("OPERATOR: GATEWAY CREDENTIAL MODE", out)
         self.assertIn("NO EXCHANGE (by design)", out)
         self.assertIn("tokenFile = mounted R", out)
+
+    def test_praxis_timestamp_survives_ansi_wrapping(self) -> None:
+        """Praxis wraps even its leading timestamp in ANSI escapes.
+
+        The strip used to run AFTER stamp extraction, so the anchored
+        timestamp regex never matched and every praxis card fell back to
+        "~" receipt time (cross-hop order unreadable).
+        """
+        out = self.monitor.run([
+            ("praxis", "[praxis-proxy/praxis-proxy-7d9c-x2:praxis] \x1b[2m2026-11-20T10:00:08Z\x1b[0m"
+                       " \x1b[34mDEBUG\x1b[0m praxis_filter: route matched path=/a2a cluster=hub-adapter"),
+        ])
+        self.assertIn("PRAXIS HUB ROUTE [10:00:08]", out)
+        self.assertNotIn("PRAXIS HUB ROUTE [~", out)
+
+    def test_praxis_identity_plugin_internals_are_silent(self) -> None:
+        """The plugin's module name contains "jwt" — not a denial.
+
+        Live 2026-11-25: JWKS refreshes and claim-map misses carded as bare
+        "PRAXIS" noise because the denial matcher had an unanchored `jwt`.
+        """
+        out = self.monitor.run([
+            ("praxis", "[praxis-proxy/praxis-proxy-7d9c-x2:praxis] 2026-11-25T10:57:51Z "
+                       "INFO praxis_policy_plugin_identity_jwt::resolver: "
+                       "refreshed JWKS on demand plugin=jwt-client"),
+            ("praxis", "[praxis-proxy/praxis-spoke-hub-6b8-zz:praxis] 2026-11-25T10:57:51Z "
+                       "DEBUG praxis_policy_plugin_identity_jwt::configured_mapper: "
+                       'claim map: no candidate resolved for these fields fields=["roles"]'),
+        ])
+        self.assertNotIn("┌─", out)
+
+    def test_runcred_secret_appearance_cards_h_to_r_and_dedupes(self) -> None:
+        """The Secret watcher is the only witness of "exchange H→R + write".
+
+        The adapter never logs the Secret's creation (only its deletion), so
+        `oc get secrets -w` rows must card the exchange and the store — once,
+        because the watch reprints rows on every change.
+        """
+        row = "ls-run-token-db01da4d-93b3-4789-836c-3a101079b160 2026-11-25T07:27:44Z"
+        out = self.monitor.run([("runcred", row), ("runcred", row)])
+        self.assertEqual(out.count("ADAPTER RUN-TOKEN SECRET (stored)"), 1)
+        self.assertIn("ADAPTER RUN-TOKEN SECRET (stored) [07:27:44]", out)
+        self.assertIn("ls-run-token-db01da4d-93b3-4789-836c-3a101079b160", out)
+        # The Secret's existence proves the H→R exchange happened.
+        self.assertIn("TOKEN EXCHANGE H ──▶ R", out)
+        self.assertIn("run-token Secret appeared", out)
+
+    def test_operator_reconcile_churn_is_silent_and_phases_dedupe(self) -> None:
+        """Framework requeue spam must not bury the real operator events.
+
+        Live 2026-11-25: ~15 near-identical OPERATOR SANDBOX cards per run
+        (reconciling / handling analysis / already in progress, waiting).
+        """
+        base = ('[lightspeed-hub/lightspeed-hub-agentic-operator-1:manager] '
+                '2026-11-25T07:27:4{}Z\tDEBUG\t{}\t{{"controller": "agenticrun", '
+                '"AgenticRun": {{"name":"a2a-71bfcaaafe0f87b23574e06aa33089c233dfd6a1"}}, '
+                '"reconcileID": "ae5d2592-51fb-4ccf-ab63-7a92ef7621e0"}}')
+        out = self.monitor.run([
+            ("operator", base.format(4, "reconciling")),
+            ("operator", base.format(4, "handling analysis")),
+            ("operator", base.format(4, "analysis already in progress, waiting")),
+            ("operator", base.format(6, "handling analysis")),
+        ])
+        # Churn is gone entirely; the phase transition cards exactly once.
+        self.assertNotIn("reconciling", out)
+        self.assertNotIn("already in progress", out)
+        self.assertEqual(out.count("OPERATOR SANDBOX"), 1)
 
     def test_duplicate_exchange_card_is_suppressed_when_keycloak_confirms(self) -> None:
         # Normal delivery order: Keycloak's event reaches the monitor first.
@@ -329,8 +416,32 @@ class MonitorReplayTest(unittest.TestCase):
         ])
         self.assertIn("ACME TOKEN RENEWAL", out)
         self.assertIn(f"{fp(A)} ──▶ {fp(H)}", out)
+        # A 401 renewal is a refusal: the card must say so.
+        self.assertIn("downstream refused the current token", out)
         # A renewal is not an A→H exchange: no exchange card may claim it.
         self.assertNotIn("TOKEN EXCHANGE A ──▶ H", out)
+
+    def test_auth_required_renewal_is_a_task_resume_not_a_refusal(self) -> None:
+        """MAS pausing an ongoing task (near-expiry A) must not read as a 401.
+
+        The reason value also carries spaces ("task auth-required"); an
+        \\S+ matcher truncated it to "task" and the card hardcoded the
+        refusal text, which made a routine mid-task renewal look like the
+        request had been rejected and re-sent.
+        """
+        out = self.monitor.run([
+            ("acme", f'2026-11-20 10:00:01,000 INFO [acme] acme_audit request_id=r1 '
+                     f'actor=acme-agent action="mint Keycloak Token A" outcome=ok token={fp(A)}'),
+            ("acme", f'2026-11-20 10:00:02,000 INFO [acme] acme_audit request_id=r1 '
+                     f'action="renew Token A" outcome=ok reason=task auth-required '
+                     f'renewed_from={fp(A)} token={fp(H)} source=minted override=-'),
+        ])
+        self.assertIn("ACME TOKEN RENEWAL", out)
+        # Full multi-word reason, not just its first word.
+        self.assertIn("REASON  : task auth-required", out)
+        self.assertIn("MAS paused the ongoing task", out)
+        self.assertIn("resumes the SAME task", out)
+        self.assertNotIn("downstream refused the current token", out)
 
     def test_public_readiness_probes_are_silent_on_every_hop(self) -> None:
         out = self.monitor.run([
@@ -437,7 +548,7 @@ class KeycloakFeedTest(unittest.TestCase):
                 'case "$args" in\n'
                 "  *\"/protocol/openid-connect/token\"*) echo '{\"access_token\":\"ADMIN-TOKEN\"}' ;;\n"
                 "  *\"events/config\"*) echo '{\"eventsEnabled\":true,\"enabledEventTypes\":[\"TOKEN_EXCHANGE\"]}' ;;\n"
-                "  *\"admin-events\"*)\n"
+                "  *\"/events\"*)\n"
                 "    now=$(date +%s%3N)\n"
                 "    printf '[{\"type\":\"TOKEN_EXCHANGE\",\"clientId\":\"praxis-spoke-gateway\",\"userId\":\"U1\",\"details\":{\"audience\":\"praxis-spoke-hub\"},\"time\":%d},"
                 "{\"type\":\"TOKEN_EXCHANGE\",\"clientId\":\"lightspeed-hub-a2a\",\"userId\":\"U1\",\"details\":{\"audience\":\"praxis-spoke-gateway\"},\"time\":%d},"

@@ -61,7 +61,10 @@ set -euo pipefail
 # parser without touching a cluster; tests/scripts/test_monitor.py does this.
 MONITOR_LIB="${MONITOR_LIB:-0}"
 
-SINCE="${MONITOR_SINCE:-0s}"
+# `--since=0s` does NOT mean "now" — kubectl/oc treat it as "no limit" and
+# replay every retained log line, burying the live flow under history. 1s
+# means "newer than one second": attach from now.
+SINCE="${MONITOR_SINCE:-1s}"
 FILTER_REQ="${REQUEST_ID:-}"
 MODE="all"
 WANT_KC=1
@@ -513,6 +516,12 @@ parse_line() {
     fi
   fi
 
+  # Colour codes must be gone before ANY matcher or the stamp runs — Praxis
+  # wraps even its leading timestamp in escapes ("^<esc>[2m2026-…"), so an
+  # anchored timestamp regex run before this strip never matched and every
+  # praxis card fell back to "~" receipt time.
+  line=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$line")
+
   # Prefer the POD'S OWN timestamp from the line over the monitor's
   # receipt time: each hop is a separate `oc logs -f` pipeline whose
   # delivery latency differs, so receipt-time ordering interleaves
@@ -547,9 +556,6 @@ parse_line() {
   if [[ -n "$FILTER_REQ" ]] && ! grep -qF "$FILTER_REQ" <<<"$line"; then
     return 0
   fi
-  # Colour codes must be gone before any matcher runs — including the
-  # metadata pass, because Praxis embeds escapes around field names.
-  line=$(sed 's/\x1b\[[0-9;]*m//g' <<<"$line")
   metadata_prepass "$src" "$line"
   # Which log stream is this, from the identity model's point of view? The
   # caller names ACME/MAS/worker; Praxis is split by pod into hubgw/spoke;
@@ -617,6 +623,12 @@ parse_line() {
     return 0
   fi
 
+  # ── run-token Secret watch (see parse_runcred) ──────────────────────────
+  if [[ "$src" == "runcred" ]]; then
+    parse_runcred "$line" "$ts"
+    return 0
+  fi
+
   # ── OCP API server: bearer-token OIDC rejects (needs --api + cluster-admin)
   # ─
   if [[ "$src" == "api" ]]; then
@@ -649,7 +661,9 @@ parse_acme() {
   token=$(grep -oP ' token=\K\S+' <<<"$line" || true)
   source=$(grep -oP ' source=\K\S+' <<<"$line" || true)
   renewed_from=$(grep -oP 'renewed_from=\K\S+' <<<"$line" || true)
-  reason=$(grep -oP ' reason=\K\S+' <<<"$line" || true)
+  # renewal.py reasons carry spaces ("task auth-required"): capture up to the
+  # next key=value pair, not just the first word.
+  reason=$(grep -oP ' reason=\K.*?(?= \w+=|$)' <<<"$line" || true)
   token_exp=$(grep -oP ' exp=\K\S+' <<<"$line" || true)
 
   # A renewal is not a mint-to-dispatch cycle: the SAME request is retried
@@ -668,10 +682,21 @@ parse_acme() {
     fi
     printf "\n${Y}┌─ ACME TOKEN RENEWAL [${ts}]${N} ${D}$(token_tag A)${N}\n"
     if [[ "$outcome" == "ok" ]]; then
+      # renewal.py has exactly two causes: "HTTP 401" (a real downstream
+      # refusal) and "task auth-required" (MAS paused the ONGOING task because
+      # the credential is nearly invalid — not a refusal; the follow-up POST
+      # resumes the same A2A task). One text for both made a routine
+      # mid-task renewal look like a rejected request.
+      local cause="downstream refused the current token"
+      local tail="resends the SAME request on the fresh A; sub is unchanged"
+      if [[ "$reason" == *auth-required* ]]; then
+        cause="MAS paused the ongoing task (credential nearly invalid)"
+        tail="resumes the SAME task on the fresh A; sub is unchanged — not a new request"
+      fi
       printf "${Y}│${N} ${D}WHO     :${N} ACME ${D}mints a fresh A as itself (same workload identity)${N}\n"
-      printf "${Y}│${N} ${D}REASON  :${N} ${reason:-?} ${D}— downstream refused the current token${N}\n"
-      printf "${Y}│${N} ${D}TOKEN   :${N} ${renewed_from:-?} ${D}──▶${N} ${W}${token:-?}${N} ${D}(refused → fresh)${N}\n"
-      printf "${Y}└─ resends the SAME request on the fresh A; sub is unchanged${N}\n"
+      printf "${Y}│${N} ${D}REASON  :${N} ${reason:-?} ${D}— ${cause}${N}\n"
+      printf "${Y}│${N} ${D}TOKEN   :${N} ${renewed_from:-?} ${D}──▶${N} ${W}${token:-?}${N} ${D}(old → fresh)${N}\n"
+      printf "${Y}└─ ${tail}${N}\n"
       check_ip acme "$ts" "${token#fp:}"
       flag_identity acme "$ts" "${token#fp:}" "$IP_STATUS"
     else
@@ -1106,7 +1131,14 @@ parse_praxis() {
     printf "${D}└─${N}\n"
     return 0
   fi
-  if grep -qiE 'deny|reject|unauthorized|jwt|forbidden|403|401' <<<"$line"; then
+  # Routine identity-plugin internals: the module name contains "jwt", so the
+  # old unanchored `jwt` keyword carded every JWKS refresh and claim-map miss
+  # as if it were a denial (live: several noise cards per request). Only
+  # actual denial vocabulary cards; the plugin's own lines are skipped.
+  if grep -qiE 'refreshed JWKS|claim map: no candidate|praxis_policy_plugin_identity_jwt::' <<<"$line"; then
+    return 0
+  fi
+  if grep -qiE 'deny|reject|unauthorized|forbidden|403|401' <<<"$line"; then
     printf "\n${B}┌─ PRAXIS [${ts}] ${D}(${who})${N}\n"
     printf "${B}│${N} %s\n" "$(trunc "$line" 160)"
     printf "${B}└─${N}\n"
@@ -1262,11 +1294,68 @@ report_adapter_identity() {
   flag_identity adapter "$ts" "$fp" "$IP_STATUS"
 }
 
+# ── run-token Secret watcher (ls-run-token-* in the hub namespace) ──────────
+# The adapter logs the Secret's DELETION ("deleted run-token Secret after
+# terminal grace") but never its creation — there is no log line for the
+# H→R exchange or the Secret write (verified live 2026-11-25). The kube API
+# is the remaining witness: `oc get secrets -w` in the hub namespace. A new
+# ls-run-token-* row proves steps 2+3 of the adapter sequence (exchange H→R,
+# write the Secret) succeeded, and cards the H→R exchange when Keycloak
+# events are unavailable.
+parse_runcred() {
+  local line="$1" ts="$2"
+  local name created
+  name=$(awk '{print $1}' <<<"$line" || true)
+  created=$(awk '{print $2}' <<<"$line" || true)
+  [[ "$name" == ls-run-token-* ]] || return 0
+  # `oc get -w` reprints a row on every change: card each Secret once.
+  if [[ "$(kv_get "runcred_${name}")" == "1" ]]; then
+    return 0
+  fi
+  kv_set "runcred_${name}" "1"
+  # creationTimestamp is the event time (UTC), not the watch's receipt time.
+  if [[ "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2} ]]; then
+    ts=$(date -d "${created:0:19}Z" +%H:%M:%S 2>/dev/null || printf '%s' "$ts")
+    ts="${ts#\~}"
+  fi
+  if ! exchange_seen "H>R"; then
+    record_exchange H R "lightspeed-hub-a2a" "praxis-spoke-gateway" \
+      "lightspeed-hub adapter (run-token Secret appeared)" "$ts"
+  fi
+  printf "\n${M}┌─ ADAPTER RUN-TOKEN SECRET (stored) [${ts}]${N} ${D}$(token_tag R)${N}\n"
+  printf "${M}│${N} ${D}WHO     :${N} adapter (SA) ${W}stored${N} R ${D}into the Secret (not A, not H)${N}\n"
+  printf "${M}│${N} ${D}WHERE   :${N} ${W}${name}${N} ${D}key token-a (operator's contract)${N}\n"
+  printf "${M}│${N} ${D}WHY R   :${N} ${D}only the spoke gateway accepts R; H/A are dead past the adapter${N}\n"
+  printf "${M}└─ steps 2+3 of the adapter sequence succeeded (exchange H→R, write)${N}\n"
+  return 0
+}
+
 # ── lightspeed-agentic-operator (gateway credential mode) ────────────────────
 # The operator's job in this chain is explicit: mount the stored credential and
 # run the sandbox. It performs NO token exchange and holds NO caller token.
 parse_operator() {
   local line="$1" ts="$2"
+  # Reconcile-loop churn: the controller re-queues constantly, so "reconciling"
+  # and "analysis already in progress, waiting" repeat many times per run with
+  # zero new information (observed live: ~15 near-identical OPERATOR SANDBOX
+  # cards per run buried the actual events). Drop them outright; "handling
+  # <phase>" carries phase information, so it is kept but deduped per
+  # run+phase — the transition cards exactly once.
+  if grep -qE '(DEBUG|INFO)[[:space:]]+reconciling' <<<"$line"; then
+    return 0
+  fi
+  if grep -q 'already in progress, waiting' <<<"$line"; then
+    return 0
+  fi
+  if [[ "$line" =~ handling[[:space:]]+(analysis|execution) ]]; then
+    local rname phase
+    rname=$(grep -m1 -oP 'a2a-[0-9a-f]+' <<<"$line" || true)
+    phase="${BASH_REMATCH[1]}"
+    if [[ -n "$rname" && "$(kv_get "op_${rname}_${phase}")" == "1" ]]; then
+      return 0
+    fi
+    [[ -n "$rname" ]] && kv_set "op_${rname}_${phase}" "1"
+  fi
   if grep -qiE 'gateway credential mode|credential mode' <<<"$line"; then
     printf "\n${G}┌─ OPERATOR: GATEWAY CREDENTIAL MODE [${ts}]${N}\n"
     printf "${G}│${N} ${D}WHO     :${N} the operator's own ServiceAccount (no caller token)${N}\n"
@@ -1394,6 +1483,7 @@ sys.stdout.write("\x1f".join([
     g("grant_type"),
     str(ev.get("error") or details.get("error") or ""),
     g("username", "auth_method", "client_auth_method"),
+    str(ev.get("id") or ""),
 ]) + "\x1f")
 PY
 )
@@ -1402,13 +1492,23 @@ PY
   # collapses EMPTY fields, which silently shifted grant_type into the
   # audience slot whenever a field (sessionId, audience, grant_type) was
   # absent. 0x1f cannot occur in these values.
-  local type client user session aud grant err extra
+  local type client user session aud grant err extra evid
   local -a fields=()
   IFS=$'\x1f' read -r -a fields <<<"$out"
   type="${fields[0]:-}" client="${fields[1]:-}" user="${fields[2]:-}"
   session="${fields[3]:-}" aud="${fields[4]:-}" grant="${fields[5]:-}"
-  err="${fields[6]:-}" extra="${fields[7]:-}"
+  err="${fields[6]:-}" extra="${fields[7]:-}" evid="${fields[8]:-}"
   [[ -z "$type" ]] && return 0
+  # The poller's lookback deliberately overlaps previous windows, so the same
+  # event can be fetched twice. Keycloak gives every event a unique id; a
+  # re-fetch of a known id must not re-card (fake events without an id, such
+  # as the replay tests', always pass through).
+  if [[ -n "$evid" ]]; then
+    if [[ "$(kv_get "kcev_${evid}")" == "1" ]]; then
+      return 0
+    fi
+    kv_set "kcev_${evid}" "1"
+  fi
   # The event's own time is the truth for ordering; the emitted line has no
   # log timestamp of its own.
   local evtime
@@ -1432,9 +1532,11 @@ PY
         praxis-spoke-gateway) stage="R → U"; who="praxis spoke gateway";;
         *)                   stage="exchange by ${client:-?}"; who="unclassified";;
       esac ;;
-    LOGIN|LOGIN_ERROR)
-      # In this chain a LOGIN for a workload client is a client_credentials
-      # grant (the "CODE_TO_TOKEN"/"LOGIN" type Keycloak reports for it).
+    # Live (2026-11-25, Keycloak 26): a workload client's client_credentials
+    # grant is reported as CLIENT_LOGIN (never LOGIN) with
+    # details.grant_type=client_credentials — including acme-agent's
+    # SPIFFE client_assertion mint ("federated-jwt" auth method).
+    LOGIN|LOGIN_ERROR|CLIENT_LOGIN|CLIENT_LOGIN_ERROR)
       if [[ "${err:-}" == "" && "$grant" == "client_credentials" ]]; then
         stage="mint"; who="${client:-?}"
         [[ "$client" == "acme-agent" ]] && stage="mint A"
@@ -1461,9 +1563,14 @@ PY
     # Keycloak is authoritative. If a pod already reported this exchange,
     # say so instead of emitting a second, thinner card for the same grant.
     if exchange_seen "${stage%% *}>${stage##* }"; then
-      printf "\n${D}┌─ KEYCLOAK confirmed ${stage} [${ts}] ${D}(already carded from a pod log)${N}\n"
-      printf "${D}│${N} ${D}CLIENT  :${N} ${W}${client:-?}${N}  ${D}AUDIENCE:${N} ${W}${aud:-?}${N}\n"
-      printf "${D}└─ the pod's account of the exchange is corroborated by Keycloak${N}\n"
+      # Recurring exchanges (the sandbox makes one R→U per spoke API call)
+      # each used to print a full confirmation line; one is enough.
+      if [[ "$(kv_get "kc_confirmed_${stage%% *}_${stage##* }")" != "1" ]]; then
+        kv_set "kc_confirmed_${stage%% *}_${stage##* }" "1"
+        printf "\n${D}┌─ KEYCLOAK confirmed ${stage} [${ts}]${N} ${D}(hop already carded)${N}\n"
+        printf "${D}│${N} ${D}CLIENT  :${N} ${W}${client:-?}${N}  ${D}AUDIENCE:${N} ${W}${aud:-?}${N}\n"
+        printf "${D}└─ later grants for the same hop corroborate it silently${N}\n"
+      fi
       return 0
     fi
     record_exchange "${stage%% *}" "${stage##* }" "$client" "${aud:-?}" "Keycloak event (${who})" "$ts" "$user" "" ""
@@ -1508,12 +1615,20 @@ kc_curl() {
 # (the RHBK operator puts Keycloak behind keycloak.<apps domain>).
 kc_base_url() {
   if [[ -n "${KC_URL:-}" ]]; then printf '%s' "$KC_URL"; return 0; fi
+  # Prefer the Route the keycloak-oidc chart actually created. Deriving from
+  # the API server host guesses "keycloak.<domain>" — the route is
+  # "keycloak.apps.<domain>", so the guessed name does not resolve and the
+  # feed dies at DNS with only a stderr warning (observed live: the feed
+  # never produced a card although every hop was healthy).
   local host=""
-  host=$(oc get kubeconfig -o json 2>/dev/null \
-    | grep -oP '"server":\s*"\K[^"]+' | head -1 || true)
-  [[ -z "$host" ]] && host=$(oc whoami --show-server 2>/dev/null || true)
-  host="${host#https://}"; host="${host%%/*}"; host="${host%%:*}"
-  [[ -n "$host" ]] && printf 'https://keycloak.%s' "${host#api.}"
+  host=$(oc get routes -n "$NS_KC" -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' 2>/dev/null \
+    | grep -m1 -i keycloak || true)
+  if [[ -z "$host" ]]; then
+    host=$(oc whoami --show-server 2>/dev/null || true)
+    host="${host#https://}"; host="${host%%/*}"; host="${host%%:*}"
+    [[ -n "$host" ]] && host="keycloak.${host#api.}"
+  fi
+  [[ -n "$host" ]] && printf 'https://%s' "$host"
 }
 
 # admin-cli password grant with the Secret the keycloak-oidc chart keeps
@@ -1535,9 +1650,14 @@ kc_admin_token() {
     | python3 -c 'import json,sys;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null
 }
 
-# Emit admin events newer than $3 (epoch ms) as one JSON object per line,
+# Emit realm events newer than $3 (epoch ms) as one JSON object per line,
 # oldest first, page by page. Keycloak returns newest first with no cursor, so
 # this re-reads the recent window and filters by time (+ id, in the caller).
+#
+# TOKEN_EXCHANGE / LOGIN / CLIENT_LOGIN grants are LOGIN events: they are
+# served by /admin/realms/<realm>/events. The previous version queried
+# /admin-events (admin API operations — client creates, role mappings), which
+# can never contain a token grant; the feed was empty by construction.
 #
 # `timeout` execs a PROGRAM, so the curl call runs inside bash -c with the
 # helper's own definition available ("timeout 25 kc_curl ..." fails: not a
@@ -1549,7 +1669,7 @@ kc_events_since() {
       '"$(declare -f kc_curl)"'
       kc_curl --max-time 20 -H "Authorization: Bearer $token" "$url"
     ' _ "${KC_CA:-}" "$token" \
-    "$base/admin/realms/$KC_REALM/admin-events?max=500" \
+    "$base/admin/realms/$KC_REALM/events?max=500" \
     | python3 -c '
 import json, sys
 since = int(sys.argv[1])

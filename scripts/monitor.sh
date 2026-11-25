@@ -26,7 +26,7 @@
 #   bash scripts/monitor.sh --kc            # Keycloak realm events only (AUTHORITATIVE)
 #   bash scripts/monitor.sh --api           # OCP API server token rejects (cluster-admin)
 #   bash scripts/monitor.sh --join          # all hops except --api (default)
-#   bash scripts/monitor.sh --since 10m     # oc --since (default: 0s = now)
+#   bash scripts/monitor.sh --since 10m     # oc --since (default: 1s = attach from now)
 #   bash scripts/monitor.sh --no-kc         # skip the Keycloak event feed
 #   bash scripts/monitor.sh --endpoint      # print every log source, then exit
 #   REQUEST_ID=abc123 bash scripts/monitor.sh --join   # filter one request id
@@ -89,7 +89,14 @@ follow() {
   # re-attach from "now".
   local since="$SINCE"
   while (( RUNNING )); do
-    oc logs -n "$ns" -l "$sel" -f --since="$since" --prefix=true --all-containers=true 2>/dev/null \
+    # --max-log-requests: a label that matches many containers (praxis-proxy
+    # matches the hub gateway + every spoke + the CA-sync Jobs, 8+ streams)
+    # exceeds `oc logs -f`'s default concurrency of 5. The client then prints
+    # an error on stderr (discarded below) and HANGS — the hop goes dark with
+    # no warning and no reattach (observed live: the praxis hop never printed
+    # a single card while its pods logged normally).
+    oc logs -n "$ns" -l "$sel" -f --since="$since" --prefix=true --all-containers=true \
+        --max-log-requests=20 2>/dev/null \
       | while IFS= read -r line; do
           parse_line "$name" "$line"
         done
@@ -107,11 +114,31 @@ follow() {
   done
 }
 
+# ── run-token Secret watcher ─────────────────────────────────────────────────
+# The adapter never logs the run-token Secret's creation (only its deletion),
+# so the kube API is the only witness of "H→R exchange + Secret write". Watch
+# the hub namespace's Secrets and hand rows to parse_runcred. The initial
+# listing repeats rows for Secrets that already exist; parse_runcred cards
+# each name once. Needs list/watch on secrets in NS_HUB (any user who can
+# read the operator's logs normally has it).
+watch_run_secrets() {
+  while (( RUNNING )); do
+    oc get secrets -n "$NS_HUB" -w --no-headers \
+      -o custom-columns=NAME:.metadata.name,CTS:.metadata.creationTimestamp 2>/dev/null \
+      | while IFS= read -r line; do
+          parse_line runcred "$line"
+        done
+    nap 5
+  done
+}
+
 # ── Keycloak event poller ───────────────────────────────────────────────────
-# The realm admin events are fetched in windows and handed to parse_line as
+# The realm's LOGIN/TOKEN_EXCHANGE events (the authoritative record of every
+# grant in the chain) are fetched in windows and handed to parse_line as
 # one JSON object per line (the same "one line = one event" contract the log
 # followers have). Nothing here prints a secret; the admin token stays in a
-# variable and is never echoed.
+# variable and is never echoed. Realm events must be ENABLED for this to see
+# anything (kc_probe reports the realm's switch; the realm import sets it).
 kc_follow() {
   local base token since now ev
   base=$(kc_base_url)
@@ -137,7 +164,12 @@ kc_follow() {
     while IFS= read -r ev; do
       [[ -n "$ev" ]] && parse_line kc "$ev"
     done < <(kc_events_since "$base" "$token" "$since")
-    since=$(( now - 1000 ))
+    # A 30 s lookback, not 1 s: events can appear in the store seconds after
+    # their `time` (observed live: the A mint and both chain exchanges were
+    # written late and a 1 s window had already marched past them — the feed
+    # skipped them forever). Re-fetches are deduped by event id in
+    # parse_kc_event, so the overlap cannot double-card.
+    since=$(( now - 30000 ))
     nap "$KC_POLL_SECONDS"
     # Re-authenticate occasionally: the admin token outlives a few polls but
     # not a long session.
@@ -178,7 +210,8 @@ praxis     ${NS_PRAXIS}  ${SEL_PRAXIS}
            (hub = the praxis-proxy pod; spokes = praxis-spoke-<id>)
 hub        ${NS_HUB}  ${SEL_HUB}
 operator   ${NS_OPERATOR}  ${SEL_OPERATOR}
-kc         ${NS_KC}  Secret ${KC_ADMIN_SECRET} → admin-events (realm ${KC_REALM})
+runcred    ${NS_HUB}  Secret watch: ls-run-token-* (creation has no log line)
+kc         ${NS_KC}  Secret ${KC_ADMIN_SECRET} → realm events (realm ${KC_REALM})
 kc         (KC_URL=https://keycloak.<cluster domain>; KC_CA for a private Route)
 api        ${NS_API}  ${SEL_API}  (needs cluster-admin)
 
@@ -215,6 +248,7 @@ case "$MODE" in
   praxis) follow praxis "$NS_PRAXIS" "$SEL_PRAXIS" ;;
   hub)    follow hub      "$NS_HUB"      "$SEL_HUB" &
           follow operator "$NS_OPERATOR" "$SEL_OPERATOR" &
+          watch_run_secrets &
           wait || true ;;
   kc)     kc_follow ;;
   api)    follow api    "$NS_API"    "$SEL_API" ;;
@@ -227,6 +261,7 @@ case "$MODE" in
     follow praxis "$NS_PRAXIS" "$SEL_PRAXIS" &
     follow hub      "$NS_HUB"      "$SEL_HUB" &
     follow operator "$NS_OPERATOR" "$SEL_OPERATOR" &
+    watch_run_secrets &
     [[ "$WANT_KC" == "1" ]] && kc_follow &
     # `wait` returns 128+signal when a follower is killed; that is shutdown,
     # not a failure of the monitor.

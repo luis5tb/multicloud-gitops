@@ -431,6 +431,58 @@ re-check each when the image is bumped.
   empty Keycloak event fields and shifted `grant_type` into the audience slot.
   `tests/scripts/test_monitor.py` replays each hop's line shape through the
   same parser the live monitor uses. *(found while wiring the Keycloak feed)*
+- **A renewal is not always a refusal.** The renewal card hardcoded
+  "downstream refused the current token" after whatever `reason=` said, and
+  the reason matcher (`\S+`) truncated `reason=task auth-required` to "task".
+  Hit live (2026-11-24, bm-cluster): one user question ran past Token A's
+  5-minute TTL, MAS paused the *ongoing* task (`TASK_STATE_AUTH_REQUIRED`,
+  mas-api `a2a.credentials_renewed`), and ACME's renewal transport resumed
+  the same task — the monitor made this routine mid-flight renewal read like
+  the request had been refused and re-sent, and (with a second inbound POST
+  card plus a fresh TOKEN A MINT) like a duplicate request. `renewal.py` has
+  exactly two causes — "HTTP 401" (real refusal) and "task auth-required"
+  (task pause) — and the card now distinguishes them; the replay test had
+  only ever used a single-word `reason=http_401` and asserted the card title,
+  not the cause text. Related reading of the same trace: several AgenticRuns
+  for one question are orchestration *rounds* (same `a2a.lightspeed.io/
+  context-id` on every run), here round 2 having been stopped by the
+  operator's `ToolResultSafetyInspectionFailed` and retried with a rephrased
+  prompt — not duplicates and not caused by the renewal.
+- **A dark hop is worse than a failing hop — and `oc logs -f` goes dark
+  silently past 5 streams.** The praxis selector matches the hub gateway,
+  both spokes and the CA-sync Jobs (8+ containers); `oc logs -f` refuses to
+  follow more than 5 streams by default, prints that error on stderr — which
+  `follow()` discards — and then HANGS. Result: the praxis hop never printed
+  one card while every other hop was healthy, and the whole A→H exchange /
+  spoke-routing story was invisible (mistaken for missing events, 2026-11-25).
+  `follow()` now passes `--max-log-requests=20`. Lesson: a follower whose
+  stream never produces anything should be suspect even when no warning
+  appears; test dark-hop behavior, not just happy-path parsing.
+- **The Keycloak feed never worked live, and nothing noticed.** Compounding
+  defects, each invisible alone: `kc_base_url` derived `keycloak.<domain>`
+  while the chart's Route is `keycloak.apps.<domain>` (DNS just fails); the
+  poller queried `/admin-events` (admin API operations) instead of `/events`
+  (login/token-exchange grants), so even with a working URL it was empty *by
+  construction*; realm events were disabled on the cluster; and the
+  1-second fetch window marched past events that appeared in the store a
+  few seconds late, skipping them forever. The fake-curl integration test
+  faked all four conditions away (right URL via KC_URL, a canned payload on
+  the admin-events pattern, events pre-enabled, single poll). It now derives
+  the URL from the actual Route, reads `/events`, and uses a 30 s lookback
+  deduped by event id — a `TOKEN_EXCHANGE` event cannot be fabricated in a
+  unit test: verify a feed against the real store before calling it
+  "authoritative". (Realm events are now enabled by the realm import, and
+  live on the bm-cluster realm.)
+- **`--since=0s` is not "now".** kubectl/oc treat a zero `--since` as "no
+  limit": every monitor start replayed the pods' entire retained history on
+  top of the live flow, which is why cards appeared out of order and long
+  before the request under investigation. The default is now `1s`.
+- **Some witnesses have no log line at all.** The adapter logs the run-token
+  Secret's deletion but never its creation (nor the H→R exchange), so no log
+  parser can ever show "the run is credentialed". The monitor now watches
+  `oc get secrets -w` in the hub namespace: a new `ls-run-token-*` row cards
+  the store AND records the H→R exchange. When a hop's log level cannot be
+  raised (pinned image), find the other witness — the kube API often is one.
 
 ## 10. Documentation process
 
