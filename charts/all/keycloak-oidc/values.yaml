@@ -251,6 +251,20 @@ keycloak:
     # before enabling.
     subjectTokenAudienceMapper: true
 
+  # Separate exchanger for the write-capable Execution path. It has the same
+  # per-spoke target audiences as the read gateway but an independent inbound
+  # audience/client secret, so an R token for analysis cannot be replayed at
+  # the execution gateway. Disabled until adapter/operator rollout is ready.
+  spokeGatewayExecExchanger:
+    enabled: false
+    clientId: praxis-spoke-gateway-exec
+    clientName: Praxis spoke execution-gateway token exchanger
+    vaultKey: ""
+    vaultProperty: praxis-spoke-gateway-exec-client-secret
+    targetNamespace: praxis-proxy
+    secretName: praxis-spoke-gateway-exec-client
+    spokeAudiences: []
+
   # TASK B / PHASE 1 H-SIDE WIRING (DISABLED BY DEFAULT): Keycloak
   # prerequisites for the hub A2A adapter's A->H token exchange
   # (charts/all/lightspeed-hub's adapter.keycloak.clientId; see
@@ -329,6 +343,12 @@ keycloak:
     # adapter.runTokenAudience. Empty = no run token (the adapter stores its
     # inbound token as-is).
     runTokenAudience: ""
+    # Execution token R_exec's audience. Kept distinct from runTokenAudience;
+    # Keycloak standard token exchange should return only the requested
+    # audience even though both audience mappers are configured on this
+    # client. Verify aud separation on the deployed Keycloak build before
+    # enabling the execution path.
+    executionTokenAudience: ""
     # Lifespan (seconds) of tokens this client exchanges -- i.e. R. Sized to
     # an AgenticRun step (e.g. "1800"); empty = realm default (300).
     runTokenLifespanSeconds: ""
@@ -396,6 +416,14 @@ keycloak:
     # Roles on each spoke audience client (what U may do on that spoke).
     spokeRoles:
       - reader
+    # Additional permissions are granted only to these groups. The hub
+    # exchanger projects hubRole into H; only the execution exchanger scopes
+    # spokeRole and can project it into U_exec. The read exchanger never
+    # scopes spokeRole.
+    remediation:
+      groups: []
+      hubRole: agenticrun-approver
+      spokeRole: writer
 
 openshiftOIDC:
   enabled: false

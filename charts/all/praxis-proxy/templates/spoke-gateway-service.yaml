@@ -1,6 +1,13 @@
 {{- range $key, $cfg := .Values.spokeGateways }}
-{{- $name := include "praxis-proxy.spokeGatewayName" $key }}
-{{- $gatewayLabels := dict "praxis-proxy.spoke-gateway" $key }}
+{{- $modes := list (dict "execution" false) }}
+{{- if $.Values.spokeGatewayConfig.execution.enabled }}{{- $modes = append $modes (dict "execution" true) }}{{- end }}
+{{- range $mode := $modes }}
+{{- $isExec := $mode.execution }}
+{{- $name := include "praxis-proxy.spokeGatewayModeName" (dict "key" $key "execution" $isExec) }}
+{{- $modeLabel := ternary "exec" "read" $isExec }}
+{{- $appName := include "praxis-proxy.name" $ }}
+{{- if $isExec }}{{- $appName = include "praxis-proxy.spokeGatewayExecAppName" $ }}{{- end }}
+{{- $gatewayLabels := dict "praxis-proxy.spoke-gateway" $key "praxis-proxy.spoke-gateway-mode" $modeLabel }}
 ---
 apiVersion: v1
 kind: Service
@@ -24,9 +31,12 @@ spec:
   # main praxis-proxy Service).
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: {{ include "praxis-proxy.name" $ }}
+    app.kubernetes.io/name: {{ $appName }}
     app.kubernetes.io/instance: {{ $.Release.Name }}
-    {{- toYaml $gatewayLabels | nindent 4 }}
+    praxis-proxy.spoke-gateway: {{ $key }}
+    {{- if $isExec }}
+    praxis-proxy.spoke-gateway-mode: {{ $modeLabel | quote }}
+    {{- end }}
   ports:
     # Port/namespace/naming match repo C's generated sandbox kubeconfig
     # convention: https://{{ $name }}.praxis-proxy.svc.cluster.local:8443
@@ -35,4 +45,5 @@ spec:
       port: 8443
       targetPort: https
       protocol: TCP
+{{- end }}
 {{- end }}

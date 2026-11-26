@@ -4,8 +4,10 @@ This documents the full per-request authentication path from a user typing a
 message in the ACME agent's UI through to the MAS orchestrator and its
 downstream A2A agents. There is one Keycloak grant and one passthrough hop
 (ACME -> MAS -> Praxis) per request. When the downstream agent is the
-**lightspeed-hub** (cluster investigations), three RFC 8693 token exchanges
-follow, each minting a token for exactly the next hop (A -> H -> R -> U).
+**lightspeed-hub** (cluster investigations), the read-only path uses three
+RFC 8693 token exchanges (A -> H -> R -> U), each minting a token for exactly
+the next hop. Approved Execution adds a separate H -> R_exec -> U_exec path;
+that split is implemented but not live-verified.
 To watch a live request hop by hop — identities, each exchange, and on whose
 behalf — run `bash scripts/monitor.sh` (see
 [`scripts/README.md`](../scripts/README.md#flow-monitor)); the Keycloak
@@ -132,6 +134,8 @@ only lets a client exchange a token that names it in `aud`, and Praxis's
 | **H** | hub gateway, as `mas-a2a` | same | `mas-a2a` | `lightspeed-hub-a2a` | `lightspeed-hub-a2a:agenticrun-creator` | 300 s | adapter, hub kube API |
 | **R** | adapter, as `lightspeed-hub-a2a` | same | `lightspeed-hub-a2a` | `praxis-spoke-gateway` | none | 1800 s | spoke gateway only |
 | **U** | spoke gateway, as `praxis-spoke-gateway`, per call | same | `praxis-spoke-gateway` | `praxis-spoke-<id>` | `praxis-spoke-<id>:reader` | 300 s | spoke kube API |
+| **R_exec** [implemented; not live-verified] | adapter, as `lightspeed-hub-a2a`, after approval | same | `lightspeed-hub-a2a` | `praxis-spoke-gateway-exec` | gateway credential; group claims must be checked live | configured on `lightspeed-hub-a2a` | execution gateway only |
+| **U_exec** [implemented; not live-verified] | execution gateway, as `praxis-spoke-gateway-exec`, per call | same | `praxis-spoke-gateway-exec` | `praxis-spoke-<id>` | `praxis-spoke-<id>:writer` (+ `reader` if principal is in both groups) | 300 s | spoke kube API |
 
 ```mermaid
 sequenceDiagram
@@ -173,8 +177,10 @@ sequenceDiagram
 - The adapter never sees Token A, and A is useless past the hub gateway (it
   gets `401` at every kube API, as does R).
 - The run is created **as the caller** (H), not as the adapter's
-  ServiceAccount; the adapter's own SA only watches runs and manages the
-  run-token Secret.
+   ServiceAccount; the adapter's own SA watches runs and manages run-token
+   Secrets, and performs ownership-checked metadata/revision updates. Callers
+   do not receive `update` permission on AgenticRuns; see the adapter README
+   for the revision and attribution contract.
 - R exists so a long investigation survives A's and H's 5-minute lifetime: an
   exchanged token takes the **exchanging client's** `access.token.lifespan`
   (1800 s on `lightspeed-hub-a2a`), even past the subject token's expiry.
@@ -382,8 +388,9 @@ these breaks the flow -- see that chart's README for the exact rationale.
 | `openshift-console` | confidential | Web console | Registered as the `console` OIDC platform client. Needs the `groups` protocol mapper (see Troubleshooting) or RBAC group membership never reaches the console. |
 | `acme-agent` | confidential | acme-agent | Client-credentials-style grant authenticated with acme-agent's own SPIFFE JWT-SVID (`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-spiffe`) instead of a static secret. Its service account belongs to the `acme-agent-rca` group, so its tokens carry a `groups` claim RBAC can key on. Only audience: `mas-a2a`. `fullScopeAllowed: false`, so Keycloak's audience-resolve cannot add other clients' audiences. |
 | `mas-a2a` | confidential, exchange only | Praxis hub gateway | Token A's audience (MAS validates it) **and** the hub gateway's exchanger: A -> H, audience `lightspeed-hub-a2a`. Secret `praxis-hub-exchange-client` (Vault `praxis-hub-exchange`, alphanumeric). `keycloak.hubGatewayExchanger`. |
-| `lightspeed-hub-a2a` | confidential, exchange only | lightspeed-hub adapter | H's audience (the hub kube API accepts it) and the adapter's exchanger: H -> R, audience `praxis-spoke-gateway`. `access.token.lifespan` 1800 s gives R its lifetime. Client role `agenticrun-creator` lands in H's `groups`. `keycloak.hubExchange`. |
-| `praxis-spoke-gateway` | confidential, exchange only | Praxis spoke gateways | R's audience and the spoke gateways' exchanger: R -> U, audience `praxis-spoke-<id>`. Secret `praxis-spoke-gateway-client` (Vault `praxis-spoke-gateway`, alphanumeric). `keycloak.spokeGatewayExchanger`. |
+| `lightspeed-hub-a2a` | confidential, exchange only | lightspeed-hub adapter | H's audience (hub kube API) and adapter exchanger: H -> R (`praxis-spoke-gateway`) or, after approval, R_exec (`praxis-spoke-gateway-exec`). `access.token.lifespan` controls exchanged run-token lifetime. H may carry `agenticrun-creator` and, for remediation members, `agenticrun-approver`. `keycloak.hubExchange`. |
+| `praxis-spoke-gateway` | confidential, exchange only | Praxis read gateways | R's audience and read exchanger: R -> U, audience `praxis-spoke-<id>`. Role scope is reader-only. Secret `praxis-spoke-gateway-client` (Vault `praxis-spoke-gateway`, alphanumeric). `keycloak.spokeGatewayExchanger`. |
+| `praxis-spoke-gateway-exec` [optional] | confidential, exchange only | Praxis execution gateways | R_exec's distinct audience and execution exchanger: R_exec -> U_exec, audience `praxis-spoke-<id>`. Role scope is reader + writer; disabled until the coordinated rollout. `keycloak.spokeGatewayExecExchanger`. |
 | `praxis-spoke-<id>` | audience only | spoke kube APIs | U's audience, one per spoke. Exists because a token-exchange `audience` must name an existing client (`400 Audience not found` otherwise). Client role `reader` lands in U's `groups`. |
 
 `mas-a2a` used to be a plain custom audience string with no client behind
@@ -517,6 +524,78 @@ behalf" story in one column.
 9. **Spoke kube API**: user `keycloak:<sub>`, group
    `keycloak:praxis-spoke-<id>:reader`, bound to `cluster-reader` and
    `cluster-monitoring-view` (`charts/all/lightspeed-hub` `spokeReaderRBAC`).
+
+### Approved Execution: separate token path (implemented, not live-verified)
+
+The current read-only path above remains the path for Analysis and
+Verification. The optional execution split is implemented in the operator,
+adapter, and charts, but is **not live-verified** and remains disabled in the
+standalone rollout. See
+[`docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`](../docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md)
+and the [`lightspeed-hub`](../charts/all/lightspeed-hub/README.md),
+[`praxis-proxy`](../charts/all/praxis-proxy/README.md), and
+[`keycloak-oidc`](../charts/all/keycloak-oidc/README.md) READMEs for exact
+values and enablement gates.
+
+Every adapter-created run now contains Analysis, Execution, and Verification.
+The `ApprovalPolicy` makes Analysis automatic, Execution manual, and
+Verification/Escalation automatic. On the Analysis → Execution checkpoint,
+the adapter returns `input-required` with a human-readable summary and
+`DataPart` containing `approvalRequest` (`stage`, `run`, `targetCluster`,
+ordered `options`, and `decisions: ["approve", "reject"]`); the first stream
+ends with `Final=true`. MAS's outbound A2A ApprovalGate surfaces the pause to
+ACME and maps its decision onto the same remote task. ACME forwards an
+approval reply only when it continues the **same inbound ACME A2A task** that
+paused; a new ACME task routes normally. This is task-ID continuation, not
+per-user authorization: ACME's shared-workload-token boundary is documented in
+the [ACME agent README](acme_agent/README.md#approval-continuation-and-authority).
+A successful Analysis
+with Execution rejected completes with the analysis result attached and the
+message `Execution rejected by approver; analysis result attached.`
+
+On an approval follow-up, the adapter receives the current Token H, exchanges
+it for fresh R and R_exec, writes both run-token Secret keys, and patches
+AgenticRunApproval as the caller with H. If the approval patch fails, it
+removes `token-execution`. It renews both tokens while approved Execution is
+pending/running and removes `token-execution` when Execution finishes. The
+Execution sandbox alone uses `gateway-execution-server-url-template` and
+projects only `token-execution`; Analysis and Verification use
+`gateway-server-url-template` and `token-a`. A missing selected key causes
+`CredentialsExpired`, not a fallback to the other credential.
+
+The distinct Keycloak clients are `praxis-spoke-gateway` (read exchange,
+scoped to `reader`) and `praxis-spoke-gateway-exec` (execution exchange,
+scoped to `reader` plus `writer`). Both target the same per-spoke audience;
+the spoke execution gateway accepts R_exec and mints U_exec per call. The
+hub binds `keycloak:lightspeed-hub-a2a:agenticrun-approver` to `get/update`
+on AgenticRunApprovals, while each target separately binds
+`keycloak:praxis-spoke-<id>:writer` through namespaced RoleBindings only in
+the required `spokeExecutorRBAC.namespaces` allow-list; no ClusterRoleBinding
+is rendered. Within an allowed namespace, workloads can still run as any
+ServiceAccount there and mount that namespace's Secrets; see the
+[lightspeed-hub chart README](../charts/all/lightspeed-hub/README.md). The
+adapter ServiceAccount does not make the approval decision. A write thus
+requires remediation-group membership, a human approval relayed through the
+adapter, the caller's hub approver role, and a target writer binding. The
+default writer rules exclude Secrets and `pods/exec`, `pods/attach`, and
+`pods/portforward`.
+
+After approval, Execution acts as the principal in the approving H (the same
+`sub`), not as the adapter ServiceAccount. This distinction is only per-human
+if the flow has a per-user Token A. ACME currently uses a Keycloak
+`client_credentials` token whose principal is the ACME service account; giving
+that principal remediation membership means **ACME can remediate**, not that
+the UI's human is individually authorized.
+
+MAS's outbound A2A node relays its HITL decision on the same remote task:
+approve, reject, modify → `revise` (or approval with an option), and redirect
+→ reject. Structured option values can arrive from protobuf as floats; only
+integer-valued numbers are accepted and they are zero-based indexes. Plain-text
+`approve option N` uses the human-facing one-based number. The hub node is
+configured with `hitl_mode: ask` by `setup-mas-blueprint.sh`
+(`HUB_ADAPTER_HITL_MODE`, default `ask`); its HITL timeout is 300 seconds.
+The MAS integration is present in the working tree but is not live-verified.
+ACME's approval continuation uses pinned `google-adk==2.10.0`.
 
 ## Tracing a live request
 

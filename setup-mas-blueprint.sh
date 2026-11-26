@@ -48,6 +48,13 @@
 #   HUB_ADAPTER_TARGET_HEADER Routing header Praxis matches on
 #                             (default X-Hub-Cluster; must equal
 #                             praxis-proxy a2aUpstream.targetHeader).
+#   HUB_ADAPTER_HITL_MODE     hitl_mode of the investigation node (default
+#                             "ask"): every hub run pauses for a human
+#                             Execution approval, which MAS relays to the
+#                             caller as INPUT_REQUIRED (needs a MAS image with
+#                             outbound A2A HITL, branch a2a-outbound-hitl).
+#                             Set empty to omit the field on older images; the
+#                             node then reports the pause without relaying it.
 #   HUB_ADAPTER_CLUSTERS      Comma-separated closed list of target cluster
 #                             names (e.g. "east,west"). When set together
 #                             with HUB_ADAPTER_A2A_URL, the orchestrator
@@ -169,6 +176,14 @@ HUB_ADAPTER_A2A_URL="${HUB_ADAPTER_A2A_URL:-}"
 HUB_ADAPTER_AGENT_NAME="${HUB_ADAPTER_AGENT_NAME:-Hub Cluster Investigator}"
 HUB_ADAPTER_TARGET_HEADER="${HUB_ADAPTER_TARGET_HEADER:-X-Hub-Cluster}"
 HUB_ADAPTER_CLUSTERS="${HUB_ADAPTER_CLUSTERS:-}"
+HUB_ADAPTER_HITL_MODE="${HUB_ADAPTER_HITL_MODE-ask}"
+HUB_ADAPTER_HITL_LINE=""
+if [ -n "$HUB_ADAPTER_HITL_MODE" ]; then
+  HUB_ADAPTER_HITL_LINE="      # Relays the hub run's Execution approval (remote input-required)
+      # through MAS's approval gate to the caller.
+      hitl_mode: ${HUB_ADAPTER_HITL_MODE}
+"
+fi
 # Normalize "east, west" / "east,west" into a display list "east, west" for
 # the prompt's closed list (the model copies names verbatim from it).
 HUB_ADAPTER_CLUSTERS_LIST="$(printf '%s' "$HUB_ADAPTER_CLUSTERS" | tr -d ' ' | sed 's/,/, /g')"
@@ -229,6 +244,7 @@ ROUTING:
 - For live cluster inspection or troubleshooting, delegate to ${HUB_ADAPTER_AGENT_NAME}. Determine the target cluster from the user's question. When delegating, you MUST set the "data" parameter with the routing header, spelled EXACTLY "${HUB_ADAPTER_TARGET_HEADER}" (hyphens, this exact casing, never underscores):
   data={"headers": {"${HUB_ADAPTER_TARGET_HEADER}": "<cluster-id>"}}
 ${HUB_ADAPTER_CLUSTER_RULE}
+- ${HUB_ADAPTER_AGENT_NAME} analyzes first and changes nothing until a human approves the proposed remediation; that approval is collected outside your turn. Report the analysis, the remediation outcome (executed and verified, or rejected), and never claim a change was made unless the agent reported it.
 
 Synthesize the agent's results into one answer. Distinguish documentation-based guidance from observed facts, and do not present documentation as evidence of any cluster's current state.
 EOF
@@ -490,16 +506,17 @@ if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
     HUB_ADAPTER_PAYLOAD=$(jq -n \
       --arg base_url "$HUB_ADAPTER_A2A_URL" \
       --arg name "$HUB_ADAPTER_AGENT_NAME" \
+      --arg hitl_mode "$HUB_ADAPTER_HITL_MODE" \
       '{
         "category": "nodes",
         "type": "a2a_agent_node",
         "name": $name,
-        "config": {
+        "config": ({
           "type": "a2a_agent_node",
           "base_url": $base_url,
           "bearer_token": "",
           "verify_ssl": true
-        }
+        } + (if $hitl_mode != "" then {"hitl_mode": $hitl_mode} else {} end))
       }')
     HUB_ADAPTER_RESPONSE=$(mas_api_upsert_resource "$HUB_ADAPTER_PAYLOAD")
 
@@ -529,7 +546,7 @@ if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
       # forwarded by MAS's credential machinery, never stored here.
       bearer_token: \"\"
       verify_ssl: true
-"
+${HUB_ADAPTER_HITL_LINE}"
   # Direct string assignment (NOT $(cat <<...)): command substitution would
   # strip the trailing newline, gluing the next plan step onto the same line.
   HUB_ADAPTER_PLAN="  - uid: hub_investigate

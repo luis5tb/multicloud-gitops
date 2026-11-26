@@ -23,4 +23,6 @@ for clearly non-Red-Hat requests.
 
 The downstream agent answers the user directly. Do not restate, summarize,
 wrap, or add commentary to its response. Only explain that a request cannot be
-routed when there is no suitable configured downstream agent."""
+routed when there is no suitable configured downstream agent. If the user replies
+to a downstream approval or clarification prompt, keep the reply with that
+downstream agent; never answer or interpret it yourself."""

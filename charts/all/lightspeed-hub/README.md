@@ -24,6 +24,8 @@ fill before activation. Live findings from bringing this up are in
 | `networkpolicy.yaml` | Ingress admitting only the praxis-proxy namespace |
 | `run-token-writer-rbac.yaml` | Role/RoleBinding for the `ls-run-token-*` Secret writer + watch grants (design §5.2; verbs reconciled against the M3 adapter) |
 | `run-creators-rbac.yaml` | "Only the configured group can create AgenticRuns": Role (create on `agenticruns`) + Group RoleBinding when `adapter.hubRunCreatorsGroup` is set |
+| `run-approvers-rbac.yaml` | Group RoleBinding granting `get/update` on namespaced `AgenticRunApprovals` when `adapter.hubRunApproversGroup` is set; decisions are made as Token H, never as the adapter SA |
+| `spoke-executor-rbac.yaml` | Optional enumerated writer ClusterRole with namespaced RoleBindings only in `spokeExecutorRBAC.namespaces`; no ClusterRoleBinding |
 | `admission-policy.yaml` | ValidatingAdmissionPolicy + binding + param ConfigMap for requester×target authorization (design §4.3) |
 | `agentic-operator.yaml` | Repo C operator Deployment + `lightspeed-agentic-configuration` ConfigMap + operator SA |
 | `agentic-operator-crds.yaml` | Vendored repo C CRDs (all ten `agentic.openshift.io` kinds), values-gated + sync-wave −1 |
@@ -399,6 +401,12 @@ operator's contract name, now holding R).
 - **R's properties:** `aud: praxis-spoke-gateway`, lifespan from keycloak-oidc
   `hubExchange.runTokenLifespanSeconds` (1800 s), usable only at the spoke
   gateway, which exchanges it per call for U.
+- **R_exec's properties:** when remediation is enabled, the adapter separately
+  exchanges H for `aud: praxis-spoke-gateway-exec` for the approved Execution
+  stage. Praxis's execution gateway accepts that audience, not R's. Keycloak
+  26 is expected to downscope to the requested audience even though both
+  audience mappers are configured on `lightspeed-hub-a2a`; verify R/R_exec
+  claims on the deployed realm before activation (not yet live-verified).
 - **Renewal:** a fresh H from the caller is exchanged into a fresh R the same
   way.
 - **Why:** storing the caller's 5-minute Token A made investigations die
@@ -413,7 +421,9 @@ audience-scoped role groups, and this chart binds each to its own job:
 | Group (as the kube API sees it) | Token | Bound by | Grants |
 |---|---|---|---|
 | `keycloak:lightspeed-hub-a2a:agenticrun-creator` | H | `adapter.hubRunCreatorsGroup`, `admissionPolicy.allowTargets` | create AgenticRuns in the run namespace, for allowed targets |
+| `keycloak:lightspeed-hub-a2a:agenticrun-approver` | H | `adapter.hubRunApproversGroup` | get/update AgenticRunApprovals in the run namespace |
 | `keycloak:praxis-spoke-hub:reader` | U | `spokeReaderRBAC` (hub as its own spoke) | `cluster-reader`, `cluster-monitoring-view` |
+| `keycloak:praxis-spoke-hub:writer` | U_exec | `spokeExecutorRBAC` (hub as its own spoke) | the explicitly enumerated `spokeExecutorRBAC.rules` only |
 
 In gateway credential mode the operator creates no spoke ServiceAccounts or
 bindings: these group bindings are the only spoke authorization (and before
@@ -422,7 +432,92 @@ equivalent binding belongs on that cluster, keyed on its own audience's role
 group.
 See `docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`.
 
+## Approved Execution (disabled by default)
+
+The remediation path is separate from the read-only investigation path:
+
+```text
+H --exchange(aud=praxis-spoke-gateway)----> R ----> praxis-spoke-<target>
+H --exchange(aud=praxis-spoke-gateway-exec)-> R_exec -> praxis-spoke-<target>-exec
+                                                   -> U / U_exec -> spoke API
+```
+
+Analysis and Verification continue to use `gateway-server-url-template` and
+the read token `R`. Only the Execution stage uses
+`gateway-execution-server-url-template` and `R_exec`. The separate client/aud
+is important: possessing `R` must not authenticate to an execution gateway.
+The adapter's `--execution-token-audience` is omitted by default, the operator
+ConfigMap execution key is absent by default, and Praxis renders no `-exec`
+gateway unless `spokeGatewayConfig.execution.enabled=true`. Rendering an
+execution audience without the matching read audience, gateway template, or
+gateway-credential mode fails closed.
+
+Keycloak must scope the ordinary spoke exchanger to `reader` only and the
+execution exchanger to `reader` plus `writer`. The
+`agenticrun-approver` hub role and `writer` spoke role are granted only to
+`keycloak.exchangeRoles.remediation.groups`; the ordinary `exchangeRoles.groups`
+remain reader/creator-only. A user who should execute must therefore belong to
+both the ordinary read group and the designated remediation group. Approval is
+an explicit Manual Execution decision in the `cluster` ApprovalPolicy; H's
+approver group authorizes the decision, while U_exec's writer group authorizes
+the subsequent Kubernetes writes. Neither token is a cluster-admin role.
+
+`spokeExecutorRBAC.rules` is deliberately enumerated. Defaults include
+`pods/eviction` for the eviction API, but do not include Secrets,
+`pods/exec`, `pods/attach`, or `pods/portforward`, RBAC mutation, or
+wildcard resources/verbs. The ClusterRole is bound **only** by namespaced
+RoleBindings in the required, explicit `spokeExecutorRBAC.namespaces`
+allow-list; no ClusterRoleBinding is rendered. `default`, `openshift*`,
+`kube-*`, this chart's own release/run namespace, and the default
+`forbiddenNamespaces` (Praxis, mao, Keycloak, OpenShift GitOps, Vault, and
+External Secrets namespaces) are rejected at render time. Add more
+control-plane or credential-bearing namespaces to that denylist; do not
+remove its protected defaults.
+
+Namespace scoping is not full workload isolation: **within each allowed
+namespace, this role can still create/patch workloads to run as any
+ServiceAccount and mount that namespace's Secrets** (residual risk similar to
+Kubernetes `edit`). Keep privileged ServiceAccounts out of remediation
+namespaces or add admission policy that blocks their use. The standalone demo
+workload namespace `payments` (see `agenticrun_test.yaml`) is an example of an
+allow-list entry, not an enabled default. This chart creates bindings only on
+the cluster where it is installed (the hub's own spoke in standalone); for a
+real separate spoke, deliver equivalent RoleBindings on that cluster via its
+GitOps configuration.
+
+### Rollout order
+
+1. Provision the distinct Vault entry `praxis-spoke-gateway-exec` using
+   `alphaNumericPolicy`; never reuse the read gateway credential.
+2. On an already-imported realm, perform the one-time Keycloak Admin API
+   setup in the keycloak-oidc README: execution exchanger, its target-audience
+   role scopes, the R_exec audience mapper on `lightspeed-hub-a2a`, and the
+   designated remediation-group assignments. Refresh ExternalSecrets and
+   sync `keycloak-oidc`; verify fresh `R` and `R_exec` tokens have distinct
+   audiences/groups before proceeding. Realm import is one-shot and the
+   PostSync reconciler repairs secrets only; it does not repair roles/mappers.
+3. Enable the Praxis execution exchanger and sync `praxis-proxy`. Confirm the
+   per-target `praxis-spoke-<target>-exec` Services/Deployments use the
+   execution secret and a distinct inbound audience, while read gateway
+   resources remain unchanged.
+4. Enable the adapter execution audience, execution URL template, approver
+   group and reviewed executor bindings in the variant. Sync the adapter and
+   operator only after their pinned images support `--execution-token-audience`
+   and the `gateway-execution-server-url-template` key.
+5. Verify Analysis/Verification still use the read gateway, an unapproved
+   Execution remains Manual, only the approver group can approve, and an
+   approved Execution reaches the writer gateway with U_exec. Probe both
+   audience/group combinations with fresh tokens; do not infer separation
+   from chart values alone.
+
 ## Adapter Deployment contract (reconciled M4)
+
+The adapter is intentionally constrained to exactly one replica, and its
+Deployment uses the `Recreate` strategy so an old and new adapter cannot
+overlap during rollout. The current per-run lock is process-local and does not
+coordinate across replicas. **Temporary constraint:** remove the replica
+guard and `Recreate` strategy only when the adapter implements distributed
+per-run locking.
 
 The adapter container runs with the **real flags** from
 `a2a-adapter/internal/config/config.go` (the source of truth — do not
@@ -435,6 +530,8 @@ rename one side without the other):
   `--hub-audience`, `--target-header`, `--run-agent`;
 - card flags `--card-name/-description/-url/-version/-protocol-version/
   -skill-id/-skill-name/-skill-description`;
+- `--run-token-audience` (read R) and, only when enabled,
+  `--execution-token-audience` (write-capable R_exec);
 - the M3 bounds `--clock-skew`, `--stream-deadline`, `--renewal-timeout`,
   `--max-credential-pauses`, `--terminal-cleanup-grace`,
   `--sweep-interval` (values defaults mirror the adapter's flag defaults).

@@ -1,0 +1,59 @@
+{
+  "id": "d1254b4e-cf69-40b2-82e8-56ad47aaca71",
+  "contextId": "bb936a60-6e23-4304-a334-a5b57ccde4ac",
+  "status": {
+    "state": "TASK_STATE_INPUT_REQUIRED",
+    "message": {
+      "messageId": "approval-fixture-gate",
+      "contextId": "bb936a60-6e23-4304-a334-a5b57ccde4ac",
+      "taskId": "d1254b4e-cf69-40b2-82e8-56ad47aaca71",
+      "role": "ROLE_AGENT",
+      "parts": [
+        {
+          "text": "Approval required for tool 'deploy' in Deploy. Arguments: {\"namespace\":\"staging\"} Reasoning: Review change Reply to this task with a decision (\"approve\"/\"reject\"/\"modify\"/\"redirect\") to continue."
+        },
+        {
+          "data": {
+            "approvalRequest": {
+              "options": [
+                {
+                  "summary": "First remediation",
+                  "index": 0.0,
+                  "title": "Option one",
+                  "number": 1.0
+                },
+                {
+                  "summary": "Second remediation",
+                  "index": 1.0,
+                  "title": "Option two",
+                  "number": 2.0
+                }
+              ],
+              "decisions": [
+                "approve",
+                "reject"
+              ],
+              "stage": "Execution",
+              "targetCluster": "dev",
+              "run": "demo-run"
+            }
+          }
+        }
+      ]
+    },
+    "timestamp": "2026-11-26T10:51:15.060674Z"
+  },
+  "history": [
+    {
+      "messageId": "message-1",
+      "contextId": "bb936a60-6e23-4304-a334-a5b57ccde4ac",
+      "taskId": "d1254b4e-cf69-40b2-82e8-56ad47aaca71",
+      "role": "ROLE_USER",
+      "parts": [
+        {
+          "text": "hello"
+        }
+      ]
+    }
+  ]
+}

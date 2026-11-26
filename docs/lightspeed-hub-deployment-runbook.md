@@ -474,8 +474,11 @@ oc -n lightspeed-hub get secret praxis-spoke-gateway-ca -o jsonpath='{.data.ca\.
 oc -n lightspeed-hub logs deploy/lightspeed-hub-agentic-operator | grep -i "gateway credential mode"
 
 # Run-creators RBAC: the group can create AgenticRuns, others cannot
-oc -n lightspeed-hub auth can-i create agenticruns --as=group:keycloak:acme-agent-rca   # yes
-oc -n lightspeed-hub auth can-i create agenticruns --as=group:system:authenticated     # no
+# (NOTE: groups are impersonated with --as-group, NOT --as=group:... --
+# the latter impersonates a USER literally named "group:...", which has
+# no bindings and always returns "no"):
+oc -n lightspeed-hub auth can-i create agenticruns --as=test-user --as-group=keycloak:acme-agent-rca   # yes
+oc -n lightspeed-hub auth can-i create agenticruns --as=test-user --as-group=system:authenticated     # no
 oc -n lightspeed-hub get rolebinding | grep -i run-creator
 
 # Keycloak: hubExchange + exchanger clients exist with the right mappers

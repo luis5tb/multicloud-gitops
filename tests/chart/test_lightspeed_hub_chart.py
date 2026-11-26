@@ -186,6 +186,8 @@ def test_adapter_deployment_carries_real_flags() -> None:
         d for d in docs
         if d["kind"] == "Deployment" and d["metadata"]["name"] == "lightspeed-hub"
     )
+    assert dep["spec"]["replicas"] == 1
+    assert dep["spec"]["strategy"] == {"type": "Recreate"}
     container = dep["spec"]["template"]["spec"]["containers"][0]
     args = container.get("args", [])
     assert args, "adapter container must carry flag args"
@@ -544,6 +546,16 @@ def test_agentic_operator_configmap_carries_gateway_keys() -> None:
     shutil.which("helm") is None, reason="helm is required to render chart"
 )
 def test_missing_required_values_fail_loudly() -> None:
+    # The adapter's process-local per-run lock requires one replica.
+    for count in (0, 2):
+        result = _helm(
+            *ENABLE_SETS,
+            "--set", f"replicaCount={count}",
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "replicaCount must be exactly 1" in result.stderr
+
     # Missing hub audience.
     result = _helm(
         "--set", "enabled=true",
@@ -865,6 +877,11 @@ def test_agent_configuration_renders_vertex_agent_and_policy() -> None:
     assert agent["metadata"]["name"] == "investigator"  # == adapter.runAgent
     assert agent["spec"]["llmProvider"] == {"name": provider["metadata"]["name"]}
     assert agent["spec"]["model"] == "claude-opus-4-6"
+    assert agent["spec"]["timeouts"] == {
+        "analysisSeconds": 1200,
+        "executionSeconds": 1200,
+        "verificationSeconds": 600,
+    }
 
     policy = by_kind["ApprovalPolicy"]
     assert policy["metadata"]["name"] == "cluster"

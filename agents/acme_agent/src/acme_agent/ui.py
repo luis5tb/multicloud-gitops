@@ -32,6 +32,11 @@ UI_HTML = r"""<!doctype html>
       font-size: .85rem; color: #555; }
     .conversation button { padding: .3rem .7rem; }
     .notice { color: #888; font-style: italic; }
+    .approval { border: 2px solid #d69e00; border-radius: .5rem; padding: 1rem;
+      margin-top: 1rem; }
+    .approval h2 { margin: 0 0 .5rem; font-size: 1.1rem; }
+    .approval-options { margin: .5rem 0; }
+    .approval-actions { display: flex; gap: .5rem; margin-top: .75rem; }
     .override textarea { min-height: 4rem; font-family: ui-monospace, monospace; font-size: .75em; }
     form { display: flex; gap: .5rem; margin-top: 1rem; }
     textarea { flex: 1; min-height: 4rem; padding: .6rem; }
@@ -70,6 +75,18 @@ UI_HTML = r"""<!doctype html>
       identity provider selected above, so paste a token from that same provider.</div>
   </div>
   <main id="messages" aria-live="polite"></main>
+  <section id="approval-panel" class="approval" aria-live="polite" hidden>
+    <h2>Approval required</h2>
+    <div id="approval-prompt"></div>
+    <ol id="approval-options" class="approval-options" hidden></ol>
+    <label id="approval-choice-label" hidden>Option
+      <select id="approval-choice"></select>
+    </label>
+    <div class="approval-actions">
+      <button type="button" id="approve-button">Approve</button>
+      <button type="button" id="reject-button">Reject</button>
+    </div>
+  </section>
   <form id="chat-form">
     <textarea id="prompt" required placeholder="Type your request..."></textarea>
     <button type="submit">Send</button>
@@ -86,6 +103,13 @@ UI_HTML = r"""<!doctype html>
     const overrideControls = document.getElementById('override-controls');
     const overrideEnabled = document.getElementById('override-enabled');
     const overrideToken = document.getElementById('override-token');
+    const approvalPanel = document.getElementById('approval-panel');
+    const approvalPrompt = document.getElementById('approval-prompt');
+    const approvalOptions = document.getElementById('approval-options');
+    const approvalChoiceLabel = document.getElementById('approval-choice-label');
+    const approvalChoice = document.getElementById('approval-choice');
+    const approveButton = document.getElementById('approve-button');
+    const rejectButton = document.getElementById('reject-button');
     let tokenDebugEnabled = false;
     overrideEnabled.addEventListener('change', () => {
       overrideToken.hidden = !overrideEnabled.checked;
@@ -141,6 +165,11 @@ UI_HTML = r"""<!doctype html>
     // sessions are in memory, so an ACME restart starts over on the server.
     const conversationLabel = document.getElementById('conversation-label');
     let contextId = sessionStorage.getItem('acme-context-id') || '';
+    let taskId = sessionStorage.getItem('acme-task-id') || '';
+    let taskState = sessionStorage.getItem('acme-task-state') || '';
+    let approvalCall = null;
+    try { approvalCall = JSON.parse(sessionStorage.getItem('acme-approval-call') || 'null'); }
+    catch (error) { sessionStorage.removeItem('acme-approval-call'); }
     function showConversation() {
       conversationLabel.textContent = contextId
         ? `Conversation ${contextId.slice(0, 8)}`
@@ -152,10 +181,81 @@ UI_HTML = r"""<!doctype html>
       sessionStorage.setItem('acme-context-id', contextId);
       showConversation();
     }
+    function setTaskId(value) {
+      if (!value || value === taskId) return;
+      taskId = value;
+      sessionStorage.setItem('acme-task-id', taskId);
+    }
+    function clearTaskId(resetState = true) {
+      taskId = '';
+      approvalCall = null;
+      sessionStorage.removeItem('acme-task-id');
+      if (resetState) {
+        taskState = '';
+        sessionStorage.removeItem('acme-task-state');
+      }
+      sessionStorage.removeItem('acme-approval-call');
+      updateApprovalPanel('');
+    }
+    function normalizedTaskState(state) {
+      return String(state || '').toLowerCase().replace(/^task_state_/, '').replace(/_/g, '-');
+    }
+    function isInputRequired() { return normalizedTaskState(taskState) === 'input-required'; }
+    function isTerminalTaskState(state) {
+      return ['completed', 'failed', 'canceled', 'rejected'].includes(normalizedTaskState(state));
+    }
+    function findApprovalCall(node) {
+      if (!node || typeof node !== 'object') return null;
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          const found = findApprovalCall(item);
+          if (found) return found;
+        }
+        return null;
+      }
+      const data = node.data;
+      const type = node.metadata && (node.metadata.adk_type || node.metadata.type);
+      if (data && typeof data === 'object' &&
+          (type === 'function_call' || String(data.name || '').includes('mock_function_call_for_required_user_input'))) {
+        return data;
+      }
+      for (const [key, value] of Object.entries(node)) {
+        if (key === 'metadata' || key === 'data') continue;
+        const found = findApprovalCall(value);
+        if (found) return found;
+      }
+      return null;
+    }
+    function captureTaskInfo(result) {
+      if (!result || typeof result !== 'object') return;
+      const task = result.task || (result.kind === 'task' ? result : null);
+      const statusUpdate = result.statusUpdate || result.status_update ||
+        (result.kind === 'status-update' || result.status ? result : null);
+      const snapshot = task || result;
+      const id = (task && task.id) || (statusUpdate && (statusUpdate.taskId || statusUpdate.task_id)) || result.taskId;
+      const context = (task && task.contextId) || (statusUpdate && (statusUpdate.contextId || statusUpdate.context_id));
+      if (id) setTaskId(id);
+      if (context) setContextId(context);
+      const status = (statusUpdate && statusUpdate.status) || (snapshot && snapshot.status);
+      if (status && status.state) {
+        taskState = status.state;
+        sessionStorage.setItem('acme-task-state', taskState);
+        if (isTerminalTaskState(taskState)) {
+          clearTaskId(false);
+          return;
+        }
+      }
+      const call = findApprovalCall(result);
+      if (call) {
+        approvalCall = call;
+        sessionStorage.setItem('acme-approval-call', JSON.stringify(call));
+      }
+    }
     function startNewConversation(reason) {
       const hadConversation = !!contextId;
       contextId = '';
       sessionStorage.removeItem('acme-context-id');
+      clearTaskId();
       showConversation();
       if (hadConversation) {
         const note = document.createElement('div');
@@ -171,6 +271,59 @@ UI_HTML = r"""<!doctype html>
       if (!result || typeof result !== 'object') return;
       const nested = result.task || result.statusUpdate || result.artifactUpdate || result.message;
       setContextId((nested && nested.contextId) || result.contextId);
+      captureTaskInfo(result);
+    }
+    function findOptions(value) {
+      if (!value || typeof value !== 'object') return null;
+      if (Array.isArray(value)) return null;
+      for (const [key, nested] of Object.entries(value)) {
+        if (key.toLowerCase() === 'options' && Array.isArray(nested)) return nested;
+      }
+      for (const nested of Object.values(value)) {
+        const found = findOptions(nested);
+        if (found) return found;
+      }
+      return null;
+    }
+    function optionLabel(option, index) {
+      if (typeof option === 'string') return option;
+      if (option && typeof option === 'object') {
+        const label = option.label || option.name || option.title || option.description;
+        if (label) return option.summary ? `${label}: ${option.summary}` : String(label);
+      }
+      return JSON.stringify(option);
+    }
+    function updateApprovalPanel(statusText) {
+      if (!isInputRequired()) {
+        approvalPanel.hidden = true;
+        return;
+      }
+      approvalPanel.hidden = false;
+      const payload = approvalCall && approvalCall.args && approvalCall.args.input_required;
+      const visiblePrompt = typeof statusText === 'string' && statusText.trim()
+        ? statusText.trim()
+        : typeof payload === 'string' ? payload : (payload && payload.prompt) || '';
+      const details = payload && typeof payload === 'object'
+        ? JSON.stringify(payload, null, 2) : '';
+      approvalPrompt.textContent = visiblePrompt || details ||
+        'The downstream agent is waiting for your approval or response.';
+      const options = findOptions(payload) || [];
+      approvalOptions.replaceChildren();
+      approvalChoice.replaceChildren();
+      options.forEach((option, index) => {
+        const label = optionLabel(option, index);
+        const item = document.createElement('li');
+        item.textContent = label;
+        approvalOptions.appendChild(item);
+        const choice = document.createElement('option');
+        choice.value = String(option && Number.isInteger(option.index) ? option.index : index);
+        choice.textContent = `${(option && option.number) || index + 1}) ${label}`;
+        approvalChoice.appendChild(choice);
+      });
+      approvalOptions.hidden = options.length === 0;
+      approvalChoiceLabel.hidden = options.length === 0;
+      approveButton.disabled = !approvalCall;
+      rejectButton.disabled = !approvalCall;
     }
     document.getElementById('new-conversation').addEventListener('click', () => startNewConversation());
     // A downstream conversation belongs to one principal, so switching the
@@ -182,6 +335,7 @@ UI_HTML = r"""<!doctype html>
     environmentSelect.addEventListener('change', onIdentityChange);
     readAuthOptions();
     showConversation();
+    updateApprovalPanel('');
     // Renders the agent's final answer prominently and, if present, its
     // reasoning/"thinking" text in a separate, visually muted, collapsible
     // block above it -- the two are never concatenated into one line.
@@ -410,12 +564,15 @@ UI_HTML = r"""<!doctype html>
       }
       return { ingest, current };
     }
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const text = prompt.value.trim();
+    async function sendMessage(text) {
+      text = String(text || '').trim();
       if (!text) return;
       if (providerSelect.value === 'redhat' && tokenTypeSelect.value === 'user') {
         addMessage('agent', 'Request failed: Red Hat IdP user tokens are not implemented yet; select Agent token.');
+        return;
+      }
+      if (isInputRequired() && (!taskId || !approvalCall)) {
+        addMessage('agent', 'Request failed: the pending approval response is not available. Start a new conversation and try again.');
         return;
       }
       prompt.value = '';
@@ -429,12 +586,17 @@ UI_HTML = r"""<!doctype html>
       // silently drops -- surfacing as "NetworkError" even though the agent
       // eventually produced a full answer. Streaming keeps bytes flowing so the
       // idle timer never trips, and lets the answer render as it arrives.
-      const payload = JSON.stringify({jsonrpc: '2.0', id, method: 'message/stream', params: {
-        message: Object.assign(
-          {messageId: id, role: 'user', parts: [{kind: 'text', text}]},
-          contextId ? {contextId} : {}
-        )
-      }});
+      const message = {messageId: id, role: 'user', parts: [{kind: 'text', text}]};
+      if (contextId) message.contextId = contextId;
+      if (isInputRequired()) {
+        // Keep the existing ACME task/context identifiers, but send the
+        // caller's decision as plain text. The root before_model callback
+        // routes it to the paused downstream task without resuming the ADK
+        // long-running function invocation.
+        message.taskId = taskId;
+        message.parts = [{kind: 'text', text}];
+      }
+      const payload = JSON.stringify({jsonrpc: '2.0', id, method: 'message/stream', params: {message}});
       const headers = {
         'content-type': 'application/json',
         'accept': 'text/event-stream',
@@ -470,6 +632,7 @@ UI_HTML = r"""<!doctype html>
           if (!response.ok || body.error) throw new Error(JSON.stringify(body.error || body));
           captureContextId(body.result);
           const { thoughts, answer } = renderTaskResult(body.result);
+          updateApprovalPanel(answer);
           const item = addMessage('agent', answer || JSON.stringify(body.result), thoughts);
           await attachTokenDebug(item, debugId);
           return;
@@ -510,19 +673,29 @@ UI_HTML = r"""<!doctype html>
             acc.ingest(envelope.result);
             const { thoughts, answer } = acc.current();
             agentMessage.update(thoughts, answer);
+            updateApprovalPanel(answer);
           }
           if (streamError) break;
         }
         if (streamError) throw streamError;
         const { thoughts, answer } = acc.current();
         agentMessage.update(thoughts, answer || '(the agent returned no answer)');
+        updateApprovalPanel(answer);
         await agentMessage.setToken(debugId);
       } catch (error) {
         addMessage('agent', `Request failed: ${error.message}`);
       }
+    }
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      await sendMessage(prompt.value);
     });
+    approveButton.addEventListener('click', () => {
+      const optionIndex = approvalChoiceLabel.hidden ? '' : approvalChoice.value;
+      sendMessage(optionIndex === '' ? 'approve' : `approve option ${Number(optionIndex) + 1}`);
+    });
+    rejectButton.addEventListener('click', () => sendMessage('reject'));
   </script>
 </body>
 </html>
 """
-

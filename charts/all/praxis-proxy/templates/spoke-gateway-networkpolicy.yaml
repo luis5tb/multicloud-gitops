@@ -1,7 +1,21 @@
 {{- $np := .Values.spokeGatewayConfig.networkPolicy }}
+{{- if and $np.enabled (not $np.ingressFromNamespaces) }}
+{{- fail "spokeGatewayConfig.networkPolicy.ingressFromNamespaces must list at least one namespace when the spoke-gateway NetworkPolicy is enabled" }}
+{{- end }}
 {{- if and $np.enabled (gt (len .Values.spokeGateways) 0) }}
+{{- if not $np.ingressPodSelectors.read }}
+{{- fail "spokeGatewayConfig.networkPolicy.ingressPodSelectors.read must be a non-empty Kubernetes LabelSelector when the NetworkPolicy is enabled" }}
+{{- end }}
+{{- if and $.Values.spokeGatewayConfig.execution.enabled (not $np.ingressPodSelectors.execution) }}
+{{- fail "spokeGatewayConfig.networkPolicy.ingressPodSelectors.execution must be a non-empty Kubernetes LabelSelector when the execution gateway is enabled" }}
+{{- end }}
 {{- range $key, $cfg := .Values.spokeGateways }}
-{{- $name := include "praxis-proxy.spokeGatewayName" $key }}
+{{- $modes := list (dict "execution" false) }}
+{{- if $.Values.spokeGatewayConfig.execution.enabled }}{{- $modes = append $modes (dict "execution" true) }}{{- end }}
+{{- range $mode := $modes }}
+{{- $isExec := $mode.execution }}
+{{- $name := include "praxis-proxy.spokeGatewayModeName" (dict "key" $key "execution" $isExec) }}
+{{- $modeLabel := ternary "exec" "read" $isExec }}
 {{- $u := urlParse ($cfg.remoteAPIServer | toString) }}
 {{- $hostPort := $u.host | toString }}
 {{- $port := "443" }}
@@ -16,12 +30,18 @@ metadata:
   labels:
     {{- include "praxis-proxy.labels" $ | nindent 4 }}
     praxis-proxy.spoke-gateway: {{ $key | quote }}
+    praxis-proxy.spoke-gateway-mode: {{ $modeLabel | quote }}
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "praxis-proxy.name" $ }}
+      {{- if $isExec }}
+      app.kubernetes.io/name: {{ include "praxis-proxy.spokeGatewayExecAppName" $ | quote }}
+      {{- else }}
+      app.kubernetes.io/name: {{ include "praxis-proxy.name" $ | quote }}
+      {{- end }}
       app.kubernetes.io/instance: {{ $.Release.Name }}
       praxis-proxy.spoke-gateway: {{ $key | quote }}
+      praxis-proxy.spoke-gateway-mode: {{ $modeLabel | quote }}
   policyTypes:
     - Ingress
     - Egress
@@ -34,6 +54,12 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $ns | quote }}
+          podSelector:
+            {{- if $isExec }}
+            {{- toYaml $np.ingressPodSelectors.execution | nindent 12 }}
+            {{- else }}
+            {{- toYaml $np.ingressPodSelectors.read | nindent 12 }}
+            {{- end }}
         {{- end }}
       ports:
         - protocol: TCP
@@ -89,5 +115,6 @@ spec:
           port: 443
         - protocol: TCP
           port: {{ $port }}
+{{- end }}
 {{- end }}
 {{- end }}

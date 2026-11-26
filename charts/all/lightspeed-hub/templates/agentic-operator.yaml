@@ -27,6 +27,9 @@ data:
   sandbox-credential-mode: {{ .Values.agenticOperator.config.sandboxCredentialMode | quote }}
   {{- if eq .Values.agenticOperator.config.sandboxCredentialMode "gateway" }}
   gateway-server-url-template: {{ .Values.agenticOperator.config.gatewayServerURLTemplate | quote }}
+  {{- with .Values.agenticOperator.config.gatewayExecutionServerURLTemplate }}
+  gateway-execution-server-url-template: {{ . | quote }}
+  {{- end }}
   gateway-ca-secret: {{ .Values.agenticOperator.config.gatewayCASecret | quote }}
   {{- end }}
   terminal-ttl-days: {{ .Values.agenticOperator.config.terminalTTLDays | quote }}

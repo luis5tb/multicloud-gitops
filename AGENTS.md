@@ -81,6 +81,7 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 | Praxis routing / allow-list policy | `charts/all/praxis-proxy/files/{praxis.yaml,policy.yaml}` |
 | **Multi-OIDC configuration (accept tokens from multiple issuers)** | **See [`MULTI_OIDC_CONFIGURATION.md`](MULTI_OIDC_CONFIGURATION.md) for complete guide; example in [`MULTI_OIDC_EXAMPLE.yaml`](MULTI_OIDC_EXAMPLE.yaml)** |
 | MAS inbound A2A blueprint, caller allow-list, Keycloak auth, HITL | `charts/all/mao/mas-a2a/` and its README; activate only after hardening `mao/mas-api` and pinning the API/worker/A2A image together |
+| Hub Execution approval and read/write token split | [`docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`](docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md); chart rollout gates in the `lightspeed-hub`, `praxis-proxy`, and `keycloak-oidc` READMEs |
 | Any cluster-specific value (URLs, trust domain, image tags, namespace scope) | `variants/standalone/values-standalone.yaml` only |
 | New secret | `values-secret.yaml.template`, consumed via ExternalSecret -- never a chart default |
 

@@ -32,6 +32,10 @@ fullnameOverride: ""
 nameOverride: ""
 
 imagePullSecrets: []
+# TEMPORARY SINGLETON CONSTRAINT: the adapter's per-run lock is process-local,
+# so multiple replicas or overlapping old/new pods can race. Keep exactly one
+# replica and use Recreate rollout strategy. Remove this count constraint and
+# Recreate strategy only after the adapter has distributed per-run locking.
 replicaCount: 1
 
 serviceAccount:
@@ -133,6 +137,11 @@ adapter:
   # the flag; older images reject unknown flags).
   runTokenAudience: ""
 
+  # Execution-only R_exec audience. Rendered as
+  # --execution-token-audience; it must be non-empty only with a runTokenAudience
+  # because the adapter requires the ordinary read token as well.
+  executionTokenAudience: ""
+
   # The inbound bearer is already Token H: the Praxis hub gateway
   # (praxis-proxy a2aUpstream.exchangeAtPraxis) exchanged the caller's
   # Token A before forwarding. The adapter creates AgenticRuns with it
@@ -165,6 +174,11 @@ adapter:
   # the admission policy additionally restricts WHICH targetCluster --
   # see templates/run-creators-rbac.yaml.
   hubRunCreatorsGroup: ""
+
+  # H's audience-scoped approver group. The adapter patches approvals as the
+  # caller using H, so this Role grants get/update on run-scoped
+  # AgenticRunApprovals only (never to the adapter ServiceAccount).
+  hubRunApproversGroup: ""
 
   keycloak:
     # Issuer the adapter validates Token A against / exchanges A->H at.
@@ -342,6 +356,10 @@ agenticOperator:
     # e.g. https://praxis-spoke-{targetCluster}.praxis-proxy.svc.cluster.local:8443.
     # OWNED by the praxis implementer; referenced here (design §8.1 item 6).
     gatewayServerURLTemplate: ""
+    # Optional Execution-only gateway template. When set, repo C routes only
+    # the execution sandbox to this URL and gives it token-execution; Analysis
+    # and Verification continue using gatewayServerURLTemplate/token-a.
+    gatewayExecutionServerURLTemplate: ""
     # gateway-ca-secret: Secret (in THIS namespace, key ca.crt) holding the
     # spoke gateways' serving CA. Must name the Secret the praxis-proxy
     # chart's spokeGatewayConfig.servingCA bridge maintains (default
@@ -408,9 +426,9 @@ agenticOperator:
         # llm-creds-vertex), the same record mao/mas-worker consumes.
         vaultKey: secret/data/global/llm-creds-vertex
         vaultProperty: credentials
-    # The operator reads the ApprovalPolicy named "cluster". Adapter runs
-    # are analysis-only, so Analysis MUST be Automatic or every run waits
-    # for a human; Execution stays Manual (cluster mutations need a human).
+    # The operator reads the ApprovalPolicy named "cluster". Runs include
+    # Analysis and remediation Execution; Analysis and Verification are
+    # Automatic while Execution stays Manual (cluster mutations need a human).
     approvalPolicy:
       maxConcurrentRuns: 5
       stages:
@@ -445,6 +463,67 @@ spokeReaderRBAC:
   clusterRoles:
     - cluster-reader
     - cluster-monitoring-view
+
+# Spoke-side write access for Execution. The enumerated ClusterRole is bound
+# ONLY by RoleBindings in the explicit namespaces allow-list below (never by a
+# ClusterRoleBinding). This limits where these write permissions apply; within
+# an allowed namespace they can still run workloads as any ServiceAccount and
+# mount its Secrets (residual risk similar to Kubernetes `edit`). Keep
+# privileged ServiceAccounts out of remediation namespaces or add admission
+# policy. For a real separate spoke, deliver equivalent RoleBindings on that
+# spoke cluster via its GitOps configuration. Defaults omit Secrets,
+# pods/exec, pods/attach, and pods/portforward. U_exec also carries reader, so
+# spokeReaderRBAC remains responsible for its read grants.
+spokeExecutorRBAC:
+  enabled: false
+  groups: []
+  # Required non-empty when enabled. Example only; enable only in a reviewed,
+  # isolated workload namespace (e.g. payments), never a system/control-plane
+  # namespace. The template rejects default, openshift*, kube-* and all names
+  # in forbiddenNamespaces, as well as this chart's namespace and runNamespace.
+  namespaces: []
+    # - payments
+  # Keep the pattern-controlled namespace denylist intact; add deployment-
+  # specific control-plane / credential-bearing namespaces here.
+  forbiddenNamespaces:
+    - lightspeed-hub
+    - praxis-proxy
+    - mao
+    - keycloak-system
+    - openshift-gitops
+    - vault
+    - external-secrets
+    - external-secrets-operator
+    - golang-external-secrets
+  rules:
+    - apiGroups: [""]
+      resources:
+        - pods
+        - services
+        - configmaps
+        - persistentvolumeclaims
+        - endpoints
+        - replicationcontrollers
+      verbs: [get, list, watch, create, update, patch, delete]
+    - apiGroups: [""]
+      resources: [pods/eviction]
+      verbs: [create]
+    - apiGroups: [apps]
+      resources:
+        - deployments
+        - deployments/scale
+        - replicasets
+        - replicasets/scale
+        - statefulsets
+        - statefulsets/scale
+        - daemonsets
+      verbs: [get, list, watch, create, update, patch, delete]
+    - apiGroups: [batch]
+      resources: [jobs, cronjobs]
+      verbs: [get, list, watch, create, update, patch, delete]
+    - apiGroups: [networking.k8s.io]
+      resources: [networkpolicies, ingresses]
+      verbs: [get, list, watch, create, update, patch, delete]
 
 # Vault-backed ExternalSecrets rendered by this chart (agent LLM credentials).
 secretStore:
