@@ -781,8 +781,10 @@ additional hub `agenticrun-approver` and spoke `writer` roles. The read
 exchanger role scope explicitly excludes `writer`; the execution exchanger
 scope contains `reader` and `writer`. A designated human who needs to execute
 must have both the ordinary group (for creator/reader) and an explicitly
-approved remediation group. Do not add the automation service account to the
-remediation group as a shortcut.
+approved remediation group. A remediation group that is not the ACME/admin
+group is created **empty** by a fresh import; membership is always a separate
+admin action. Do not add the automation service account to the remediation
+group as a shortcut, except in an explicitly scoped shared-principal lab.
 
 **Existing live realm: one-shot import means the chart will not add clients,
 audience mappers, roles, group-role mappings, or exchange scopes.** The

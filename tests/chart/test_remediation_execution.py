@@ -145,6 +145,37 @@ def test_keycloak_execution_exchanger_has_separate_audience_and_role_scopes():
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required")
+def test_keycloak_creates_dedicated_empty_remediation_group():
+    def without(args: list[str], *keys: str) -> list[str]:
+        pairs = zip(args[::2], args[1::2])
+        return [part for flag, value in pairs if not value.startswith(keys) for part in (flag, value)]
+
+    base = without(KEYCLOAK_EXEC, "keycloak.adminGroupName=", "keycloak.exchangeRoles.remediation.groups[0]=")
+    dedicated = base + _sets(("keycloak.exchangeRoles.remediation.groups[0]", "acme-remediation-mario-ipi"))
+    docs = _docs(_render(KEYCLOAK, "keycloak-oidc", *dedicated).stdout)
+    realm = next(d["spec"]["realm"] for d in docs if d["kind"] == "KeycloakRealmImport")
+    groups = {group["name"]: group.get("clientRoles") for group in realm["groups"]}
+    assert groups["acme-remediation-mario-ipi"] == {
+        "lightspeed-hub-a2a": ["agenticrun-approver"],
+        "praxis-spoke-east": ["writer"],
+    }
+    assert groups["acme-agent-rca"] == {
+        "lightspeed-hub-a2a": ["agenticrun-creator"],
+        "praxis-spoke-east": ["reader"],
+    }
+    # No user (including ACME's service account) joins it implicitly.
+    for user in realm.get("users", []):
+        assert "/acme-remediation-mario-ipi" not in user.get("groups", [])
+
+    blank = _render(
+        KEYCLOAK, "keycloak-oidc",
+        *base, *_sets(("keycloak.exchangeRoles.remediation.groups[0]", "")),
+        check=False,
+    )
+    assert blank.returncode != 0
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required")
 def test_keycloak_rejects_execution_audience_without_matching_exchange():
     orphan = _render(
         KEYCLOAK,
@@ -512,7 +543,13 @@ def test_lightspeed_hub_execution_dependencies_fail_closed():
     assert "spokeExecutorRBAC.namespaces contains forbidden namespace" in blocked_release_namespace.stderr
 
 
-def test_standalone_variant_keeps_execution_switch_commented_out():
+def test_standalone_variant_execution_rollout_is_ordered_and_scoped():
+    """Execution switches may be enabled phase by phase, never out of order.
+
+    Keycloak first, then the Praxis execution gateways, then the Hub path.
+    The lab grants write access only on the remote target (mario-ipi), so
+    the hub chart must not render spoke writer bindings.
+    """
     variant = yaml.safe_load(VARIANT.read_text())
     applications = variant["clusterGroup"]["applications"]
 
@@ -522,9 +559,23 @@ def test_standalone_variant_keeps_execution_switch_commented_out():
     keycloak = overrides("keycloak-oidc")
     praxis = overrides("praxis-proxy")
     hub = overrides("lightspeed-hub")
-    assert "keycloak.spokeGatewayExecExchanger.enabled" not in keycloak
-    assert "keycloak.hubExchange.executionTokenAudience" not in keycloak
-    assert "spokeGatewayConfig.execution.enabled" not in praxis
-    assert "adapter.executionTokenAudience" not in hub
-    assert "agenticOperator.config.gatewayExecutionServerURLTemplate" not in hub
+    keycloak_on = keycloak.get("keycloak.spokeGatewayExecExchanger.enabled") == "true"
+    praxis_on = praxis.get("spokeGatewayConfig.execution.enabled") == "true"
+    hub_on = "adapter.executionTokenAudience" in hub
+
+    assert keycloak_on == ("keycloak.hubExchange.executionTokenAudience" in keycloak)
+    assert hub_on == ("agenticOperator.config.gatewayExecutionServerURLTemplate" in hub)
+    assert not praxis_on or keycloak_on, "enable Keycloak execution exchange before Praxis execution gateways"
+    assert not hub_on or praxis_on, "enable Praxis execution gateways before the Hub execution path"
+    if keycloak_on:
+        # ACME's token may become the shared remediation principal: its
+        # token debug/override must already be off.
+        acme = overrides("acme-agent")
+        assert acme.get("auth.tokenDebug.enabled") != "true"
+        assert acme.get("auth.tokenOverride.enabled") != "true"
+        remediation = keycloak["keycloak.exchangeRoles.remediation.groups[0]"]
+        ordinary = {value for key, value in keycloak.items() if key.startswith("keycloak.exchangeRoles.groups[")}
+        assert remediation not in ordinary | {keycloak.get("keycloak.adminGroupName")}
+    if hub_on:
+        assert hub["adapter.hubRunApproversGroup"] == "keycloak:lightspeed-hub-a2a:agenticrun-approver"
     assert "spokeExecutorRBAC.enabled" not in hub
