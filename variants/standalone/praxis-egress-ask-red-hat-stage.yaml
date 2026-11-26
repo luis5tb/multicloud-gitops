@@ -1,0 +1,17 @@
+# Ask Red Hat egress gateway -- STAGE (docs/EXTERNAL_IDP_EGRESS.md).
+# Selected by the praxis-proxy app's extraValueFiles in values-standalone.yaml.
+# MAS forwards the local Token A to
+# https://praxis-egress-ask-red-hat.praxis-proxy.svc:8443/api/ask/v1/a2a; the
+# gateway mints a Red Hat SSO stage token with this client and forwards here.
+egressGateways:
+  ask-red-hat:
+    upstreamURL: https://access.stage.redhat.com/api/ask/v1/a2a
+    tokenUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+    clientId: ff524661-b74a-4e10-bc24-4e71322e0852
+    audience: api.ask_red_hat
+    scopes:
+      - openid
+      - api.ask_red_hat
+    clientSecret:
+      # Same Vault record as ACME's stage Red Hat SSO credentials.
+      vaultKey: secret/data/global/acme-agent-redhat-sso-stage

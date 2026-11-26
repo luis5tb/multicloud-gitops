@@ -493,3 +493,59 @@ local vendor/fork path was used for any of this):
   against the real pinned binary (see "Validation evidence" above) -- so
   this chart's routing/TLS config needs no changes if/when the image is
   later bumped to an `ai` release built against Core v0.7.2.
+
+## External-IdP egress gateways
+
+`egressGateways.<key>` renders one internal Praxis per external destination.
+It accepts the caller's local-Keycloak Token A, mints a token at an external
+IdP with its own client (`delegate(..., subject: this_workload)`, which is
+`client_credentials`), and forwards to one fixed upstream. The standalone
+variant uses it for Ask Red Hat (stage), so MAS forwards the local Token A
+instead of a Red Hat SSO token. Design, rollout and the live evidence are in
+[`docs/EXTERNAL_IDP_EGRESS.md`](../../../docs/EXTERNAL_IDP_EGRESS.md); adding
+another agent: [`docs/ADDING_AN_EXTERNAL_AGENT.md`](../../../docs/ADDING_AN_EXTERNAL_AGENT.md).
+The external API sees one shared account (the gateway's client), not
+individual users.
+
+| Rendered per entry | Purpose |
+|---|---|
+| `ConfigMap praxis-egress-<key>` | TLS listener (8443), `policy` (local Keycloak only + `azp` allow-list + delegator), `headers` (`Host` = upstream host), the agent card from `agentCard`, router for the upstream's own path prefix, upstream cluster verified with `policy.caBundleConfigMap` |
+| `Deployment praxis-egress-<key>` | same pinned image, DNS sidecar and trust store as the other gateways; app label `praxis-egress-gateway`, so the main Service never selects it |
+| `Service praxis-egress-<key>` | ClusterIP 8443 with an OpenShift service-serving cert; no Route |
+| `NetworkPolicy praxis-egress-<key>` | ingress only from `egressGatewayConfig.networkPolicy` namespaces and pods (default: `mas-worker`, `mas-api` in `mao`); egress DNS + TCP 443 |
+| `ExternalSecret praxis-egress-<key>-client` | only with `clientSecret.vaultKey`; reads the same Vault record the caller-side client uses |
+
+Rules:
+
+- **Requires** `policy.enabled` and `policy.caBundleConfigMap.name` with
+  public roots (`policy.caBundleSync.includeSystemRoots`); the chart fails
+  the render otherwise.
+- **The client secret must be alphanumeric.** The delegator sends HTTP Basic
+  without URL-encoding, same as the other exchangers.
+- **`scopes` are enforced.** The pinned delegator denies with
+  `delegation.scope_too_broad` unless every requested scope is in the granted
+  `scope`.
+- **Path and `Host`.** The upstream's own path is served unchanged (the
+  pinned image has no path rewrite), and `Host` is always rewritten to the
+  upstream host: Red Hat's edge rejects the Service name with `400 Invalid
+  URL` (`docs/LESSONS_LEARNED.md` section 5).
+- **A2A upstreams need `agentCard`.** The a2a-sdk sends to the card's URL,
+  and the upstream's card advertises the upstream's own host. The gateway
+  therefore serves `agentCard` itself at `GET <path>/.well-known/agent-card.json`
+  (the one unauthenticated route; it mints nothing), with `url` and any
+  `supportedInterfaces[].url` forced to the gateway and `additionalInterfaces`
+  dropped. Without it, the card GET is passed through and A2A callers would
+  bypass the gateway. This is the deliberate exception to "never serve a
+  hand-maintained card": pass-through with a rewritten URL is impossible on
+  the pinned image. Keep the copy current
+  (`docs/EXTERNAL_IDP_EGRESS.md`, "Keeping the card current").
+- **Callers must trust the OpenShift service CA.** Set
+  `identity.serviceCaTrust.enabled` on mas-worker and mas-api.
+- **Stage to production is a values change only** (`upstreamURL`,
+  `tokenUrl`, `clientId`, `clientSecret`, plus `agentCard` if the cards
+  differ). Callers keep `base_url` = the gateway. The standalone variant puts
+  each environment in its own `extraValueFiles` file.
+- **The PostSync `enforcement-check` Job does not cover egress gateways.** It
+  tests only the main gateway. The egress allow-list is rendered by the same
+  template, but the `azp` deny on an egress gateway has not been exercised
+  live.

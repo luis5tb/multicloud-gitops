@@ -160,6 +160,22 @@ mas_api_upsert_resource() {
 CLUSTER_DOMAIN="${CLUSTER_DOMAIN:-bm-cluster.e2e.bos.redhat.com}"
 ASK_REDHAT_A2A_URL="${ASK_REDHAT_A2A_URL:-https://access.stage.redhat.com/api/ask/v1/a2a}"
 
+# Ask Red Hat through the praxis-proxy egress gateway
+# (docs/EXTERNAL_IDP_EGRESS.md). Empty (default): the node calls
+# ASK_REDHAT_A2A_URL directly and MAS must forward a Red Hat SSO token. Set,
+# e.g. https://praxis-egress-ask-red-hat.praxis-proxy.svc:8443/api/ask/v1/a2a:
+# the node's base_url becomes the gateway, MAS forwards its local Token A, and
+# the gateway mints the SSO token. The gateway serves the agent card itself
+# (praxis-proxy egressGateways.<key>.agentCard, URL pointing back at it), so
+# nothing environment-specific is stored in the blueprint: switching Ask Red
+# Hat stage <-> production is a praxis-proxy values change only.
+ASK_REDHAT_EGRESS_URL="${ASK_REDHAT_EGRESS_URL:-}"
+ASK_REDHAT_EGRESS_URL="${ASK_REDHAT_EGRESS_URL%/}"
+# The URL the Ask Red Hat node calls: the egress gateway when set, otherwise the
+# agent itself. Used for BOTH the inventory resource and the blueprint's inline
+# node config below -- they must agree.
+ASK_REDHAT_NODE_URL="${ASK_REDHAT_EGRESS_URL:-$ASK_REDHAT_A2A_URL}"
+
 # Hub-adapter investigation node (see the header comment for the full
 # contract). HUB_ADAPTER_A2A_URL empty => node omitted, non-investigation
 # blueprint preserved. When set, it MUST be the Praxis public route: MAS's
@@ -268,7 +284,7 @@ echo "========================================="
 echo "MAS API: $MAS_API_URL"
 echo "Cluster: $CLUSTER_DOMAIN"
 echo "Blueprint Type: $BLUEPRINT_TYPE"
-echo "Ask Red Hat A2A: $ASK_REDHAT_A2A_URL"
+echo "Ask Red Hat A2A: $ASK_REDHAT_NODE_URL"
 if [ "$HUB_ADAPTER_ENABLED" == "true" ]; then
   echo "Hub Adapter A2A: $HUB_ADAPTER_A2A_URL (agent: ${HUB_ADAPTER_AGENT_NAME}, header: ${HUB_ADAPTER_TARGET_HEADER})"
   if [ -n "$HUB_ADAPTER_CLUSTERS" ]; then
@@ -444,10 +460,16 @@ echo ""
 if [ "$DRY_RUN" == "true" ]; then
   ASK_REDHAT_RID="dryrun-ask-red-hat-rid"
   echo "1d. (dry run) Ask Red Hat A2A Agent RID: $ASK_REDHAT_RID"
+  if [ -n "$ASK_REDHAT_EGRESS_URL" ]; then
+    echo "   (dry run) would route Ask Red Hat through the egress gateway $ASK_REDHAT_EGRESS_URL"
+  fi
 else
   echo "1d. Registering Ask Red Hat A2A Agent Node..."
+  if [ -n "$ASK_REDHAT_EGRESS_URL" ]; then
+    echo "   Routing through the egress gateway: $ASK_REDHAT_EGRESS_URL"
+  fi
   ASK_REDHAT_PAYLOAD=$(jq -n \
-    --arg base_url "$ASK_REDHAT_A2A_URL" \
+    --arg base_url "$ASK_REDHAT_NODE_URL" \
     '{
       "category": "nodes",
       "type": "a2a_agent_node",
@@ -640,7 +662,7 @@ nodes:
     type: a2a_agent_node
     config:
       type: a2a_agent_node
-      base_url: "${ASK_REDHAT_A2A_URL}"
+      base_url: "${ASK_REDHAT_NODE_URL}"
       # Empty uses the token from the MAS execution context; no static token is stored.
       bearer_token: ""
       verify_ssl: true
@@ -712,7 +734,7 @@ $(printf '%s\n' "$ORCHESTRATOR_SYSTEM_MESSAGE" | sed 's/^/        /')
     type: a2a_agent_node
     config:
       type: a2a_agent_node
-      base_url: "${ASK_REDHAT_A2A_URL}"
+      base_url: "${ASK_REDHAT_NODE_URL}"
       # Empty uses the token from the MAS execution context; no static token is stored.
       bearer_token: ""
       verify_ssl: true

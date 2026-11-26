@@ -445,9 +445,13 @@ hub needs only a minimal probe identity for health checks (B-full).
   Praxis attribute bag anyway, so the working exchange needs `subject_issuer`
   from a component that can send it -- adapter-side is the current candidate;
   the reverted twin-delegator attempt (`c7c6f205`) holds the routing machinery.
+  **Resolved by not exchanging SSO tokens at all:** callers send the local
+  Token A, and Ask Red Hat gets an SSO token minted by the praxis-proxy egress
+  gateway ([`EXTERNAL_IDP_EGRESS.md`](EXTERNAL_IDP_EGRESS.md)).
 
 - Execution with the user's own RBAC vs approval-based elevation (3.2).
 - Token A lifetime vs long runs: the adapter's renewal bridge and
   `CredentialsExpired` pause exist, but haven't been exercised end to end.
 - SSO-brokered callers on the hub leg: the adapter's exchanger does not send
   `subject_issuer`, which external-token exchange needs.
+  Superseded by the egress-gateway design above.

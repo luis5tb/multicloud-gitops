@@ -486,3 +486,99 @@ a2aUpstream:
     # only: the delegator sends Basic auth without URL-encoding.
     secretName: praxis-hub-exchange-client
     secretKey: client-secret
+
+# EXTERNAL-IdP EGRESS GATEWAYS (docs/EXTERNAL_IDP_EGRESS.md). One internal
+# Praxis instance per entry: it accepts the caller's local-Keycloak Token A
+# (validated + azp allow-list, the same policy as the hub gateway), mints a
+# fresh token at an EXTERNAL IdP with this gateway's own client
+# (delegate(..., subject: this_workload) = client_credentials), and forwards
+# to ONE fixed external upstream. This keeps the agent mesh on a single
+# internal identity: no external->internal token exchange, no
+# subject_issuer, nothing that dies with Keycloak 26.7's removal of
+# token-exchange-external-internal:v2. VERIFIED END TO END (2026-11-26) on
+# the pinned image: local Token A -> this gateway -> Red Hat SSO stage mint
+# -> Ask Red Hat stage answered (message/send and message/stream), while
+# Ask Red Hat rejects the same Token A sent directly (401).
+#
+# The minted token speaks for this gateway's client, not for the caller --
+# exactly what the caller-side client_credentials token it replaces did.
+# The external API sees that one account for every caller; attribution of
+# WHICH user asked lives upstream (ACME/MAS audit), and the allow-list is what
+# bounds who may use the client (docs/ADDING_AN_EXTERNAL_AGENT.md).
+#
+# Callers reach it at https://praxis-egress-<key>.<namespace>.svc:8443<path>
+# (internal TLS, OpenShift service-serving cert; callers must trust the
+# service CA -- mas-worker/mas-api identity.serviceCaTrust). Because the
+# pinned image cannot rewrite paths, the gateway serves the upstream's own
+# path. For A2A upstreams set agentCard: the gateway serves that card itself
+# with every interface URL forced to its own address (the upstream's card
+# advertises the upstream's host, and the a2a-sdk sends to the card's URL),
+# so the caller only ever stores base_url = this gateway.
+#
+# Map keyed by a DNS label (embedded in resource names). Moving an entry from
+# stage to production is purely a values change (upstreamURL, tokenUrl,
+# clientId, clientSecret, and agentCard if the environments' cards differ);
+# the caller (MAS blueprint) does not change. Each entry:
+#
+#   upstreamURL    (required) https URL of the external upstream INCLUDING its
+#                  path, e.g. https://access.stage.redhat.com/api/ask/v1/a2a.
+#                  Only that path prefix is routed; Host is rewritten to the
+#                  upstream host (an external edge rejects the Service name).
+#   tokenUrl       (required) the external IdP's token endpoint.
+#   clientId       (required) the external IdP client the gateway mints as.
+#   audience       (required) the delegate() audience, sent as the
+#                  client_credentials `audience` parameter.
+#   scopes         (optional) requested scopes; the pinned delegator also
+#                  REQUIRES each to be in the granted `scope`
+#                  (delegation.scope_too_broad otherwise).
+#   clientSecret   (required) exactly one of:
+#                    vaultKey: Vault path (rendered as an ExternalSecret via
+#                              egressGatewayConfig.secretStore); vaultProperty
+#                              defaults to client-secret
+#                    existingSecret: {name, key (default client-secret)}
+#                  ALPHANUMERIC secrets only: the delegator sends HTTP Basic
+#                  without URL-encoding.
+#   agentCard      (optional; REQUIRED for A2A upstreams) the upstream's A2A
+#                  agent card as YAML (copy it from
+#                  <upstreamURL>/.well-known/agent-card.json). Served
+#                  unauthenticated at <path>/.well-known/agent-card.json with
+#                  `url` (and any supportedInterfaces[].url) replaced by this
+#                  gateway's URL; additionalInterfaces is dropped. Without it
+#                  the card GET is passed through to the upstream, whose URL
+#                  would make A2A callers bypass the gateway. It is a copy:
+#                  re-copy it when the upstream changes skills or capabilities.
+#   inboundAudience (optional) Token A audience; default identity.keycloak.audience.
+#   allowedCallers (optional) azp allow-list; default policy.allowedCallers.
+#   replicas       (optional, default 1).
+egressGateways: {}
+  # ask-red-hat:
+  #   upstreamURL: https://access.stage.redhat.com/api/ask/v1/a2a
+  #   tokenUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+  #   clientId: "<Red Hat SSO client id>"
+  #   audience: api.ask_red_hat
+  #   scopes: [openid, api.ask_red_hat]
+  #   clientSecret:
+  #     vaultKey: secret/data/global/acme-agent-redhat-sso-stage
+
+# Shared egress-gateway settings. Nothing renders while egressGateways is empty.
+egressGatewayConfig:
+  # Store for clientSecret.vaultKey entries (same store as the other charts).
+  secretStore:
+    name: vault-backend
+    kind: ClusterSecretStore
+    refreshInterval: 2m0s
+  networkPolicy:
+    enabled: true
+    # Namespaces whose pods may call the egress gateways.
+    ingressFromNamespaces:
+      - mao
+    # ANDed with each namespace above. MAS calls from mas-worker (node
+    # execution) and mas-api (the node validator's unauthenticated card GET
+    # when a blueprint is saved). Non-empty by design.
+    ingressPodSelector:
+      matchExpressions:
+        - key: app.kubernetes.io/name
+          operator: In
+          values:
+            - mas-worker
+            - mas-api

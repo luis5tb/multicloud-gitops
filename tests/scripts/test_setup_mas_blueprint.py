@@ -260,3 +260,28 @@ class SimpleType(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EgressGatewayBlueprint(unittest.TestCase):
+    """ASK_REDHAT_EGRESS_URL: the Ask Red Hat node calls the praxis-proxy egress
+    gateway (docs/EXTERNAL_IDP_EGRESS.md) -- base_url only, no stored card, in
+    the blueprint's inline node config of every blueprint type."""
+
+    EGRESS = "https://praxis-egress-ask-red-hat.praxis-proxy.svc:8443/api/ask/v1/a2a"
+    # Blank on purpose: the run must not depend on the caller's shell.
+    CLEAN = {"HUB_ADAPTER_A2A_URL": "", "HUB_ADAPTER_CLUSTERS": "", "ASK_REDHAT_EGRESS_URL": ""}
+
+    def _ask_node(self, blueprint):
+        return next(n for n in blueprint["nodes"] if n["name"] == "Ask Red Hat")["config"]
+
+    def test_egress_url_is_the_node_base_url(self):
+        for blueprint_type in ("simple", "multi-cluster", "multi-cluster-hitl"):
+            with self.subTest(blueprint_type=blueprint_type):
+                cfg = self._ask_node(run_dry(blueprint_type, **{**self.CLEAN, "ASK_REDHAT_EGRESS_URL": self.EGRESS + "/"}))
+                self.assertEqual(cfg["base_url"], self.EGRESS)  # trailing slash trimmed
+                self.assertEqual(cfg["bearer_token"], "")
+                self.assertNotIn("agent_card", cfg)  # the gateway serves the card
+
+    def test_default_calls_ask_red_hat_directly(self):
+        cfg = self._ask_node(run_dry("multi-cluster", **self.CLEAN))
+        self.assertEqual(cfg["base_url"], "https://access.stage.redhat.com/api/ask/v1/a2a")

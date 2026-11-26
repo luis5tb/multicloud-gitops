@@ -162,6 +162,17 @@ routes:
     authorization:
       pre_invocation:
         - "allow"
+{{- range .Values.__publicGetPaths }}
+
+  # Egress gateway: the upstream's public A2A card, fetched unauthenticated
+  # by MAS's node validator (templates/egress-gateway-configmap.yaml).
+  - http:
+      path: {{ . }}
+      method: GET
+    authorization:
+      pre_invocation:
+        - "allow"
+{{- end }}
 
   # Catch-all: every other HTTP request requires a valid Keycloak client
   # token and an explicit allow-list match. The earlier exact routes take
@@ -235,5 +246,8 @@ routes:
         # delegate(<plugin>, target: <upstream cluster name>, audience:
         # <exchange audience>) -- a SINGLE audience, which is why every
         # token's audience names the client that exchanges it next.
-        - {{ printf "delegate(%s, target: %s, audience: %s)" .Values.__delegation.plugin .Values.__delegation.target .Values.__delegation.audience | quote }}
+        {{- $step := printf "delegate(%s, target: %s, audience: %s" .Values.__delegation.plugin .Values.__delegation.target .Values.__delegation.audience }}
+        {{- with .Values.__delegation.permissions }}{{ $step = printf "%s, permissions: [%s]" $step (join ", " .) }}{{ end }}
+        {{- with .Values.__delegation.subject }}{{ $step = printf "%s, subject: %s" $step . }}{{ end }}
+        - {{ printf "%s)" $step | quote }}
         {{- end }}

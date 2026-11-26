@@ -364,6 +364,14 @@ clusterGroup:
       namespace: praxis-proxy
       argoProject: hub
       path: charts/all/praxis-proxy
+      # External-IdP egress gateway for Ask Red Hat (docs/EXTERNAL_IDP_EGRESS.md):
+      # the shared agent card, then ONE environment file. Stage -> production
+      # is swapping the second line; MAS (base_url = the gateway) is untouched.
+      # The clustergroup chart sets ignoreMissingValueFiles, so a mistyped
+      # path silently renders NO egress gateway -- check after changing it.
+      extraValueFiles:
+        - /variants/standalone/praxis-egress-ask-red-hat-card.yaml
+        - /variants/standalone/praxis-egress-ask-red-hat-stage.yaml
       ignoreDifferences:
         - group: apps
           kind: Deployment
@@ -773,6 +781,10 @@ clusterGroup:
         # trust the synced managed-ingress CA without disabling TLS verification.
         - name: identity.keycloakCaTrust.enabled
           value: "true"
+        # ...and the OpenShift service CA, for the internal praxis-proxy egress
+        # gateways (Ask Red Hat via praxis-egress-ask-red-hat.praxis-proxy.svc).
+        - name: identity.serviceCaTrust.enabled
+          value: "true"
     mao-api:
       name: mao-api
       namespace: mao
@@ -806,6 +818,10 @@ clusterGroup:
         # MAS API validates A2A Agent Card URLs over HTTPS; trust the cluster's
         # managed ingress CA in addition to the image's public roots.
         - name: identity.keycloakCaTrust.enabled
+          value: "true"
+        # Its node validator fetches the egress gateway's card at blueprint save
+        # (internal Service, OpenShift service CA).
+        - name: identity.serviceCaTrust.enabled
           value: "true"
         # In dev mode, all authenticated requests get user_id="dev"
         # Add "dev" to adminAllowedUsers so it can access resources

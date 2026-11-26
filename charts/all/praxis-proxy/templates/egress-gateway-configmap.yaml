@@ -1,0 +1,186 @@
+{{- /*
+External-IdP egress gateways: one internal Praxis per entry that accepts the
+caller's local-Keycloak Token A, mints a fresh token at an EXTERNAL IdP with
+this gateway's own client (subject: this_workload, i.e. client_credentials),
+and forwards to ONE fixed external upstream. Lets callers (MAS) keep a
+single internal identity while each external destination still gets the
+credential its own IdP issues -- no external->internal token exchange, no
+subject_issuer. Verified end to end on the pinned image against Red Hat SSO
+stage + Ask Red Hat stage (2026-11-26); see docs/EXTERNAL_IDP_EGRESS.md.
+*/}}
+{{- range $key, $cfg := .Values.egressGateways }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $key) }}
+{{- fail (printf "egressGateways key %q must be a DNS label (lowercase alphanumerics and '-'): it is embedded in resource names and the Service DNS name" $key) }}
+{{- end }}
+{{- if gt (len $key) 40 }}
+{{- fail (printf "egressGateways key %q is too long (maximum 40 characters, to keep praxis-egress-<key>-serving-cert a valid name)" $key) }}
+{{- end }}
+{{- if not (kindIs "map" $cfg) }}
+{{- fail (printf "egressGateways.%s must be a map of settings" $key) }}
+{{- end }}
+{{- if not $.Values.policy.enabled }}
+{{- fail (printf "egressGateways.%s requires policy.enabled: the gateway mints an external credential and must authenticate and allow-list its caller first" $key) }}
+{{- end }}
+{{- if not $.Values.policy.caBundleConfigMap.name }}
+{{- fail (printf "egressGateways.%s requires policy.caBundleConfigMap.name: the external upstream and token endpoint are verified against that bundle, which must carry public roots (policy.caBundleSync.includeSystemRoots)" $key) }}
+{{- end }}
+{{- range $field := list "upstreamURL" "tokenUrl" "clientId" "audience" }}
+{{- if not (index $cfg $field) }}
+{{- fail (printf "egressGateways.%s.%s is required" $key $field) }}
+{{- end }}
+{{- end }}
+{{- range $field := list "upstreamURL" "tokenUrl" }}
+{{- if not (hasPrefix "https://" (index $cfg $field | toString)) }}
+{{- fail (printf "egressGateways.%s.%s must be an https:// URL" $key $field) }}
+{{- end }}
+{{- end }}
+{{- $up := include "praxis-proxy.egressGatewayUpstream" $cfg | fromJson }}
+{{- if not $up.host }}
+{{- fail (printf "egressGateways.%s.upstreamURL has no parseable hostname" $key) }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+$" $up.port) }}
+{{- fail (printf "egressGateways.%s.upstreamURL has a non-numeric port %q" $key $up.port) }}
+{{- end }}
+{{- if not $up.pathPrefix }}
+{{- fail (printf "egressGateways.%s.upstreamURL must include the upstream's path (e.g. /api/ask/v1/a2a): the pinned image cannot rewrite paths, so the gateway serves the upstream's own path and routes only that prefix" $key) }}
+{{- end }}
+{{- $cs := default dict $cfg.clientSecret }}
+{{- if and $cs.vaultKey $cs.existingSecret }}
+{{- fail (printf "egressGateways.%s.clientSecret: set exactly one of vaultKey or existingSecret" $key) }}
+{{- end }}
+{{- if not (or $cs.vaultKey (and $cs.existingSecret $cs.existingSecret.name)) }}
+{{- fail (printf "egressGateways.%s.clientSecret requires vaultKey (rendered as an ExternalSecret) or existingSecret.name" $key) }}
+{{- end }}
+{{- $name := include "praxis-proxy.egressGatewayName" $key }}
+{{- $labelCtx := dict "root" $ "key" $key }}
+{{- $cardPath := printf "%s/.well-known/agent-card.json" $up.pathPrefix }}
+{{- $card := "" }}
+{{- with $cfg.agentCard }}
+{{- if not (kindIs "map" .) }}
+{{- fail (printf "egressGateways.%s.agentCard must be a map (the upstream's A2A agent card as YAML)" $key) }}
+{{- end }}
+{{- /* Every advertised interface must point back at THIS gateway: the a2a-sdk
+      sends to the card's URL, so an upstream URL left in the card bypasses
+      the gateway (and posts Token A straight to the upstream). */}}
+{{- $gatewayURL := printf "https://%s.%s.svc:8443%s/" $name $.Release.Namespace $up.pathPrefix }}
+{{- $c := deepCopy . }}
+{{- $_ := set $c "url" $gatewayURL }}
+{{- $_ := unset $c "additionalInterfaces" }}
+{{- if hasKey $c "supportedInterfaces" }}
+{{- $ifaces := list }}
+{{- range $c.supportedInterfaces }}{{- $ifaces = append $ifaces (set (deepCopy .) "url" $gatewayURL) }}{{- end }}
+{{- $_ := set $c "supportedInterfaces" $ifaces }}
+{{- end }}
+{{- $card = toJson $c }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "praxis-proxy.egressGatewayLabels" $labelCtx | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  praxis.yaml: |
+    # Egress gateway "{{ $key }}": local Token A in, {{ $cfg.audience }} token
+    # minted at {{ $cfg.tokenUrl }} out, to https://{{ $up.hostHeader }}{{ $up.pathPrefix }}.
+    listeners:
+      - name: egress
+        address: "0.0.0.0:8443"
+        # Same TLS listener schema as the spoke gateways: OpenShift's
+        # service-serving cert for this gateway's Service. Callers (MAS) trust
+        # the service CA (mas-worker/mas-api identity.serviceCaTrust).
+        tls:
+          certificates:
+            - cert_path: /etc/praxis/serving-cert/tls.crt
+              key_path: /etc/praxis/serving-cert/tls.key
+        filter_chains: [egress]
+
+    filter_chains:
+      - name: egress
+        filters:
+          # Authenticates Token A (local Keycloak only), enforces the azp
+          # allow-list and mints the external token (policy.yaml below).
+          - filter: policy
+            config_path: /etc/praxis/config/policy.yaml
+            allow_private_idp: {{ $.Values.policy.allowPrivateIdp }}
+            require_protocol_metadata: false
+            init_timeout_secs: 30
+
+          # Praxis forwards the INBOUND Host header (this Service's name) by
+          # default; an external edge such as Red Hat's Akamai rejects that
+          # with 400 "Invalid URL". VERIFIED LIVE 2026-11-26.
+          - filter: headers
+            request_set:
+              - name: Host
+                value: {{ $up.hostHeader | quote }}
+            request_remove:
+              - X-Forwarded-For
+              - X-Forwarded-Host
+              - X-Forwarded-Proto
+              - X-Forwarded-Server
+              - Forwarded
+
+          - filter: static_response
+            conditions:
+              - when:
+                  path: /readiness
+                  methods: [GET]
+            status: 200
+            body: "ok"
+          {{- if $card }}
+
+          # The A2A agent card, served from config (agentCard) with every
+          # interface URL forced to this gateway, so callers keep only
+          # base_url and switching environments never touches the caller.
+          # Public: policy.yaml exempts exactly this GET (MAS's node validator
+          # and A2ACardResolver fetch it without a token); nothing is minted.
+          - filter: static_response
+            conditions:
+              - when:
+                  path: {{ $cardPath | quote }}
+                  methods: [GET]
+            status: 200
+            headers:
+              - name: Content-Type
+                value: application/json
+            body: {{ toJson $card }}
+          {{- end }}
+
+          # Only the upstream's own path prefix is routed (no path rewrite on
+          # the pinned image); everything else is a Core 404.
+          - filter: router
+            routes:
+              - path_prefix: {{ $up.pathPrefix | quote }}
+                cluster: egress-upstream
+
+          - filter: load_balancer
+            clusters:
+              - name: egress-upstream
+                endpoints:
+                  - "{{ $up.host }}:{{ $up.port }}"
+                tls:
+                  sni: {{ $up.host | quote }}
+                  verify: true
+                  ca:
+                    ca_path: /etc/praxis/ca-bundle/ca-bundle.crt
+
+    admin:
+      # Kept on loopback: only container-local health probes can access it.
+      address: "127.0.0.1:9901"
+  policy.yaml: |
+{{- $egressValues := deepCopy $.Values }}
+{{- /* Inbound: the caller's local-Keycloak token only. Never trust external
+      issuers here; minting an external credential for an external token is
+      the confused-deputy shape this gateway exists to avoid. */}}
+{{- $_ := set $egressValues.identity "oidcIssuers" list }}
+{{- $_ := set $egressValues.identity.keycloak "audience" ($cfg.inboundAudience | default $.Values.identity.keycloak.audience) }}
+{{- with $cfg.allowedCallers }}
+{{- $_ := set $egressValues.policy "allowedCallers" . }}
+{{- end }}
+{{- $_ := set $egressValues "__delegation" (dict "plugin" "egress-delegator" "target" "egress-upstream" "audience" $cfg.audience "clientId" $cfg.clientId "secretEnv" "PRAXIS_EGRESS_CLIENT_SECRET" "tokenUrl" $cfg.tokenUrl "subject" "this_workload" "permissions" ($cfg.scopes | default list)) }}
+{{- $_ := set $egressValues "__publicGetPaths" (list $cardPath) }}
+{{ tpl ($.Files.Get "files/policy.yaml") (dict "Values" $egressValues "Chart" $.Chart "Release" $.Release "Template" $.Template) | indent 4 }}
+{{- end }}

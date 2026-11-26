@@ -1,0 +1,26 @@
+{{- range $key, $cfg := .Values.egressGateways }}
+{{- $name := include "praxis-proxy.egressGatewayName" $key }}
+{{- $labelCtx := dict "root" $ "key" $key }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "praxis-proxy.egressGatewayLabels" $labelCtx | nindent 4 }}
+  annotations:
+    # service-ca-operator issues and rotates the gateway's serving cert into
+    # this Secret; callers verify it with the cluster service CA.
+    service.beta.openshift.io/serving-cert-secret-name: {{ $name }}-serving-cert
+spec:
+  # Internal only: no Route is ever rendered for an egress gateway. Callers
+  # use https://{{ $name }}.{{ $.Release.Namespace }}.svc:8443<upstream path>.
+  type: ClusterIP
+  selector:
+    {{- include "praxis-proxy.egressGatewaySelectorLabels" $labelCtx | nindent 4 }}
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+      protocol: TCP
+{{- end }}

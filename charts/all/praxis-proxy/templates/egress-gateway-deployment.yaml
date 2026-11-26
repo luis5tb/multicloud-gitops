@@ -1,0 +1,167 @@
+{{- range $key, $cfg := .Values.egressGateways }}
+{{- $name := include "praxis-proxy.egressGatewayName" $key }}
+{{- $labelCtx := dict "root" $ "key" $key "cfg" $cfg }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "praxis-proxy.egressGatewayLabels" $labelCtx | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  replicas: {{ $cfg.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "praxis-proxy.egressGatewaySelectorLabels" $labelCtx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "praxis-proxy.egressGatewayLabels" $labelCtx | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/egress-gateway-configmap.yaml") $ | sha256sum }}
+    spec:
+      {{- if $.Values.dnsIPv4Only.enabled }}
+      # Same IPv4-only DNS arrangement as the other gateways (loopback
+      # AAAA-stripping CoreDNS sidecar) -- needed for the external upstream
+      # and token endpoint as much as for the Keycloak JWKS.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 127.0.0.1
+        searches:
+          - {{ printf "%s.svc.cluster.local" $.Release.Namespace }}
+          - svc.cluster.local
+          - cluster.local
+          {{- range $.Values.dnsIPv4Only.extraSearches }}
+          - {{ . | quote }}
+          {{- end }}
+        options:
+          - name: ndots
+            value: "5"
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml $.Values.securityContext | nindent 8 }}
+        {{- if $.Values.dnsIPv4Only.enabled }}
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "53"
+        {{- end }}
+      {{- with $.Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: praxis-egress-gateway
+          # SAME pinned Praxis image as the other gateways.
+          image: {{ include "praxis-proxy.image" $ | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          env:
+            # The external IdP client's secret. A dangling reference fails
+            # closed (CreateContainerConfigError). ALPHANUMERIC only: the
+            # delegator sends HTTP Basic without URL-encoding.
+            - name: PRAXIS_EGRESS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "praxis-proxy.egressGatewaySecretName" $labelCtx }}
+                  key: {{ include "praxis-proxy.egressGatewaySecretKey" $labelCtx }}
+            # Required (validated in the ConfigMap template): replaces the
+            # image's trust file for the JWKS, token-endpoint and upstream TLS.
+            - name: SSL_CERT_FILE
+              value: /etc/praxis/ca-bundle/ca-bundle.crt
+            {{- if $.Values.logLevel }}
+            - name: RUST_LOG
+              value: {{ $.Values.logLevel | quote }}
+            {{- end }}
+          args:
+            - --config
+            - /etc/praxis/config/praxis.yaml
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: admin-local
+              containerPort: 9901
+              protocol: TCP
+          startupProbe:
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9901/healthy"]
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 36
+          livenessProbe:
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9901/healthy"]
+            periodSeconds: 20
+            timeoutSeconds: 2
+          readinessProbe:
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9901/healthy"]
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/praxis/config
+              readOnly: true
+            - name: serving-cert
+              mountPath: /etc/praxis/serving-cert
+              readOnly: true
+            - name: policy-ca-bundle
+              mountPath: /etc/praxis/ca-bundle
+              readOnly: true
+        {{- if $.Values.dnsIPv4Only.enabled }}
+        - name: dns-ipv4only
+          image: {{ required "praxis-proxy: dnsIPv4Only.image is required when dnsIPv4Only.enabled" $.Values.dnsIPv4Only.image | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args:
+            - -conf
+            - /etc/coredns/Corefile
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8053
+            periodSeconds: 20
+            timeoutSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8053
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            {{- toYaml $.Values.dnsIPv4Only.resources | nindent 12 }}
+          volumeMounts:
+            - name: dns-ipv4only-config
+              mountPath: /etc/coredns
+              readOnly: true
+        {{- end }}
+      volumes:
+        {{- if $.Values.dnsIPv4Only.enabled }}
+        - name: dns-ipv4only-config
+          configMap:
+            name: {{ include "praxis-proxy.fullname" $ }}-dns-ipv4only
+            defaultMode: 0444
+        {{- end }}
+        - name: config
+          configMap:
+            name: {{ $name }}
+            defaultMode: 0444
+        - name: serving-cert
+          secret:
+            secretName: {{ $name }}-serving-cert
+            defaultMode: 0444
+        - name: policy-ca-bundle
+          configMap:
+            name: {{ $.Values.policy.caBundleConfigMap.name }}
+            items:
+              - key: {{ $.Values.policy.caBundleConfigMap.key }}
+                path: ca-bundle.crt
+{{- end }}

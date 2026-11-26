@@ -1,0 +1,134 @@
+# Ask Red Hat's A2A agent card, served by the praxis-proxy egress gateway
+# (charts/all/praxis-proxy egressGateways.<key>.agentCard). The chart replaces
+# `url` with the gateway's own address, so this is environment-neutral: on
+# 2026-11-26 the stage and production cards were identical apart from `url`.
+# It is a COPY: re-copy it (minus `url`) when Ask Red Hat changes skills or
+# capabilities -- see docs/EXTERNAL_IDP_EGRESS.md "Keeping the card current".
+egressGateways:
+  ask-red-hat:
+    agentCard:
+      capabilities:
+        pushNotifications: false
+        stateTransitionHistory: true
+        streaming: true
+      defaultInputModes:
+      - text/plain
+      - application/json
+      defaultOutputModes:
+      - text/plain
+      - application/json
+      description: 'Ask Red Hat is an AI assistant developed by Red Hat that answers questions exclusively
+        about Red Hat products and services. The agent searches Red Hat''s official knowledge base for
+        Solutions, Articles, Documentation, and Compliance information; queries Red Hat''s CVE database
+        for security vulnerability details; looks up product lifecycle data including release dates, support
+        phases, and end-of-life timelines; and provides information about Red Hat''s executive leadership
+        team. All responses are grounded in retrieved data and cite source links for verification. The
+        agent covers RHEL (Red Hat Enterprise Linux), OpenShift, Ansible Automation Platform, RHEL AI,
+        OpenShift AI, and other Red Hat products. The agent responds in the user''s language when supported
+        (English, German, Spanish, French, Japanese, Portuguese, Arabic, Czech, Italian, Korean, Dutch,
+        Chinese), otherwise defaults to English. Important limitations: the agent does NOT generate code,
+        does NOT answer general knowledge questions, and declines requests unrelated to Red Hat products
+        or services.'
+      name: Ask Red Hat Agent
+      preferredTransport: JSONRPC
+      protocolVersion: 0.3.0
+      security:
+      - bearer: []
+      securitySchemes:
+        bearer:
+          bearerFormat: JWT
+          description: Bearer token for Red Hat SSO authentication
+          scheme: bearer
+          type: http
+      skills:
+      - description: Default fallback skill for any Red Hat related query. Searches Red Hat's knowledge
+          base including Solutions, Articles, Documentation, CVEs, Errata, and Compliance information.
+          Use for configuration, troubleshooting, how-to guides, documentation, release notes, errata,
+          supported configurations, error messages, best practices, and general inquiries about RHEL,
+          OpenShift, Ansible, JBoss, Satellite, Ceph, and other Red Hat products. Covers installation,
+          upgrade, migration procedures, package management, system administration, and technical troubleshooting.
+          All responses are grounded in retrieved documents and cite source links for verification. When
+          in doubt, this is the skill to use.
+        examples:
+        - How can I create a new user in RHEL and set its password?
+        - How do I perform an in-place upgrade from RHEL 8 to RHEL 9 using leapp?
+        - How to troubleshoot SELinux denials preventing application access?
+        - Why are my containers in OpenShift stuck in CrashLoopBackOff state?
+        - How do I enable SELinux on RHEL 9?
+        id: general_search
+        name: General Search
+        tags:
+        - search
+        - documentation
+        - knowledge-base
+        - red-hat
+        - troubleshooting
+        - solutions
+        - articles
+      - description: Searches Red Hat's CVE database for security vulnerabilities by CVE ID, keyword,
+          severity, or package name. Retrieves CVE details including severity levels (Critical, Important,
+          Moderate, Low), CVSS scores, affected Red Hat products and versions, available patches and fixes,
+          and links to security advisories (RHSAs, RHBAs, RHEAs). Use this skill when the user asks about
+          specific CVE IDs, security patches for packages, vulnerability severity, or which Red Hat products
+          are affected by a CVE. All data is sourced from Red Hat's official security database.
+        examples:
+        - Is there a fix available for CVE-2024-53150?
+        - What CVEs affect RHEL 9.2?
+        - What is the severity of CVE-2021-44228?
+        - Are there critical vulnerabilities in the httpd package?
+        - What security patches are available for openssl?
+        id: cve_search
+        name: CVE Search
+        tags:
+        - security
+        - cve
+        - vulnerability
+        - errata
+        - rhsa
+        - advisories
+        - patches
+      - description: Looks up GA (General Availability) release dates, support end dates, EOL dates, and
+          lifecycle phases for Red Hat products. Retrieves lifecycle data including Full Support, Maintenance
+          Support, Extended Life Phase, and Extended Update Support (EUS) dates. Covers RHEL, OpenShift,
+          Ansible Automation Platform, Satellite, OpenStack, JBoss EAP, ACM, ACS, AMQ, Quay, Ceph, and
+          other Red Hat products. Handles common abbreviations automatically. Use this skill for questions
+          about release dates, end of life dates, end of support dates, version support status, and how
+          long a product version is supported. NOT for release notes, documentation, errata content, or
+          technical questions.
+        examples:
+        - When does RHEL 7 reach end of life?
+        - What versions of OpenShift are currently supported?
+        - When do RHEL 9 and Satellite 6.15 reach end of support?
+        - Is RHEL 8 still in full support?
+        - What is the GA date for OpenShift 4.16?
+        id: redhat_product_lifecycle
+        name: Red Hat Product Lifecycle
+        tags:
+        - lifecycle
+        - eol
+        - support
+        - release-dates
+        - versions
+        - ga
+        - eus
+      - description: Provides information about Red Hat's executive leadership team including the CEO,
+          CTO, CFO, COO, CPO, CMO, CIO, General Counsel, and other senior vice presidents. Answers questions
+          about specific executives by name or role, the overall leadership team structure, and management
+          responsibilities. Use this skill when the user asks about who leads Red Hat, specific executive
+          roles, or Red Hat's management structure.
+        examples:
+        - Who is the CEO of Red Hat?
+        - Who is on Red Hat's leadership team?
+        - Tell me about Matt Hicks
+        - Who is Red Hat's CTO?
+        - Who runs Red Hat?
+        id: red_hat_leadership
+        name: Red Hat Leadership
+        tags:
+        - leadership
+        - executives
+        - management
+        - ceo
+        - cto
+        - organization
+      version: 0.1.0

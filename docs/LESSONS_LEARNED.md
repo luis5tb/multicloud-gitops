@@ -158,6 +158,16 @@ caught by rendering/validation, not at runtime.
   community source first had said the jwt type should work. The reverted
   twin-delegator attempt (`c7c6f205` and its revert) holds the full machinery
   for whoever revisits. *(live 2026-11-25)*
+- **`subject: caller_workload` (RFC 7523) cannot carry a third-party token
+  either.** Its leg 1 presents the inbound credential as a `federated-jwt`
+  client assertion, and RHBK 26.4's `FederatedJWTClientValidator` requires
+  that assertion's `aud` to be exactly the realm issuer (single audience).
+  That is why it works for SPIFFE SVIDs (minted with our realm as audience)
+  and never for a Red Hat SSO token (`aud: api.ask_red_hat`); leg 1 would also
+  speak for the twin client's service account, not the caller. Found by
+  reading the validator source while evaluating the Praxis
+  identity-delegation guide's Recipe 2; the replacement that does work is the
+  egress gateway in `docs/EXTERNAL_IDP_EGRESS.md`. *(source, 2026-11-26)*
 - **A successful external-token login can still fail RBAC as
   `User "keycloak:<uuid>"`.** Without a `groups` claim OpenShift authorizes the
   brokered subject as an individual, while RBAC targets
@@ -259,6 +269,19 @@ re-check each when the image is bumped.
   through the conditionals verified live) and the grammar was checked against
   the pinned parser source -- but the external predicate's attribute
   visibility was the documented-but-not-run spike. *(live 2026-11-25)*
+- **An external upstream needs `Host` rewritten.** Praxis forwards the
+  inbound `Host` (the gateway's Service name); Red Hat's Akamai edge answered
+  `400 Invalid URL "[no URL]"` even though routing, TLS and the delegation had
+  all succeeded (the delay in the debug log between identity resolution and
+  the route match was the mint). The egress gateways set it with
+  `headers.request_set`. Nothing caught it earlier because every previous
+  upstream was in-cluster and ignored `Host`. *(live 2026-11-26)*
+- **A response body cannot be rewritten on the pinned image.** `json_body`
+  rejects `response_replace` / `response_add` at config time (Content-Length
+  is already committed when body hooks run), so Praxis cannot pass an
+  upstream's A2A card through with its `url` swapped. The egress gateways
+  serve a configured copy instead (`agentCard`), the one deliberate exception
+  to the no-hand-maintained-card rule above. *(source, Core v0.7.0)*
 - **Never serve a hand-maintained agent card.** The static card advertised A2A
   `protocolVersion: "1.0"`, so MAS (a2a-sdk 1.1.5) called
   `SendStreamingMessage` against the 0.3-only adapter (a2a-go v0.3.15
@@ -411,6 +434,28 @@ re-check each when the image is bumped.
 - **Red Hat SSO callers fail the adapter's A->H exchange.** The adapter's
   exchanger never sends `subject_issuer`, which external-token exchange needs.
   Expected until the adapter sets it from the token's `iss`. *(open)*
+- **MAS sends to the agent card's URL, not the node's `base_url`.** The
+  a2a-sdk (1.1.5) picks `supported_interfaces[].url` from the card; Ask Red
+  Hat's card advertises `ifd-001-stage.apps.ext-waf...`, so re-pointing
+  `base_url` at a proxy alone would leave JSON-RPC bypassing it (and posting
+  the wrong token straight to the upstream). The proxy must therefore serve a
+  card whose interface URL is itself: the egress gateways serve `agentCard`
+  from config, so the node keeps only `base_url`. If you ever store a card on
+  the node instead, it must be in MAS's A2A v1 shape: the raw 0.3 card JSON
+  fails `parse_agent_card` (`AgentCapabilities has no field named
+  "stateTransitionHistory"`); mas-api's `a2a.get_agent_card` action
+  (`/api/actions/action.execute`) produces that shape. Hit live while proving
+  the egress gateway with MAS's own `A2AClient`. *(live 2026-11-26)*
+- **MAS's node validator fetches the card unauthenticated from mas-api.** It
+  builds `A2AClient(base_url)` with no stored card and no token (the node's
+  `bearer_token` is empty), so any proxy in front of a node must serve
+  `<base_url>/.well-known/agent-card.json` without auth and be trusted by
+  mas-api, not only by mas-worker. *(source + live, 2026-11-26)*
+- **Ask Red Hat stage quirks.** From outside Red Hat's allow-listed egress
+  ranges `access.stage.redhat.com` answers `403 "Preprod Lockdown"` (test from
+  a cluster pod, not a workstation), and a POST to `.../api/ask/v1/a2a`
+  without the trailing slash gets `307` to `http://localhost:8081/...` --
+  only the card's URL (trailing slash) works. *(live 2026-11-26)*
 
 ## 8. lightspeed-hub / agentic operator
 

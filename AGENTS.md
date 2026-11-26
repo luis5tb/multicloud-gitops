@@ -79,6 +79,7 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 | Keycloak realm/clients/mappers/groups | `charts/all/keycloak-oidc/templates/keycloak-realm-import.yaml` + `values.yaml` |
 | OpenShift Native OIDC resource | `charts/all/keycloak-oidc/templates/openshift-authentication.yaml` |
 | Praxis routing / allow-list policy | `charts/all/praxis-proxy/files/{praxis.yaml,policy.yaml}` |
+| Add an external A2A agent behind its own IdP (e.g. Ask Red Hat) | [`docs/ADDING_AN_EXTERNAL_AGENT.md`](docs/ADDING_AN_EXTERNAL_AGENT.md): praxis-proxy `egressGateways` (+ `variants/standalone/praxis-egress-*.yaml`) and the MAS blueprint node; design in [`docs/EXTERNAL_IDP_EGRESS.md`](docs/EXTERNAL_IDP_EGRESS.md) |
 | **Multi-OIDC configuration (accept tokens from multiple issuers)** | **See [`MULTI_OIDC_CONFIGURATION.md`](MULTI_OIDC_CONFIGURATION.md) for complete guide; example in [`MULTI_OIDC_EXAMPLE.yaml`](MULTI_OIDC_EXAMPLE.yaml)** |
 | MAS inbound A2A blueprint, caller allow-list, Keycloak auth, HITL | `charts/all/mao/mas-a2a/` and its README; activate only after hardening `mao/mas-api` and pinning the API/worker/A2A image together |
 | Any cluster-specific value (URLs, trust domain, image tags, namespace scope) | `variants/standalone/values-standalone.yaml` only |

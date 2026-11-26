@@ -1,0 +1,22 @@
+# Ask Red Hat egress gateway -- PRODUCTION (docs/EXTERNAL_IDP_EGRESS.md).
+# To switch, replace ...-stage.yaml with this file in the praxis-proxy app's
+# extraValueFiles (values-standalone.yaml). Nothing changes in MAS.
+#
+# upstreamURL VERIFIED 2026-11-26 (the production card advertises
+# https://access.redhat.com/api/ask/v1/a2a/). NOT YET VERIFIED: the client --
+# the production Vault record still held a placeholder (client-id
+# "fake-client"), so set clientId to the real production client ID and load
+# its secret into that record before switching. The secret must be
+# alphanumeric (the delegator sends HTTP Basic without URL-encoding).
+egressGateways:
+  ask-red-hat:
+    upstreamURL: https://access.redhat.com/api/ask/v1/a2a
+    tokenUrl: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+    clientId: REPLACE-WITH-PRODUCTION-CLIENT-ID
+    audience: api.ask_red_hat
+    scopes:
+      - openid
+      - api.ask_red_hat
+    clientSecret:
+      # Same Vault record as ACME's production Red Hat SSO credentials.
+      vaultKey: secret/data/global/acme-agent-redhat-sso-production
