@@ -69,6 +69,20 @@ fails validation) as a spoke.
 {{- printf "praxis-spoke-%s" . -}}
 {{- end -}}
 
+{{- define "praxis-proxy.spokeGatewayModeName" -}}
+{{- $name := include "praxis-proxy.spokeGatewayName" .key -}}
+{{- if .execution -}}{{ printf "%s-exec" $name }}{{- else -}}{{ $name }}{{- end -}}
+{{- end -}}
+
+{{- define "praxis-proxy.spokeGatewayExecAppName" -}}
+{{- $readName := include "praxis-proxy.name" . -}}
+{{- if eq $readName "praxis-proxy-spoke-exec" -}}
+praxis-proxy-spoke-read
+{{- else -}}
+praxis-proxy-spoke-exec
+{{- end -}}
+{{- end -}}
+
 {{/*
 Per-spoke validation + shared derived values. Sits in its own template file
 (spoke-gateway-configmap.yaml) so it only runs when gateways are configured.
@@ -84,6 +98,17 @@ credentials in transit (mirrors the remoteAPIServer https-only check above).
 {{- fail (printf "spokeGatewayConfig.exchangeClient.tokenUrl must be an https:// URL, got %q: the token endpoint carries the exchange client secret and the exchanged token in transit (see the remoteAPIServer https-only rule)" .Values.spokeGatewayConfig.exchangeClient.tokenUrl) -}}
 {{- end -}}
 {{- .Values.spokeGatewayConfig.exchangeClient.tokenUrl -}}
+{{- else -}}
+{{- printf "%s/protocol/openid-connect/token" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "praxis-proxy.spokeExecExchangeTokenUrl" -}}
+{{- if .Values.spokeGatewayConfig.execution.exchangeClient.tokenUrl -}}
+{{- if not (hasPrefix "https://" .Values.spokeGatewayConfig.execution.exchangeClient.tokenUrl) -}}
+{{- fail (printf "spokeGatewayConfig.execution.exchangeClient.tokenUrl must be an https:// URL, got %q: the execution token endpoint carries the exchange client secret and token in transit" .Values.spokeGatewayConfig.execution.exchangeClient.tokenUrl) -}}
+{{- end -}}
+{{- .Values.spokeGatewayConfig.execution.exchangeClient.tokenUrl -}}
 {{- else -}}
 {{- printf "%s/protocol/openid-connect/token" (trimSuffix "/" (include "praxis-proxy.effectiveIssuerUrl" .)) -}}
 {{- end -}}

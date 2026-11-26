@@ -269,10 +269,10 @@ def test_spoke_gateway_entry_renders_expected_resources() -> None:
         "audience: praxis-spoke-east)" in pre
     )
 
-    # NetworkPolicy: ingress only from the configured sandbox namespaces on
-    # 8443; egress limited to DNS + HTTPS 443 (Keycloak/JWKS) + the remote
-    # spoke API port parsed from remoteAPIServer (6443 here -- remote kube
-    # APIs do not listen on 443; port-scoped only, see chart README).
+    # NetworkPolicy: ingress only from configured sandbox namespaces AND pods
+    # carrying a step label on 8443; egress limited to DNS + HTTPS 443
+    # (Keycloak/JWKS) + the remote spoke API port parsed from remoteAPIServer
+    # (6443 here -- remote kube APIs do not listen on 443; port-scoped only).
     np = policies[0]
     assert np["spec"]["policyTypes"] == ["Ingress", "Egress"]
     ingress = np["spec"]["ingress"][0]
@@ -281,7 +281,12 @@ def test_spoke_gateway_entry_renders_expected_resources() -> None:
         {
             "namespaceSelector": {
                 "matchLabels": {"kubernetes.io/metadata.name": "mao"}
-            }
+            },
+            "podSelector": {
+                "matchExpressions": [
+                    {"key": "agentic.openshift.io/step", "operator": "Exists"}
+                ]
+            },
         }
     ]
     egress_ports = np["spec"]["egress"][1]["ports"]

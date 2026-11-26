@@ -304,6 +304,40 @@ image as the main gateway, in this chart's namespace):
   contract-validated only, not yet live);
 - a per-spoke **NetworkPolicy** (best-effort; see below).
 
+### Separate write-capable Execution gateways (disabled by default)
+
+`spokeGatewayConfig.execution.enabled` adds a second, per-target gateway named
+`praxis-spoke-<key>-exec`; the existing `praxis-spoke-<key>` read gateway is
+unchanged. Both use the same fixed remote API endpoint, CA/SNI verification,
+target-spoke audience and ingress/egress policy shape, but the execution
+gateway has its own Deployment/Service/NetworkPolicy mode label, inbound
+audience (`spokeGatewayConfig.execution.inboundAudience`, defaulting to its
+exchanger client ID), client secret env var and Keycloak exchanger. It accepts
+R_exec (`aud: praxis-spoke-gateway-exec` in standalone), not the ordinary run
+token R (`aud: praxis-spoke-gateway`). The caller allow-list defaults to the
+read gateway's list; set `execution.allowedCallers` only when the authorized
+exchanger identities intentionally differ.
+
+The execution client/secret comes from
+`keycloak.spokeGatewayExecExchanger` in `charts/all/keycloak-oidc`, with the
+same Vault-backed secret copied into this namespace. Do not reuse the read
+gateway client or secret. The adapter requests R_exec only for the approved
+Execution stage; Analysis and Verification continue to use the read gateway.
+The operator URL template must therefore pair the exact name format, e.g.
+`https://praxis-spoke-{targetCluster}-exec.praxis-proxy.svc.cluster.local:8443`.
+The DNS-label length guard accounts for the `-exec` suffix. Rendering rejects
+colliding read/execution names (for example, keys `east` and `east-exec` when
+execution is enabled); existing valid reader names are preserved.
+
+Praxis rendering provides no Kubernetes write authorization by itself. Each
+target cluster must separately bind the execution token's audience-scoped
+`<spoke-audience>:writer` group to a reviewed writer role; the read token's
+`<spoke-audience>:reader` group stays separate. The standalone variant leaves
+this feature disabled in comments until Keycloak's live R/R_exec downscoping,
+the adapter/operator images, and each spoke's writer RBAC have been verified.
+See the lightspeed-hub and keycloak-oidc READMEs for the role contract and
+rollout sequence.
+
 The remote spoke API CA is mounted from the referenced
 `remoteCACert.secretName`/`configMapName` + `key`; a dangling reference
 leaves the pod unschedulable (fail closed). PPE's exchanger client identity
@@ -337,9 +371,23 @@ wrong in the first attempt, and the target-header gap are in
 Each spoke gateway's NetworkPolicy restricts ingress to
 `spokeGatewayConfig.networkPolicy.ingressFromNamespaces` on 8443 (the `mao`
 default is a placeholder tied to design open question Q4 -- where repo C's
-sandboxes run is undecided, so override it), and egress to cluster DNS, TCP
-443 (Keycloak/JWKS) and the spoke's own remote API port, parsed at render time
-from `remoteAPIServer` (typically 6443).
+sandboxes run is undecided, so override it), AND to pods matching the
+mode-specific `ingressPodSelectors` in the same NetworkPolicy peer. By default
+the read gateway requires `agentic.openshift.io/step` to exist; the execution
+gateway requires that label to equal `execution`. Source inspection of
+`lightspeed-agentic-operator/controller/agenticrun/sandbox_manager.go` confirms
+the label is added directly to bare sandbox Pod metadata and to
+`SandboxTemplate.spec.podTemplate.metadata.labels` for claim-backed sandboxes.
+`podspec_builder.go` defines the label key (`LabelStep`), while
+`sandbox_agent.go` lowercases `SandboxStepExecution` to `execution` before
+`sandbox_manager.go` writes it onto the Pod/template. `pod_handler.go` reads
+this Pod label first and only falls back to Sandbox/SandboxClaim metadata when
+absent. These are source-level controller contracts (not a live-cluster
+observation). The selectors are configurable under
+`spokeGatewayConfig.networkPolicy`; keep the namespace list and selectors
+non-empty whenever this policy is enabled. Egress is restricted to cluster
+DNS, TCP 443 (Keycloak/JWKS) and the spoke's own remote API port, parsed at
+render time from `remoteAPIServer` (typically 6443).
 
 Plain NetworkPolicies cannot match FQDNs, so egress is port-scoped only;
 FQDN-aware enforcement of "only its registered remote API, IdP/JWKS and DNS"

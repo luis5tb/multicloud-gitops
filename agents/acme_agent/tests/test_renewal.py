@@ -318,6 +318,26 @@ def test_failed_mint_passes_the_pause_through(monkeypatch: pytest.MonkeyPatch) -
     assert results[-1]["statusUpdate"]["status"]["state"] == "TASK_STATE_AUTH_REQUIRED"
 
 
+def test_input_required_passes_through_without_auth_renewal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Human approval pauses are not mistaken for credential-renewal pauses."""
+    issuer = TokenIssuer()
+    auth = _auth(monkeypatch, issuer)
+    paused = _status("task-approval", "TASK_STATE_INPUT_REQUIRED", "Approve execution?")
+    downstream = Downstream(_sse(paused))
+
+    async def run() -> list[dict]:
+        async with _client(auth, downstream) as client:
+            return await _stream_results(client, _send_body())
+
+    results = asyncio.run(run())
+
+    assert results == [paused]
+    assert len(downstream.requests) == 1
+    assert downstream.tokens() == ["Bearer kc-1"]
+
+
 def test_legacy_protocol_follow_up(monkeypatch: pytest.MonkeyPatch) -> None:
     """A2A 0.3 streams use kind-tagged events and a legacy message shape."""
     issuer = TokenIssuer()

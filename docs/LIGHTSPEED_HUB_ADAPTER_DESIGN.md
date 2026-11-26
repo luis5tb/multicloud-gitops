@@ -1,19 +1,24 @@
 # Design: the hub A2A adapter (Task B, Phase 1)
 
-Status: DRAFT for review. Authoritative plan: `PLAN-lightspeed-hub-migration.md`
-(v3.8). This document designs the **net-new hub A2A adapter** — the Go service
+Status: implementation record / DRAFT for review. The adapter and the
+approval-gated Execution path described below are implemented on their
+upstream working branches, but have not been verified live. The original
+`PLAN-lightspeed-hub-migration.md` (v3.8) remains the planning record. This
+document designs the **hub A2A adapter** — the Go service
 that gives lightspeed-hub (repo B) an A2A front door and bridges A2A task
 semantics onto the `AgenticRun` machinery of lightspeed-agentic-operator
-(repo C, branch `a2a-support`). It is the counterpart of repo C's
+(repo C, branch `a2a-support-split`). It is the counterpart of repo C's
 already-implemented gateway credential mode and `CredentialsExpired` pause
 contract.
 
 Conventions used here:
 
-- **Token A** = the caller's original token (no groups, by contract:
-  `PLAN-lightspeed-hub-migration.md:14-18`). **Token H** = hub-audience
-  exchange of A (plan `:493-497`). **Token U** = spoke-audience exchange of A,
-  minted per call by the hub-hosted spoke-facing PPE (plan B1, `:710-833`).
+- **Token A** = the caller's original token. **Token H** = the hub-audience
+  exchange of A at the Praxis hub gateway. **R/U** = the stored read-token
+  exchange of H and its per-call spoke-audience exchange. **R_exec/U_exec** =
+  the separate execution-token exchange of H and its per-call spoke exchange.
+  The current token/RBAC contract is
+  [`GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`](GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md).
 - Every claim about current code cites `file:line`. Citations into
   `charts/all/praxis-proxy` and `charts/all/keycloak-oidc` reflect the
   pre-B1 state of branch `rca-mao-praxis-hub`; a concurrent implementer is
@@ -22,7 +27,17 @@ Conventions used here:
   editing.
 - Repo C paths are relative to
   `/home/ltomasbo/git_repos/lightspeed-agentic-operator` (branch
-  `a2a-support`).
+  `a2a-support-split`). Repo B paths are relative to
+  `/home/ltomasbo/git_repos/lightspeed-hub` (branch `a2a-split`).
+
+> **Implementation alignment:** this design began with a protected-Token-A
+> run credential. The current chart path gives the adapter H from the Praxis
+> hub gateway; `token-a` stores R (not A), and approved Execution can also
+> store R_exec under `token-execution`. The old A-handoff assumptions in
+> §§3.3–3.4 and the token-specific details in §§5–6 are superseded; the current
+> implementation contract is in the linked scoped-token design and the
+> lightspeed-hub chart README. The execution rollout is disabled and is not
+> live-verified.
 
 ---
 
@@ -37,7 +52,7 @@ projects status and artifacts back onto the A2A task. It also owns the
 run-token Secret lifecycle (`ls-run-token-{runUID}`) that repo C's gateway
 credential mode consumes.
 
-**Where the source lives.** In the lightspeed-hub repo, branch `a2a`, as an
+**Where the source lives.** In the lightspeed-hub repo, branch `a2a-split`, as an
 optional component: the nested Go module `a2a-adapter/` (binary
 `cmd/hub-a2a-adapter`, packages `internal/{auth,config,run,server,store,watch}`),
 built by that repo's `*-a2a-adapter` Makefile targets and deployed by its
@@ -80,8 +95,10 @@ exactly the boundary OLS used to occupy (plan `:459-464`). Reasons:
   mints Token U — the PPE does, per call.
 
 **Language/runtime choice.** Go, reusing controller-runtime (watch/informer
-machinery, leader election for the single-active-writer guarantee on task
-state). The A2A protocol server uses the A2A SDK (plan `:611`). Trade-off: the
+machinery and a process-local per-run mutex for serialized task/credential
+changes; this is why the adapter is constrained to one replica with
+`Recreate` until distributed locking exists (§8). The A2A protocol server
+uses the A2A SDK (plan `:611`). Trade-off: the
 only proven A2A-server implementations we own are Python (OLS fork's
 `a2a_executor.py`, MAS); a Go server is new code but keeps one toolchain with
 repo B/repo C, shares their CRD Go types (`api/` module is published
@@ -172,13 +189,16 @@ by the API server itself — an acceptable substitute for Temporal's
 
 ## 3. Authentication contract
 
-Per the plan's Phase 1 table (plan `:466-473`) and the current identity chain
-(`agents/AUTHENTICATION.md:40-95`): today's inbound Token A is minted by ACME
-via `client_credentials` + SPIFFE assertion, `aud=["mas-a2a"]`,
-`azp=acme-agent` (`AUTHENTICATION.md:311-321`); MAS validates it and passes
-it through unchanged (`AUTHENTICATION.md:64-75`), so **Praxis sees `azp=acme-agent`,
-never a MAS identity** (`AUTHENTICATION.md:88-94`). Human Keycloak tokens and
-external Red Hat SSO tokens are future inputs with the same shape of handling.
+ACME currently mints Token A via `client_credentials` + SPIFFE assertion,
+`aud=["mas-a2a"]`, `azp=acme-agent`. MAS validates and passes it through;
+the Praxis hub gateway validates A, exchanges it as `mas-a2a` for Token H, and
+forwards H to the adapter. The adapter creates and approves runs with H and
+derives R/R_exec from the current inbound caller credential. It does not
+receive A on the current chart path. See
+[`agents/AUTHENTICATION.md`](../agents/AUTHENTICATION.md) and the scoped-token
+design for the current hop contract. External SSO callers are an available
+input to MAS/Praxis but the hub-gateway exchange still has the documented
+`subject_issuer` limitation (§10).
 
 ### 3.1 Inbound validation (Praxis, not the adapter)
 
@@ -222,15 +242,14 @@ watching, status patches it is allowed to make). Kubernetes authenticates H
 and authorizes by RBAC; the hub's `Authentication` mapping and RoleBindings
 are keycloak-oidc chart work (concurrent implementer), not adapter work.
 
-### 3.3 Protected Token A handoff (required, not deferred)
+### 3.3 Protected Token A handoff (superseded by the current H-based path)
 
-Invariant from the plan (plan `:499-509`): **A must reach the run credential
-path** — the sandbox's kubeconfig reads Token A per request from
-`ls-run-token-{runUID}` (repo C `docs/gateway-credential-mode.md:19-25`), and
-the PPE's per-call A→U exchange needs A as subject. If Praxis performs the
-A→H exchange and replaces the outbound `Authorization` header, it must retain
-A and deliver it (or an access-controlled handle) to the adapter's
-run-credential path through a confidential channel. Concretely:
+This is the original plan's handoff model, not the current chart path. Praxis
+exchanges A→H before the adapter, and the adapter stores R (exchange of H) as
+`token-a`; when enabled, it stores R_exec (also from H) as `token-execution`.
+No protected A handoff is required for the current chain. The earlier A-based
+requirements below are retained only as design history; do not implement them
+instead of the scoped-token contract:
 
 - A is **never** placed in CR fields, logs, Result CRs, or requests to either
   kube API. The only at-rest location is `ls-run-token-{runUID}`, key
@@ -248,16 +267,14 @@ run-credential path through a confidential channel. Concretely:
   (plan `:509`) — that would make every run attributable to the adapter and
   destroy the requester-authority property (plan `:922`).
 
-### 3.4 Token U (B1, out of adapter scope but adjacent)
+### 3.4 Token U (current per-call read token; execution adds U_exec)
 
-The hub-hosted spoke-facing PPE mints U per call from A (plan `:710-833`;
-repo C `gateway.go:22-30` describes the consumer side). The adapter's only
-responsibilities toward U are: (a) write A into the run-token Secret so the
-sandbox can present it, and (b) renew that Secret (§6). The adapter does not
-mint, cache, or validate U in Phase 1. For why the recorded option-A
-fallback is moot against current repo C (which has taken the B1 shape
-itself), see the re-assessment note in Q1 (§10) — the full argument lives
-there.
+The per-spoke Praxis gateway mints U per read call from R; the distinct
+execution gateway mints U_exec per Execution call from R_exec. The adapter
+does not mint or cache either per-call token. It writes/renews R in `token-a`
+and, only for approved Execution, R_exec in `token-execution`. The operator
+selects the gateway and key by step. See the scoped-token design and the
+operator's `docs/gateway-credential-mode.md` for the implemented contract.
 
 ---
 
@@ -265,7 +282,8 @@ there.
 
 ### 4.1 Message → CR mapping
 
-An A2A `message/send` on a new task maps onto a minimal, analysis-shaped run:
+An A2A `message/send` on a new task maps onto a three-stage run (implemented
+in `a2a-adapter/internal/run/creator.go`, `Creator.NewRun`):
 
 ```yaml
 apiVersion: agentic.openshift.io/v1alpha1
@@ -280,24 +298,27 @@ metadata:
 spec:
   request: <text parts of the A2A message, joined; verbatim>
   targetCluster: <from the deterministic header, §4.2>
-  analysis: {}                  # default agent
+  analysis: {agent: <run agent>}
+  execution: {agent: <run agent>}
+  verification: {agent: <run agent>}
 ```
 
 Decisions and trade-offs:
 
-- **Analysis-only by default** (omit `execution`/`verification`). The A2A
-  caller asked a question; repo C's own doc positions analysis-only as the
-  advisory pattern (`agenticrun_types.go:460-475`). Adding execution on a
-  follow-up is not possible on the same run (step fields are immutable,
-  `agenticrun_types.go:309-310`) — a follow-up that requests execution creates
-  a *new* task/run, referencing the prior context. This is honest about the
-  CRD's run-to-completion shape rather than fighting it.
+- **Analysis, Execution, and Verification are always present.** The cluster's
+  `ApprovalPolicy` makes Analysis automatic, Execution manual, and
+  Verification/Escalation automatic. The adapter does not infer an execution
+  request from free-form text and does not create analysis-only runs. The
+  decision comes through the approval checkpoint on the same task.
 - `request` is immutable (`agenticrun_types.go:322`), which matches A2A
   semantics where a task's original message is history, not mutable state.
   `spec.revisionFeedback` (`agenticrun_types.go:374-384`) is the CRD's
   built-in "same run, refined question" path — the adapter exposes it as a
-  structured follow-up DataPart (`revise`), reusing the existing generation-
-  bump re-analysis rather than inventing anything.
+  structured follow-up DataPart (`revise`) only before Execution has an
+  approval or rejection decision. After a decision it rejects `revise` and
+  requires a new task. The adapter revalidates task ownership, then its own SA
+  updates `revisionFeedback` and records `a2a.lightspeed.io/revised-by`; callers
+  are not granted `update` on AgenticRuns.
 - LLM credentials, agents, approval policies: **not the adapter's spec to
   fill**. They come from cluster-scoped `LLMProvider`, `Agent`, and
   `ApprovalPolicy` CRs that the repo C stack's deployment (§8) provisions.
@@ -365,6 +386,14 @@ permitted targets.
 
 ## 5. Run-token Secret lifecycle
 
+> The original details in this section describe the A-based proposal. For the
+> current implementation, `token-a` contains R (the H→read-audience exchange),
+> and approved Execution additionally receives `token-execution` (H→execution
+> audience). The existing run UID/target labels and `CredentialsExpired`
+> contract still apply. The current dual-key lifecycle is documented in
+> [`GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`](GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md)
+> and `charts/all/lightspeed-hub/README.md`.
+
 This is the plan's "Run-token Secret" requirement block (plan `:634-639`),
 item by item, against repo C's implemented contract
 (`docs/gateway-credential-mode.md`, `controller/agenticrun/gateway.go`).
@@ -372,12 +401,16 @@ item by item, against repo C's implemented contract
 ### 5.1 Naming, key, labels (repo C's contract, verbatim)
 
 - Name: `ls-run-token-{run UID}` (`gateway.go:35,67-69`).
-- Key: `token-a` (`gateway.go:38`).
+- Read key: `token-a` (`gateway.go:38`); approved Execution also uses
+  `token-execution`. See the scoped-token design for the dual-key contract.
 - Labels: `hub.openshift.io/agentic-run: {run UID}` and
   `hub.openshift.io/spoke-cluster: {target cluster}` (`gateway.go:117-130`,
   label constants at `spoke.go:53-54`). Repo C validates all three fail-closed
   before creating the sandbox pod (`gateway.go:100-132`) — the adapter must
   write exactly this shape or the run pauses.
+- The Secret has a non-controller, non-blocking ownerReference to its
+  AgenticRun; it is a deletion backstop, not a substitute for terminal-grace
+  cleanup. See the adapter README for the lifecycle contract.
 - Namespace: the run's namespace (repo C fetches it in `r.Namespace`, the
   operator namespace — `credential_pause.go:80`; sandbox pods run in the
   operator namespace per repo C `ARCHITECTURE.md:114`). Confirm against live
@@ -406,15 +439,19 @@ cannot grant "secrets named `ls-run-token-*`". Therefore:
   RBAC.
 - The adapter SA gets **no** secrets access anywhere else, and no
   `create` on arbitrary namespaces' secrets.
+- The adapter SA performs ownership-checked same-run revision updates; callers
+  only patch AgenticRunApproval as H and have no `update` on AgenticRuns.
+  Revision attribution is written to `a2a.lightspeed.io/revised-by`.
 
 ### 5.3 Immutable creator/target binding
 
 Enforced twice: (a) the adapter writes the labels from the *run CR's* UID and
 `spec.targetCluster` (never from the inbound message, which could lie);
 (b) repo C independently rejects a Secret whose labels don't match the run
-(`gateway.go:117-130`). A renewal rewrite (§6) updates `token-a` **without**
-touching labels or any other key — if the target or run changed, that is a
-different run and a different Secret.
+(`gateway.go:117-130`). A read-token renewal (§6) updates `token-a` without
+touching labels or `token-execution`; approval preparation writes both keys
+atomically. If the target or run changed, that is a different run and a
+different Secret.
 
 ### 5.4 Missing credential → CredentialsExpired pause
 
@@ -424,7 +461,8 @@ step condition stays Unknown (`credential_pause.go:30-46`;
 `agenticrun_types.go:57-62,266-278`). The adapter's duty is only to *cause*
 the Secret to exist in time and to react to the condition (§6). Deliberate
 sequencing note: the adapter should write the Secret **before or immediately
-after** creating the run CR (it has A in hand at message time), so the common
+after** creating the run CR (it has H in hand at message time on the current
+Praxis path), so the common
 path never pauses at all — the pause path exists for expiry, not for
 first-write lag.
 
@@ -433,8 +471,8 @@ first-write lag.
 Owner-ref GC is **not** cleanup for retained runs (plan `:636-638`): a
 run-token Secret with an owner ref to the AgenticRun is deleted when the run
 CR is deleted, but a *retained* terminal run (TTL not yet elapsed,
-`status.deleteAfter`, `agenticrun_types.go:440-445`) keeps its Secret — and
-that Secret still contains a Token A that expired long ago. Requirement: the
+  `status.deleteAfter`, `agenticrun_types.go:440-445`) keeps its Secret — and
+  that Secret retains the run-scoped R / R_exec credentials. Requirement: the
 adapter's controller, on observing a run transition to a terminal phase
 (Completed/Failed/Denied/Escalated/EmergencyStopped, derivable via
 `DerivePhase`, `agenticrun_types.go:68-137`), **deletes** (not blanks —
@@ -442,11 +480,12 @@ deletes, so the name can't be re-resolved) `ls-run-token-{runUID}` once no
 step can retry. Repo C's mode-flip behavior (`gateway-credential-mode.md:80-83`)
 shows a deleted Secret in gateway mode simply re-pauses, never corrupts — so
 deleting early-at-terminal is safe even if a human later triggers a revision
-re-analysis: the adapter re-writes the Secret from the *next* valid
-follow-up's A, through the same renewal path (§6). Edge: revision feedback on
-a terminal analysis re-opens the run (`agenticrun_types.go:429-438`) — the
-adapter must treat a terminal→non-terminal transition as "park new A on the
-next message", not auto-resurrect an old one.
+re-analysis **before any Execution decision**: the adapter rewrites the Secret
+from the *next* valid follow-up's H through the renewal path (§6). Once
+Execution is decided, `revise` is rejected and a new task is required. When an
+allowed revision reopens a terminal run (`agenticrun_types.go:429-438`), the
+adapter parks new credentials until the next message rather than resurrecting
+the old ones.
 
 ### 5.6 Denial of untrusted credential references; ownership validation
 
@@ -473,6 +512,11 @@ next message", not auto-resurrect an old one.
 
 ## 6. Renewal bridge (sandbox ↔ MAS)
 
+> The A2A pause/resume shape remains relevant, but this section's original
+> A-in-`token-a` premise is superseded: the adapter derives R from the renewed
+> inbound H and renews R_exec as well only while an approved Execution is
+> pending/running. See the current token-flow reference above.
+
 This implements the plan's "B1 still needs a sandbox-to-task renewal bridge"
 requirement (plan `:864-877`) using the repo C condition contract as the
 hub-side signal and the **existing** MAS↔ACME renewal flow as the
@@ -498,8 +542,10 @@ sends the credential-only follow-up on the same *downstream* task — i.e., on
 4. **Validate ownership + immutability**: same principal (sub), same context,
    same immutable target (§5.6). Renewal does **not** grant permission to
    revive terminal/cancelled tasks or bypass approvals (plan `:446-448`).
-5. **Rewrite**: update `ls-run-token-{runUID}` key `token-a` with A′ —
-   labels untouched (§5.3).
+5. **Rewrite**: the adapter exchanges H′ for fresh R and updates
+   `ls-run-token-{runUID}` key `token-a`; it also renews R_exec only if the
+   approved Execution still matches the recorded analysis identity. Labels
+   remain untouched (§5.3).
 6. **Resume**: repo C detects the Secret's changed `resourceVersion`
    (embedded in the pause condition message, `gateway.go:51-54,216-236`) and
    re-attempts the paused step on its next poll — worst case one
@@ -516,20 +562,15 @@ validates (`gateway-credential-mode.md:73-78`, `credential_pause.go:50-54`).
 The adapter never writes conditions — it only writes the Secret — so it never
 interacts with that rule. Keep it that way.
 
-### 6.2 Pre-start expiry check (parked A is often already dead)
+### 6.2 Pre-start expiry check
 
-Token A is minted at request time; the sandbox may start hours later behind
-an approval, so the parked A is frequently **already expired at sandbox
-start** (plan `:868-871`, Round-5 finding 5 at plan `:1008-1012`). Therefore
-the adapter, in addition to reacting to the condition, **proactively checks
-A's `exp` before writing it** (and on a timer while a run is
-pre-execution/approval-pending): if stale, do not write a dead token —
-immediately surface `AUTH_REQUIRED` (§6.1 steps 2-7) and wait for A′. This
-converts the failure from "pod starts, first PPE call 401s, pause, round
-trip" into "pause before pod creation" — fewer moving parts, and repo C's
-pause machinery already supports not-yet-started runs (the pause happens
-before pod creation by construction, `credential_pause.go` pauses instead of
-failing the step).
+The adapter pre-checks the expiry of the inbound credential before writing
+run credentials. On the current path that credential is H (the original A is
+exchanged by Praxis); a stale credential is not written and the task waits for
+a fresh caller follow-up. This check runs on each inbound request/follow-up,
+not on a background timer. Repo C's pause machinery also handles a later
+gateway rejection or expired credential by pausing before the sandbox step
+fails (`credential_pause.go`).
 
 ### 6.3 What this bridge is NOT
 
@@ -545,8 +586,10 @@ failing the step).
   If the pod has exited, resume requires repo C's own controlled
   re-attempt machinery — the adapter does not replay execution steps
   (plan `:433-435`).
-- **Not a credentials resurrection for terminal runs** — freshness of A′
-  does not override terminal/cancelled state (plan `:446-448`).
+- **Renewal is not a credentials resurrection for terminal runs** — fresh H
+  does not by itself override terminal/cancelled state. An ownership-checked
+  `revise` may reopen a terminal run only before an Execution decision; once
+  decided, start a new task.
 
 ### 6.4 Bounded waits and deadlines
 
@@ -576,13 +619,26 @@ The adapter watches (informer-based) in the run namespace:
   `EscalationResult` — `api/v1alpha1/`, each with Started/Completed
   conditions, `result_types.go:26-36`) referenced from `status.steps`.
 - **AgenticRunApproval** (approval gates, repo C `ARCHITECTURE.md`):
-  when a step waits on a manual approval, the adapter surfaces the A2A task
-  as `INPUT_REQUIRED` — the exact pattern MAS already implements for its own
-  HITL (structured decision DataPart `approve`/`reject`/`modify`/`redirect`,
-  reply on the same task with a new messageId —
-  `AUTHENTICATION.md:467-478`). The adapter forwards the decision to the
-  AgenticRunApproval CR (the patch shape is repo C's; the fields are in
-  `agenticrunapproval_types.go`).
+  when Execution waits for its manual approval, the adapter surfaces the A2A
+  task as `input-required`, with a human-readable TextPart and a DataPart
+  `{"approvalRequest":{"stage":"Execution","run":"…","targetCluster":"…","options":[…],"decisions":["approve","reject"]}}`.
+  The initial stream ends with `Final=true`. A same-task follow-up carries
+  `{"approve":{"stage":"Execution","option":<zero-based index>}}` or
+  `{"reject":{"stage":"Execution"}}`. `revise` is accepted only before
+  an Execution decision; afterward the adapter rejects it and requires a new
+  task. The adapter SA writes the revision after ownership validation and
+  stamps `a2a.lightspeed.io/revised-by`; callers do not update AgenticRuns.
+  On approval, the adapter records the approved AnalysisResult UID/generation
+  in `a2a.lightspeed.io/approved-analysis`, exchanges H for R and R_exec,
+  writes both keys, then patches AgenticRunApproval using H as the caller.
+  Renewal rechecks this analysis identity. Startup recovery and the periodic
+  sweep reconcile `token-execution`, preserving a newly prepared key for a
+  two-minute grace unless Execution is finished or the run is terminal. The
+  run-token Secret has an AgenticRun ownerReference as a deletion backstop.
+  Hub RBAC requires the caller's
+  `keycloak:lightspeed-hub-a2a:agenticrun-approver` group; the adapter
+  ServiceAccount does not get this decision grant. See the chart README for
+  the binding and the scoped-token design for the human / token path.
 
 ### 7.2 Mapping table
 
@@ -590,11 +646,12 @@ The adapter watches (informer-based) in the run namespace:
 | --- | --- |
 | Pending | `submitted` → `working` |
 | Analyzing / Executing / Verifying | `working` (with per-step progress artifacts) |
-| Proposed (analysis done, awaiting approval) | `input-required` (approval decision requested) |
+| Proposed after Analysis, awaiting Execution approval | `input-required` with `approvalRequest` DataPart; initial stream ends `Final=true` |
 | CredentialsExpired=True (any phase) | `working` + `AUTH_REQUIRED` status message (§6) |
 | Completed | `completed`, artifacts from Result CRs |
 | Failed | `failed`, with step failure reason/message |
-| Denied | `failed` with denial reason (approval rejected) |
+| Denied at Execution after successful Analysis | `completed` with the analysis artifact and `Execution rejected by approver; analysis result attached.` |
+| Other Denied phase | `failed` with denial reason |
 | Escalated / EmergencyStopped | terminal states with their reasons; `tasks/cancel` during Stopping → `canceled` |
 
 Artifacts: each completed step's Result CR payload becomes an A2A artifact
@@ -608,9 +665,12 @@ from the Result CR's UID so they are stable across adapter restarts.
   adapter pins one SDK version per image and the agent card reflects it.
 - Task/context mapping: §2.2.
 - Retries/idempotency: duplicate messageId and uncertain-start retry must not
-  create a second run (acceptance item, plan `:450-455`).
+  create a second run; decision replay is idempotent and per-run decision,
+  revision, and credential operations are serialized (acceptance item, plan
+  `:450-455`; see the adapter README).
 - Restart recovery: §2.3 (all state reconstructible from CRs + annotations).
 - Approval waiting: §7.1.
+- Execution rejection mapping and retained analysis artifact: §7.2.
 - Cancellation: §2.3.
 - Result retention: §2.3.
 - Renewal must not create a new MAS session/turn, downstream task, or
@@ -627,7 +687,10 @@ Contents (all net-new; registered in the clusterGroup and parameterized in
 cluster-specific values go, per `AGENTS.md` and `docs/ARCHITECTURE.md`):
 
 1. **Adapter Deployment** (the Go service from this doc) + internal Service
-   + NetworkPolicy admitting only Praxis.
+   + NetworkPolicy admitting only Praxis. It must remain single-replica with
+   `Recreate` while locking is process-local; this temporary rollout constraint
+   ends only when distributed per-run locking is implemented (see the chart
+   README).
 2. **Adapter RBAC**: dedicated SA with the exact grants from §5.2 (secrets in
    the run namespace; agenticruns get/list/watch/patch-status in the run
    namespace; agenticrunapprovals get/list/patch; result CRs get/list/watch;
@@ -673,17 +736,17 @@ cluster-specific values go, per `AGENTS.md` and `docs/ARCHITECTURE.md`):
   repo B and repo C images: the adapter changes on A2A/auth cadence; repo C
   changes on sandbox/execution cadence; pinning them together would force
   lockstep upgrades (plan `:649-652`).
-- **Source of the image**: the lightspeed-hub repo, branch `a2a` — the
+- **Source of the image**: the lightspeed-hub repo, branch `a2a-split` — the
   adapter lives there as the nested module `a2a-adapter/` and its image is
   built by `make image-a2a-adapter` (Dockerfile target `a2a-adapter`,
   UBI9 go-toolset with `strictfipsruntime`, mirroring the repo's operator
   image). Until that build is published to a registry, this chart's image
   value stays a placeholder (`quay.io/example/lightspeed-hub-adapter`) —
   pin the published digest/tag in the variant when it lands. The
-  `a2a-support` api module the adapter `replace`s is vendored into the
+  `a2a-support-split` api module the adapter `replace`s is vendored into the
   image build context by that target; a published api-module version
   replaces the replace before any registry build outside this workspace.
-- Repo C image: pin the `a2a-support` build; rollback image = the upstream
+- Repo C image: pin the `a2a-support-split` build; rollback image = the upstream
   `spoke-sa`-mode image (byte-identical behavior when the new ConfigMap keys
   are absent — `gateway-credential-mode.md:43-45` — so rollback is: flip the
   ConfigMap back and swap the image).

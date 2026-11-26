@@ -556,6 +556,95 @@ re-check each when the image is bumped.
   `gh pr view <n> --json mergedAt,reviews` and whether its scope matches; e.g.
   `lightspeed-service` PR #2866 added A2A *transport* with no authentication,
   which does not address per-caller delegated identity.
+- **Successful renders do not prove cross-spoke name uniqueness.** A local
+  Helm reproduction with `east` and `east-exec` and execution enabled emitted
+  four duplicate resource identities while exiting successfully. The render
+  suite passed because its examples did not combine a spoke name with another
+  spoke's new `-exec` gateway suffix. Add identity-uniqueness assertions, not
+  just expected-resource checks; see [review G1](A2A_REMEDIATION_REVIEW.md).
+  *(local-only review, 2026-11-25; not fixed in this review pass)*
+- **Test credential resume at the handler boundary.** A disposable fake-client
+  test resumed verification, advanced the run's resourceVersion, then hit a
+  stale optimistic-lock patch base; the next reconcile saw an in-progress
+  condition but no sandbox. Helper-level credential tests did not exercise the
+  second status write. Test pause -> resume -> exactly one launch; see
+  [review O1/O2](A2A_REMEDIATION_REVIEW.md).
+  *(local-only review, 2026-11-25; not fixed in this review pass)*
+- **Passing race tests do not establish command atomicity or event freshness.**
+  Disposable adapter tests replayed approval after an adapter timeout, combined
+  approve/revise commands, used CLI-shaped approvals, and injected an old
+  terminal snapshot after revision. Existing happy-path tests did not cover
+  these orderings. Validate commands before writes and reread current state
+  before destructive reconciliation; see
+  [review H1-H5](A2A_REMEDIATION_REVIEW.md).
+  *(local-only review, 2026-11-25; not fixed in this review pass)*
+- **Validate decisions through the durable gate, not just the mapper.** Local
+  probes found revision prose becoming approval, malformed option text falling
+  back to approval, and an invalid choice consuming the only pending mailbox
+  request. A separate gate-to-A2A projection probe showed that a 300-character
+  tool-argument preview drops structured options. Mapper-only and mocked-prompt
+  tests missed these boundaries; see [review M1-M4](A2A_REMEDIATION_REVIEW.md).
+  *(local-only review, 2026-11-25; not fixed in this review pass)*
+- **Exercise the outer A2A executor when testing remote lifecycle states.** A
+  real pinned-dependency ADK/`to_a2a` probe reported ACME completion after a
+  nonterminal MAS stream closed. Invalid-decision RPC errors and protocol-level
+  rejection also appeared successful in response probes. Remote-agent-only
+  tests did not establish the outer task outcome; see
+  [review A1-A3](A2A_REMEDIATION_REVIEW.md).
+  *(local-only review, 2026-11-25; not fixed in this review pass)*
+
+  The entries above preserve the original review checkpoint; subsequent local
+  fixes and regression results are tracked in the
+  [remediation follow-up](A2A_REMEDIATION_REVIEW.md#remediation-follow-up--2026-11-26),
+  not evidence of a live rollout.
+
+- **A locked approval handler is not enough if watcher/sweeper writes bypass it.**
+  Independent local remediation review used barriers to stop token exchange or
+  a watcher mid-flight, then interleaved timeout expiry or successful renewal.
+  Passing sequential tests had missed a terminal record being overwritten and
+  a cleared auth pause being restored from an older watcher copy. A separate
+  contended-event test also showed that dropping a callback was unsafe unless
+  the periodic sweep retried the complete lifecycle work. Cover shared-record
+  mutations and retry behavior, not only the handler's entry guard; see the
+  [remediation follow-up](A2A_REMEDIATION_REVIEW.md#remediation-follow-up--2026-11-26)
+  for correction/review status. *(local-only regression review, 2026-11-26)*
+
+- **Strict option matching also needs a strict rejection path and a gate type.**
+  Local review sent `approve 2 please` through MAS's real inbound parser and
+  Mongo-store implementation (with mongomock): it missed the whole-choice
+  matcher, was treated as no choice, and consumed the durable gate with a
+  default approval. Exact-number tests alone did not cover this fall-through.
+  The same review compared the pre-edit implementation and found generic tool
+  `MODIFY` arguments named `option` were being mistaken for remote remediation
+  choices. Test malformed selection attempts at the submission boundary and
+  preserve generic tool-argument semantics; remediation review status is
+  tracked in the [follow-up](A2A_REMEDIATION_REVIEW.md#remediation-follow-up--2026-11-26).
+  *(local-only regression review, 2026-11-26)*
+
+- **Audit the early-return writers, not just the main renewal path.** A later
+  local interleaving probe sent an expired-token follow-up while the sweeper
+  terminalized the run-backed task. That branch did not mint credentials, but
+  its stale full-record write erased terminality, allowing a later valid replay
+  to mint again. A separate condition-removal probe kept `auth-required` after
+  the operator legitimately switched credential mode and cleared its pause,
+  eventually timing out a resumed run. Sequential and race-detector passes did
+  not expose these ordering/semantic failures. Cover every shared-record write
+  and the authoritative condition-clear transition; the remediation
+  [status table](A2A_REMEDIATION_REVIEW.md#finding-to-fix-and-regression-map)
+  records final correction/review status. *(local-only regression review,
+  2026-11-26)*
+
+- **A barrier-controlled test must also control background timers.** Final Hub
+  remediation review caught `TestSweepDeadlineSerializesWithApprovalRenewal`
+  failing under race: its harness still swept every 10 ms, so advancing the
+  fake clock past the deadline let the background sweep correctly terminalize
+  before the test started renewal. It then waited for an exchange that should
+  never occur. Earlier single runs missed this scheduling-dependent ordering;
+  even 10 later full runs and 50 focused repetitions passed. Disable automatic
+  sweeping at harness construction for this test and retain its explicit sweep
+  (now done; 200 focused race repetitions passed); see the
+  [resolution](A2A_REMEDIATION_REVIEW.md#resolved-nondeterministic-hub-concurrency-regression).
+  *(local-only regression review, 2026-11-26)*
 
 ## 9. Flow monitor (`scripts/monitor.sh`)
 
@@ -654,3 +743,12 @@ re-check each when the image is bumped.
   from a predecessor's doc, and the agent card's protocol version was copied
   with it. When this file says "check the source", it includes READMEs and
   comments.
+- **An offline HTML walkthrough still needs browser tests.** A headless Chrome
+  invalid-input check on `a2a-api-watch-map.html` found that the example-name
+  constraint accepted `<script>`: an unescaped literal hyphen made its
+  `pattern` invalid under HTML's Unicode `v` regular-expression rules, so the
+  browser ignored the constraint. Escaping the hyphen restored validation;
+  JavaScript syntax and static HTML/link checks had passed because neither
+  compiles HTML input patterns. Example rendering uses `textContent`, so this
+  was a validation defect, not script execution. *(local documentation test,
+  2026-11-26)*

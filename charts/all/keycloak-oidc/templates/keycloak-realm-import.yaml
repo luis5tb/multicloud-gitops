@@ -42,6 +42,48 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if .Values.keycloak.spokeGatewayExecExchanger.enabled }}
+{{- $exchanger := .Values.keycloak.spokeGatewayExecExchanger }}
+{{- if not $exchanger.vaultKey }}
+{{- fail "keycloak.spokeGatewayExecExchanger.vaultKey is required when keycloak.spokeGatewayExecExchanger.enabled is true (Vault path holding the execution exchanger client's secret)" }}
+{{- end }}
+{{- if not $exchanger.clientId }}
+{{- fail "keycloak.spokeGatewayExecExchanger.clientId must be set when keycloak.spokeGatewayExecExchanger.enabled is true" }}
+{{- end }}
+{{- if not .Values.keycloak.hubExchange.enabled }}
+{{- fail "keycloak.spokeGatewayExecExchanger.enabled requires keycloak.hubExchange.enabled to mint execution run tokens" }}
+{{- end }}
+{{- if not .Values.keycloak.exchangeRoles.enabled }}
+{{- fail "keycloak.spokeGatewayExecExchanger.enabled requires keycloak.exchangeRoles.enabled so execution and read tokens receive audience-scoped groups" }}
+{{- end }}
+{{- if not .Values.keycloak.exchangeRoles.remediation.groups }}
+{{- fail "keycloak.spokeGatewayExecExchanger.enabled requires keycloak.exchangeRoles.remediation.groups so writer and approver roles are granted only to an explicitly authorized group" }}
+{{- end }}
+{{- if not .Values.keycloak.spokeGatewayExchanger.enabled }}
+{{- fail "keycloak.spokeGatewayExecExchanger.enabled requires keycloak.spokeGatewayExchanger.enabled so read and execution gateways are configured together" }}
+{{- end }}
+{{- if not $exchanger.spokeAudiences }}
+{{- fail "keycloak.spokeGatewayExecExchanger.spokeAudiences must list every registered spoke audience when the execution exchanger is enabled" }}
+{{- end }}
+{{- range $aud := $exchanger.spokeAudiences }}
+{{- if not (has $aud $.Values.keycloak.spokeGatewayExchanger.spokeAudiences) }}
+{{- fail (printf "execution audience %q is missing from keycloak.spokeGatewayExchanger.spokeAudiences; read and execution gateways must target the same spokes" $aud) }}
+{{- end }}
+{{- end }}
+{{- range $aud := .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
+{{- if not (has $aud $exchanger.spokeAudiences) }}
+{{- fail (printf "read audience %q is missing from keycloak.spokeGatewayExecExchanger.spokeAudiences; read and execution gateways must target the same spokes" $aud) }}
+{{- end }}
+{{- end }}
+{{- if ne .Values.keycloak.hubExchange.executionTokenAudience $exchanger.clientId }}
+{{- fail "keycloak.hubExchange.executionTokenAudience must equal keycloak.spokeGatewayExecExchanger.clientId when the execution exchanger is enabled" }}
+{{- end }}
+{{- range $aud := $exchanger.spokeAudiences }}
+{{- if or (not (kindIs "string" .)) (not .) }}
+{{- fail "keycloak.spokeGatewayExecExchanger.spokeAudiences entries must be non-empty strings (per-spoke Keycloak audiences matching each execution gateway's exchangeAudience)" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.keycloak.hubExchange.enabled }}
 {{- $hub := .Values.keycloak.hubExchange }}
 {{- if not $hub.vaultKey }}
@@ -52,6 +94,15 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- end }}
 {{- if not $hub.hubAudience }}
 {{- fail "keycloak.hubExchange.hubAudience is required when keycloak.hubExchange.enabled is true: it is the audience of the exchanged Token H (must equal charts/all/lightspeed-hub's adapter.hubAudience)" }}
+{{- end }}
+{{- if and $hub.executionTokenAudience (not .Values.keycloak.spokeGatewayExecExchanger.enabled) }}
+{{- fail "keycloak.hubExchange.executionTokenAudience requires keycloak.spokeGatewayExecExchanger.enabled" }}
+{{- end }}
+{{- if and $hub.executionTokenAudience (not $hub.runTokenAudience) }}
+{{- fail "keycloak.hubExchange.executionTokenAudience requires keycloak.hubExchange.runTokenAudience" }}
+{{- end }}
+{{- if and $hub.executionTokenAudience (eq $hub.executionTokenAudience $hub.runTokenAudience) }}
+{{- fail "keycloak.hubExchange.executionTokenAudience must be distinct from keycloak.hubExchange.runTokenAudience so read and execution tokens cannot be replayed across gateways" }}
 {{- end }}
 {{- /* Audience-distinctness fail-guards: the hub audience names a distinct
       consumer (the hub kube API path via the adapter), so it must never
@@ -68,6 +119,13 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- range $aud := .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
 {{- if eq $aud $hub.hubAudience }}
 {{- fail "keycloak.hubExchange.hubAudience must be distinct from every keycloak.spokeGatewayExchanger.spokeAudiences entry (spoke vs hub audiences name different consumers)" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.keycloak.spokeGatewayExecExchanger.enabled }}
+{{- range $aud := .Values.keycloak.spokeGatewayExecExchanger.spokeAudiences }}
+{{- if eq $aud $hub.hubAudience }}
+{{- fail "keycloak.hubExchange.hubAudience must be distinct from every keycloak.spokeGatewayExecExchanger.spokeAudiences entry" }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -111,23 +169,32 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
       client that may carry (and projects) those roles. */}}
 {{- $er := .Values.keycloak.exchangeRoles }}
 {{- $audRoles := dict }}
-{{- $audExchanger := dict }}
 {{- if $er.enabled }}
 {{- if .Values.keycloak.hubExchange.enabled }}
-{{- $_ := set $audRoles .Values.keycloak.hubExchange.hubAudience $er.hubRoles }}
-{{- $_ := set $audExchanger .Values.keycloak.hubExchange.hubAudience (ternary $hgClientId .Values.keycloak.hubExchange.clientId $hgEnabled) }}
+{{- $hubAudienceRoles := $er.hubRoles }}
+{{- if and $er.remediation.groups $er.remediation.hubRole }}{{- $hubAudienceRoles = uniq (concat $hubAudienceRoles (list $er.remediation.hubRole)) }}{{- end }}
+{{- $_ := set $audRoles .Values.keycloak.hubExchange.hubAudience $hubAudienceRoles }}
 {{- end }}
+{{- $allSpokeAudiences := list }}
 {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
-{{- range .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
-{{- $_ := set $audRoles . $er.spokeRoles }}
-{{- $_ := set $audExchanger . $.Values.keycloak.spokeGatewayExchanger.clientId }}
+{{- $allSpokeAudiences = concat $allSpokeAudiences .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
 {{- end }}
+{{- if .Values.keycloak.spokeGatewayExecExchanger.enabled }}
+{{- $allSpokeAudiences = concat $allSpokeAudiences .Values.keycloak.spokeGatewayExecExchanger.spokeAudiences }}
+{{- end }}
+{{- range $aud := uniq $allSpokeAudiences }}
+{{- $spokeAudienceRoles := $er.spokeRoles }}
+{{- if and $er.remediation.groups $er.remediation.spokeRole }}{{- $spokeAudienceRoles = uniq (concat $spokeAudienceRoles (list $er.remediation.spokeRole)) }}{{- end }}
+{{- $_ := set $audRoles $aud $spokeAudienceRoles }}
 {{- end }}
 {{- if not $audRoles }}
-{{- fail "keycloak.exchangeRoles.enabled requires keycloak.hubExchange.enabled and/or keycloak.spokeGatewayExchanger.enabled (with spokeAudiences): there is no exchange audience to scope roles to" }}
+{{- fail "keycloak.exchangeRoles.enabled requires an enabled hubExchange and/or spoke gateway exchanger with audiences: there is no exchange audience to scope roles to" }}
 {{- end }}
-{{- if or (and .Values.keycloak.hubExchange.enabled (not $er.hubRoles)) (and .Values.keycloak.spokeGatewayExchanger.enabled (not $er.spokeRoles)) }}
+{{- if or (and .Values.keycloak.hubExchange.enabled (not $er.hubRoles)) (and (or .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.spokeGatewayExecExchanger.enabled) (not $er.spokeRoles)) }}
 {{- fail "keycloak.exchangeRoles.hubRoles / spokeRoles must be non-empty for every enabled exchanger" }}
+{{- end }}
+{{- if and $er.remediation.groups (or (not $er.remediation.hubRole) (not $er.remediation.spokeRole)) }}
+{{- fail "keycloak.exchangeRoles.remediation.hubRole and spokeRole must be non-empty when remediation.groups is set" }}
 {{- end }}
 {{- $knownGroups := list .Values.keycloak.acmeGroupName }}
 {{- if .Values.keycloak.adminGroupName }}
@@ -136,6 +203,11 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- range $er.groups }}
 {{- if not (has . $knownGroups) }}
 {{- fail (printf "keycloak.exchangeRoles.groups entry %q is not a group this realm import creates (%s)" . (join ", " $knownGroups)) }}
+{{- end }}
+{{- end }}
+{{- range $er.remediation.groups }}
+{{- if not (has . $knownGroups) }}
+{{- fail (printf "keycloak.exchangeRoles.remediation.groups entry %q is not a group this realm import creates (%s)" . (join ", " $knownGroups)) }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -151,7 +223,7 @@ metadata:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   keycloakCRName: {{ .Values.keycloak.name }}
-  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.hubExchange.enabled .Values.keycloak.hubGatewayExchanger.enabled }}
+  {{- if or .Values.keycloak.consoleClientSecretVaultKey .Values.keycloak.consoleAdminUser.enabled $hasExternalCredentials .Values.keycloak.spokeGatewayExchanger.enabled .Values.keycloak.spokeGatewayExecExchanger.enabled .Values.keycloak.hubExchange.enabled .Values.keycloak.hubGatewayExchanger.enabled }}
   placeholders:
     {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
     # Resolves ${PRAXIS_SPOKE_EXCHANGER_SECRET} below into the spoke
@@ -160,6 +232,12 @@ spec:
     PRAXIS_SPOKE_EXCHANGER_SECRET:
       secret:
         name: {{ .Values.keycloak.spokeGatewayExchanger.secretName }}
+        key: client-secret
+    {{- end }}
+    {{- if .Values.keycloak.spokeGatewayExecExchanger.enabled }}
+    PRAXIS_SPOKE_EXEC_EXCHANGER_SECRET:
+      secret:
+        name: {{ .Values.keycloak.spokeGatewayExecExchanger.secretName }}
         key: client-secret
     {{- end }}
     {{- if .Values.keycloak.hubExchange.enabled }}
@@ -235,12 +313,29 @@ spec:
       {{- $groupNames = append $groupNames .Values.keycloak.acmeGroupName }}
       {{- range $g := $groupNames }}
       - name: {{ $g | quote }}
-        {{- if and $er.enabled (has $g $er.groups) }}
-        # Members get every audience-scoped exchange role; each exchanger
-        # projects only its own audience's roles into `groups`.
+        {{- if and $er.enabled (or (has $g $er.groups) (has $g $er.remediation.groups)) }}
+        # Ordinary exchange roles go to exchangeRoles.groups; the extra
+        # approver/writer roles are assigned only to remediation.groups.
         clientRoles:
           {{- range $aud := keys $audRoles | sortAlpha }}
-          {{ $aud | quote }}: {{ toJson (get $audRoles $aud) }}
+          {{- $roles := list }}
+          {{- if has $g $er.groups }}
+            {{- if eq $aud $.Values.keycloak.hubExchange.hubAudience }}
+              {{- $roles = concat $roles $er.hubRoles }}
+            {{- else }}
+              {{- $roles = concat $roles (without $er.spokeRoles $er.remediation.spokeRole) }}
+            {{- end }}
+          {{- end }}
+          {{- if has $g $er.remediation.groups }}
+            {{- if eq $aud $.Values.keycloak.hubExchange.hubAudience }}
+              {{- $roles = append $roles $er.remediation.hubRole }}
+            {{- else }}
+              {{- $roles = append $roles $er.remediation.spokeRole }}
+            {{- end }}
+          {{- end }}
+          {{- if $roles }}
+          {{ $aud | quote }}: {{ toJson (uniq $roles) }}
+          {{- end }}
           {{- end }}
         {{- end }}
       {{- end }}
@@ -262,8 +357,21 @@ spec:
     clientScopeMappings:
       {{- range $aud := keys $audRoles | sortAlpha }}
       {{ $aud | quote }}:
-        - client: {{ get $audExchanger $aud | quote }}
+        {{- if eq $aud $.Values.keycloak.hubExchange.hubAudience }}
+          {{- if $.Values.keycloak.hubExchange.enabled }}
+        - client: {{ ternary $hgClientId $.Values.keycloak.hubExchange.clientId $hgEnabled | quote }}
           roles: {{ toJson (get $audRoles $aud) }}
+          {{- end }}
+        {{- else }}
+          {{- if $.Values.keycloak.spokeGatewayExchanger.enabled }}
+        - client: {{ $.Values.keycloak.spokeGatewayExchanger.clientId | quote }}
+          roles: {{ toJson (without (without $.Values.keycloak.exchangeRoles.spokeRoles "writer") $.Values.keycloak.exchangeRoles.remediation.spokeRole) }}
+          {{- end }}
+          {{- if $.Values.keycloak.spokeGatewayExecExchanger.enabled }}
+        - client: {{ $.Values.keycloak.spokeGatewayExecExchanger.clientId | quote }}
+          roles: {{ toJson (uniq (concat $.Values.keycloak.exchangeRoles.spokeRoles (list $.Values.keycloak.exchangeRoles.remediation.spokeRole))) }}
+          {{- end }}
+        {{- end }}
       {{- end }}
     {{- end }}
     clients:
@@ -484,6 +592,47 @@ spec:
           {{- end }}
         {{- end }}
       {{- end }}
+      {{- if .Values.keycloak.spokeGatewayExecExchanger.enabled }}
+      # Execution-only exchanger: unlike the reader exchanger above, this
+      # client is allowed to scope the spoke's writer role. Its distinct
+      # client ID is also the inbound audience on the execution gateway.
+      - clientId: {{ .Values.keycloak.spokeGatewayExecExchanger.clientId | quote }}
+        name: {{ .Values.keycloak.spokeGatewayExecExchanger.clientName | quote }}
+        enabled: true
+        protocol: openid-connect
+        publicClient: false
+        standardFlowEnabled: false
+        implicitFlowEnabled: false
+        directAccessGrantsEnabled: false
+        # Exchange-only: the client must not mint its own client-credentials
+        # token as a way around the subject-token group authorization.
+        serviceAccountsEnabled: false
+        secret: ${PRAXIS_SPOKE_EXEC_EXCHANGER_SECRET}
+        fullScopeAllowed: false
+        attributes:
+          standard.token.exchange.enabled: "true"
+        protocolMappers:
+          {{- range $aud := .Values.keycloak.spokeGatewayExecExchanger.spokeAudiences }}
+          - name: {{ printf "%s-audience" $aud | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ $aud | quote }}
+              access.token.claim: "true"
+          - name: {{ printf "%s-roles-as-groups" $aud | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            config:
+              usermodel.clientRoleMapping.clientId: {{ $aud | quote }}
+              usermodel.clientRoleMapping.rolePrefix: {{ printf "%s:" $aud | quote }}
+              claim.name: groups
+              multivalued: "true"
+              jsonType.label: String
+              access.token.claim: "true"
+              id.token.claim: "false"
+              userinfo.token.claim: "false"
+          {{- end }}
+      {{- end }}
       {{- if .Values.keycloak.hubExchange.enabled }}
       # TASK B / PHASE 1: confidential client the hub A2A adapter
       # (charts/all/lightspeed-hub) authenticates as when exchanging the
@@ -528,6 +677,18 @@ spec:
           # the adapter exchanges its inbound token for R and stores R in
           # the run-token Secret; only the spoke gateway accepts it and
           # exchanges it (as this audience's client) for the spoke's U.
+          - name: {{ printf "%s-audience" . | quote }}
+            protocol: openid-connect
+            protocolMapper: oidc-audience-mapper
+            config:
+              included.custom.audience: {{ . | quote }}
+              access.token.claim: "true"
+          {{- end }}
+          {{- with .Values.keycloak.hubExchange.executionTokenAudience }}
+          # R_exec's distinct audience. The adapter requests this exact
+          # audience only on an Execution approval; Keycloak 26 standard
+          # token exchange downscopes aud to the requested client. Verify
+          # on the live Keycloak build that it is absent from ordinary R.
           - name: {{ printf "%s-audience" . | quote }}
             protocol: openid-connect
             protocolMapper: oidc-audience-mapper
@@ -632,12 +793,17 @@ spec:
       {{- if and .Values.keycloak.hubExchange.enabled (not $hgEnabled) }}
       {{- $audienceClients = append $audienceClients .Values.keycloak.hubExchange.hubAudience }}
       {{- end }}
-      {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
-      {{- range .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
-      {{- $audienceClients = append $audienceClients . }}
-      {{- end }}
-      {{- end }}
-      {{- $otherClientIds := list .Values.keycloak.clientId .Values.keycloak.acmeClientId .Values.keycloak.consoleClientId .Values.keycloak.spokeGatewayExchanger.clientId .Values.keycloak.hubExchange.clientId }}
+       {{- if .Values.keycloak.spokeGatewayExchanger.enabled }}
+       {{- range .Values.keycloak.spokeGatewayExchanger.spokeAudiences }}
+       {{- $audienceClients = append $audienceClients . }}
+       {{- end }}
+       {{- end }}
+       {{- if .Values.keycloak.spokeGatewayExecExchanger.enabled }}
+       {{- range .Values.keycloak.spokeGatewayExecExchanger.spokeAudiences }}
+       {{- $audienceClients = append $audienceClients . }}
+       {{- end }}
+       {{- end }}
+       {{- $otherClientIds := list .Values.keycloak.clientId .Values.keycloak.acmeClientId .Values.keycloak.consoleClientId .Values.keycloak.spokeGatewayExchanger.clientId .Values.keycloak.spokeGatewayExecExchanger.clientId .Values.keycloak.hubExchange.clientId .Values.keycloak.hubExchange.executionTokenAudience }}
       {{- range $aud := $audienceClients | uniq }}
       {{- if has $aud $otherClientIds }}
       {{- fail (printf "exchange audience %q collides with an existing client ID in the realm; audience-only clients must have their own names" $aud) }}

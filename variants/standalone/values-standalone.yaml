@@ -359,6 +359,30 @@ clusterGroup:
           value: "true"
         - name: keycloak.exchangeRoles.groups[0]
           value: acme-agent-rca
+        # REMEDIATION EXECUTION PATH (DISABLED, COMMENTED OUT): keep the
+        # read-only run token (aud praxis-spoke-gateway) separate from R_exec
+        # (aud praxis-spoke-gateway-exec). Only the explicitly approved
+        # remediation group receives agenticrun-approver and writer roles;
+        # the normal acme-agent-rca group remains read/creator-only.
+        # Before enabling on this already-imported realm, create/configure the
+        # execution exchanger and audience/role mappers through the Keycloak
+        # Admin API as documented in charts/all/keycloak-oidc/README.md.
+        # - name: keycloak.hubExchange.executionTokenAudience
+        #   value: praxis-spoke-gateway-exec
+        # - name: keycloak.spokeGatewayExecExchanger.enabled
+        #   value: "true"
+        # - name: keycloak.spokeGatewayExecExchanger.vaultKey
+        #   value: secret/data/global/praxis-spoke-gateway-exec
+        # Keep this list exactly aligned with spokeGatewayExchanger.spokeAudiences.
+        # - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[0]
+        #   value: praxis-spoke-hub
+        # - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[1]
+        #   value: praxis-spoke-mario-ipi
+        # This group must be a real, deliberately restricted approval group.
+        # Its members also need ordinary exchangeRoles.groups membership if
+        # Execution should retain the reader permissions alongside writer.
+        # - name: keycloak.exchangeRoles.remediation.groups[0]
+        #   value: cluster-admins
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
@@ -521,6 +545,20 @@ clusterGroup:
         # acme-agent -- the spoke gateways must allow-list THAT client.
         - name: spokeGatewayConfig.allowedCallers[0]
           value: lightspeed-hub-a2a
+        # REMEDIATION EXECUTION GATEWAY (DISABLED, COMMENTED OUT). Read
+        # gateways above remain praxis-spoke-<key>; execution gets the distinct
+        # praxis-spoke-<key>-exec Service and accepts only the R_exec audience.
+        # Keycloak creates this client/secret and its target-namespace copy.
+        # - name: spokeGatewayConfig.execution.enabled
+        #   value: "true"
+        # - name: spokeGatewayConfig.execution.exchangeClient.clientId
+        #   value: praxis-spoke-gateway-exec
+        # - name: spokeGatewayConfig.execution.exchangeClient.secretName
+        #   value: praxis-spoke-gateway-exec-client
+        # - name: spokeGatewayConfig.execution.inboundAudience
+        #   value: praxis-spoke-gateway-exec
+        # - name: spokeGatewayConfig.execution.allowedCallers[0]
+        #   value: lightspeed-hub-a2a
         # 32 MiB response ceiling (Praxis default 10 MiB): a full
         # `kubectl logs` of the demo payments-api pod is ~12.4 MB.
         - name: spokeGatewayConfig.maxResponseBytes
@@ -958,6 +996,13 @@ clusterGroup:
           value: "true"
         - name: adapter.runTokenAudience
           value: praxis-spoke-gateway
+        # REMEDIATION EXECUTION PATH (DISABLED, COMMENTED OUT). The adapter
+        # requests this audience only for approved Execution; Analysis and
+        # Verification keep using the ordinary run token above. The two token
+        # audiences must remain distinct and live aud/group claims must be
+        # verified before enabling.
+        # - name: adapter.executionTokenAudience
+        #   value: praxis-spoke-gateway-exec
         # adapter.keycloak.issuerUrl/tokenUrl derive from
         # global.clusterBaseDomain + global.keycloakRealm; override only to
         # diverge.
@@ -1013,6 +1058,11 @@ clusterGroup:
         # set to lightspeed-hub there):
         - name: agenticOperator.config.gatewayServerURLTemplate
           value: https://praxis-spoke-{targetCluster}.praxis-proxy.svc.cluster.local:8443
+        # Optional Execution-only endpoint; the operator selects this URL and
+        # token-execution only for the Execution stage. Analysis/Verification
+        # continue using gatewayServerURLTemplate and token-a.
+        # - name: agenticOperator.config.gatewayExecutionServerURLTemplate
+        #   value: https://praxis-spoke-{targetCluster}-exec.praxis-proxy.svc.cluster.local:8443
         - name: agenticOperator.config.gatewayCASecret
           value: praxis-spoke-gateway-ca
         # Fail-fast allow-list of target clusters (the adapter's
@@ -1049,6 +1099,25 @@ clusterGroup:
           value: "true"
         - name: spokeReaderRBAC.groups[0]
           value: keycloak:praxis-spoke-hub:reader
+        # REMEDIATION EXECUTION AUTHORIZATION (DISABLED, COMMENTED OUT).
+        # H's audience-scoped approver role authorizes decisions on
+        # AgenticRunApprovals; the R_exec->U_exec role group is separately
+        # bound to the enumerated writer ClusterRole by namespaced RoleBindings
+        # only in this explicit workload-namespace allow-list. `payments` is
+        # the demo app namespace from agenticrun_test.yaml, not enabled here.
+        # The default rules omit Secrets and pods/exec, pods/attach, and
+        # pods/portforward, but within an allowed namespace they can still run
+        # workloads as any ServiceAccount and mount its Secrets (similar to
+        # Kubernetes edit). Keep privileged SAs out or add admission policy.
+        # For a separate spoke, create the RoleBindings on that spoke cluster.
+        # - name: adapter.hubRunApproversGroup
+        #   value: keycloak:lightspeed-hub-a2a:agenticrun-approver
+        # - name: spokeExecutorRBAC.enabled
+        #   value: "true"
+        # - name: spokeExecutorRBAC.groups[0]
+        #   value: keycloak:praxis-spoke-hub:writer
+        # - name: spokeExecutorRBAC.namespaces[0]
+        #   value: payments
         # Cross-chart contract (request leg): adapter.targetHeader must equal
         # praxis-proxy's a2aUpstream.targetHeader (X-Hub-Cluster default
         # both sides); adapter.hubAudience must equal keycloak-oidc's

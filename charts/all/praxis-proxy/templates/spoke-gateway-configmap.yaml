@@ -9,9 +9,25 @@ VERIFIED-WORKS; real-Keycloak behavior (incl. the STE v2
 impersonation-only caveat) and the CA-sync end-to-end path remain open,
 so the feature stays off by default.
 */}}
+{{- $gatewayNames := dict }}
 {{- range $key, $cfg := .Values.spokeGateways }}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $key) }}
 {{- fail (printf "spokeGateways key %q must be a DNS label (lowercase alphanumerics and '-'): it is embedded in resource names and the Service DNS name repo C's sandbox kubeconfig points at" $key) }}
+{{- end }}
+{{- if and $.Values.spokeGatewayConfig.execution.enabled (gt (len $key) 45) }}
+{{- fail (printf "spokeGateways key %q is too long for the execution gateway name praxis-spoke-%s-exec (maximum key length 45 to keep the DNS label at 63 characters)" $key $key) }}
+{{- end }}
+{{- $modes := list false }}
+{{- if $.Values.spokeGatewayConfig.execution.enabled }}
+{{- $modes = append $modes true }}
+{{- end }}
+{{- range $execution := $modes }}
+{{- $name := include "praxis-proxy.spokeGatewayModeName" (dict "key" $key "execution" $execution) }}
+{{- $owner := printf "%s/%s" $key (ternary "exec" "read" $execution) }}
+{{- if hasKey $gatewayNames $name }}
+{{- fail (printf "spoke gateway resource name collision: %s and %s both generate %q; rename a spoke key before enabling execution" (get $gatewayNames $name) $owner $name) }}
+{{- end }}
+{{- $_ := set $gatewayNames $name $owner }}
 {{- end }}
 {{- if not (kindIs "map" $cfg) }}
 {{- fail (printf "spokeGateways.%s must be a map of per-spoke settings" $key) }}
@@ -54,9 +70,37 @@ so the feature stays off by default.
 {{- if not $.Values.spokeGatewayConfig.exchangeClient.secretName }}
 {{- fail "spokeGatewayConfig.exchangeClient.secretName is required when spokeGateways entries exist (Secret holding the exchanger's client secret; created by charts/all/keycloak-oidc's spoke-gateway-exchanger-secret.yaml)" }}
 {{- end }}
+{{- if $.Values.spokeGatewayConfig.execution.enabled }}
+{{- if not $.Values.spokeGatewayConfig.execution.exchangeClient.clientId }}
+{{- fail "spokeGatewayConfig.execution.exchangeClient.clientId is required when spokeGatewayConfig.execution.enabled is true" }}
+{{- end }}
+{{- if not $.Values.spokeGatewayConfig.execution.exchangeClient.secretName }}
+{{- fail "spokeGatewayConfig.execution.exchangeClient.secretName is required when spokeGatewayConfig.execution.enabled is true" }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- $serviceCaRendered := dict }}
 {{- range $key, $cfg := .Values.spokeGateways }}
+{{- $modes := list (dict "execution" false) }}
+{{- if $.Values.spokeGatewayConfig.execution.enabled }}
+{{- $modes = append $modes (dict "execution" true) }}
+{{- end }}
+{{- range $mode := $modes }}
+{{- $isExec := $mode.execution }}
+{{- $name := include "praxis-proxy.spokeGatewayModeName" (dict "key" $key "execution" $isExec) }}
+{{- $modeLabel := ternary "exec" "read" $isExec }}
+{{- $client := $.Values.spokeGatewayConfig.exchangeClient }}
+{{- $inboundAudience := $.Values.spokeGatewayConfig.inboundAudience | default $client.clientId }}
+{{- $secretEnv := "PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET" }}
+{{- $tokenUrl := include "praxis-proxy.spokeExchangeTokenUrl" $ }}
+{{- $allowedCallers := $.Values.spokeGatewayConfig.allowedCallers }}
+{{- if $isExec }}
+{{- $client = $.Values.spokeGatewayConfig.execution.exchangeClient }}
+{{- $inboundAudience = $.Values.spokeGatewayConfig.execution.inboundAudience | default $client.clientId }}
+{{- $secretEnv = "PRAXIS_SPOKE_EXEC_EXCHANGE_CLIENT_SECRET" }}
+{{- $tokenUrl = include "praxis-proxy.spokeExecExchangeTokenUrl" $ }}
+{{- $allowedCallers = $.Values.spokeGatewayConfig.execution.allowedCallers | default $.Values.spokeGatewayConfig.allowedCallers }}
+{{- end }}
 {{- if not (index $serviceCaRendered "done") }}
 {{- $_ := set $serviceCaRendered "done" true }}
 apiVersion: v1
@@ -104,15 +148,16 @@ metadata:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "praxis-proxy.spokeGatewayName" $key }}
+  name: {{ $name }}
   labels:
     {{- include "praxis-proxy.labels" $ | nindent 4 }}
     praxis-proxy.spoke-gateway: {{ $key | quote }}
+    praxis-proxy.spoke-gateway-mode: {{ $modeLabel | quote }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 data:
   praxis.yaml: |
-    # Per-spoke Praxis configuration for spoke gateway "{{ $key }}"
+    # Per-spoke Praxis configuration for {{ $modeLabel }} gateway "{{ $key }}"
     # (Phase 2 B1). Syntax VERIFIED against the pinned image
     # (ghcr.io/praxis-proxy/ai:0.4.1 / praxis-policy 0.3.1) via a local
     # podman spike; see the chart README "Spoke gateways (B1)" for what
@@ -249,7 +294,7 @@ data:
     Empirical gotchas are recorded as comments in files/policy.yaml.
 */}}
 {{- $spokeValues := deepCopy $.Values }}
-{{- $_ := set $spokeValues "__delegation" (dict "plugin" "spoke-delegator" "target" "spoke-api" "audience" $cfg.exchangeAudience "clientId" $.Values.spokeGatewayConfig.exchangeClient.clientId "secretEnv" "PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET" "tokenUrl" (include "praxis-proxy.spokeExchangeTokenUrl" $)) }}
+{{- $_ := set $spokeValues "__delegation" (dict "plugin" "spoke-delegator" "target" "spoke-api" "audience" $cfg.exchangeAudience "clientId" $client.clientId "secretEnv" $secretEnv "tokenUrl" $tokenUrl) }}
 {{- /* Inbound audience for local-Keycloak tokens: the audience of the hop
       THIS gateway fronts -- its own exchanger client ID by default, since
       Keycloak only exchanges a subject token carrying the exchanging client
@@ -258,15 +303,16 @@ data:
       VERIFIED LIVE (2026-11-20): R = H exchanged by the adapter for
       aud praxis-spoke-gateway, accepted by Keycloak as the subject of this
       gateway's R->U exchange. */}}
-{{- $_ := set $spokeValues.identity.keycloak "audience" ($.Values.spokeGatewayConfig.inboundAudience | default $.Values.spokeGatewayConfig.exchangeClient.clientId) }}
+{{- $_ := set $spokeValues.identity.keycloak "audience" $inboundAudience }}
 {{- /* azp allow-list for the spoke gateways. An exchanged token's `azp` is
       the client that PERFORMED the exchange, so the run token R carries
       azp=<adapter exchanger client> (lightspeed-hub-a2a), not the original
       caller (acme-agent). VERIFIED-BROKEN LIVE (2026-11-20): inheriting the
       hub gateway's policy.allowedCallers denied every sandbox kube call with
       403 "not an allow-listed caller". Empty = inherit (Token A mode). */}}
-{{- with $.Values.spokeGatewayConfig.allowedCallers }}
+{{- with $allowedCallers }}
 {{- $_ := set $spokeValues.policy "allowedCallers" . }}
 {{- end }}
 {{ tpl ($.Files.Get "files/policy.yaml") (dict "Values" $spokeValues "Chart" $.Chart "Release" $.Release "Template" $.Template) | indent 4 }}
+{{- end }}
 {{- end }}

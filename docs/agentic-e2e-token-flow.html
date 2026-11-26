@@ -19,6 +19,8 @@
     --H: light-dark(#8a4b08, #f5c37a);
     --R: light-dark(#6b3fa0, #cfb1f4);
     --U: light-dark(#14654f, #89ddc2);
+    --Rexec: light-dark(#a23d59, #f2a8be);
+    --Uexec: light-dark(#426a16, #c2e58f);
     --S: light-dark(#5b6b80, #9fb0c6);
     --kc: light-dark(#a3293c, #ffa9b5);
     --ok: light-dark(#14654f, #89ddc2);
@@ -39,7 +41,7 @@
   .dots { display: flex; gap: 5px; flex-wrap: wrap; margin: 14px 0 10px; }
   .dots button { padding: 3px 9px; font-size: 12px; border-radius: 999px; }
   .dots button.on { background: var(--accent); color: var(--panel); border-color: var(--accent); }
-  .lane { display: grid; grid-template-columns: repeat(14, minmax(0, 1fr)); gap: 6px; margin: 6px 0 16px; }
+  .lane { display: grid; grid-template-columns: repeat(15, minmax(0, 1fr)); gap: 6px; margin: 6px 0 16px; }
   .ent { border: 1.5px solid var(--border); background: var(--panel); border-radius: 10px; padding: 7px 6px; font-size: 11.5px; text-align: center; line-height: 1.25; color: var(--muted); min-height: 50px; display: flex; align-items: center; justify-content: center; transition: all .15s; }
   .ent.touch { border-style: dashed; border-color: var(--accent); color: var(--text); }
   .ent.from, .ent.to { border-width: 2.5px; border-color: var(--accent); color: var(--text); font-weight: 650; background: var(--tint); }
@@ -62,6 +64,8 @@
   .tH { border-color: var(--H); } .tH .tt { color: var(--H); }
   .tR { border-color: var(--R); } .tR .tt { color: var(--R); }
   .tU { border-color: var(--U); } .tU .tt { color: var(--U); }
+  .tRexec { border-color: var(--Rexec); } .tRexec .tt { color: var(--Rexec); }
+  .tUexec { border-color: var(--Uexec); } .tUexec .tt { color: var(--Uexec); }
   .tS .tt { color: var(--S); }
   .arrow { text-align: center; font-size: 13px; color: var(--muted); margin: 6px 0; }
   pre.req { font-size: 12px; background: var(--subtle); border-radius: 8px; padding: 9px 11px; margin: 6px 0 0; white-space: pre; overflow-x: auto; }
@@ -75,14 +79,14 @@
   .k { font-size: 12px; color: var(--muted); }
   footer { margin-top: 18px; font-size: 13px; color: var(--muted); }
   a { color: var(--accent); }
-  @media (max-width: 1000px) { .lane { grid-template-columns: repeat(7, minmax(0, 1fr)); } }
+  @media (max-width: 1000px) { .lane { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
 </style>
 </head>
 <body>
 <main>
 <header>
   <div>
-    <div class="sub">multicloud-gitops · rca-mao-praxis-hub · live-verified 2026-11-20</div>
+    <div class="sub">multicloud-gitops · read-only path live-verified 2026-11-20 · execution branch implemented, not live-verified</div>
     <h1>ACME → lightspeed-hub investigation: tokens hop by hop</h1>
     <div class="sub">← / → keys or the buttons. Component map: <a href="agentic-architecture-overview.html">agentic-architecture-overview.html</a></div>
   </div>
@@ -96,7 +100,8 @@
 <div class="lane" id="lane"></div>
 <section class="slide" id="slide"></section>
 <footer>Token claims are trimmed to what each hop checks; the <code>sub</code> (<code>bb366787-…</code>, the
-acme-agent service account) is identical in all four tokens. <code>&lt;kc&gt;</code> =
+acme-agent service account) is preserved across token exchange. R_exec/U_exec are implemented but not live-verified;
+the current ACME identity is a service account, not an individually authenticated UI human. <code>&lt;kc&gt;</code> =
 <code>https://keycloak.apps.&lt;cluster-domain&gt;/realms/rca</code>.</footer>
 </main>
 
@@ -107,6 +112,7 @@ const ENT = [
   ["phub", "Praxis hub<br>gateway"], ["adapter", "hub A2A<br>adapter"], ["hubapi", "Hub<br>kube API"],
   ["op", "agentic<br>operator"], ["sbx", "sandbox<br>pod"], ["pspoke", "Praxis spoke<br>gateway"],
   ["spokeapi", "Spoke<br>kube API"], ["vertex", "Vertex AI<br>(Gemini)"],
+  ["pexec", "Praxis exec<br>gateway"],
 ];
 
 const T = {
@@ -138,6 +144,18 @@ sub:    bb366787-…
 azp:    praxis-spoke-gateway
 aud:    praxis-spoke-hub
 groups: [praxis-spoke-hub:reader]` },
+  Rexec: { c: "tRexec", name: "Token R_exec · execution credential", life: "configured", body:
+`iss:    <kc>
+sub:    same caller identity
+azp:    lightspeed-hub-a2a
+aud:    praxis-spoke-gateway-exec
+groups: verify claims live` },
+  Uexec: { c: "tUexec", name: "Token U_exec · spoke execution", life: "300 s, per call", body:
+`iss:    <kc>
+sub:    same caller identity
+azp:    praxis-spoke-gateway-exec
+aud:    praxis-spoke-hub
+groups: writer; reader only if also in ordinary group` },
 };
 
 const xreq = (client, auth, subj, aud) =>
@@ -153,15 +171,17 @@ const STEPS = [
   title: "The cast and the plan",
   who: "Overview",
   from: null, to: null, touch: ENT.map(e => e[0]),
-  sum: "One user question to ACME becomes one AgenticRun on the hub. Four tokens are involved, each minted for the next hop only. Praxis sits in front of the hub (hub gateway) and in front of every cluster API the sandbox reads (spoke gateway).",
+  sum: "One question becomes a three-stage AgenticRun. The live-verified read path uses A, H, R, and U. The optional execution branch (R_exec and U_exec) is implemented but not live-verified; it is only enabled after an approval checkpoint.",
   html: `<table>
   <tr><th>Token</th><th>Minted by (client)</th><th>aud</th><th>groups</th><th>Life</th><th>Used at</th></tr>
   <tr><td><b style="color:var(--A)">A</b></td><td>Keycloak for <code>acme-agent</code></td><td>mas-a2a</td><td>acme-agent-rca</td><td>300 s</td><td>MAS A2A, hub gateway</td></tr>
   <tr><td><b style="color:var(--H)">H</b></td><td>hub gateway as <code>mas-a2a</code></td><td>lightspeed-hub-a2a</td><td>lightspeed-hub-a2a:agenticrun-creator</td><td>300 s</td><td>adapter, hub kube API</td></tr>
   <tr><td><b style="color:var(--R)">R</b></td><td>adapter as <code>lightspeed-hub-a2a</code></td><td>praxis-spoke-gateway</td><td>none</td><td>1800 s</td><td>spoke gateway only</td></tr>
   <tr><td><b style="color:var(--U)">U</b></td><td>spoke gateway as <code>praxis-spoke-gateway</code></td><td>praxis-spoke-hub</td><td>praxis-spoke-hub:reader</td><td>300 s</td><td>spoke kube API</td></tr>
+  <tr><td><b style="color:var(--Rexec)">R_exec</b></td><td>adapter as <code>lightspeed-hub-a2a</code>, after approval</td><td>praxis-spoke-gateway-exec</td><td>verify live</td><td>configured</td><td>execution gateway only</td></tr>
+  <tr><td><b style="color:var(--Uexec)">U_exec</b></td><td>execution gateway as <code>praxis-spoke-gateway-exec</code></td><td>praxis-spoke-hub</td><td>writer; reader if in both groups</td><td>300 s</td><td>spoke kube API</td></tr>
 </table>
-<div class="note">Rule: a token's <code>aud</code> is the client that exchanges or consumes it next. Keycloak only lets a client exchange a token that names it in <code>aud</code>, and Praxis's <code>delegate()</code> asks for exactly one audience, so this rule is what makes every exchange legal.</div>`
+<div class="note">Rule: a token's <code>aud</code> is the client that exchanges or consumes it next. Keycloak only lets a client exchange a token that names it in <code>aud</code>, and Praxis's <code>delegate()</code> asks for exactly one audience. Execution-token audiences and claims still need live validation on the deployed Keycloak version.</div>`
 },
 {
   title: "ACME gets its workload identity",
@@ -230,12 +250,14 @@ POST /a2a   message/stream   Authorization: Bearer <A>`,
   title: "Adapter creates the AgenticRun as the user",
   who: "hub A2A adapter → Hub kube API",
   from: "adapter", to: "hubapi", touch: ["phub"],
-  sum: "The adapter receives H (--inbound-hub-token) and creates the AgenticRun in ns lightspeed-hub with H itself, so the run is created by the user, not by the adapter's ServiceAccount.",
+  sum: "The adapter receives H (--inbound-hub-token) and creates a three-stage AgenticRun in ns lightspeed-hub with H itself, so the run is created by the caller identity, not by the adapter's ServiceAccount.",
   inTok: ["H"],
   validates: ["Kube API (OpenShift Native OIDC): iss = Keycloak, aud = lightspeed-hub-a2a", "user keycloak:bb366787-…", "group keycloak:lightspeed-hub-a2a:agenticrun-creator → RBAC create agenticruns", "ValidatingAdmissionPolicy …-agenticrun-target-authz: target allowed for that group"],
   req: `POST /apis/agentic.openshift.io/v1alpha1/namespaces/lightspeed-hub/agenticruns
   Authorization: Bearer <H>
-  name: a2a-<hash>   spec.targetCluster: hub   spec.analysis.agent: default`,
+  name: a2a-<hash>   spec.targetCluster: hub
+  analysis.agent: default   execution.agent: default   verification.agent: default
+  ApprovalPolicy: Analysis=Automatic, Execution=Manual, Verification=Automatic`,
   connects: ["Hub kube API"],
   notes: ["The adapter's own ServiceAccount only watches runs and manages run-token Secrets; it cannot create runs."],
   fwd: "AgenticRun a2a-…",
@@ -257,19 +279,19 @@ POST /a2a   message/stream   Authorization: Bearer <A>`,
   title: "Operator starts the sandbox",
   who: "agentic operator → sandbox pod",
   from: "op", to: "sbx", touch: ["hubapi", "vertex"],
-  sum: "The operator reconciles the AgenticRun (Agent default, LLMProvider vertex, ApprovalPolicy cluster). In gateway credential mode it creates the sandbox with a kubeconfig whose only credential is R.",
+  sum: "The operator reconciles the three-stage AgenticRun. During Analysis, gateway credential mode points the sandbox at the read gateway and projects only R from token-a. Execution later gets a distinct URL and key after approval.",
   inTok: [],
   connects: ["Hub kube API (operator's own ServiceAccount)", "Secret llm-creds-vertex → sandbox LLM config"],
   html: `<div class="box" style="margin-top:4px"><h3>Sandbox kubeconfig (Secret ls-sandbox-kubeconfig-…)</h3>
 <pre class="req">clusters:
-- name: spoke-via-gateway
+- name: spoke-via-read-gateway
   cluster:
-    server: https://praxis-spoke-hub.praxis-proxy.svc.cluster.local:8443
+    server: https://&lt;read-gateway-for-targetCluster&gt;
     certificate-authority: /var/run/secrets/praxis-gateway/ca.crt
 users:
 - name: requester
   user:
-    tokenFile: /var/run/secrets/run-identity/token-a   # R, mounted without subPath so renewals appear</pre></div>`,
+    tokenFile: /var/run/secrets/run-identity/token-a   # R; key-only projection, no subPath</pre></div>`,
   notes: ["No spoke ServiceAccount and no spoke-management kubeconfig are created in gateway mode: every read happens as the user, through the gateway."],
 },
 {
@@ -280,7 +302,7 @@ users:
   inTok: ["R"],
   req: `GET https://praxis-spoke-hub.praxis-proxy.svc:8443/api/v1/namespaces/payments/pods
   Authorization: Bearer <R>`,
-  connects: ["Praxis spoke gateway (NetworkPolicy: only from ns lightspeed-hub)", "Vertex AI (LLM)"],
+  connects: ["Praxis spoke gateway (NetworkPolicy: namespace + mode-specific pod selector)", "Vertex AI (LLM)"],
   notes: ["Every tool result is inspected by the sandbox before the model sees it; a suspicious result stops the run (ToolResultSafetyInspectionFailed)."],
   fwd: "R",
 },
@@ -310,10 +332,95 @@ users:
   fwd: "kube API responses → sandbox",
 },
 {
+  title: "Analysis pauses at the Execution approval checkpoint",
+  who: "hub adapter → MAS ApprovalGate → ACME",
+  from: "adapter", to: "acme", touch: ["mas", "worker", "phub"],
+  sum: "When Analysis completes, the adapter pauses the same A2A task with input-required. MAS's hub node is configured with hitl_mode: ask by setup-mas-blueprint.sh (default ask); its outbound HITL gate surfaces the request to ACME. ACME forwards a reply only on the same inbound ACME task that paused. A new ACME task routes normally; no execution credential exists yet.",
+  connects: ["MAS outbound A2A ApprovalGate (hub node hitl_mode: ask)", "ACME approval UI or text decision"],
+  html: `<div class="cols">
+<div class="box"><h3>Adapter event</h3><pre class="req">state: input-required
+Final: true
+DataPart:
+  approvalRequest:
+    stage: Execution
+    run: &lt;AgenticRun name&gt;
+    targetCluster: hub
+    options: [&lt;proposed remediation options&gt;]
+    decisions: [approve, reject]</pre></div>
+<div class="box"><h3>Authorization boundary</h3><ul>
+<li>MAS relays the choice on the paused remote task; ACME requires the same inbound task.</li>
+<li>H must carry the hub <code>agenticrun-approver</code> role for the API patch.</li>
+<li>With current ACME <code>client_credentials</code>, the caller is ACME's service account, not the UI human.</li></ul></div>
+</div>`,
+  notes: ["Reject mints no R_exec. If Analysis succeeded, the adapter returns completed with the analysis artifact and an execution-rejected message."],
+},
+{
+  title: "Approval follow-up mints scoped credentials and patches the decision",
+  who: "ACME → MAS → Praxis hub gateway → adapter",
+  from: "acme", to: "adapter", touch: ["mas", "worker", "phub", "kc", "hubapi"],
+  sum: "Approve or reject continues the same inbound ACME task and paused MAS task. On approval, the adapter records the approved analysis identity, exchanges current H for fresh R and R_exec, writes both run-token keys, then patches AgenticRunApproval using H as the caller.",
+  req: `message/send on existing task
+  messageId: <new id>
+  data: { approve: { stage: Execution, option: <zero-based index> } }
+  # structured MAS option may arrive as protobuf float; it must be integral
+  # Plain-text "approve option N" uses one-based display numbering.
+  # or: { reject: { stage: Execution } }
+  Authorization: Bearer <fresh caller token; reaches adapter as H>`,
+  client: "lightspeed-hub-a2a exchanges H for R and R_exec; H authorizes the approval patch",
+  out: ["R", "Rexec"],
+  fwdHtml: `Secret <code>ls-run-token-&lt;uid&gt;</code>: <code>token-a = R</code> and <code>token-execution = R_exec</code>; patch is made after the write`,
+  notes: ["Decision/revision/credential operations serialize per run; replays are idempotent. Revise is rejected after an Execution decision (start a new task). If the approval patch fails, the adapter removes token-execution. R_exec is only for the execution gateway; live claim and cross-gateway checks remain open."],
+},
+{
+  title: "Operator starts the approved Execution sandbox",
+  who: "agentic operator → Execution sandbox",
+  from: "op", to: "sbx", touch: ["hubapi", "adapter"],
+  sum: "Only the Execution step selects gateway-execution-server-url-template and projects token-execution. The read credential is not mounted into this sandbox, and there is no fallback between credentials.",
+  html: `<div class="box"><h3>Execution kubeconfig</h3><pre class="req">clusters:
+- name: spoke-via-execution-gateway
+  cluster:
+    server: https://&lt;execution-gateway-for-targetCluster&gt;
+    certificate-authority: /var/run/secrets/praxis-gateway/ca.crt
+users:
+- name: requester
+  user:
+    tokenFile: /var/run/secrets/run-identity/token-execution  # R_exec only</pre></div>`,
+  notes: ["The volume projects the selected Secret key using items (not subPath). A missing key should pause with CredentialsExpired; verify this live."],
+},
+{
+  title: "Execution gateway exchanges R_exec for U_exec",
+  who: "Execution sandbox → Praxis execution gateway ⇄ Keycloak → spoke API",
+  from: "sbx", to: "pexec", touch: ["kc", "spokeapi"],
+  sum: "Per call, the separate execution gateway validates R_exec and exchanges it for a short-lived token scoped to the target spoke. The target API enforces its independent writer group binding.",
+  inTok: ["Rexec"],
+  validates: ["R_exec audience = praxis-spoke-gateway-exec", "Distinct execution app-name / Deployment-Service selector; read selector unchanged", "NetworkPolicy ingress peer includes agentic.openshift.io/step=execution", "Execution gateway client = praxis-spoke-gateway-exec", "U_exec audience = praxis-spoke-hub", "U_exec groups must contain writer only for configured remediation membership"],
+  req: xreq("praxis-spoke-gateway-exec", "HTTP Basic, execution exchanger secret", "R_exec", "praxis-spoke-hub"),
+  out: ["Uexec"],
+  client: "praxis-spoke-gateway-exec (confidential, exchange only)",
+  notes: ["This path and its RHBK 26.x audience/group downscoping are implemented but not live-verified. Confirm R is rejected at this gateway, R_exec is rejected at the read gateway, and a read-only caller cannot mint writer-group U_exec."],
+},
+{
+  title: "Execution ends, the execution key is removed, and Verification returns to read-only",
+  who: "agentic operator / hub adapter",
+  from: "op", to: "adapter", touch: ["sbx", "pspoke", "pexec", "hubapi"],
+  sum: "When Execution finishes, the adapter removes token-execution. Verification uses the ordinary read gateway and R (token-a); the execution token is not retained for later steps.",
+  connects: ["adapter watches AgenticRun status", "run-token Secret lifecycle"],
+  html: `<div class="cols">
+<div class="box"><h3>Approved path</h3><ul>
+<li>Execution sandbox gets only <code>token-execution</code>.</li>
+<li>Adapter removes that key when Execution completes.</li>
+<li>Verification uses <code>gateway-server-url-template</code> + <code>token-a</code> (R).</li></ul></div>
+<div class="box"><h3>Rejected path</h3><ul>
+<li>No R_exec is minted and no execution key is projected.</li>
+<li>Successful Analysis returns as a completed task with its analysis artifact.</li>
+<li>Neither path implies a per-human identity while ACME uses client credentials.</li></ul></div>
+</div>`,
+},
+{
   title: "The run completes and the answer flows back",
   who: "sandbox → operator → adapter → hub gateway → MAS → ACME",
   from: "adapter", to: "worker", touch: ["sbx", "op", "hubapi", "phub", "mas", "acme"],
-  sum: "The sandbox writes its analysis; the operator sets Analyzed=True (Succeeded). The adapter, watching with its own ServiceAccount, turns that into A2A task events (working → completed with the analysis artifact) on the open stream.",
+  sum: "The adapter maps successful Analysis / Execution / Verification to the A2A task. Rejected Execution after successful Analysis also completes with the analysis artifact; successful approved execution proceeds to Verification.",
   inTok: [],
   html: `<div class="cols">
 <div class="box"><h3>Back along the request path</h3><ul>
@@ -323,8 +430,9 @@ users:
 <li>ACME → user</li></ul></div>
 <div class="box"><h3>Cleanup</h3><ul>
 <li>sandbox pod released by the operator</li>
-<li><code>ls-run-token-&lt;uid&gt;</code> deleted after the terminal grace period</li>
-<li>no long-lived token remains: R expires within 30 min anyway</li></ul></div>
+<li><code>token-execution</code> removed when Execution finishes</li>
+<li>run-token Secret deleted after the terminal grace period</li>
+<li>R expires within its configured 30-minute lifetime</li></ul></div>
 </div>`,
   notes: ["Seen live: a2a-1410731… finished with Analyzed=True Succeeded, R stored with aud praxis-spoke-gateway / azp lightspeed-hub-a2a / 1800 s."],
 },
@@ -332,7 +440,7 @@ users:
   title: "Who holds what, and what it can do",
   who: "Summary",
   from: null, to: null, touch: ["kc", "phub", "adapter", "pspoke"],
-  sum: "Leaking any one token gives only that hop. Kubernetes can tell run creation (H) from investigation reads (U) apart because the audience-scoped roles land in different groups.",
+  sum: "Leaking a token gives only the permissions of its intended hop. Kubernetes distinguishes run creation, reads, and approved writes by audience-scoped groups and separate RBAC bindings.",
   html: `<table>
 <tr><th>Entity</th><th>Receives</th><th>Client it authenticates as</th><th>Sends on</th><th>Talks to</th></tr>
 <tr><td>ACME</td><td>JWT-SVID</td><td>acme-agent</td><td><b style="color:var(--A)">A</b></td><td>SPIRE, Keycloak, MAS, LiteLLM</td></tr>
@@ -342,9 +450,11 @@ users:
 <tr><td>agentic operator</td><td>(own SA)</td><td>none</td><td>R mounted into the sandbox</td><td>hub kube API</td></tr>
 <tr><td>sandbox</td><td><b style="color:var(--R)">R</b> (file)</td><td>none</td><td><b style="color:var(--R)">R</b></td><td>spoke gateway, Vertex</td></tr>
 <tr><td>Praxis spoke gateway</td><td><b style="color:var(--R)">R</b></td><td>praxis-spoke-gateway</td><td><b style="color:var(--U)">U</b></td><td>Keycloak, spoke kube API</td></tr>
+<tr><td>Praxis execution gateway</td><td><b style="color:var(--Rexec)">R_exec</b>, after approval</td><td>praxis-spoke-gateway-exec</td><td><b style="color:var(--Uexec)">U_exec</b></td><td>Keycloak, spoke kube API (writer RoleBindings in allow-listed namespaces)</td></tr>
 <tr><td>Spoke kube API</td><td><b style="color:var(--U)">U</b></td><td>none</td><td>-</td><td>Keycloak JWKS</td></tr>
+<tr><td>ACME caller identity</td><td>current client-credentials principal</td><td>ACME service account</td><td>same <code>sub</code> across exchanged tokens</td><td>not the UI human without a per-user token flow</td></tr>
 </table>
-<div class="note warn">Open items: renewal for steps longer than R's 30 minutes; a per-spoke R so one spoke's run token cannot be replayed at another spoke's gateway; SSO callers (the hub gateway's delegator sends no subject_issuer).</div>`
+<div class="note warn">Execution branch remains not live-verified. Validate Keycloak audience downscoping, cross-gateway rejection, U_exec groups, target writer RoleBindings, and approval/key cleanup before enabling. In each allowed namespace workloads can still run as any ServiceAccount and mount its Secrets. R is currently per-spoke-gateway rather than per-target; external SSO caller exchange remains unresolved.</div>`
 },
 ];
 

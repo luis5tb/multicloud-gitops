@@ -13,7 +13,6 @@ from google.adk.a2a.utils.agent_to_a2a import to_a2a
 from google.adk.agents.llm_agent import Agent
 from google.adk.agents.remote_a2a_agent import (
     AGENT_CARD_WELL_KNOWN_PATH,
-    RemoteA2aAgent,
 )
 from google.adk.models.lite_llm import LiteLlm
 from starlette.responses import HTMLResponse, JSONResponse
@@ -24,6 +23,13 @@ from .auth import (
     DownstreamAuth,
     log_dispatch_audit,
     stamp_request_id,
+)
+from .approval import (
+    ApprovalAwareRemoteA2aAgent,
+    approval_aware_executor_factory,
+    approval_resume_before_model,
+    remote_context_builder,
+    remote_request_config,
 )
 from .config import agent_card_url, remote_agents_from_env
 from .renewal import CredentialRenewingTransport
@@ -105,13 +111,15 @@ USE_LEGACY = os.getenv("A2A_USE_LEGACY", "false").strip().lower() in {
 }
 
 remote_agents = [
-    RemoteA2aAgent(
+    ApprovalAwareRemoteA2aAgent(
         name=remote.name,
         description=remote.description,
         agent_card=agent_card_url(remote.endpoint, AGENT_CARD_WELL_KNOWN_PATH),
         httpx_client=HTTP_CLIENT,
         timeout=AUTH.settings.timeout,
         use_legacy=USE_LEGACY,
+        context_builder=remote_context_builder,
+        config=remote_request_config(remote.name),
     )
     for remote in remote_agents_from_env()
 ]
@@ -163,6 +171,9 @@ root_agent = Agent(
     ),
     instruction=ROUTER_INSTRUCTION,
     sub_agents=remote_agents,
+    before_model_callback=approval_resume_before_model(
+        remote.name for remote in remote_agents
+    ),
 )
 
 
@@ -198,6 +209,7 @@ _adk_app = to_a2a(
     port=int(os.getenv("A2A_PUBLIC_PORT", "8080")),
     protocol=os.getenv("A2A_PUBLIC_PROTOCOL", "http"),
     lifespan=lifespan,
+    agent_executor_factory=approval_aware_executor_factory,
 )
 
 # ADK returns a Starlette application, so the UI and health endpoint can be

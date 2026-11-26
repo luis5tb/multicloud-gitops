@@ -1,0 +1,52 @@
+{{- if and .Values.enabled .Values.spokeExecutorRBAC.enabled }}
+{{- if not .Values.spokeExecutorRBAC.groups }}
+{{- fail "spokeExecutorRBAC.groups must list at least one audience-scoped writer group when spokeExecutorRBAC.enabled is true (e.g. keycloak:praxis-spoke-hub:writer)" }}
+{{- end }}
+{{- if not .Values.spokeExecutorRBAC.namespaces }}
+{{- fail "spokeExecutorRBAC.namespaces must list at least one approved workload namespace when spokeExecutorRBAC.enabled is true (e.g. payments); no ClusterRoleBinding is rendered" }}
+{{- end }}
+{{- if not .Values.spokeExecutorRBAC.rules }}
+{{- fail "spokeExecutorRBAC.rules must contain reviewed, enumerated Kubernetes rules when spokeExecutorRBAC.enabled is true" }}
+{{- end }}
+{{- $forbidden := .Values.spokeExecutorRBAC.forbiddenNamespaces | default (list) }}
+{{- $runNamespace := .Values.adapter.runNamespace | default .Release.Namespace }}
+{{- range $namespace := .Values.spokeExecutorRBAC.namespaces }}
+  {{- if not $namespace }}
+    {{- fail "spokeExecutorRBAC.namespaces entries must be non-empty namespace names" }}
+  {{- end }}
+  {{- if or (eq $namespace "default") (hasPrefix "openshift" $namespace) (hasPrefix "kube-" $namespace) (has $namespace $forbidden) (eq $namespace $.Release.Namespace) (eq $namespace $runNamespace) }}
+    {{- fail (printf "spokeExecutorRBAC.namespaces contains forbidden namespace %q; remediation writers may only bind in explicitly reviewed workload namespaces (see spokeExecutorRBAC.forbiddenNamespaces)" $namespace) }}
+  {{- end }}
+{{- end }}
+# The ClusterRole defines the reviewed write rules, but grants are namespaced:
+# only the allow-listed RoleBindings below attach the audience-scoped writer
+# group, never a ClusterRoleBinding.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "lightspeed-hub.fullname" . }}-spoke-executor
+  labels:
+    {{- include "lightspeed-hub.labels" . | nindent 4 }}
+rules:
+  {{- toYaml .Values.spokeExecutorRBAC.rules | nindent 2 }}
+{{- range $namespace := .Values.spokeExecutorRBAC.namespaces }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lightspeed-hub.fullname" $ }}-spoke-executor
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "lightspeed-hub.labels" $ | nindent 4 }}
+subjects:
+  {{- range $.Values.spokeExecutorRBAC.groups }}
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ . | quote }}
+  {{- end }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "lightspeed-hub.fullname" $ }}-spoke-executor
+{{- end }}
+{{- end }}

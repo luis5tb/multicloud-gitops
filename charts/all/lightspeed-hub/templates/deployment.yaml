@@ -1,6 +1,24 @@
 {{- if .Values.enabled }}
+{{- if ne (int .Values.replicaCount) 1 }}
+{{- fail "replicaCount must be exactly 1 while the adapter uses process-local per-run locking; use the Recreate Deployment strategy to ensure non-overlapping rollouts" }}
+{{- end }}
 {{- if not .Values.adapter.hubAudience }}
 {{- fail "adapter.hubAudience must be set when the chart is enabled: it is the audience of the A->H token exchange (design doc §3.2) and belongs to the Keycloak backend contract, so there is no default" }}
+{{- end }}
+{{- if and .Values.adapter.executionTokenAudience (not .Values.adapter.runTokenAudience) }}
+{{- fail "adapter.executionTokenAudience requires adapter.runTokenAudience: the adapter also needs the read token used outside Execution" }}
+{{- end }}
+{{- if and .Values.adapter.executionTokenAudience (not .Values.agenticOperator.enabled) }}
+{{- fail "adapter.executionTokenAudience requires agenticOperator.enabled so the execution sandbox can consume the separate execution token and gateway" }}
+{{- end }}
+{{- if and .Values.adapter.executionTokenAudience (ne .Values.agenticOperator.config.sandboxCredentialMode "gateway") }}
+{{- fail "adapter.executionTokenAudience requires agenticOperator.config.sandboxCredentialMode=gateway" }}
+{{- end }}
+{{- if and .Values.adapter.executionTokenAudience (not .Values.agenticOperator.config.gatewayExecutionServerURLTemplate) }}
+{{- fail "adapter.executionTokenAudience requires agenticOperator.config.gatewayExecutionServerURLTemplate so Execution uses the write-scoped gateway" }}
+{{- end }}
+{{- if and .Values.agenticOperator.config.gatewayExecutionServerURLTemplate (not .Values.adapter.executionTokenAudience) }}
+{{- fail "agenticOperator.config.gatewayExecutionServerURLTemplate requires adapter.executionTokenAudience; otherwise the adapter cannot mint R_exec for that gateway" }}
 {{- end }}
 {{- if not (include "lightspeed-hub.keycloakIssuerUrl" .) }}
 {{- fail "adapter.keycloak.issuerUrl (or global.clusterBaseDomain / global.localClusterDomain to derive it) is required when the chart is enabled" }}
@@ -33,6 +51,8 @@ metadata:
     {{- include "lightspeed-hub.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "lightspeed-hub.selectorLabels" . | nindent 6 }}
@@ -122,6 +142,9 @@ spec:
             - --hub-audience={{ .Values.adapter.hubAudience }}
             {{- with .Values.adapter.runTokenAudience }}
             - --run-token-audience={{ . }}
+            {{- end }}
+            {{- with .Values.adapter.executionTokenAudience }}
+            - --execution-token-audience={{ . }}
             {{- end }}
             {{- if .Values.adapter.inboundHubToken }}
             - --inbound-hub-token

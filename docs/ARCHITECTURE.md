@@ -18,6 +18,14 @@ for presenting the design. The per-hop authentication reference is
 [agents/AUTHENTICATION.md](../agents/AUTHENTICATION.md); the original options
 analysis is [LIGHTSPEED_HUB_IDENTITY_DESIGN.md](LIGHTSPEED_HUB_IDENTITY_DESIGN.md).
 
+For the remediation implementation, follow the offline
+[MAS → AgenticRun → approval walkthrough](a2a-api-watch-map.html): one
+investigation request, its returned A2A events, and how selecting or rejecting
+a proposal updates approval and gates execution with automatic verification.
+The [cross-repository review](A2A_REMEDIATION_REVIEW.md) records the local-test
+findings and rollout blockers for that uncommitted snapshot; it is not a live
+readiness sign-off.
+
 ## What this repo is
 
 `multicloud-gitops` is a Red Hat Validated Patterns GitOps repo: ArgoCD's
@@ -111,23 +119,43 @@ Application).
   ACME --A--> MAS A2A (front door; public Route)   validates aud mas-a2a (local KC) / api.ask_red_hat (SSO)
                  | MAS forwards A verbatim
                  v
-              praxis HUB gateway (praxis-proxy)    validates A (aud mas-a2a, azp allow-list), exchanges A->H as client mas-a2a
+               praxis HUB gateway (praxis-proxy)    validates A (aud mas-a2a, azp allow-list), exchanges A->H as client mas-a2a
                  | H (aud lightspeed-hub-a2a, 300s)
                  v
-              hub adapter --H--> hub kube API      creates the AgenticRun with H (no exchange)
+               hub adapter --H--> hub kube API      creates the AgenticRun with H (no exchange)
                  | exchanges H->R as client lightspeed-hub-a2a; stores R (aud praxis-spoke-gateway, 1800s)
                  v
-              AgenticRun sandbox --R--> praxis SPOKE gateway (praxis-spoke-<id>) --U--> spoke kube API
-                                        validates R (aud praxis-spoke-gateway), exchanges R->U per call (aud praxis-spoke-<id>)
+     Analysis/Verification --R--> praxis read gateway (praxis-spoke-<id>) --U--> spoke kube API
+     Execution after approval --R_exec--> praxis exec gateway (praxis-spoke-<id>-exec) --U_exec--> spoke kube API
+     ACME <-- approval checkpoint via MAS HITL <-- adapter (input-required; H authorizes the decision)
   ```
 
   Token A carries only `mas-a2a` and lives 5 minutes; the adapter never sees
-  it. The run's stored credential R outlives A (an exchanged token gets the
-  exchanging client's lifespan), but only the spoke gateway accepts it. The
-  front door is the MAS A2A endpoint; the two Praxis instances are the hub
-  gateway and the spoke gateways. MAS validates its own `mas-a2a` audience
-  and principal allow-list. Target state: MAS performs the A->H exchange per
-  delegation itself, taking over the `mas-a2a` exchanger client.
+  it. R is the read-only run credential. For the approved Execution stage,
+  the adapter exchanges the current H for a distinct R_exec and stores it
+  only after receiving approval. R reaches only the read gateway; R_exec is
+  intended only for the execution gateway. Both gateways mint their own
+   per-call spoke token (U / U_exec), with reader and writer roles kept
+   audience-scoped. Spoke writer access is granted only by namespaced
+   RoleBindings in the executor's explicit namespace allow-list, not by a
+   ClusterRoleBinding; within an allowed namespace workloads can still run as
+   any ServiceAccount and mount its Secrets (see the
+   [`lightspeed-hub README`](../charts/all/lightspeed-hub/README.md)). The read chain is verified live; the execution split is
+   implemented but not live-verified and remains disabled in standalone.
+   The adapter surfaces the approval checkpoint on its A2A task, MAS relays it
+   through its HITL gate (`hitl_mode: ask`, defaulted by
+   `setup-mas-blueprint.sh`), and ACME presents the approval to its caller on
+   the same inbound ACME task that paused. The
+  detailed token and RBAC contract is
+  [`GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md`](GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md);
+  chart-specific configuration and rollout warnings are in the
+  [`lightspeed-hub README`](../charts/all/lightspeed-hub/README.md),
+  [`praxis-proxy README`](../charts/all/praxis-proxy/README.md), and
+  [`keycloak-oidc README`](../charts/all/keycloak-oidc/README.md). The front
+  door is MAS A2A; Praxis instances are the hub gateway and per-spoke read / optional
+  execution gateways. MAS validates its own `mas-a2a` audience and principal
+  allow-list. Target state: MAS performs the A->H exchange per delegation
+  itself, taking over the `mas-a2a` exchanger client.
 
 - **The identity chain is the point.** ACME authenticates to Keycloak as
   itself (SPIFFE JWT-SVID, `client_credentials`), gets "Token A", sends it

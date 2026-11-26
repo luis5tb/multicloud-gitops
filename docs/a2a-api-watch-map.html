@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>One investigation: MAS → AgenticRun → approval → result</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f9; --panel: #fff; --ink: #182b3a; --muted: #4e6375;
+      --line: #ccd7df; --accent: #075d91; --soft: #e7f2fa;
+      --code: #f0f4f8; --warn: #fff4d8; --warn-ink: #62460c;
+      --good: #12663c; --focus: #a74000;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.65 system-ui, sans-serif; overflow-wrap: anywhere; }
+    main { max-width: 1160px; margin: auto; padding: 40px 28px 64px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.65rem); line-height: 1.17; max-width: 930px; margin-bottom: 16px; }
+    h2 { font-size: 1.4rem; line-height: 1.3; margin-bottom: 10px; }
+    h3 { font-size: 1rem; margin-bottom: 10px; }
+    p { margin-bottom: 14px; }
+    a { color: var(--accent); text-underline-offset: 3px; }
+    a:hover { text-decoration-thickness: 2px; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    :not(pre) > code { font-size: .9em; overflow-wrap: anywhere; }
+    pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 0; font-size: .79rem; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 2; }
+    pre code { display: block; }
+    .eyebrow { font-size: .78rem; color: var(--accent); font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+    .intro { max-width: 900px; font-size: 1.08rem; }
+    .muted, .caption { color: var(--muted); }
+    .caption { font-size: .85rem; margin: 10px 0 0; }
+    .notice { background: var(--warn); color: var(--warn-ink); border-left: 4px solid currentColor; padding: 12px 16px; border-radius: 4px; font-size: .9rem; }
+    .notice a { color: inherit; }
+    .setup { background: var(--panel); padding: 20px; border: 1px solid var(--line); border-radius: 10px; margin: 24px 0 18px; }
+    form { display: flex; gap: 14px; align-items: end; flex-wrap: wrap; }
+    label { display: grid; gap: 4px; font-weight: 650; font-size: .88rem; }
+    input { background: var(--panel); color: var(--ink); border: 1px solid var(--muted); border-radius: 5px; padding: 9px 12px; font: inherit; width: 220px; max-width: 100%; }
+    button { font: inherit; font-size: .9rem; font-weight: 650; cursor: pointer; padding: 10px 16px; border: 1px solid var(--accent); border-radius: 6px; background: var(--panel); color: var(--accent); }
+    button:hover { background: var(--soft); }
+    button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 4px; }
+    #example-feedback { min-height: 1.4em; margin: 8px 0 0; font-size: .85rem; color: var(--muted); }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 16px 0 26px; font-size: .88rem; }
+    .throughline { background: var(--soft); padding: 16px 20px; border-radius: 8px; }
+    .throughline p { margin: 0; }
+    .stage { position: relative; border-top: 1px solid var(--line); margin-top: 36px; padding: 28px 0 0 54px; scroll-margin-top: 18px; }
+    .number { position: absolute; left: 0; top: 26px; background: var(--accent); color: var(--panel); width: 35px; height: 35px; border-radius: 50%; text-align: center; line-height: 35px; font-weight: 750; }
+    .direction { color: var(--accent); font-size: .8rem; font-weight: 750; letter-spacing: .02em; margin-bottom: 6px; }
+    .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin: 20px 0 14px; }
+    .card { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 18px; }
+    .card.full { margin: 18px 0; }
+    .mapping { margin: 14px 0 0; padding-left: 22px; }
+    .mapping li { padding: 3px 0; }
+    .watch { border-left: 3px solid var(--accent); padding: 9px 14px; background: var(--soft); margin-top: 18px; font-size: .92rem; }
+    .watch p:last-child, .card p:last-child { margin-bottom: 0; }
+    details { margin-top: 16px; }
+    summary { cursor: pointer; color: var(--accent); font-weight: 650; }
+    details > :not(summary) { margin-top: 12px; }
+    .choice-list { display: grid; gap: 10px; padding: 0; list-style: none; }
+    .choice-list li { background: var(--panel); padding: 13px 16px; border: 1px solid var(--line); border-radius: 6px; }
+    .choice-list span { display: block; font-size: .9rem; color: var(--muted); }
+    .decision-controls { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+    #decision-feedback { font-weight: 650; color: var(--accent); margin: 12px 0 0; }
+    .sequence { list-style: none; padding: 0; display: grid; gap: 10px; }
+    .sequence li { padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+    .sequence strong { color: var(--good); }
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+    th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); }
+    .outcome { border-left: 4px solid var(--good); background: var(--panel); padding: 16px 20px; margin-top: 18px; }
+    .outcome p { margin: 0; }
+    footer { border-top: 1px solid var(--line); margin-top: 36px; padding-top: 22px; font-size: .88rem; color: var(--muted); }
+    .sources { padding-left: 22px; }
+    .sources li { margin: 10px 0; overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      main { padding: 26px 16px 40px; }
+      .stage { padding-left: 0; padding-top: 72px; }
+      .pair { grid-template-columns: minmax(0, 1fr); }
+      .card { padding: 14px; }
+      form, label { width: 100%; }
+      input { width: 100%; }
+      nav { gap: 8px 14px; }
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { color-scheme: dark; --bg: #111b25; --panel: #192733; --ink: #e1ecf4; --muted: #afc2d0; --line: #405361; --accent: #82cbff; --soft: #20384a; --code: #111f2a; --warn: #372c15; --warn-ink: #f6d98d; --good: #8cdbb0; --focus: #ffba80; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      body { background: #fff; color: #000; }
+      main { max-width: none; padding: 0; }
+      .setup, nav, .decision-controls { display: none; }
+      .pair { grid-template-columns: minmax(0, 1fr); }
+      .stage { break-inside: auto; }
+      pre, .card { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">One request, end to end · implementation walkthrough</p>
+    <h1>“Investigate the issue in namespace <span data-namespace>payments</span> on cluster <span data-cluster>west</span>.”</h1>
+    <p class="intro">Follow MAS’s A2A request into an <code>AgenticRun</code>, watch analysis turn into an approval question, and follow the human’s answer back into execution and automatic verification.</p>
+    <p class="notice"><strong>Code walkthrough, not a live execution.</strong> This describes the local remediation implementation reviewed in <a href="A2A_REMEDIATION_REVIEW.md">the cross-repository review</a>. Payloads and outcomes are illustrative; execution still has rollout blockers. Nothing on this page calls a cluster.</p>
+  </header>
+
+  <div class="setup">
+    <form id="example-form">
+      <label for="namespace-input">Namespace X<input id="namespace-input" name="namespace" value="payments" maxlength="63" required pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?" spellcheck="false"></label>
+      <label for="cluster-input">Cluster Y<input id="cluster-input" name="cluster" value="west" maxlength="63" required pattern="[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?" spellcheck="false"></label>
+      <button type="submit">Update example</button>
+    </form>
+    <p id="example-feedback" role="status">Example names only. The proposal buttons in step 4 change the downstream story.</p>
+  </div>
+  <noscript><p class="notice">JavaScript is disabled. The narrative is readable, but generated payloads and decision switching require JavaScript.</p></noscript>
+
+  <div class="throughline"><p><strong>The short version:</strong> A2A request → run with all three steps → analysis result → <code>input-required</code> → same-task decision → approval object update → execute, then verify → A2A result.</p></div>
+  <nav aria-label="Walkthrough stages">
+    <a href="#request">1. Request</a><a href="#analysis">2. Analysis</a><a href="#question">3. Approval question</a><a href="#selection">4. MAS’s answer</a><a href="#approval">5. Approval update</a><a href="#execution">6. What runs next</a><a href="#result">7. Result to MAS</a>
+  </nav>
+
+  <section class="stage" id="request" aria-labelledby="request-title">
+    <span class="number" aria-hidden="true">1</span>
+    <p class="direction">MAS → Hub A2A adapter → Kubernetes API</p>
+    <h2 id="request-title">The question becomes a run, not an analysis-only job</h2>
+    <p>MAS invokes <code>message/stream</code>. The adapter joins the message’s TextParts into <code>spec.request</code>, resolves the target cluster, and <strong>CREATEs an AgenticRun using the caller’s Hub credential (H)</strong>.</p>
+    <div class="pair">
+      <article class="card"><h3>A2A request arriving at the Hub</h3><pre><code id="request-json"></code></pre><p class="caption">Hub-leg HTTP header: <code>X-Hub-Cluster: <span data-cluster>west</span></code>. Authorization headers are omitted throughout.</p></article>
+      <article class="card"><h3>Created AgenticRun · abbreviated metadata</h3><pre><code id="run-yaml"></code></pre><p class="caption"><code>hub-runs</code> and <code>default</code> stand in for the configured run namespace and agent. <code>a2a-example</code> is a shortened run-name alias.</p></article>
+    </div>
+    <ul class="mapping">
+      <li><strong>Namespace X is request text.</strong> It is not extracted into a dedicated scope field and is not the run’s <code>metadata.namespace</code>.</li>
+      <li><strong>Cluster Y is structured routing.</strong> In this example the routed <code>X-Hub-Cluster</code> header supplies <code>spec.targetCluster</code>; mentioning a cluster in prose does not select it.</li>
+      <li><strong>All three agent refs already exist.</strong> The approval policy is Analysis = Automatic, Execution = Manual, Verification = Automatic. Execution being configured does not approve it.</li>
+    </ul>
+    <details><summary>IDs, real run name, and initial credential setup</summary>
+      <p>The initial request below uses explicit illustrative IDs. If omitted, the Hub allocates task/context IDs and returns them in its initial <code>kind: "task"</code> event; MAS must retain the Hub IDs, not substitute an outer MAS task ID.</p>
+      <p>The real run name for <code>hub-context-17</code> / <code>hub-task-42</code> is <code>a2a-969b461702bff4852960fb27b7c5c991d82c4c33</code>: <code>"a2a-" + first40hex(SHA-256(contextId + NUL + taskId))</code>. Every example uses <code>a2a-example</code> instead.</p>
+      <p>After the run is created as H, the adapter exchanges the incoming credential for a scoped run credential (R) and writes its run-token Secret as the adapter ServiceAccount. The examples omit tokens, resource versions, timestamps, UIDs, and unrelated metadata. The header route shown here is not the adapter’s only accepted structured target input.</p>
+    </details>
+  </section>
+
+  <section class="stage" id="analysis" aria-labelledby="analysis-title">
+    <span class="number" aria-hidden="true">2</span>
+    <p class="direction">Operator → analysis sandbox → Result + run status → adapter → MAS</p>
+    <h2 id="analysis-title">Automatic analysis publishes proposals and advances the run</h2>
+    <p>The operator observes the new run, creates its same-name <code>AgenticRunApproval</code> with the automatic stages, and launches an analysis sandbox. The sandbox creates an <code>AnalysisResult</code> and writes its status on the Hub API. When the Pod completes, the operator reads the result’s <code>Completed=True</code>, appends a successful result reference, and updates the run’s conditions.</p>
+    <div class="pair">
+      <article class="card"><h3>AnalysisResult · relevant fields</h3><pre><code id="analysis-yaml"></code></pre><p class="caption">Diagnosis, remediation/verification plans, RBAC, and other result fields are omitted here; this is not a runnable remediation manifest.</p></article>
+      <article class="card"><h3>AgenticRun · status after analysis</h3><pre><code id="analyzed-run-yaml"></code></pre><p class="caption">Phases are derived from conditions. While <code>Analyzed=Unknown</code>, the phase is Analyzing → A2A <code>working</code>. With <code>Analyzed=True</code> and execution not yet started, it is Proposed → <code>input-required</code>.</p></article>
+    </div>
+    <div class="watch"><p><strong>How the change reaches MAS:</strong> the adapter’s shared Kubernetes informers watch runs, Results, and approvals. A Result event resolves the parent through <code>spec.agenticRunName</code>; an approval uses its same-name run. The adapter re-projects that run into its task store; <code>Store.PutTask</code> signals <code>streamUpdates</code>, which emits A2A events on MAS’s open SSE stream. MAS does not open its own Kubernetes watch.</p></div>
+  </section>
+
+  <section class="stage" id="question" aria-labelledby="question-title">
+    <span class="number" aria-hidden="true">3</span>
+    <p class="direction">Hub adapter → MAS · current SSE attachment ends here</p>
+    <h2 id="question-title">The completed analysis becomes an approval question</h2>
+    <p>The adapter reads the latest successful analysis referenced by the run. <code>approvalDetail</code> builds a status message with <strong>two parts</strong>: readable text and a structured <code>approvalRequest</code>. Its options preserve analysis order: human proposal 1 has index 0; proposal 2 has index 1.</p>
+    <div class="card full"><h3>A2A status event returned to MAS</h3><pre><code id="approval-event-json"></code></pre><p class="caption">Shown as the SSE JSON-RPC <code>result</code> body, not the surrounding <code>data:</code> envelope. Generated message IDs and timestamps are simplified.</p></div>
+    <p><strong>Before this status event,</strong> the stream emits the newly available analysis as an <code>artifact-update</code>: a TextPart summary plus a DataPart containing the <code>AnalysisResult.status</code> payload. The approval question itself lives in <code>status.message</code>, not in a standalone A2A message response.</p>
+    <div class="watch"><p><strong><code>final: true</code> ends this stream, not this task.</strong> The task is <code>input-required</code>, remains resumable, and is waiting for a new message on the same Hub task/context.</p></div>
+  </section>
+
+  <section class="stage" id="selection" aria-labelledby="selection-title">
+    <span class="number" aria-hidden="true">4</span>
+    <p class="direction">Human → MAS → Hub adapter · same task, new message</p>
+    <h2 id="selection-title">MAS answers with an explicit proposal index or rejection</h2>
+    <p>Suppose the analysis found a broken rollout for the <code>checkout</code> Deployment. Choose an illustrative response below. Steps 5–7 change with the decision; this is a local demonstration, not an approval action.</p>
+    <ol class="choice-list">
+      <li><strong>Proposal 1 — Restart the checkout Deployment</strong><span>Recreate pods without changing the Deployment’s image. A2A <code>option: 0</code>.</span></li>
+      <li><strong>Proposal 2 — Roll back the checkout Deployment</strong><span>Restore the previous Deployment revision. A2A <code>option: 1</code>.</span></li>
+    </ol>
+    <div class="decision-controls" role="group" aria-label="Illustrative human decision">
+      <button type="button" data-decision="0" aria-pressed="false">Approve proposal 1</button>
+      <button type="button" data-decision="1" aria-pressed="true">Approve proposal 2</button>
+      <button type="button" data-decision="reject" aria-pressed="false">Reject execution</button>
+    </div>
+    <p id="decision-feedback" role="status">Showing: proposal 2 → option index 1 → execution and verification.</p>
+    <div class="card full"><h3>New A2A request from MAS</h3><pre><code id="decision-json"></code></pre><p class="caption">Same <code>taskId</code> and <code>contextId</code>; new <code>messageId</code>. This opens a new stream. The target remains <code>X-Hub-Cluster: <span data-cluster>west</span></code>.</p></div>
+    <p>The adapter recognizes the existing Hub task, checks ownership/context/target consistency, and parses the DataPart as a decision. <strong>It does not create another run.</strong> A human-facing “proposal 2” must become <code>option: 1</code>, not <code>option: 2</code>.</p>
+    <p class="notice"><strong>Current MAS caveat:</strong> this shows the Hub-side decision contract MAS needs to send. The current MAS HITL bridge loses structured choices into a shortened preview and has selection/revision defects; this is not a claim that its UI completes the round trip today. See <a href="A2A_REMEDIATION_REVIEW.md#m1">the MAS review findings</a>.</p>
+  </section>
+
+  <section class="stage" id="approval" aria-labelledby="approval-title">
+    <span class="number" aria-hidden="true">5</span>
+    <p class="direction">Hub adapter → Kubernetes API · UPDATE AgenticRunApproval as H</p>
+    <h2 id="approval-title">The decision changes the approval, not the run’s step spec</h2>
+    <p>The adapter reads the approval as its ServiceAccount, adds the Execution stage decision, and performs a <strong>full-object UPDATE using the caller’s H credential</strong>. The object has the same name and namespace as the run. The following are relevant-field excerpts, not a literal merge patch.</p>
+    <div class="pair">
+      <article class="card"><h3>Before · seeded by the operator</h3><pre><code id="approval-before-yaml"></code></pre><p class="caption">Automatic Analysis/Verification entries normally have no explicit <code>decision</code>. There is no Execution decision yet.</p></article>
+      <article class="card"><h3 id="approval-after-title">After · proposal 2 approved</h3><pre><code id="approval-after-yaml"></code></pre><p class="caption" id="approval-after-caption"></p></article>
+    </div>
+    <div class="watch"><p><strong>The trigger:</strong> the operator owns/watches <code>AgenticRunApproval</code>. Its update queues the parent run for reconciliation. The adapter also watches the approval so the A2A projection can leave the old approval checkpoint while the operator catches up.</p></div>
+    <details><summary>Credential preparation and why “approval update” is not the whole transaction</summary>
+      <p>On the configured remote-cluster execution path, before updating an Approved Execution decision the adapter records the approved-analysis identity on the run as its ServiceAccount, exchanges credentials for R and the execution credential (R_exec), and writes both Secret keys as its ServiceAccount. Only then does it UPDATE the approval as H. Rejection does not mint R_exec.</p>
+      <p>That ordering is the current implementation, not a guarantee of atomicity or proof that the security findings are fixed. The <a href="A2A_REMEDIATION_REVIEW.md#boundaries">review’s trust boundaries and rollout gates</a> remain applicable. There is no Secret informer in the adapter’s event path.</p>
+    </details>
+  </section>
+
+  <section class="stage" id="execution" aria-labelledby="execution-title">
+    <span class="number" aria-hidden="true">6</span>
+    <p class="direction">Approval watch → operator reconciliation → sandbox work</p>
+    <h2 id="execution-title">Approval unlocks execution; verification needs no second answer</h2>
+    <p id="execution-intro"></p>
+    <ol class="sequence" id="approved-sequence">
+      <li><strong>Execution:</strong> <code>handleExecution</code> checks approval, trims <code>AnalysisResult.status.options</code> to the selected option, sets <code>Executed=Unknown</code>, and launches an execution sandbox. Its input includes the selected remediation, rather than the whole original proposal list.</li>
+      <li><strong>Execution completes:</strong> the sandbox writes an <code>ExecutionResult</code>; Pod completion leads the operator to record a successful result ref and <code>Executed=True</code>. The derived phase becomes Verifying.</li>
+      <li><strong>Verification starts automatically:</strong> the existing automatic Verification approval allows the operator to launch verification using the selected option plus execution output. <code>Verified=Unknown</code> means work is in progress.</li>
+      <li><strong>Verification succeeds:</strong> a successful <code>VerificationResult</code> is referenced and <code>Verified=True</code> makes the derived run phase Completed.</li>
+    </ol>
+    <div class="card full" id="denied-sequence" hidden><h3>Rejected means no remediation</h3><p>The operator sees <code>Execution / Denied</code>, marks the run Denied, and launches neither execution nor verification. The analysis remains available; a “completed” A2A answer in this branch means the investigation finished, not that the proposed fix was performed.</p></div>
+    <div class="table-wrap"><table aria-label="Selected branch: run conditions mapped to A2A states"><thead><tr><th>Run condition / phase</th><th>A2A projection</th><th>What MAS can observe</th></tr></thead><tbody id="phase-rows"></tbody></table></div>
+    <p class="caption">Approval stops the stale <code>input-required</code> projection before the run’s conditions necessarily change. Analyzing, Executing, Verifying, and Escalating all map to <code>working</code>. The stream emits a new status event only when the <em>A2A state</em> changes, not for every operator phase; new Result IDs produce artifact events.</p>
+  </section>
+
+  <section class="stage" id="result" aria-labelledby="result-title">
+    <span class="number" aria-hidden="true">7</span>
+    <p class="direction">Result + run watches → Hub A2A stream → MAS</p>
+    <h2 id="result-title">MAS receives artifacts and a terminal task status</h2>
+    <p id="result-intro"></p>
+    <div class="pair">
+      <article class="card"><h3 id="artifact-title">Example verification artifact event</h3><pre><code id="result-artifact-json"></code></pre><p class="caption">Artifact IDs are <code>result-&lt;Result CR UID&gt;</code>; the UID here is an alias. Each artifact contains readable text and the corresponding Result’s structured status. The DataPart below is a status excerpt; plans, sandbox details, token usage, and condition timestamps are omitted.</p></article>
+      <article class="card"><h3>Final status event</h3><pre><code id="final-event-json"></code></pre><p class="caption">Both the current stream and the task are finished now. The successful text comes from a run condition, not the verification summary. Intermediate snapshots can coalesce; these examples do not promise an exact event count.</p></article>
+    </div>
+    <div class="outcome"><p id="outcome-text"></p></div>
+    <details><summary>What if there is nothing to fix, or verification fails?</summary>
+      <p>If analysis returns <code>actionRequired: "False"</code>, the operator’s <code>NoActionRequired</code> path completes the run after analysis: no execution or verification is launched, even though all three refs were configured. A negative verification can lead to escalation rather than the successful path shown here.</p>
+      <p>The adapter projects each step’s newest successful Result reference as an artifact. A new attachment can replay existing artifacts, so MAS should use their stable IDs, not treat each replay as a new remediation.</p>
+    </details>
+  </section>
+
+  <footer>
+    <p><strong>Keep the two responsibilities separate:</strong> the adapter translates A2A ↔ Kubernetes objects/events. The operator decides when to run each sandbox from the run, approval, and policy. MAS receives the approval question and sends the human’s answer back on the same Hub task.</p>
+    <details id="sources"><summary>Source checkpoints behind this example</summary>
+      <p>Paths below assume the four repositories are sibling checkouts. Line ranges describe the reviewed local snapshot, not a pinned upstream revision.</p>
+      <ul class="sources">
+        <li><a href="../../lightspeed-hub/a2a-adapter/internal/run/creator.go">Hub · creator.go</a> — <code>NewRun</code> (88–109): text/target, identity annotations, all three refs.</li>
+        <li><a href="../../lightspeed-hub/a2a-adapter/internal/server/handler.go">Hub · handler.go</a> — <code>handleSend</code> (836–1088), <code>project</code> (413–510), <code>approvalDetail / analysisOptions</code> (538–605), <code>submitApprovalDecision</code> (1248–1359), <code>streamUpdates / statusEvent</code> (1439–1555).</li>
+        <li><a href="../../lightspeed-hub/a2a-adapter/internal/server/watch.go">Hub · watch.go</a> — run/task projection and <code>ObjectChanged</code> (211–229), parent resolution for Results/approvals.</li>
+        <li><a href="../../lightspeed-hub/a2a-adapter/internal/server/state.go">Hub · state.go</a> — <code>TaskStateFor</code> (20–57), <code>StreamFinalState</code> (154–156).</li>
+        <li><a href="../../lightspeed-agentic-operator/controller/agenticrun/approval.go">Operator · approval.go</a> — <code>ensureAgenticRunApproval</code> (43–107), automatic-stage seeding.</li>
+        <li><a href="../../lightspeed-agentic-operator/controller/agenticrun/handlers.go">Operator · handlers.go</a>, <a href="../../lightspeed-agentic-operator/controller/agenticrun/helpers.go">helpers.go</a>, <a href="../../lightspeed-agentic-operator/controller/agenticrun/reconciler.go">reconciler.go</a> — stage gating, selected-option trimming, approval ownership watch.</li>
+        <li><a href="../../lightspeed-agentic-operator/api/v1alpha1/agenticrun_types.go">Operator · agenticrun_types.go</a> — <code>DerivePhase</code>; <a href="../charts/all/lightspeed-hub/values.yaml">pattern chart values</a> — <code>agent.approvalPolicy.stages</code>.</li>
+        <li><a href="../../uie-mas-hosted/lib/mas/elements/nodes/a2a_agent/a2a_agent_node.py">MAS · a2a_agent_node.py</a> — outbound Hub-task continuation and HITL translation. See the <a href="A2A_REMEDIATION_REVIEW.md#m1">review</a> for the bridge’s current limitations.</li>
+      </ul>
+    </details>
+    <p><a href="ARCHITECTURE.md">Architecture</a> · <a href="A2A_REMEDIATION_REVIEW.md">Remediation review and rollout blockers</a></p>
+  </footer>
+</main>
+<script>
+  'use strict';
+  const example = { namespace: 'payments', cluster: 'west', decision: '1' };
+  const taskId = 'hub-task-42';
+  const contextId = 'hub-context-17';
+  const runName = 'a2a-example';
+  const runNamespace = 'hub-runs';
+  const titles = ['Restart the checkout Deployment', 'Roll back the checkout Deployment'];
+  const byId = id => document.getElementById(id);
+  const text = (id, value) => { byId(id).textContent = value; };
+
+  // Keep leaf objects compact without abbreviating or invalidating the JSON.
+  function json(value, depth = 0) {
+    const compact = JSON.stringify(value);
+    if (value === null || typeof value !== 'object' || compact.length <= 100) return compact;
+    const pad = '  '.repeat(depth + 1);
+    const end = '  '.repeat(depth);
+    const array = Array.isArray(value);
+    const entries = array ? value.map(item => json(item, depth + 1)) :
+      Object.entries(value).map(([key, item]) => JSON.stringify(key) + ': ' + json(item, depth + 1));
+    return (array ? '[' : '{') + '\n' + entries.map(entry => pad + entry).join(',\n') + '\n' + end + (array ? ']' : '}');
+  }
+
+  function request(messageId, parts) {
+    return { jsonrpc: '2.0', id: messageId === 'mas-message-1' ? 1 : 2, method: 'message/stream', params: {
+      message: { kind: 'message', role: 'user', messageId, taskId, contextId, parts }
+    } };
+  }
+
+  function statusEvent(state, messageId, parts) {
+    return { kind: 'status-update', taskId, contextId, status: {
+      state, message: { kind: 'message', role: 'agent', messageId, parts }
+    }, final: true };
+  }
+
+  function artifactEvent(step, status, summary) {
+    return { kind: 'artifact-update', taskId, contextId, artifact: {
+      artifactId: 'result-' + step + '-uid', name: step,
+      parts: [{ kind: 'text', text: summary }, { kind: 'data', data: status }]
+    }, lastChunk: true };
+  }
+
+  function approvalYaml(extra = '') {
+    return `apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRunApproval
+metadata:
+  name: ${runName}
+  namespace: ${runNamespace}
+spec:
+  stages:
+    - type: Analysis
+      analysis: {}
+    - type: Verification
+      verification: {}${extra}`;
+  }
+
+  function renderRows(rows) {
+    const body = byId('phase-rows');
+    body.replaceChildren();
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      row.forEach(value => {
+        const td = document.createElement('td');
+        td.textContent = value;
+        tr.append(td);
+      });
+      body.append(tr);
+    });
+  }
+
+  function render() {
+    const { namespace, cluster, decision } = example;
+    const denied = decision === 'reject';
+    const index = denied ? null : Number(decision);
+    const question = `Investigate the issue in namespace ${namespace} on cluster ${cluster}.`;
+    const summaries = [
+      `Recreate the checkout pods in namespace ${namespace} without changing their image.`,
+      `Restore the previous checkout Deployment revision in namespace ${namespace}.`
+    ];
+    const options = titles.map((title, i) => ({ index: i, number: i + 1, title, summary: summaries[i] }));
+    const completedCondition = { type: 'Completed', status: 'True', reason: 'Succeeded', message: 'Sandbox completed' };
+    const analysisStatus = {
+      conditions: [completedCondition], actionRequired: 'True',
+      options: titles.map((title, i) => ({ title, summary: summaries[i] }))
+    };
+    document.querySelectorAll('[data-namespace]').forEach(node => { node.textContent = namespace; });
+    document.querySelectorAll('[data-cluster]').forEach(node => { node.textContent = cluster; });
+    document.querySelectorAll('[data-decision]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.decision === decision));
+    });
+
+    text('request-json', json(request('mas-message-1', [{ kind: 'text', text: question }])));
+    text('run-yaml', `apiVersion: agentic.openshift.io/v1alpha1
+kind: AgenticRun
+metadata:
+  name: ${runName}
+  namespace: ${runNamespace}
+  annotations:
+    a2a.lightspeed.io/task-id: ${taskId}
+    a2a.lightspeed.io/context-id: ${contextId}
+spec:
+  request: ${JSON.stringify(question)}
+  targetCluster: ${JSON.stringify(cluster)}
+  analysis:
+    agent: default
+  execution:
+    agent: default
+  verification:
+    agent: default`);
+    text('analysis-yaml', `apiVersion: agentic.openshift.io/v1alpha1
+kind: AnalysisResult
+metadata:
+  name: analysis-1
+  namespace: ${runNamespace}
+spec:
+  agenticRunName: ${runName}
+status:
+  conditions:
+    - type: Completed
+      status: "True"
+      reason: Succeeded
+      message: Sandbox completed
+  actionRequired: "True"
+  options:
+    - title: ${JSON.stringify(titles[0])}
+      summary: ${JSON.stringify(summaries[0])}
+    - title: ${JSON.stringify(titles[1])}
+      summary: ${JSON.stringify(summaries[1])}`);
+    text('analyzed-run-yaml', `# Relevant fields only; phase is derived.
+status:
+  conditions:
+    - type: Analyzed
+      status: "True"
+      reason: Succeeded
+      message: Sandbox completed
+  steps:
+    analysis:
+      results:
+        - name: analysis-1
+          outcome: Succeeded
+
+# Derived phase: Proposed
+# Execution: waiting for manual approval
+# A2A state: input-required`);
+    const labels = titles.map((title, i) => `${i + 1}) ${title}`).join(' ');
+    text('approval-event-json', json(statusEvent('input-required', 'hub-approval-message', [
+      { kind: 'text', text: `Analysis complete. Approval required to run the Execution stage on cluster ${cluster}. Options: ${labels}. Reply approve (optionally choosing an option number) or reject.` },
+      { kind: 'data', data: { approvalRequest: { stage: 'Execution', run: runName, targetCluster: cluster, options, decisions: ['approve', 'reject'] } } }
+    ])));
+
+    const decisionData = denied ? { reject: { stage: 'Execution' } } : { approve: { stage: 'Execution', option: index } };
+    text('decision-json', json(request('mas-message-2', [{ kind: 'data', data: decisionData }])));
+    text('decision-feedback', denied ? 'Showing: reject execution → Denied → analysis only; no execution or verification.' :
+      `Showing: proposal ${index + 1} → option index ${index} → execution and verification.`);
+    text('approval-before-yaml', approvalYaml());
+    text('approval-after-title', denied ? 'After · execution rejected' : `After · proposal ${index + 1} approved`);
+    text('approval-after-yaml', approvalYaml(denied ? `
+    - type: Execution
+      decision: Denied
+      execution: {}` : `
+    - type: Execution
+      decision: Approved
+      execution:
+        option: ${index}`));
+    text('approval-after-caption', denied ? 'Denied is an explicit decision, not an absent approval. It prevents execution.' :
+      `execution.option: ${index} selects original analysis option ${index + 1}. AgenticRun.spec.execution stays unchanged.`);
+    text('execution-title', denied ? 'Rejection ends the run without execution or verification' : 'Approval unlocks execution; verification needs no second answer');
+    text('execution-intro', denied ? `The approval watch wakes the same operator reconciliation, but the Denied branch stops work on cluster ${cluster}.` :
+      `The approval watch wakes the operator. It selects “${titles[index]}” for namespace ${namespace} on cluster ${cluster}, then follows the already-configured Execution → Verification steps.`);
+    byId('approved-sequence').hidden = denied;
+    byId('denied-sequence').hidden = !denied;
+    renderRows(denied ? [
+      ['Execution decision recorded; operator has not reconciled yet', 'working', 'The old input-required checkpoint is suppressed.'],
+      ['Denied=True → Denied, after successful analysis', 'completed (adapter override)', 'Execution rejected; analysis is the result. No fix was performed.']
+    ] : [
+      ['Execution decision recorded; operator has not reconciled yet', 'working', 'The old input-required checkpoint is suppressed.'],
+      ['Executed=Unknown → Executing', 'working', 'Execution is running; no extra status event if already working.'],
+      ['Executed=True → Verifying; then Verified=Unknown', 'working', 'Execution artifact; verification runs automatically. No second approval.'],
+      ['Verified=True → Completed', 'completed', 'Verification artifact, then final status.']
+    ]);
+
+    text('result-intro', denied ? 'The recognized Execution denial after successful analysis is translated to A2A completed with the analysis attached, rather than a remediation success. The new stream can replay the existing analysis artifact before its terminal status.' :
+      'The continuation stream publishes execution and verification artifacts as their successful Result refs become visible. The final completed status follows the available artifacts. It can also replay the analysis artifact at the start of this new attachment.');
+    text('artifact-title', denied ? 'Analysis artifact · existing result may replay' : 'Example verification artifact event');
+    const verificationSummary = `The checkout Deployment in ${namespace} is healthy after proposal ${index + 1}.`;
+    const verificationStatus = {
+      conditions: [completedCondition],
+      checks: [{ name: 'checkout-rollout', source: `oc rollout status deployment/checkout -n ${namespace}`, value: 'successfully rolled out', result: 'Passed' }],
+      summary: verificationSummary
+    };
+    text('result-artifact-json', json(denied ? artifactEvent('analysis', analysisStatus, titles.join('; ')) :
+      artifactEvent('verification', verificationStatus, verificationSummary)));
+    text('final-event-json', json(statusEvent('completed', 'hub-final-message', [{ kind: 'text', text: denied ?
+      'Execution rejected by approver; analysis result attached.' : 'Succeeded: Sandbox completed' }])));
+    text('outcome-text', denied ? `MAS gets the investigation result. The human rejected execution in namespace ${namespace} on cluster ${cluster}; neither remediation nor verification ran.` :
+      `MAS gets the analysis, execution, and verification results for the same Hub task. In this successful example, proposal ${index + 1} was approved, executed in namespace ${namespace} on cluster ${cluster}, and verified automatically.`);
+  }
+
+  byId('example-form').addEventListener('submit', event => {
+    event.preventDefault();
+    example.namespace = byId('namespace-input').value;
+    example.cluster = byId('cluster-input').value;
+    render();
+    text('example-feedback', `Example updated: namespace ${example.namespace}, cluster ${example.cluster}. No network request was made.`);
+  });
+  document.querySelectorAll('[data-decision]').forEach(button => {
+    button.addEventListener('click', () => { example.decision = button.dataset.decision; render(); });
+  });
+  render();
+</script>
+</body>
+</html>

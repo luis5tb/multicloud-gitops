@@ -9,6 +9,7 @@ def test_router_prompt_sends_red_hat_projects_to_mao():
     assert "route every red hat-related request to mao, including" in prompt
     assert "unfamiliar or ambiguously named projects" in prompt
     assert "mao decides which of its specialist agents can answer" in prompt
+    assert "keep the reply with that downstream agent" in prompt
     assert (
         "if mao is the only configured downstream agent, delegate every request to it"
         in prompt

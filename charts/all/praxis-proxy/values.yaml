@@ -344,6 +344,20 @@ spokeGatewayConfig:
     # identity.keycloak.issuerUrl (i.e. from global.clusterBaseDomain);
     # override only to diverge.
     tokenUrl: ""
+  # Optional write-capable execution gateway. It shares each spoke's fixed
+  # API endpoint and target audience with the read gateway, but accepts a
+  # distinct inbound token audience and exchanges with a client whose role
+  # scope includes reader + writer. Keep disabled until Keycloak and the
+  # adapter/operator images are rolled out together.
+  execution:
+    enabled: false
+    exchangeClient:
+      clientId: praxis-spoke-gateway-exec
+      secretName: praxis-spoke-gateway-exec-client
+      secretKey: client-secret
+      tokenUrl: ""
+    inboundAudience: ""
+    allowedCallers: []
   # Best-effort NetworkPolicy hardening per gateway pod (rendered once per
   # spoke-gateway entry). Plain Kubernetes NetworkPolicies cannot match on
   # FQDNs: the remote API / IdP / JWKS egress rule below is port-scoped
@@ -363,6 +377,21 @@ spokeGatewayConfig:
     # variants/standalone/values-standalone.yaml before enabling.
     ingressFromNamespaces:
       - mao
+    # Pod selectors are ANDed with each namespaceSelector in the same
+    # NetworkPolicy peer. Repo C stamps agentic.openshift.io/step onto the
+    # SandboxTemplate podTemplate metadata: Execution uses exactly
+    # "execution"; read-only steps carry the label with their step name.
+    # Keep selectors non-empty so a namespace allow-list cannot accidentally
+    # become namespace-wide access. Override only to match a verified sandbox
+    # pod-template contract.
+    ingressPodSelectors:
+      read:
+        matchExpressions:
+          - key: agentic.openshift.io/step
+            operator: Exists
+      execution:
+        matchLabels:
+          agentic.openshift.io/step: execution
   # Serving-CA delivery bridge to repo C (lightspeed-agentic-operator,
   # a2a-support): repo C's `gatewayCASecret` expects a SECRET with key
   # `ca.crt` (controller/agenticrun/gateway.go mounts it as the

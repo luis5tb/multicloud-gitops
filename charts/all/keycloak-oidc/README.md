@@ -754,3 +754,85 @@ SSO token exchange" above). An SSO-authenticated request reaching the
 adapter is therefore expected to fail its A->H exchange until the adapter
 sets `subject_issuer` from the token's `iss` -- UNCONFIRMED, not yet tested
 live.
+
+## Remediation execution token and role separation (disabled by default)
+
+The read-only and write-capable paths use distinct audiences and exchanger
+clients; do not reuse the read client secret or audience:
+
+| Token/hop | Audience | Exchanger / groups |
+| --- | --- | --- |
+| H (hub API) | `lightspeed-hub-a2a` | `mas-a2a`; includes `agenticrun-creator`, and `agenticrun-approver` only for `exchangeRoles.remediation.groups` |
+| R (ordinary run token) | `praxis-spoke-gateway` | `lightspeed-hub-a2a`; accepted by read gateways only |
+| U (ordinary spoke token) | `praxis-spoke-<spoke>` audience | `praxis-spoke-gateway`; `reader` only |
+| R_exec (Execution run token) | `praxis-spoke-gateway-exec` | `lightspeed-hub-a2a`; accepted by execution gateways only |
+| U_exec (Execution spoke token) | same target spoke audience as U | `praxis-spoke-gateway-exec`; `reader` plus `writer` only for a principal with the ordinary and remediation group roles |
+
+Set `hubExchange.executionTokenAudience` equal to
+`spokeGatewayExecExchanger.clientId`; it must differ from
+`hubExchange.runTokenAudience`. Execution exchanger audiences must exactly
+match the read exchanger's registered spoke audience set. The Keycloak chart
+fails rendering for mismatched audiences, missing dependencies, or an
+execution exchanger without `exchangeRoles`.
+
+With `exchangeRoles.enabled`, ordinary `exchangeRoles.groups` receive only
+`hubRoles`/`spokeRoles`; `exchangeRoles.remediation.groups` alone receive the
+additional hub `agenticrun-approver` and spoke `writer` roles. The read
+exchanger role scope explicitly excludes `writer`; the execution exchanger
+scope contains `reader` and `writer`. A designated human who needs to execute
+must have both the ordinary group (for creator/reader) and an explicitly
+approved remediation group. Do not add the automation service account to the
+remediation group as a shortcut.
+
+**Existing live realm: one-shot import means the chart will not add clients,
+audience mappers, roles, group-role mappings, or exchange scopes.** The
+PostSync reconciler only aligns client secrets. Before enabling the commented
+variant switch, apply these narrow changes through the Keycloak Admin API
+(realm `rca`; use the existing Vault secret value in memory, never in shell
+history/logs):
+
+1. Create confidential client `praxis-spoke-gateway-exec`, with standard,
+   implicit, direct-access and browser flows disabled, service accounts
+   disabled, `standard.token.exchange.enabled=true`, and its secret matching
+   the Vault value `secret/data/global/praxis-spoke-gateway-exec` property
+   `praxis-spoke-gateway-exec-client-secret`. The ExternalSecrets rendered by
+   this chart then materialize the same value into Keycloak and `praxis-proxy`.
+2. On client `lightspeed-hub-a2a`, retain the ordinary run-token audience
+   mapper (`praxis-spoke-gateway`) and add an Access Token Audience mapper for
+   `praxis-spoke-gateway-exec`. Keycloak 26 standard exchange is expected to
+   downscope each response to the single requested audience; this R/R_exec
+   separation has **not** yet been verified against the live realm.
+3. For every registered spoke audience client, ensure it has client roles
+   `reader` and `writer`. Assign `reader` to the ordinary
+   `exchangeRoles.groups`; assign `writer` only to groups in
+   `exchangeRoles.remediation.groups`. On audience client `lightspeed-hub-a2a`,
+   similarly assign `agenticrun-creator` to ordinary groups and
+   `agenticrun-approver` only to remediation groups. Ensure those groups exist
+   in the already-imported realm before mapping.
+4. Configure the spoke read exchanger's scope mapping to `reader` only and
+   the execution exchanger's scope mapping to `reader` plus `writer` for each
+   target audience. Add the client-role-to-`groups` mapper to the execution
+   exchanger with `usermodel.clientRoleMapping.clientId=<spoke audience>`,
+   `rolePrefix=<spoke audience>:` and `claim.name=groups`; keep the matching
+   mapper on the read exchanger limited by its `reader` scope. Configure the
+   existing `mas-a2a` hub exchange scope/role mapper for the hub
+   `agenticrun-approver` role as well as `agenticrun-creator`.
+5. Use the same API sequence as "Audience-scoped exchange roles" above:
+   resolve exact client IDs with
+   `GET /admin/realms/rca/clients?clientId=<id>`, create missing client roles
+   with `POST .../clients/<audience-uuid>/roles`, map group roles with
+   `POST .../groups/<group-id>/role-mappings/clients/<audience-uuid>`, and
+   scope exchanger roles with
+   `POST .../clients/<exchanger-uuid>/scope-mappings/clients/<audience-uuid>`.
+   Add protocol mappers via the client's
+   `POST .../clients/<exchanger-uuid>/protocol-mappers/models` endpoint. GET
+   the resulting roles, scopes and mappers back before changing values.
+
+After those Admin API changes, enable the keycloak-oidc values and wait for
+both ExternalSecrets; sync the chart so the PostSync credential reconciler
+checks the execution client secret. Then verify fresh exchanges: ordinary R
+has only `praxis-spoke-gateway` and cannot reach `praxis-spoke-<key>-exec`; R_exec
+has only `praxis-spoke-gateway-exec` and cannot reach the read gateway; U has
+the `reader` group only; U_exec has `reader` plus `writer` only for the
+designated remediation principal. Chart rendering proves configuration
+intent, not these live Keycloak claims.

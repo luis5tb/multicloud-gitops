@@ -20,9 +20,38 @@ calls the remote with `message/stream` and yields each remote event
 `message/stream` response, so the downstream workflow's progress and final
 answer stream straight to the caller.
 
+### Approval continuation and authority
+
+An approval pause is bound to its inbound ACME task ID and the corresponding
+MAS agent/task/context IDs. Only another message continuing that same ACME task
+resumes MAS; a new ACME task routes normally. ACME does not authenticate inbound
+callers: when it forwards the shared workload token, approval authority is
+effectively possession of the ACME task/context IDs. Per-user approval
+authorization requires per-user tokens so MAS can enforce task ownership.
+Working MAS updates clear the human pause but retain a separate active-task
+binding; terminal updates clear both. A transport/RPC error is not evidence of
+remote completion. ACME makes one bounded, read-only `GetTask` recovery attempt
+for the bound MAS task: a confirmed open gate is re-exposed for correction on
+the same ACME task, and a confirmed terminal result is projected normally.
+Otherwise the attachment explicitly fails rather than silently completing or
+replaying a decision. A failed attachment may leave a remote task running; use
+the recorded MAS task ID for diagnosis rather than submitting another approval.
+These bindings remain in-memory and are not restart/failover guarantees.
+Protocol-level `rejected`, `failed`, and `canceled` are unsuccessful outer
+outcomes. Hub's intentional completed-analysis result after Execution denial
+is different and remains completed.
+
+MAS's structured `approvalRequest` DataPart is carried inside the long-running
+call's `args.input_required`, alongside the readable prompt. The browser shows
+all transported option titles/summaries. Option indexes are zero-based; the
+plain-text `approve option N` command displayed/sent by the UI is one-based.
+The container installs the pinned runtime dependency closure from
+`requirements.txt` (see `Containerfile`).
+
 We do **not** set `mode="task"` (it needs ADK's `finish_task` handshake, which
 the downstream A2A endpoint does not implement); the default mode streams
-events and treats stream end / `TASK_STATE_COMPLETED` as completion. See
+events. Our wrapper requires a terminal result or an explicit input/auth pause;
+nonterminal or empty stream EOF is an explicit failure, not completion. See
 `agents/AUTHENTICATION.md` for the identity chain on each delegated call.
 
 The current ACME → MAO deployment does not validate a cluster URL at ACME's

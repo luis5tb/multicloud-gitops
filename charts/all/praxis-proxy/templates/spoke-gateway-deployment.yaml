@@ -1,5 +1,13 @@
 {{- range $key, $cfg := .Values.spokeGateways }}
-{{- $name := include "praxis-proxy.spokeGatewayName" $key }}
+{{- $modes := list (dict "execution" false) }}
+{{- if $.Values.spokeGatewayConfig.execution.enabled }}{{- $modes = append $modes (dict "execution" true) }}{{- end }}
+{{- range $mode := $modes }}
+{{- $isExec := $mode.execution }}
+{{- $name := include "praxis-proxy.spokeGatewayModeName" (dict "key" $key "execution" $isExec) }}
+{{- $modeLabel := ternary "exec" "read" $isExec }}
+{{- $client := $.Values.spokeGatewayConfig.exchangeClient }}
+{{- $secretEnv := "PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET" }}
+{{- if $isExec }}{{- $client = $.Values.spokeGatewayConfig.execution.exchangeClient }}{{- $secretEnv = "PRAXIS_SPOKE_EXEC_EXCHANGE_CLIENT_SECRET" }}{{- end }}
 {{- $ca := default dict $cfg.remoteCACert }}
 {{- $caKey := $ca.key | default "ca.crt" }}
 {{- $replicas := $cfg.replicas | default 1 }}
@@ -11,20 +19,33 @@ metadata:
   labels:
     {{- include "praxis-proxy.labels" $ | nindent 4 }}
     praxis-proxy.spoke-gateway: {{ $key | quote }}
+    praxis-proxy.spoke-gateway-mode: {{ $modeLabel | quote }}
   annotations:
     argocd.argoproj.io/sync-wave: "0"
 spec:
   replicas: {{ $replicas }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "praxis-proxy.name" $ }}
+      {{- if $isExec }}
+      app.kubernetes.io/name: {{ include "praxis-proxy.spokeGatewayExecAppName" $ | quote }}
+      {{- else }}
+      app.kubernetes.io/name: {{ include "praxis-proxy.name" $ | quote }}
+      {{- end }}
       app.kubernetes.io/instance: {{ $.Release.Name }}
       praxis-proxy.spoke-gateway: {{ $key | quote }}
   template:
     metadata:
       labels:
+        {{- if $isExec }}
+        app.kubernetes.io/name: {{ include "praxis-proxy.spokeGatewayExecAppName" $ | quote }}
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/managed-by: {{ $.Release.Service }}
+        helm.sh/chart: {{ $.Chart.Name }}-{{ $.Chart.Version | replace "+" "_" }}
+        {{- else }}
         {{- include "praxis-proxy.labels" $ | nindent 8 }}
+        {{- end }}
         praxis-proxy.spoke-gateway: {{ $key | quote }}
+        praxis-proxy.spoke-gateway-mode: {{ $modeLabel | quote }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/spoke-gateway-configmap.yaml") $ | sha256sum }}
     spec:
@@ -76,11 +97,11 @@ spec:
             # spoke-gateway-exchanger-secret.yaml) -- a dangling reference
             # leaves this pod in CreateContainerConfigError, i.e. it fails
             # closed.
-            - name: PRAXIS_SPOKE_EXCHANGE_CLIENT_SECRET
+            - name: {{ $secretEnv }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ $.Values.spokeGatewayConfig.exchangeClient.secretName }}
-                  key: {{ $.Values.spokeGatewayConfig.exchangeClient.secretKey }}
+                  name: {{ $client.secretName }}
+                  key: {{ $client.secretKey }}
             {{- if $.Values.policy.caBundleConfigMap.name }}
             # Same trust-store arrangement as the main gateway: the policy
             # plugin (and the exchange callout to Keycloak's token
@@ -213,4 +234,5 @@ spec:
               - key: {{ $.Values.policy.caBundleConfigMap.key }}
                 path: ca-bundle.crt
         {{- end }}
+{{- end }}
 {{- end }}
