@@ -419,7 +419,8 @@ keycloak:
     # Additional permissions are granted only to these groups. The hub
     # exchanger projects hubRole into H; only the execution exchanger scopes
     # spokeRole and can project it into U_exec. The read exchanger never
-    # scopes spokeRole.
+    # scopes spokeRole. A dedicated group named here is created empty by the
+    # import (membership stays a deliberate admin action).
     remediation:
       groups: []
       hubRole: agenticrun-approver

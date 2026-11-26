@@ -62,7 +62,9 @@ authenticated person. Grant namespaced writer RBAC only in `payments` **on
 Workload writes in that namespace can mount Secrets or use ServiceAccounts;
 the namespace must be a disposable/trusted lab boundary. Restrict who can reach
 ACME's chat and approval endpoints, record the shared identity in evidence, and
-remove its temporary grants after testing.
+remove its temporary grants after testing. Step-by-step commands for this lab
+(image builds, per-phase values patches, Keycloak Admin API, `mario-ipi` RBAC,
+ACME tests): [lab deployment](A2A_REMEDIATION_LAB_DEPLOY.md).
 
 The detailed backend examples below retain the alternative **human-token,
 hub/remediation-e2e** fixture. They are not instructions to grant hub write

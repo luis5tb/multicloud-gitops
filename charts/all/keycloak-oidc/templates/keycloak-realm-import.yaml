@@ -206,8 +206,8 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- end }}
 {{- end }}
 {{- range $er.remediation.groups }}
-{{- if not (has . $knownGroups) }}
-{{- fail (printf "keycloak.exchangeRoles.remediation.groups entry %q is not a group this realm import creates (%s)" . (join ", " $knownGroups)) }}
+{{- if not . }}
+{{- fail "keycloak.exchangeRoles.remediation.groups entries must be non-empty group names" }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -311,6 +311,15 @@ spec:
       {{- $groupNames = append $groupNames .Values.keycloak.adminGroupName }}
       {{- end }}
       {{- $groupNames = append $groupNames .Values.keycloak.acmeGroupName }}
+      {{- if $er.enabled }}
+      {{- /* Dedicated remediation groups are created empty; membership is a
+             deliberate admin action, never implied by the ordinary group. */}}
+      {{- range $er.remediation.groups }}
+      {{- if not (has . $groupNames) }}
+      {{- $groupNames = append $groupNames . }}
+      {{- end }}
+      {{- end }}
+      {{- end }}
       {{- range $g := $groupNames }}
       - name: {{ $g | quote }}
         {{- if and $er.enabled (or (has $g $er.groups) (has $g $er.remediation.groups)) }}
