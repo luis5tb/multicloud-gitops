@@ -27,14 +27,17 @@ export MAS="$REPOS/uie-mas-hosted"
 export REGISTRY=quay.io/ltomasbo
 export TAG=a2a-rem-20261126          # must match the tags in phase-a.patch
 export MARIO_KUBECONFIG="$HOME/mario-ipi.kubeconfig"   # adjust
-export LAB=/tmp/opencode/remediation-deploy
+export LAB="$PATTERN/scripts/remediation-lab"   # committed lab assets
 umask 077
-export EVIDENCE="$(mktemp -d /tmp/opencode/remediation-lab.XXXXXX)"
+mkdir -p "$HOME/remediation-lab-evidence"           # outside every Git repo
+export EVIDENCE="$(mktemp -d "$HOME/remediation-lab-evidence/run.XXXXXX")"
 ```
 
-The suggested `variants/standalone/values-standalone.yaml` changes are in the
-working tree (uncommitted) **with all phases applied**. ArgoCD auto-syncs, so
-push them **one phase at a time**, using the cumulative patches in `$LAB`:
+All lab assets are committed in `scripts/remediation-lab/` of this repository:
+the four cumulative `values-standalone.yaml` patches, the mario-ipi writer
+RBAC manifest and the token-gate observer. The committed
+`variants/standalone/values-standalone.yaml` keeps execution disabled; ArgoCD
+auto-syncs, so apply and push the patches **one phase at a time**:
 
 | Patch | App(s) | Change |
 |---|---|---|
@@ -48,24 +51,19 @@ remediation group, and the phase-ordering test in
 `tests/chart/test_remediation_execution.py`, are already committed; they must
 be on the pushed branch before Phase B.
 
-To stage phase by phase from the current working tree:
+Each patch applies on top of the previous one, starting from the committed
+values file. If that file changed since the patches were written, use
+`git apply --3way` and review the result:
 
 ```bash
 cd "$PATTERN"
-cp variants/standalone/values-standalone.yaml "$LAB/values-all-phases.yaml"
-git checkout -- variants/standalone/values-standalone.yaml   # back to HEAD
-git apply "$LAB/phase-a.patch"
-git diff --stat
+git apply --check "$LAB/phase-a.patch"
 ```
-
-(`$LAB/make_phase_patches.py` regenerates the patches from HEAD if `/tmp` is
-cleaned; `$LAB/render_phases.py` renders all affected charts per phase with the
-real per-app overrides — all phases currently render cleanly.)
 
 ## 1. Build and push the images
 
 Use a clean checkout of the committed branches if you can. Otherwise: MAS now
-has a `.dockerignore` (uncommitted) excluding `.env*`, keys, kubeconfigs,
+has a committed `.dockerignore` excluding `.env*`, keys, kubeconfigs,
 virtualenvs, caches and logs; the Hub target stages its own context; the
 operator `.dockerignore` excludes docs/config; ACME copies only
 `requirements.txt`, `pyproject.toml` and `src/`.
@@ -120,7 +118,8 @@ Verification with the gateway kubeconfig and Result publication.
 ## 2. Phase A — images, close the development API Route
 
 ```bash
-cd "$PATTERN"          # phase-a.patch was applied in step 0
+cd "$PATTERN"
+git apply "$LAB/phase-a.patch"
 git add variants/standalone/values-standalone.yaml
 git commit -m "standalone: remediation lab images (phase A)"
 git push
@@ -365,50 +364,10 @@ Run one approval **before** step 8, so a mistake cannot write anything yet.
 export MOC="oc --kubeconfig $MARIO_KUBECONFIG"
 $MOC get clusterrolebinding,rolebinding -A -o wide | grep 'praxis-spoke-mario-ipi:writer' \
   && echo 'STOP: a writer binding already exists'
-# Bounded observer: polls the run-token Secret and decodes selected claims of
-# token-a and token-execution from the SAME read that first contains
-# token-execution. Never prints a token. Fails on timeout, or if Execution
-# finishes (Executed=True/False) or the Secret disappears before capture.
-cat > "$EVIDENCE/capture_exec_claims.py" <<'PY'
-import base64, json, subprocess, sys, time
-
-secret, run, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
-deadline = time.monotonic() + timeout
-
-
-def oc_json(*args):
-    remaining = deadline - time.monotonic()
-    try:
-        out = subprocess.run(["oc", "-n", "lightspeed-hub", "get", *args, "-o", "json"],
-                             capture_output=True, text=True, timeout=max(remaining, 1))
-    except subprocess.TimeoutExpired:
-        sys.exit("FAIL: oc call exceeded the observer deadline; use a fresh run")
-    return json.loads(out.stdout) if out.returncode == 0 else None
-
-
-def claims(raw):
-    payload = base64.b64decode(raw).decode().split(".")[1]
-    payload += "=" * (-len(payload) % 4)
-    c = json.loads(base64.urlsafe_b64decode(payload))
-    return {k: c.get(k) for k in ("aud", "azp", "sub", "exp", "groups")}
-
-
-while time.monotonic() < deadline:
-    secret_obj = oc_json("secret", secret)
-    if secret_obj is None:
-        sys.exit("FAIL: run-token Secret is gone before token-execution was seen; use a fresh run")
-    data = secret_obj.get("data", {})
-    if data.get("token-execution"):
-        print(json.dumps({"R": claims(data["token-a"]),
-                          "R_exec": claims(data["token-execution"])}, indent=2))
-        sys.exit(0)
-    run_obj = oc_json("agenticrun", run) or {}
-    for cond in run_obj.get("status", {}).get("conditions", []):
-        if cond.get("type") == "Executed" and cond.get("status") in ("True", "False"):
-            sys.exit("FAIL: Execution finished before token-execution was seen; use a fresh run")
-    time.sleep(0.5)
-sys.exit("FAIL: token-execution not seen before timeout; use a fresh run")
-PY
+# The token-gate observer is $LAB/capture_exec_claims.py (stdlib only): it
+# decodes selected claims of token-a and token-execution from the SAME
+# Secret read, never prints a token, and fails on timeout, finished
+# Execution or a missing Secret.
 ```
 
 Ask ACME a mario-ipi/payments question (step 9 prompt). When it shows the
@@ -419,7 +378,7 @@ RUN=$(oc -n lightspeed-hub get agenticruns --sort-by=.metadata.creationTimestamp
 UID_=$(oc -n lightspeed-hub get agenticrun "$RUN" -o jsonpath='{.metadata.uid}')
 oc -n lightspeed-hub get agenticrun "$RUN" -o jsonpath='{.spec.targetCluster}{"\n"}'   # mario-ipi
 SECRET="ls-run-token-$UID_"
-python3 "$EVIDENCE/capture_exec_claims.py" "$SECRET" "$RUN" 900 \
+python3 "$LAB/capture_exec_claims.py" "$SECRET" "$RUN" 900 \
   > "$EVIDENCE/token-claims.json" 2> "$EVIDENCE/token-claims.err" &
 OBSERVER=$!
 ```
@@ -454,7 +413,7 @@ $MOC get ns payments
 The reader binding for `keycloak:praxis-spoke-mario-ipi:reader` must already
 exist (analysis on mario-ipi depends on it). Save the current `payments` state,
 then apply the reviewed writer RBAC (rules rendered from the lightspeed-hub
-chart; regenerate with `$LAB/render_mario_rbac.py`):
+chart; `tests/chart/test_remediation_execution.py` keeps them in sync):
 
 ```bash
 $MOC -n payments get deploy,sts,svc,cm,pods -o yaml > "$EVIDENCE/payments-before.yaml"

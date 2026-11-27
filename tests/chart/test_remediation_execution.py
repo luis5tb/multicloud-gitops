@@ -579,3 +579,34 @@ def test_standalone_variant_execution_rollout_is_ordered_and_scoped():
     if hub_on:
         assert hub["adapter.hubRunApproversGroup"] == "keycloak:lightspeed-hub-a2a:agenticrun-approver"
     assert "spokeExecutorRBAC.enabled" not in hub
+
+
+LAB = ROOT / "scripts/remediation-lab"
+
+
+def test_remediation_lab_phase_patches_apply_in_order(tmp_path):
+    """The committed lab patches still apply to the committed values file."""
+    target = tmp_path / "variants/standalone/values-standalone.yaml"
+    target.parent.mkdir(parents=True)
+    target.write_text(VARIANT.read_text())
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    for phase in "abcd":
+        patch = LAB / f"phase-{phase}.patch"
+        subprocess.run(["git", "apply", "--check", str(patch)], cwd=tmp_path, check=True)
+        subprocess.run(["git", "apply", str(patch)], cwd=tmp_path, check=True)
+        yaml.safe_load(target.read_text())
+
+
+def test_remediation_lab_writer_rbac_matches_chart_rules():
+    """mario-ipi's hand-applied writer RBAC mirrors the chart's reviewed rules."""
+    docs = {d["kind"]: d for d in yaml.safe_load_all((LAB / "mario-ipi-writer-rbac.yaml").read_text()) if d}
+    chart_rules = yaml.safe_load((HUB / "values.yaml").read_text())["spokeExecutorRBAC"]["rules"]
+    assert docs["ClusterRole"]["rules"] == chart_rules
+    binding = docs["RoleBinding"]
+    assert binding["metadata"]["namespace"] == "payments"
+    assert binding["subjects"] == [{
+        "kind": "Group", "apiGroup": "rbac.authorization.k8s.io",
+        "name": "keycloak:praxis-spoke-mario-ipi:writer",
+    }]
+    assert binding["roleRef"]["name"] == docs["ClusterRole"]["metadata"]["name"]
+    assert set(docs) == {"ClusterRole", "RoleBinding"}
