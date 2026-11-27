@@ -69,6 +69,9 @@ Linting runs in CI via super-linter (`.github/workflows/superlinter.yml`).
 - `docs/agentic-architecture-overview.html` / `docs/agentic-e2e-token-flow.html`
   -- component diagram and step-by-step token walkthrough (ACME -> MAS ->
   lightspeed-hub). Update them when a client, audience or hop changes.
+  `docs/agentic-architecture-overview-with-egress-gateways.html` adds the
+  Praxis egress gateways (Ask Red Hat via Red Hat SSO, a partner IdP) and the
+  stage -> production switch.
 
 ## Where do I change X?
 

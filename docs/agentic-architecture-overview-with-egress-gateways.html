@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic pattern · component overview with Praxis egress gateways</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: light-dark(#f4f6fa, #0c1421);
+    --panel: light-dark(#ffffff, #131f30);
+    --subtle: light-dark(#edf1f7, #1b2a3f);
+    --text: light-dark(#17263b, #edf3fc);
+    --muted: light-dark(#52627a, #adbed5);
+    --border: light-dark(#ced7e4, #354962);
+    --accent: light-dark(#175eb3, #8cbfff);
+    --tokA: light-dark(#1a5a9d, #98c9ff);
+    --tokH: light-dark(#8a4b08, #f5c37a);
+    --tokR: light-dark(#6b3fa0, #cfb1f4);
+    --tokU: light-dark(#14654f, #89ddc2);
+    --tokS: light-dark(#a0287a, #f29bd6);
+    --tokP: light-dark(#5d6b12, #c9d97a);
+    --kc: light-dark(#a3293c, #ffa9b5);
+    --ext: light-dark(#5b6b80, #9fb0c6);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); }
+  main { max-width: 1560px; margin: auto; padding: 28px clamp(14px, 3vw, 40px) 56px; }
+  h1 { font-size: clamp(24px, 2.6vw, 36px); letter-spacing: -.03em; margin: 4px 0 8px; }
+  h2 { font-size: 20px; margin: 36px 0 10px; }
+  p.lead { color: var(--muted); max-width: 980px; margin: 0 0 18px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; }
+  svg { width: 100%; height: auto; display: block; }
+  svg text { fill: var(--text); font-family: inherit; }
+  svg .muted { fill: var(--muted); }
+  svg .box { fill: var(--panel); stroke: var(--border); stroke-width: 1.5; }
+  svg .grp { fill: var(--subtle); stroke: var(--border); stroke-dasharray: 6 5; stroke-width: 1.2; }
+  svg .kcbox { fill: var(--panel); stroke: var(--kc); stroke-width: 2; }
+  svg .extbox { fill: var(--panel); stroke: var(--ext); stroke-width: 1.5; stroke-dasharray: 4 4; }
+  svg .pxbox { fill: var(--panel); stroke: var(--accent); stroke-width: 2; }
+  svg .chip { fill: var(--subtle); stroke: var(--border); }
+  svg .t { font-size: 15px; font-weight: 650; }
+  svg .s { font-size: 12px; }
+  svg .xs { font-size: 11px; }
+  svg .lbl { font-size: 12px; font-weight: 600; paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+  .A { stroke: var(--tokA); } .H { stroke: var(--tokH); } .R { stroke: var(--tokR); } .U { stroke: var(--tokU); }
+  .S { stroke: var(--tokS); } .P { stroke: var(--tokP); }
+  .KC { stroke: var(--kc); } .EXT { stroke: var(--ext); }
+  svg path.flow { fill: none; stroke-width: 3; }
+  svg path.aux { fill: none; stroke-width: 1.8; stroke-dasharray: 6 5; }
+  .fA { fill: var(--tokA); } .fH { fill: var(--tokH); } .fR { fill: var(--tokR); } .fU { fill: var(--tokU); }
+  .fS { fill: var(--tokS); } .fP { fill: var(--tokP); } .fKC { fill: var(--kc); } .fEXT { fill: var(--ext); }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 12px 4px 0; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .legend i { display: inline-block; width: 30px; height: 0; border-top: 3px solid; }
+  .legend i.d { border-top-style: dashed; border-top-width: 2px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--subtle); font-weight: 650; }
+  code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: .92em; background: var(--subtle); padding: 1px 5px; border-radius: 5px; }
+  .tok { font-weight: 700; padding: 1px 8px; border-radius: 999px; border: 2px solid; }
+  .tA { color: var(--tokA); border-color: var(--tokA); } .tH { color: var(--tokH); border-color: var(--tokH); }
+  .tR { color: var(--tokR); border-color: var(--tokR); } .tU { color: var(--tokU); border-color: var(--tokU); }
+  .tS { color: var(--tokS); border-color: var(--tokS); } .tP { color: var(--tokP); border-color: var(--tokP); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+  .grid .card h3 { margin: 0 0 4px; font-size: 16px; }
+  .grid .card p { margin: 4px 0; font-size: 14px; color: var(--muted); }
+  .grid .card ul { margin: 6px 0 0; padding-left: 18px; font-size: 14px; }
+  ol.steps { max-width: 1100px; font-size: 14px; padding-left: 22px; }
+  ol.steps li { margin: 6px 0; }
+  .note { border-left: 4px solid var(--tokS); padding: 8px 12px; background: var(--panel); border-radius: 0 10px 10px 0; max-width: 1100px; font-size: 14px; }
+  footer { margin-top: 32px; font-size: 13px; color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+<div style="font-size:13px;color:var(--muted)">multicloud-gitops · standalone variant · egress gateways (docs/EXTERNAL_IDP_EGRESS.md)</div>
+<h1>Agentic pattern: investigations, Ask Red Hat and partner agents</h1>
+<p class="lead">ACME asks the <b>hub-hosted MAS orchestrator</b> with one local token, <b>Token A</b>, for every
+destination. MAS forwards that same Token A to whichever agent it delegates to, always through a
+<b>Praxis</b> instance. The <b>hub gateway</b> exchanges it inside Keycloak for cluster investigations. The
+<b>egress gateways</b> (one per external agent) trade it for a token from that agent's own identity provider,
+minted with the gateway's own client. Red Hat SSO fronts Ask Red Hat, and a partner IdP fronts a partner agent.
+No external token ever enters Keycloak, and nothing external is stored in MAS. The investigation token walkthrough
+is in <a href="agentic-e2e-token-flow.html">agentic-e2e-token-flow.html</a>.</p>
+
+<div class="card">
+<svg viewBox="0 0 1500 1340" role="img" aria-labelledby="diagram-title diagram-description">
+  <title id="diagram-title">MAS reaches lightspeed-hub, Ask Red Hat and a partner agent through Praxis</title>
+  <desc id="diagram-description">ACME calls MAS with Token A. For investigations MAS calls the Praxis hub
+    gateway, which exchanges Token A in Keycloak, and the run reads clusters through the Praxis spoke gateway.
+    For external agents MAS calls a Praxis egress gateway per agent: the ask-red-hat gateway mints a Red Hat SSO
+    token with its own client and forwards to Ask Red Hat; the partner gateway mints a token at the partner's IdP
+    and forwards to the partner agent. Each external agent sees one shared account, not individual users.</desc>
+  <defs>
+    <marker id="mA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fA"/></marker>
+    <marker id="mH" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fH"/></marker>
+    <marker id="mR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fR"/></marker>
+    <marker id="mU" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fU"/></marker>
+    <marker id="mS" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fS"/></marker>
+    <marker id="mP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fP"/></marker>
+    <marker id="mKC" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fKC"/></marker>
+    <marker id="mEXT" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fEXT"/></marker>
+  </defs>
+
+  <!-- ===== Top row: SPIRE, Keycloak, external IdPs note ===== -->
+  <rect x="30" y="30" width="220" height="100" rx="12" class="extbox"/>
+  <text x="46" y="58" class="t">SPIRE / ZTWIM</text>
+  <text x="46" y="80" class="s muted">Workload Identity Manager</text>
+  <text x="46" y="100" class="s muted">JWT-SVID for acme-agent</text>
+  <text x="46" y="118" class="xs muted">aud = Keycloak realm issuer</text>
+
+  <rect x="280" y="20" width="850" height="160" rx="12" class="kcbox"/>
+  <text x="298" y="46" class="t">Keycloak (RHBK) · realm rca · ns keycloak-system</text>
+  <text x="1112" y="46" class="xs muted" text-anchor="end">token endpoint (issue + RFC 8693 exchange) · JWKS</text>
+  <g class="xs">
+    <rect x="298" y="60" width="265" height="50" rx="8" class="chip"/>
+    <text x="308" y="80" font-weight="650">acme-agent</text>
+    <text x="308" y="98" class="muted">federated-jwt (SPIFFE) → mints A</text>
+    <rect x="573" y="60" width="265" height="50" rx="8" class="chip"/>
+    <text x="583" y="80" font-weight="650">mas-a2a</text>
+    <text x="583" y="98" class="muted">A's aud · hub gateway exchanger A→H</text>
+    <rect x="848" y="60" width="265" height="50" rx="8" class="chip"/>
+    <text x="858" y="80" font-weight="650">lightspeed-hub-a2a</text>
+    <text x="858" y="98" class="muted">H's aud · adapter exchanger H→R</text>
+    <rect x="298" y="118" width="265" height="50" rx="8" class="chip"/>
+    <text x="308" y="138" font-weight="650">praxis-spoke-gateway</text>
+    <text x="308" y="156" class="muted">R's aud · spoke gateway exchanger R→U</text>
+    <rect x="573" y="118" width="265" height="50" rx="8" class="chip"/>
+    <text x="583" y="138" font-weight="650">praxis-spoke-hub</text>
+    <text x="583" y="156" class="muted">U's aud (audience-only) · role reader</text>
+    <rect x="848" y="118" width="265" height="50" rx="8" class="chip"/>
+    <text x="858" y="138" font-weight="650">openshift-console</text>
+    <text x="858" y="156" class="muted">Native OIDC for the kube APIs / console</text>
+  </g>
+
+  <rect x="1160" y="30" width="320" height="150" rx="12" class="extbox"/>
+  <text x="1176" y="58" class="t">External IdPs</text>
+  <text x="1176" y="80" class="s muted">Red Hat SSO · partner IdP (bottom band)</text>
+  <text x="1176" y="102" class="s">used only by the egress gateways,</text>
+  <text x="1176" y="120" class="s">each with its own client</text>
+  <text x="1176" y="138" class="s">(client_credentials); never by Keycloak</text>
+  <text x="1176" y="162" class="xs muted">transitional: the hub gateway still trusts SSO</text>
+  <text x="1176" y="176" class="xs muted">issuers until rollout step 4 removes them</text>
+
+  <!-- ===== Middle row ===== -->
+  <rect x="30" y="250" width="240" height="170" rx="12" class="box"/>
+  <text x="46" y="278" class="t">ACME agent</text>
+  <text x="46" y="298" class="s muted">ns acme-agent · chat UI + ADK agent</text>
+  <text x="46" y="322" class="s">client <tspan font-weight="650">acme-agent</tspan></text>
+  <text x="46" y="342" class="s">gets Token <tspan font-weight="700" style="fill:var(--tokA)">A</tspan> (aud mas-a2a, 5 min)</text>
+  <text x="46" y="364" class="xs muted">one token for every destination;</text>
+  <text x="46" y="380" class="xs muted">no Red Hat SSO token needed</text>
+  <text x="46" y="404" class="xs muted">LLM: LiteLLM (acme-agent-litellm)</text>
+
+  <rect x="310" y="226" width="340" height="240" rx="14" class="grp"/>
+  <text x="326" y="248" class="s muted" font-weight="650">MAS orchestrator · hub cluster · ns mao</text>
+  <rect x="330" y="262" width="300" height="70" rx="10" class="box"/>
+  <text x="344" y="286" class="t">MAS A2A (front door)</text>
+  <text x="344" y="306" class="xs muted">validates A (JWKS, aud mas-a2a, sub allow-list)</text>
+  <text x="344" y="322" class="xs muted">seals A (Fernet, mao-run-credentials) into the task</text>
+  <rect x="330" y="342" width="300" height="56" rx="10" class="box"/>
+  <text x="344" y="366" class="t">mas-worker</text>
+  <text x="344" y="386" class="xs muted">forwards A to the chosen agent (node base_url)</text>
+  <rect x="330" y="408" width="300" height="46" rx="10" class="box"/>
+  <text x="344" y="430" class="s">Temporal · MongoDB · Redis</text>
+  <text x="344" y="446" class="xs muted">durable tasks; streams capped at 1200 s</text>
+
+  <rect x="690" y="250" width="250" height="180" rx="12" class="pxbox"/>
+  <text x="706" y="278" class="t">Praxis hub gateway</text>
+  <text x="706" y="298" class="s muted">deploy praxis-proxy · ns praxis-proxy</text>
+  <text x="706" y="322" class="s">validates A · azp allow-list</text>
+  <text x="706" y="342" class="s">delegate as <tspan font-weight="650">mas-a2a</tspan>: A → H</text>
+  <text x="706" y="362" class="s">routes to the hub adapter</text>
+  <text x="706" y="386" class="xs muted">agent card: public passthrough</text>
+  <text x="706" y="402" class="xs muted">of the adapter's own card</text>
+
+  <rect x="980" y="226" width="500" height="484" rx="14" class="grp"/>
+  <text x="996" y="248" class="s muted" font-weight="650">ns lightspeed-hub</text>
+  <rect x="1000" y="262" width="220" height="150" rx="10" class="box"/>
+  <text x="1014" y="286" class="t">hub A2A adapter</text>
+  <text x="1014" y="306" class="xs muted">deploy lightspeed-hub</text>
+  <text x="1014" y="328" class="s">receives H; creates the run</text>
+  <text x="1014" y="348" class="s">as <tspan font-weight="650">lightspeed-hub-a2a</tspan>: H → R</text>
+  <text x="1014" y="370" class="xs muted">watches runs with its own SA;</text>
+  <text x="1014" y="386" class="xs muted">maps status to A2A task events</text>
+  <rect x="1245" y="262" width="215" height="150" rx="10" class="box"/>
+  <text x="1259" y="286" class="t">Run Secrets</text>
+  <text x="1259" y="308" class="xs">ls-run-token-&lt;uid&gt;</text>
+  <text x="1259" y="324" class="xs muted">key token-a, holds R (30 min)</text>
+  <text x="1259" y="346" class="xs">ls-sandbox-kubeconfig-…</text>
+  <text x="1259" y="362" class="xs muted">server = spoke gateway Service,</text>
+  <text x="1259" y="378" class="xs muted">tokenFile = mounted R</text>
+  <text x="1259" y="398" class="xs muted">+ CA Secret praxis-gateway</text>
+
+  <rect x="1000" y="520" width="220" height="170" rx="10" class="box"/>
+  <text x="1014" y="544" class="t">agentic operator</text>
+  <text x="1014" y="562" class="xs muted">lightspeed-hub-agentic-operator</text>
+  <text x="1014" y="584" class="s">reconciles AgenticRun</text>
+  <text x="1014" y="604" class="xs">Agent default · LLMProvider vertex</text>
+  <text x="1014" y="620" class="xs">ApprovalPolicy cluster</text>
+  <text x="1014" y="642" class="xs muted">gateway credential mode: no</text>
+  <text x="1014" y="658" class="xs muted">spoke SA, no spoke kubeconfig;</text>
+  <text x="1014" y="674" class="xs muted">sandbox gets R only</text>
+  <rect x="1245" y="520" width="215" height="170" rx="10" class="box"/>
+  <text x="1259" y="544" class="t">sandbox pod</text>
+  <text x="1259" y="562" class="xs muted">ls-analysis-&lt;uid&gt;</text>
+  <text x="1259" y="584" class="s">investigation agent</text>
+  <text x="1259" y="604" class="xs">kubectl with Bearer R</text>
+  <text x="1259" y="626" class="xs muted">LLM: Gemini on Vertex AI</text>
+  <text x="1259" y="642" class="xs muted">(llm-creds-vertex)</text>
+  <text x="1259" y="664" class="xs muted">tool output safety inspection</text>
+
+  <rect x="690" y="520" width="250" height="150" rx="12" class="box"/>
+  <text x="706" y="546" class="t">Hub kube API</text>
+  <text x="706" y="566" class="xs muted">OpenShift Native OIDC → Keycloak</text>
+  <text x="706" y="590" class="s">H ⇒ user keycloak:&lt;sub&gt;</text>
+  <text x="706" y="608" class="xs">group keycloak:lightspeed-hub-a2a:</text>
+  <text x="706" y="622" class="xs">agenticrun-creator → create runs</text>
+  <text x="706" y="644" class="xs muted">VAP …-agenticrun-target-authz</text>
+  <text x="706" y="658" class="xs muted">checks the run's target</text>
+
+  <rect x="310" y="560" width="340" height="90" rx="12" class="extbox"/>
+  <text x="326" y="588" class="t">Vertex AI (Gemini)</text>
+  <text x="326" y="610" class="s muted">mas-worker and the sandbox</text>
+  <text x="326" y="630" class="xs muted">same credentials (llm-creds-vertex) and model</text>
+
+  <rect x="30" y="560" width="240" height="210" rx="12" class="extbox"/>
+  <text x="46" y="588" class="t">Vault + External Secrets</text>
+  <text x="46" y="610" class="xs muted">secret/global/* → ExternalSecrets:</text>
+  <text x="46" y="628" class="xs">praxis-hub-exchange-client</text>
+  <text x="46" y="644" class="xs">praxis-spoke-gateway-client</text>
+  <text x="46" y="660" class="xs">adapter KEYCLOAK_CLIENT_SECRET</text>
+  <text x="46" y="676" class="xs">llm-creds-vertex · mao-run-credentials</text>
+  <text x="46" y="698" class="xs muted">egress (client-id + client-secret):</text>
+  <text x="46" y="714" class="xs">praxis-egress-ask-red-hat-client</text>
+  <text x="46" y="730" class="xs">praxis-egress-partner-client</text>
+  <text x="46" y="754" class="xs muted">(Praxis secrets: alphanumeric only)</text>
+
+  <!-- ===== Bottom row: investigation spoke side ===== -->
+  <rect x="990" y="780" width="260" height="160" rx="12" class="pxbox"/>
+  <text x="1006" y="806" class="t">Praxis spoke gateway</text>
+  <text x="1006" y="826" class="xs muted">praxis-spoke-hub · ns praxis-proxy · :8443</text>
+  <text x="1006" y="848" class="s">validates R · azp lightspeed-hub-a2a</text>
+  <text x="1006" y="868" class="s">delegate as <tspan font-weight="650">praxis-spoke-gateway</tspan></text>
+  <text x="1006" y="886" class="s">R → U, per call</text>
+  <rect x="1006" y="898" width="230" height="30" rx="7" class="chip"/>
+  <text x="1016" y="918" class="xs"><tspan style="fill:var(--kc)" font-weight="700">⇄ Keycloak</tspan> exchange · 32 MiB responses</text>
+
+  <rect x="690" y="780" width="250" height="160" rx="12" class="box"/>
+  <text x="706" y="806" class="t">Spoke kube API</text>
+  <text x="706" y="826" class="xs muted">here: the hub, as its own spoke</text>
+  <text x="706" y="850" class="s">U ⇒ user keycloak:&lt;sub&gt;</text>
+  <text x="706" y="870" class="xs">group keycloak:praxis-spoke-hub:reader</text>
+  <text x="706" y="888" class="xs">→ cluster-reader,</text>
+  <text x="706" y="904" class="xs">  cluster-monitoring-view</text>
+  <text x="706" y="926" class="xs muted">TLS verified against the spoke CA</text>
+
+  <rect x="310" y="780" width="340" height="160" rx="12" class="grp"/>
+  <text x="326" y="806" class="t">Return path (investigations)</text>
+  <text x="326" y="830" class="s muted">sandbox result → AgenticRun status</text>
+  <text x="326" y="850" class="s muted">→ adapter (watch) → A2A task completed</text>
+  <text x="326" y="870" class="s muted">→ hub gateway → mas-worker (SSE)</text>
+  <text x="326" y="890" class="s muted">→ MAS A2A → ACME → user</text>
+  <text x="326" y="914" class="xs muted">external agents answer straight back</text>
+  <text x="326" y="930" class="xs muted">through their egress gateway (same SSE)</text>
+
+  <!-- ===== External agents band ===== -->
+  <rect x="20" y="990" width="1460" height="335" rx="14" class="grp"/>
+  <text x="330" y="1014" class="s muted" font-weight="650">External agents · one Praxis egress gateway per agent (ns praxis-proxy, internal :8443, no Route)</text>
+
+  <rect x="330" y="1030" width="310" height="135" rx="12" class="pxbox"/>
+  <text x="346" y="1056" class="t">Praxis egress · ask-red-hat</text>
+  <text x="346" y="1074" class="xs muted">praxis-egress-ask-red-hat.praxis-proxy.svc:8443</text>
+  <text x="346" y="1096" class="s">validates A (local Keycloak) · azp list</text>
+  <text x="346" y="1116" class="s">serves Ask Red Hat's card (url → itself)</text>
+  <text x="346" y="1136" class="s">mints <tspan font-weight="700" style="fill:var(--tokS)">S</tspan> as its SSO client, forwards</text>
+  <text x="346" y="1154" class="xs muted">Host → access[.stage].redhat.com</text>
+
+  <rect x="700" y="1030" width="250" height="78" rx="12" class="extbox"/>
+  <text x="716" y="1056" class="t">Red Hat SSO</text>
+  <text x="716" y="1076" class="xs muted">sso[.stage].redhat.com · redhat-external</text>
+  <text x="716" y="1094" class="xs muted">client from the stage / prod Vault record</text>
+
+  <rect x="1010" y="1030" width="260" height="135" rx="12" class="extbox"/>
+  <text x="1026" y="1056" class="t">Ask Red Hat agent</text>
+  <text x="1026" y="1074" class="xs muted">access[.stage].redhat.com/api/ask/v1/a2a/</text>
+  <text x="1026" y="1096" class="s">Red Hat docs · products · CVEs</text>
+  <text x="1026" y="1118" class="xs">sees ONE account: the SSO client,</text>
+  <text x="1026" y="1134" class="xs">for every MAS user and request</text>
+  <text x="1026" y="1154" class="xs muted">rejects Token A (401)</text>
+
+  <rect x="330" y="1185" width="310" height="125" rx="12" class="pxbox"/>
+  <text x="346" y="1211" class="t">Praxis egress · partner (example)</text>
+  <text x="346" y="1229" class="xs muted">praxis-egress-partner.praxis-proxy.svc:8443</text>
+  <text x="346" y="1251" class="s">same policy; its own client and card</text>
+  <text x="346" y="1271" class="s">mints <tspan font-weight="700" style="fill:var(--tokP)">P</tspan> as the partner client, forwards</text>
+  <text x="346" y="1295" class="xs muted">added per docs/ADDING_AN_EXTERNAL_AGENT.md</text>
+
+  <rect x="700" y="1185" width="250" height="78" rx="12" class="extbox"/>
+  <text x="716" y="1211" class="t">Partner IdP (any OAuth 2.0)</text>
+  <text x="716" y="1231" class="xs muted">client_credentials · audience · scopes</text>
+  <text x="716" y="1249" class="xs muted">client from the partner's Vault record</text>
+
+  <rect x="1010" y="1185" width="260" height="125" rx="12" class="extbox"/>
+  <text x="1026" y="1211" class="t">Partner A2A agent</text>
+  <text x="1026" y="1229" class="xs muted">partner.example.com/a2a</text>
+  <text x="1026" y="1251" class="s">the partner's own service</text>
+  <text x="1026" y="1273" class="xs">sees ONE account: the partner client</text>
+  <text x="1026" y="1295" class="xs muted">rejects Token A</text>
+
+  <rect x="1290" y="1030" width="175" height="280" rx="12" class="box"/>
+  <text x="1304" y="1056" class="t">Config (gitops)</text>
+  <text x="1304" y="1080" class="xs muted">values-standalone.yaml,</text>
+  <text x="1304" y="1096" class="xs muted">praxis-proxy app:</text>
+  <text x="1304" y="1114" class="xs">extraValueFiles:</text>
+  <text x="1304" y="1130" class="xs">· …-card.yaml</text>
+  <text x="1304" y="1146" class="xs">· …-stage.yaml</text>
+  <text x="1304" y="1162" class="xs">   ⇄ …-production.yaml</text>
+  <text x="1304" y="1188" class="xs muted">Vault record per env:</text>
+  <text x="1304" y="1204" class="xs">client-id + client-secret</text>
+  <text x="1304" y="1230" class="xs muted">MAS node (every env):</text>
+  <text x="1304" y="1246" class="xs">base_url = the gateway</text>
+  <text x="1304" y="1262" class="xs">no token, no stored card</text>
+  <text x="1304" y="1288" class="xs muted">mas-worker/mas-api trust</text>
+  <text x="1304" y="1302" class="xs muted">the service CA</text>
+
+  <!-- ===== Auxiliary (identity, LLM, IdP mints) ===== -->
+  <path d="M120,130 V250" class="aux EXT" marker-end="url(#mEXT)"/>
+  <text x="128" y="200" class="lbl xs">JWT-SVID</text>
+
+  <path d="M220,250 V150 H280" class="aux KC" marker-end="url(#mKC)"/>
+  <text x="152" y="222" class="lbl">① A (client_credentials)</text>
+
+  <path d="M800,250 V180" class="aux KC" marker-start="url(#mKC)" marker-end="url(#mKC)"/>
+  <text x="808" y="222" class="lbl">④ A→H</text>
+
+  <path d="M1110,262 V180" class="aux KC" marker-start="url(#mKC)" marker-end="url(#mKC)"/>
+  <text x="1118" y="222" class="lbl">⑥ H→R</text>
+
+  <path d="M480,466 V560" class="aux EXT" marker-end="url(#mEXT)"/>
+  <text x="488" y="520" class="lbl xs">LLM</text>
+
+  <path d="M640,1062 H700" class="aux S" marker-start="url(#mS)" marker-end="url(#mS)"/>
+  <text x="646" y="1054" class="lbl xs">⑪ mint</text>
+
+  <path d="M640,1217 H700" class="aux P" marker-start="url(#mP)" marker-end="url(#mP)"/>
+  <text x="646" y="1209" class="lbl xs">mint</text>
+
+  <!-- ===== Main request path (investigations) ===== -->
+  <path d="M270,297 H330" class="flow A" marker-end="url(#mA)"/>
+  <text x="276" y="288" class="lbl">② A</text>
+
+  <path d="M630,370 H690" class="flow A" marker-end="url(#mA)"/>
+  <text x="636" y="362" class="lbl">③ A</text>
+
+  <path d="M940,337 H1000" class="flow H" marker-end="url(#mH)"/>
+  <text x="950" y="328" class="lbl">H</text>
+
+  <path d="M1000,395 H962 V560 H940" class="flow H" marker-end="url(#mH)"/>
+  <text x="900" y="500" class="lbl">⑤ create run (H)</text>
+
+  <path d="M940,630 H1000" class="flow EXT" style="stroke-width:2" marker-end="url(#mEXT)"/>
+  <text x="944" y="622" class="lbl xs">watch</text>
+
+  <path d="M1220,337 H1245" class="flow R" marker-end="url(#mR)"/>
+  <text x="1222" y="328" class="lbl xs">R</text>
+
+  <path d="M1220,600 H1245" class="flow EXT" style="stroke-width:2" marker-end="url(#mEXT)"/>
+  <text x="1212" y="592" class="lbl xs">⑦ pod</text>
+
+  <path d="M1352,412 V520" class="flow R" marker-end="url(#mR)"/>
+  <text x="1360" y="470" class="lbl xs">mounted</text>
+
+  <path d="M1352,690 V860 H1250" class="flow R" marker-end="url(#mR)"/>
+  <text x="1360" y="780" class="lbl">⑧ kubectl + R</text>
+
+  <path d="M990,860 H940" class="flow U" marker-end="url(#mU)"/>
+  <text x="948" y="850" class="lbl">⑨ U</text>
+
+  <!-- ===== External agents path: the same Token A, down the lane to the egress gateways ===== -->
+  <path d="M330,385 H290 V1095 H330" class="flow A" marker-end="url(#mA)"/>
+  <path d="M290,1095 V1245 H330" class="flow A" marker-end="url(#mA)"/>
+  <text x="134" y="1070" class="lbl">⑩ A (forwarded as-is)</text>
+
+  <path d="M640,1140 H1010" class="flow S" marker-end="url(#mS)"/>
+  <text x="716" y="1132" class="lbl">⑫ S · aud api.ask_red_hat</text>
+
+  <path d="M640,1290 H1010" class="flow P" marker-end="url(#mP)"/>
+  <text x="716" y="1282" class="lbl">P · partner audience</text>
+</svg>
+<div class="legend">
+  <span><i style="border-color:var(--tokA)"></i>Token A · caller (acme-agent), every destination</span>
+  <span><i style="border-color:var(--tokH)"></i>Token H · run creation</span>
+  <span><i style="border-color:var(--tokR)"></i>Token R · run credential</span>
+  <span><i style="border-color:var(--tokU)"></i>Token U · spoke reads</span>
+  <span><i style="border-color:var(--tokS)"></i>Token S · Red Hat SSO, minted by the egress gateway</span>
+  <span><i style="border-color:var(--tokP)"></i>Token P · partner IdP, minted by the egress gateway</span>
+  <span><i class="d" style="border-color:var(--kc)"></i>Keycloak token endpoint</span>
+  <span><i class="d" style="border-color:var(--tokS)"></i>egress client_credentials mint</span>
+  <span><i class="d" style="border-color:var(--ext)"></i>identity / LLM / control</span>
+  <span>Blue-bordered boxes: Praxis instances</span>
+</div>
+</div>
+
+<p class="lead" style="margin-top:16px"><b>Three kinds of destination, one caller token.</b>
+Investigations go through the hub gateway and exchange Token A inside Keycloak (A → H → R → U, the
+same <code>sub</code> all the way). External agents go through their own egress gateway, which never exchanges
+Token A. It authenticates it, then mints a separate token at that agent's IdP with the gateway's own client. Steps
+⑩ ⑪ ⑫ are the Ask Red Hat path; the partner path is identical with its own IdP, client and card.</p>
+
+<h2>External agents through egress gateways</h2>
+<div class="grid">
+  <div class="card"><h3>What an egress gateway does</h3>
+    <ul><li>Validates Token A against the local Keycloak only, and enforces the <code>azp</code> allow-list</li>
+    <li>Serves the agent's A2A card from its configuration, with the card's URL rewritten to itself (the a2a-sdk sends to the card's URL, so this keeps MAS on the gateway)</li>
+    <li>Mints a token at the agent's IdP with <code>client_credentials</code> as its own client, and replaces the outbound <code>Authorization</code></li>
+    <li>Forwards to one fixed A2A endpoint, with <code>Host</code> set to that endpoint</li></ul></div>
+  <div class="card"><h3>Identity: one account, not users</h3>
+    <p>The agent sees the gateway's client account for every MAS user and every request.</p>
+    <ul><li>Its permissions apply to everyone the gateway's allow-list admits</li>
+    <li>Quotas and the agent's audit log see that one account; which user asked is in ACME's and MAS's records</li>
+    <li>Right for shared knowledge (Ask Red Hat); wrong where the agent must enforce a user's own entitlements</li></ul></div>
+  <div class="card"><h3>Configuration</h3>
+    <ul><li><b>Card:</b> <code>variants/standalone/praxis-egress-&lt;key&gt;-card.yaml</code></li>
+    <li><b>Endpoint, IdP, Vault record:</b> <code>…-stage.yaml</code> or <code>…-production.yaml</code></li>
+    <li><b>Credentials:</b> one Vault record per environment with <code>client-id</code> and <code>client-secret</code>; nothing credential-related in git</li>
+    <li><b>MAS:</b> an <code>a2a_agent_node</code> with <code>base_url</code> = the gateway; no token, no stored card</li></ul></div>
+</div>
+
+<h2>Ask Red Hat: switching stage → production</h2>
+<p class="lead">MAS never changes: its Ask Red Hat node points at
+<code>https://praxis-egress-ask-red-hat.praxis-proxy.svc:8443/api/ask/v1/a2a</code> in both environments, and the
+card is shared (the stage and production cards were identical apart from <code>url</code>, which the gateway
+replaces). Only the gateway's environment file changes.</p>
+<table>
+  <tr><th></th><th>Stage (<code>praxis-egress-ask-red-hat-stage.yaml</code>)</th><th>Production (<code>praxis-egress-ask-red-hat-production.yaml</code>)</th></tr>
+  <tr><td>A2A endpoint</td><td><code>https://access.stage.redhat.com/api/ask/v1/a2a</code></td><td><code>https://access.redhat.com/api/ask/v1/a2a</code></td></tr>
+  <tr><td>IdP token endpoint</td><td><code>sso.stage.redhat.com/…/redhat-external/…/token</code></td><td><code>sso.redhat.com/…/redhat-external/…/token</code></td></tr>
+  <tr><td>Vault record (<code>clientSecret.vaultKey</code>)</td><td><code>secret/data/global/acme-agent-redhat-sso-stage</code></td><td><code>secret/data/global/acme-agent-redhat-sso-production</code></td></tr>
+  <tr><td>Client ID and secret</td><td colspan="2">properties <code>client-id</code> and <code>client-secret</code> of that record, synced by the ExternalSecret <code>praxis-egress-ask-red-hat-client</code>. The secret reaches the delegator as an env var. The client ID is written into the gateway's config by its <code>render-config</code> init container at pod start (the delegator's <code>client_id</code> is a plain config string).</td></tr>
+</table>
+<ol class="steps">
+  <li><b>Load the real production client into Vault</b> at <code>secret/data/global/acme-agent-redhat-sso-production</code>:
+  <code>client-id</code> (characters <code>[A-Za-z0-9._-]</code>) and <code>client-secret</code> (alphanumeric). As of 2026-11-26 that
+  record still held a placeholder (<code>fake-client</code>).</li>
+  <li><b>Optionally prove it by hand</b> from a cluster pod: a <code>client_credentials</code> request to the production token
+  endpoint (HTTP Basic, <code>audience=api.ask_red_hat</code>, <code>scope=openid api.ask_red_hat</code>), then a
+  <code>message/send</code> to <code>https://access.redhat.com/api/ask/v1/a2a/</code> with that token.</li>
+  <li><b>Swap the file:</b> in <code>variants/standalone/values-standalone.yaml</code>, under the praxis-proxy app's
+  <code>extraValueFiles</code>, replace <code>/variants/standalone/praxis-egress-ask-red-hat-stage.yaml</code> with
+  <code>/variants/standalone/praxis-egress-ask-red-hat-production.yaml</code>. Commit and sync; the gateway rolls automatically.</li>
+  <li><b>Check:</b> the gateway's ConfigMap shows <code>access.redhat.com:443</code>, the pod's <code>render-config</code> init
+  container exited 0, and ACME answers a Red Hat question. To go back, swap the file again.</li>
+</ol>
+<p class="note">Credentials are read at pod start. If only the Vault record changes (rotation), restart the gateway once the
+ExternalSecret has synced: <code>oc -n praxis-proxy rollout restart deploy/praxis-egress-ask-red-hat</code>. The value
+files are loaded with <code>ignoreMissingValueFiles</code>, so a mistyped path silently removes the gateway; a chart test
+guards the committed paths.</p>
+
+<h2>Tokens</h2>
+<p class="lead">Investigation tokens keep the caller's <code>sub</code> through every Keycloak exchange. Egress tokens
+don't carry the caller at all: they belong to the gateway's client account at the external IdP.</p>
+<table>
+  <tr><th>Token</th><th>Minted by (client)</th><th><code>sub</code></th><th><code>azp</code></th><th><code>aud</code></th><th><code>groups</code></th><th>Lifetime</th><th>Accepted by</th></tr>
+  <tr><td><span class="tok tA">A</span></td><td>Keycloak for ACME (<code>acme-agent</code>, SPIFFE)</td><td>service-account-acme-agent (the caller)</td><td>acme-agent</td><td>mas-a2a</td><td>acme-agent-rca</td><td>300 s</td><td>MAS A2A, hub gateway, egress gateways</td></tr>
+  <tr><td><span class="tok tH">H</span></td><td>hub gateway exchange as <code>mas-a2a</code></td><td>same as A<br><span style="color:var(--muted);font-size:12px">kube user <code>keycloak:&lt;sub&gt;</code></span></td><td>mas-a2a</td><td>lightspeed-hub-a2a</td><td>lightspeed-hub-a2a:agenticrun-creator</td><td>300 s</td><td>adapter, hub kube API</td></tr>
+  <tr><td><span class="tok tR">R</span></td><td>adapter exchange as <code>lightspeed-hub-a2a</code></td><td>same as A</td><td>lightspeed-hub-a2a</td><td>praxis-spoke-gateway</td><td>none</td><td>1800 s</td><td>only the spoke gateway (401 at every kube API)</td></tr>
+  <tr><td><span class="tok tU">U</span></td><td>spoke gateway exchange as <code>praxis-spoke-gateway</code>, per call</td><td>same as A</td><td>praxis-spoke-gateway</td><td>praxis-spoke-hub</td><td>praxis-spoke-hub:reader</td><td>300 s</td><td>spoke kube API</td></tr>
+  <tr><td><span class="tok tS">S</span></td><td>Red Hat SSO, for the ask-red-hat gateway's client (<code>client_credentials</code>, per call)</td><td>that client's service account<br><span style="color:var(--muted);font-size:12px">identical to the token ACME used to mint itself</span></td><td>the SSO client (stage: <code>ff524661-…</code>)</td><td>api.ask_red_hat</td><td>none</td><td>900 s (stage)</td><td>Ask Red Hat only</td></tr>
+  <tr><td><span class="tok tP">P</span></td><td>partner IdP, for the partner gateway's client (<code>client_credentials</code>, per call)</td><td>the partner client's account</td><td>the partner client</td><td>the partner's audience</td><td>IdP-defined</td><td>IdP-defined</td><td>the partner agent only</td></tr>
+</table>
+
+<h2>Components</h2>
+<div class="grid">
+  <div class="card"><h3>ACME agent</h3><p>Chat agent (ns <code>acme-agent</code>). Answers Red Hat questions by delegating to MAS.</p>
+    <ul><li>Keycloak client <code>acme-agent</code>, authenticated with its SPIFFE JWT-SVID (no static secret)</li><li>Calls MAS A2A with Token A for every kind of question</li><li>LLM through LiteLLM</li></ul></div>
+  <div class="card"><h3>MAS (mao)</h3><p>Multi-agent orchestrator on the hub cluster; the A2A endpoint is the pattern's front door.</p>
+    <ul><li>MAS A2A validates Token A and seals it (Fernet) into the Temporal task</li><li>mas-worker forwards that one credential to the chosen node: the hub gateway or an egress gateway</li><li>mas-worker and mas-api trust the OpenShift service CA (<code>identity.serviceCaTrust</code>) for the internal egress gateways</li></ul></div>
+  <div class="card"><h3>Praxis hub gateway</h3><p><code>praxis-proxy</code> Deployment and Route (ns <code>praxis-proxy</code>).</p>
+    <ul><li>Validates A, azp allow-list</li><li>RFC 8693 delegation as <code>mas-a2a</code>: A → H</li><li>Routes A2A to the adapter; passes the adapter's own agent card through</li></ul></div>
+  <div class="card"><h3>Praxis egress gateways</h3><p>One per external agent: <code>praxis-egress-&lt;key&gt;</code> (chart value <code>egressGateways</code>).</p>
+    <ul><li>Internal TLS Service (service-serving cert, :8443), no Route; NetworkPolicy admits mas-worker and mas-api only</li><li>Serve the agent card from config; mint with <code>subject: this_workload</code>; forward to one fixed endpoint</li><li>Credentials: one ExternalSecret from the environment's Vault record (client ID via init container)</li></ul></div>
+  <div class="card"><h3>Ask Red Hat agent (external)</h3><p>Red Hat's hosted knowledge agent, behind Red Hat SSO.</p>
+    <ul><li>Reached only through <code>praxis-egress-ask-red-hat</code></li><li>Receives token S (the SSO client's account), never Token A</li><li>Stage and production differ only in endpoint, token endpoint and Vault record</li></ul></div>
+  <div class="card"><h3>Partner agent (example)</h3><p>Any external A2A agent behind any OAuth 2.0 IdP with <code>client_credentials</code>.</p>
+    <ul><li>Its own egress gateway, client, Vault record and card</li><li>Receives token P (the partner client's account)</li><li>How to add one: <code>docs/ADDING_AN_EXTERNAL_AGENT.md</code></li></ul></div>
+  <div class="card"><h3>lightspeed-hub A2A adapter</h3><p>Translates A2A tasks into AgenticRuns (repo lightspeed-hub).</p>
+    <ul><li>Creates the AgenticRun with H (the caller's identity)</li><li>Exchanges H → R as <code>lightspeed-hub-a2a</code>; stores R in <code>ls-run-token-&lt;uid&gt;</code></li><li>Watches runs with its own ServiceAccount; renewal via A2A auth-required</li></ul></div>
+  <div class="card"><h3>lightspeed-agentic-operator</h3><p>Runs the investigation (gateway credential mode).</p>
+    <ul><li>Agent <code>default</code>, LLMProvider <code>vertex</code>, ApprovalPolicy <code>cluster</code></li><li>Sandbox kubeconfig points at the spoke gateway, token = R</li><li>No spoke ServiceAccount, no spoke-management kubeconfig</li></ul></div>
+  <div class="card"><h3>Praxis spoke gateway</h3><p>One per spoke: <code>praxis-spoke-&lt;id&gt;</code> (here <code>praxis-spoke-hub</code>).</p>
+    <ul><li>Validates R (aud praxis-spoke-gateway, azp lightspeed-hub-a2a)</li><li>Per call, exchanges R → U as <code>praxis-spoke-gateway</code></li><li>Fixed upstream: the spoke API, TLS verified; IPv4-only DNS sidecar</li></ul></div>
+  <div class="card"><h3>Keycloak (RHBK)</h3><p>Realm <code>rca</code>, imported by charts/all/keycloak-oidc.</p>
+    <ul><li>Issues A; performs the three internal exchanges</li><li>Never sees an external token on these paths</li><li>Issuer for OpenShift Native OIDC on the kube APIs</li></ul></div>
+  <div class="card"><h3>Kube APIs</h3><p>OpenShift Native OIDC maps <code>sub</code> → <code>keycloak:&lt;sub&gt;</code>, <code>groups</code> → <code>keycloak:&lt;group&gt;</code>.</p>
+    <ul><li>Hub: H's group may create AgenticRuns (plus a ValidatingAdmissionPolicy on the target)</li><li>Spoke: U's group gets cluster-reader and cluster-monitoring-view</li><li>A and R are rejected (401)</li></ul></div>
+  <div class="card"><h3>Vault, ESO, external IdPs, Vertex</h3><p>Supporting services.</p>
+    <ul><li>Vault + External Secrets deliver every client credential, including one record per external agent and environment</li><li>Red Hat SSO and partner IdPs: used only by their egress gateway</li><li>Vertex AI: one credential and model for MAS and the sandbox</li></ul></div>
+</div>
+
+<footer>New version of <a href="agentic-architecture-overview-with-ask-red-hat.html">the Ask Red Hat component overview</a>,
+for the egress-gateway configuration. The partner agent is an illustrative example, not deployed. Source of truth:
+<code>docs/EXTERNAL_IDP_EGRESS.md</code>, <code>docs/ADDING_AN_EXTERNAL_AGENT.md</code>,
+<code>docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md</code>, <code>setup-mas-blueprint.sh</code> and the chart READMEs.
+Investigation token values reflect the live verification of 2026-11-20; egress paths were verified on 2026-11-26.</footer>
+</main>
+</body>
+</html>

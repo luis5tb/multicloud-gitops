@@ -1,6 +1,7 @@
 {{- range $key, $cfg := .Values.egressGateways }}
 {{- $name := include "praxis-proxy.egressGatewayName" $key }}
 {{- $labelCtx := dict "root" $ "key" $key "cfg" $cfg }}
+{{- $idFromSecret := include "praxis-proxy.egressGatewayClientIdFromSecret" $labelCtx }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -52,6 +53,41 @@ spec:
       {{- with $.Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if $idFromSecret }}
+      initContainers:
+        # The delegator's client_id is a plain config string (no env/file
+        # source, and Praxis does no env interpolation), so the client ID from
+        # the Secret is written into policy.yaml here, before Praxis starts.
+        # Same pinned image (Alpine: sh + sed); output goes to an emptyDir.
+        - name: render-config
+          image: {{ include "praxis-proxy.image" $ | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              case "$CLIENT_ID" in
+                ""|*[!A-Za-z0-9._-]*) echo "client-id must be non-empty and match [A-Za-z0-9._-]" >&2; exit 1 ;;
+              esac
+              cp /etc/praxis/config-template/praxis.yaml /etc/praxis/config/praxis.yaml
+              sed "s|__PRAXIS_EGRESS_CLIENT_ID__|$CLIENT_ID|" /etc/praxis/config-template/policy.yaml > /etc/praxis/config/policy.yaml
+              grep -q "client_id: \"$CLIENT_ID\"" /etc/praxis/config/policy.yaml
+          env:
+            - name: CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "praxis-proxy.egressGatewaySecretName" $labelCtx }}
+                  key: {{ include "praxis-proxy.egressGatewayClientIdKey" $labelCtx }}
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config-template
+              mountPath: /etc/praxis/config-template
+              readOnly: true
+            - name: config
+              mountPath: /etc/praxis/config
       {{- end }}
       containers:
         - name: praxis-egress-gateway
@@ -150,10 +186,21 @@ spec:
             name: {{ include "praxis-proxy.fullname" $ }}-dns-ipv4only
             defaultMode: 0444
         {{- end }}
+        {{- if $idFromSecret }}
+        - name: config-template
+          configMap:
+            name: {{ $name }}
+            defaultMode: 0444
+        - name: config
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        {{- else }}
         - name: config
           configMap:
             name: {{ $name }}
             defaultMode: 0444
+        {{- end }}
         - name: serving-cert
           secret:
             secretName: {{ $name }}-serving-cert

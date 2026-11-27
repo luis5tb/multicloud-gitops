@@ -517,15 +517,23 @@ a2aUpstream:
 #
 # Map keyed by a DNS label (embedded in resource names). Moving an entry from
 # stage to production is purely a values change (upstreamURL, tokenUrl,
-# clientId, clientSecret, and agentCard if the environments' cards differ);
-# the caller (MAS blueprint) does not change. Each entry:
+# clientSecret's Vault record, and agentCard if the environments' cards
+# differ); the caller (MAS blueprint) does not change. Each entry:
 #
 #   upstreamURL    (required) https URL of the external upstream INCLUDING its
 #                  path, e.g. https://access.stage.redhat.com/api/ask/v1/a2a.
 #                  Only that path prefix is routed; Host is rewritten to the
 #                  upstream host (an external edge rejects the Service name).
 #   tokenUrl       (required) the external IdP's token endpoint.
-#   clientId       (required) the external IdP client the gateway mints as.
+#   clientId       (optional) the external IdP client the gateway mints as.
+#                  Empty (recommended): read from the client's Secret (key
+#                  client-id; with clientSecret.vaultKey the ExternalSecret
+#                  syncs it from the same Vault record, property
+#                  vaultClientIdProperty, default client-id), so one Vault
+#                  record per environment holds the whole credential. An
+#                  init container (same image) writes it into the config at
+#                  pod start; it must match [A-Za-z0-9._-]. Set a literal
+#                  only to override.
 #   audience       (required) the delegate() audience, sent as the
 #                  client_credentials `audience` parameter.
 #   scopes         (optional) requested scopes; the pinned delegator also
@@ -535,7 +543,11 @@ a2aUpstream:
 #                    vaultKey: Vault path (rendered as an ExternalSecret via
 #                              egressGatewayConfig.secretStore); vaultProperty
 #                              defaults to client-secret
-#                    existingSecret: {name, key (default client-secret)}
+#                    existingSecret: {name, key (default client-secret),
+#                              clientIdKey (default client-id)}
+#                  Credentials are read at pod start: after changing them in
+#                  Vault, restart the gateway (oc rollout restart
+#                  deploy/praxis-egress-<key>) once the ExternalSecret synced.
 #                  ALPHANUMERIC secrets only: the delegator sends HTTP Basic
 #                  without URL-encoding.
 #   agentCard      (optional; REQUIRED for A2A upstreams) the upstream's A2A
@@ -554,7 +566,6 @@ egressGateways: {}
   # ask-red-hat:
   #   upstreamURL: https://access.stage.redhat.com/api/ask/v1/a2a
   #   tokenUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
-  #   clientId: "<Red Hat SSO client id>"
   #   audience: api.ask_red_hat
   #   scopes: [openid, api.ask_red_hat]
   #   clientSecret:

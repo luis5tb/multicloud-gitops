@@ -64,3 +64,17 @@ trailing slash). Validation happens in egress-gateway-configmap.yaml.
 {{- $path := trimSuffix "/" ($u.path | toString) -}}
 {{- dict "host" $host "port" $port "hostHeader" $hostHeader "pathPrefix" $path | toJson -}}
 {{- end }}
+
+{{/* True ("true") when the client ID comes from the Secret instead of a literal clientId. */}}
+{{- define "praxis-proxy.egressGatewayClientIdFromSecret" -}}
+{{- if not .cfg.clientId -}}true{{- end -}}
+{{- end }}
+
+{{- define "praxis-proxy.egressGatewayClientIdKey" -}}
+{{- $cs := default dict .cfg.clientSecret -}}
+{{- if $cs.existingSecret -}}
+{{- $cs.existingSecret.clientIdKey | default "client-id" -}}
+{{- else -}}
+client-id
+{{- end -}}
+{{- end }}

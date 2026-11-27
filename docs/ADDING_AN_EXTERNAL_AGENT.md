@@ -22,9 +22,9 @@ What you configure, and where:
 
 | Piece | Where | What |
 |---|---|---|
-| Client secret | Vault | the IdP client's secret (alphanumeric) |
+| Client ID + secret | Vault | one record per environment, properties `client-id` and `client-secret` (alphanumeric) |
 | Agent card | `variants/standalone/praxis-egress-<key>-card.yaml` | a copy of the agent's A2A card; the chart rewrites its URL |
-| Gateway | `variants/standalone/praxis-egress-<key>-<env>.yaml` | real A2A endpoint, IdP token URL, client ID, audience, scopes, Vault key |
+| Gateway | `variants/standalone/praxis-egress-<key>-<env>.yaml` | real A2A endpoint, IdP token URL, audience, scopes, the Vault record's path (no credentials) |
 | Wiring | `variants/standalone/values-standalone.yaml` | both files under the praxis-proxy app's `extraValueFiles` |
 | MAS | blueprint (MAS API) | an `a2a_agent_node` with `base_url` = the gateway, wired into the orchestrator |
 
@@ -105,13 +105,22 @@ curl -s -u "$CLIENT_ID:$CLIENT_SECRET" "$TOKEN_URL" \
 - Send a `message/send` to that URL with the token and check you get an
   answer.
 
-### 2. Store the client secret in Vault
+### 2. Store the client credentials in Vault
 
-Add the secret to Vault, for example at `secret/data/global/foo-agent` with
-property `client-secret`, and document the entry in
-`values-secret.yaml.template`. If the client ID itself must stay out of git,
-keep it in the same Vault record and copy it into the gateway file in step 4
-(the delegator only reads the *secret* from a Secret).
+Create one Vault record per environment, for example
+`secret/data/global/foo-agent-stage`, with two properties:
+
+- `client-id`: must match `[A-Za-z0-9._-]` (the gateway's init container
+  refuses anything else);
+- `client-secret`: must be **alphanumeric**.
+
+Document the record in `values-secret.yaml.template`. The gateway reads both
+through one ExternalSecret: the secret as an env var, and the client ID
+written into its config by an init container at pod start (the delegator's
+`client_id` is a plain config string). Nothing credential-related goes into
+git. Both are read at pod start, so after rotating them in Vault, restart the
+gateway once the ExternalSecret has synced
+(`oc -n praxis-proxy rollout restart deploy/praxis-egress-foo`).
 
 ### 3. Copy the agent card
 
@@ -150,12 +159,15 @@ egressGateways:
     # that same path and forwards it here, with Host set to this host.
     upstreamURL: https://foo.example.com/a2a
     tokenUrl: https://idp.example.com/oauth2/token
-    clientId: <client id>                      # the shared account
     audience: <audience the agent expects>
     scopes: [<scope>, ...]                      # each must be granted
     clientSecret:
-      vaultKey: secret/data/global/foo-agent   # rendered as an ExternalSecret
+      # The shared account: client-id AND client-secret both come from this
+      # record (rendered as an ExternalSecret).
+      vaultKey: secret/data/global/foo-agent-stage
       # vaultProperty: client-secret           # default
+      # vaultClientIdProperty: client-id       # default
+    # clientId: <literal>                      # only to override the Vault value
     # Optional:
     # allowedCallers: [acme-agent]             # default: policy.allowedCallers
     # inboundAudience: mas-a2a                 # default: identity.keycloak.audience
@@ -252,8 +264,8 @@ discover live in `LESSONS_LEARNED.md`.
 
 The blueprint never changes: `base_url` is the gateway in every environment.
 To move Foo from stage to production, write
-`praxis-egress-foo-production.yaml` (endpoint, token URL, client, Vault key)
-and swap it for the stage file in `extraValueFiles`. If the production card
+`praxis-egress-foo-production.yaml` (endpoint, token URL, the production
+Vault record) and swap it for the stage file in `extraValueFiles`. If the production card
 differs, give it its own card file too.
 
 ## Troubleshooting
@@ -262,6 +274,8 @@ differs, give it its own card file too.
 |---|---|
 | No `praxis-egress-<key>` objects after the sync | wrong `extraValueFiles` path (silently ignored), or a render error in the praxis-proxy app |
 | Pod stuck in `CreateContainerConfigError` | the client secret's Secret doesn't exist: ExternalSecret not synced (Vault key or property wrong) |
+| `render-config` init container fails | the Vault record's `client-id` is empty or contains characters outside `[A-Za-z0-9._-]` |
+| Old credentials still used after a Vault change | they are read at pod start: `oc rollout restart` the gateway |
 | MAS: TLS / certificate error to the gateway | mas-worker or mas-api without `identity.serviceCaTrust.enabled` |
 | MAS: connection timeout to the gateway | caller not admitted by the gateway's NetworkPolicy (`egressGatewayConfig.networkPolicy`) |
 | `401 auth.malformed_header` / `auth.token_expired` | no or expired Token A reached the gateway |

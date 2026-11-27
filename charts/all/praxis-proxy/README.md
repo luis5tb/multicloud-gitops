@@ -520,8 +520,15 @@ Rules:
 - **Requires** `policy.enabled` and `policy.caBundleConfigMap.name` with
   public roots (`policy.caBundleSync.includeSystemRoots`); the chart fails
   the render otherwise.
-- **The client secret must be alphanumeric.** The delegator sends HTTP Basic
-  without URL-encoding, same as the other exchangers.
+- **Credentials come from one Secret (Vault record).** With `clientId` empty
+  (recommended), both `client-id` and `client-secret` come from the client's
+  Secret. The secret is passed as an env var. The client ID is written into
+  `policy.yaml` by a `render-config` init container (same pinned image, which
+  is Alpine with `sh`/`sed`) into an in-memory `emptyDir`, because the
+  delegator's `client_id` is a plain string and Praxis does no env
+  interpolation. Both are read at pod start, so restart the gateway after a
+  Vault change. The secret must be alphanumeric (HTTP Basic is sent without
+  URL-encoding), and the client ID must match `[A-Za-z0-9._-]`.
 - **`scopes` are enforced.** The pinned delegator denies with
   `delegation.scope_too_broad` unless every requested scope is in the granted
   `scope`.
@@ -542,8 +549,7 @@ Rules:
 - **Callers must trust the OpenShift service CA.** Set
   `identity.serviceCaTrust.enabled` on mas-worker and mas-api.
 - **Stage to production is a values change only** (`upstreamURL`,
-  `tokenUrl`, `clientId`, `clientSecret`, plus `agentCard` if the cards
-  differ). Callers keep `base_url` = the gateway. The standalone variant puts
+  `tokenUrl`, the Vault record, plus `agentCard` if the cards differ). Callers keep `base_url` = the gateway. The standalone variant puts
   each environment in its own `extraValueFiles` file.
 - **The PostSync `enforcement-check` Job does not cover egress gateways.** It
   tests only the main gateway. The egress allow-list is rendered by the same

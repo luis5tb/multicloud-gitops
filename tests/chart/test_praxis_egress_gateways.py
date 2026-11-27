@@ -57,16 +57,12 @@ def _get(resources: list[dict], kind: str, name: str = NAME) -> dict:
     return next(r for r in resources if r["kind"] == kind and r["metadata"]["name"] == name)
 
 
-def _without(flag: str) -> list[str]:
-    out, skip = [], False
-    for i, arg in enumerate(EGRESS):
-        if skip:
-            skip = False
-            continue
-        if arg == "--set" and EGRESS[i + 1].startswith(flag):
-            skip = True
-            continue
-        out.append(arg)
+def _without(*flags: str) -> list[str]:
+    """EGRESS minus the --set pairs whose key starts with any of flags."""
+    out = []
+    for key, value in zip(EGRESS[::2], EGRESS[1::2]):
+        if not value.startswith(flags):
+            out += [key, value]
     return out
 
 
@@ -220,7 +216,6 @@ def test_networkpolicy() -> None:
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (_without("egressGateways.ask-red-hat.clientId"), "egressGateways.ask-red-hat.clientId is required"),
         (_without("egressGateways.ask-red-hat.clientSecret"), "clientSecret requires vaultKey"),
         (EGRESS + ["--set", "egressGateways.ask-red-hat.upstreamURL=http://access.example.test/api"], "must be an https:// URL"),
         (EGRESS + ["--set", "egressGateways.ask-red-hat.upstreamURL=https://access.example.test"], "must include the upstream's path"),
@@ -289,13 +284,13 @@ def test_agent_card_must_be_a_map() -> None:
 
 
 @pytest.mark.parametrize(
-    ("env_file", "upstream", "client"),
+    ("env_file", "upstream", "vault_key"),
     [
-        ("praxis-egress-ask-red-hat-stage.yaml", "access.stage.redhat.com:443", "ff524661-b74a-4e10-bc24-4e71322e0852"),
-        ("praxis-egress-ask-red-hat-production.yaml", "access.redhat.com:443", "REPLACE-WITH-PRODUCTION-CLIENT-ID"),
+        ("praxis-egress-ask-red-hat-stage.yaml", "access.stage.redhat.com:443", "secret/data/global/acme-agent-redhat-sso-stage"),
+        ("praxis-egress-ask-red-hat-production.yaml", "access.redhat.com:443", "secret/data/global/acme-agent-redhat-sso-production"),
     ],
 )
-def test_variant_environment_files(env_file: str, upstream: str, client: str) -> None:
+def test_variant_environment_files(env_file: str, upstream: str, vault_key: str) -> None:
     """Switching stage <-> production swaps upstream and client; the card URL MAS
     stores as base_url stays the gateway's."""
     import json
@@ -306,7 +301,14 @@ def test_variant_environment_files(env_file: str, upstream: str, client: str) ->
     lb = next(x for x in praxis["filter_chains"][0]["filters"] if x["filter"] == "load_balancer")
     assert lb["clusters"][0]["endpoints"] == [upstream]
     policy = yaml.safe_load(cm["data"]["policy.yaml"])
-    assert next(p for p in policy["plugins"] if p["kind"] == "delegator/oauth")["config"]["client_id"] == client
+    # No credentials in git: both client-id and client-secret come from the
+    # environment's Vault record; the client ID is filled in at pod start.
+    assert next(p for p in policy["plugins"] if p["kind"] == "delegator/oauth")["config"]["client_id"] == "__PRAXIS_EGRESS_CLIENT_ID__"
+    es = _get(res, "ExternalSecret", f"{NAME}-client")
+    assert {(d["secretKey"], d["remoteRef"]["key"], d["remoteRef"]["property"]) for d in es["spec"]["data"]} == {
+        ("client-secret", vault_key, "client-secret"),
+        ("client-id", vault_key, "client-id"),
+    }
     card = json.loads(_card_filter(cm)["body"])
     assert card["url"] == "https://praxis-egress-ask-red-hat.praxis-proxy.svc:8443/api/ask/v1/a2a/"
     assert [s["id"] for s in card["skills"]] == ["general_search", "cve_search", "redhat_product_lifecycle", "red_hat_leadership"]
@@ -320,3 +322,50 @@ def test_variant_selects_card_and_one_environment() -> None:
     # ignoreMissingValueFiles is on in the clustergroup chart: a typo would silently drop the gateway.
     for f in files:
         assert (REPO_ROOT / f.lstrip("/")).is_file(), f
+
+
+
+def _vault_id_args() -> list[str]:
+    return _without("egressGateways.ask-red-hat.clientId")
+
+
+def test_literal_client_id_needs_no_init_container() -> None:
+    res = _resources(*EGRESS)
+    pod = _get(res, "Deployment")["spec"]["template"]["spec"]
+    assert "initContainers" not in pod
+    assert {v["name"]: v for v in pod["volumes"]}["config"]["configMap"]["name"] == NAME
+    es = _get(res, "ExternalSecret", f"{NAME}-client")
+    assert [d["secretKey"] for d in es["spec"]["data"]] == ["client-secret"]
+
+
+def test_client_id_from_vault() -> None:
+    res = _resources(*_vault_id_args())
+    policy = yaml.safe_load(_get(res, "ConfigMap")["data"]["policy.yaml"])
+    delegator = next(p for p in policy["plugins"] if p["kind"] == "delegator/oauth")
+    assert delegator["config"]["client_id"] == "__PRAXIS_EGRESS_CLIENT_ID__"
+    es = _get(res, "ExternalSecret", f"{NAME}-client")
+    assert {d["secretKey"]: d["remoteRef"]["property"] for d in es["spec"]["data"]} == {
+        "client-secret": "client-secret", "client-id": "client-id",
+    }
+    pod = _get(res, "Deployment")["spec"]["template"]["spec"]
+    init = pod["initContainers"][0]
+    assert init["name"] == "render-config"
+    assert init["image"] == pod["containers"][0]["image"]  # same pinned image
+    assert init["env"] == [{"name": "CLIENT_ID", "valueFrom": {"secretKeyRef": {"name": f"{NAME}-client", "key": "client-id"}}}]
+    script = init["args"][0]
+    assert "__PRAXIS_EGRESS_CLIENT_ID__" in script and "*[!A-Za-z0-9._-]*" in script
+    vols = {v["name"]: v for v in pod["volumes"]}
+    assert vols["config-template"]["configMap"]["name"] == NAME
+    assert "emptyDir" in vols["config"]
+    mounts = {m["name"]: m["mountPath"] for m in pod["containers"][0]["volumeMounts"]}
+    assert mounts["config"] == "/etc/praxis/config"
+
+
+def test_client_id_from_existing_secret_key() -> None:
+    res = _resources(
+        *_without("egressGateways.ask-red-hat.clientSecret", "egressGateways.ask-red-hat.clientId"),
+        "--set", "egressGateways.ask-red-hat.clientSecret.existingSecret.name=my-sso",
+        "--set", "egressGateways.ask-red-hat.clientSecret.existingSecret.clientIdKey=id",
+    )
+    init = _get(res, "Deployment")["spec"]["template"]["spec"]["initContainers"][0]
+    assert init["env"][0]["valueFrom"]["secretKeyRef"] == {"name": "my-sso", "key": "id"}

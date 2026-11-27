@@ -7,11 +7,12 @@ egressGateways:
   ask-red-hat:
     upstreamURL: https://access.stage.redhat.com/api/ask/v1/a2a
     tokenUrl: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
-    clientId: ff524661-b74a-4e10-bc24-4e71322e0852
     audience: api.ask_red_hat
     scopes:
       - openid
       - api.ask_red_hat
+    # Both halves of the credential come from ONE Vault record -- the same
+    # one ACME uses for its stage Red Hat SSO client: properties client-id
+    # (written into the gateway config at pod start) and client-secret.
     clientSecret:
-      # Same Vault record as ACME's stage Red Hat SSO credentials.
       vaultKey: secret/data/global/acme-agent-redhat-sso-stage

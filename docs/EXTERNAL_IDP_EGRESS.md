@@ -7,6 +7,8 @@ the pinned Praxis image (`ghcr.io/praxis-proxy/ai:0.4.1`, praxis-policy
 0.3.1). The cutover itself (pointing the MAS node at the gateway) is a one-time
 operator step, see [Rollout](#rollout).*
 
+Diagram: [`agentic-architecture-overview-with-egress-gateways.html`](agentic-architecture-overview-with-egress-gateways.html).
+
 ## Problem
 
 ACME used to call MAS with a Red Hat SSO token whenever a request needed Ask
@@ -131,7 +133,7 @@ values files through `extraValueFiles`:
 | File | Content |
 |---|---|
 | `variants/standalone/praxis-egress-ask-red-hat-card.yaml` | `agentCard`: Ask Red Hat's card, shared by both environments (identical apart from `url`, which the chart replaces) |
-| `variants/standalone/praxis-egress-ask-red-hat-stage.yaml` or `...-production.yaml` | `upstreamURL`, `tokenUrl`, `clientId`, `audience`, `scopes`, `clientSecret.vaultKey` |
+| `variants/standalone/praxis-egress-ask-red-hat-stage.yaml` or `...-production.yaml` | `upstreamURL`, `tokenUrl`, `audience`, `scopes`, and `clientSecret.vaultKey`: the environment's Vault record, which holds **both** `client-id` and `client-secret` (no credential in git) |
 
 The clustergroup chart renders these with `ignoreMissingValueFiles: true`, so
 **a mistyped path silently renders no egress gateway**.
@@ -139,23 +141,54 @@ The clustergroup chart renders these with `ignoreMissingValueFiles: true`, so
 
 ## Stage -> production
 
-No blueprint change: MAS's `base_url` is the gateway in both environments.
+No blueprint change: MAS's `base_url` is the gateway in both environments,
+and the gateway serves the same card. Only the gateway's upstream, IdP and
+credentials change, and the credentials never live in git:
 
-1. In `praxis-egress-ask-red-hat-production.yaml`, set `clientId` to the real
-   production client. As of 2026-11-26 the production Vault record
-   (`secret/data/global/acme-agent-redhat-sso-production`) still held a
-   placeholder (`client-id: fake-client`). Load the real client secret there;
-   it must be **alphanumeric**.
-2. In the praxis-proxy app's `extraValueFiles`, replace
-   `praxis-egress-ask-red-hat-stage.yaml` with
-   `praxis-egress-ask-red-hat-production.yaml`. Commit and sync.
-3. Check: `oc -n praxis-proxy get cm praxis-egress-ask-red-hat -o yaml | grep -A3 endpoints`
-   shows `access.redhat.com:443`, then ask ACME a Red Hat question.
+| | Stage | Production |
+|---|---|---|
+| A2A endpoint (`upstreamURL`) | `https://access.stage.redhat.com/api/ask/v1/a2a` | `https://access.redhat.com/api/ask/v1/a2a` |
+| IdP token endpoint (`tokenUrl`) | `https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token` | `https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token` |
+| Vault record (`clientSecret.vaultKey`) | `secret/data/global/acme-agent-redhat-sso-stage` | `secret/data/global/acme-agent-redhat-sso-production` |
+| Client ID + secret | properties `client-id` / `client-secret` of that record | same, of the production record |
 
-Verified 2026-11-26: the production upstream path
-(`https://access.redhat.com/api/ask/v1/a2a/`) and that the production card
-equals the stage card apart from `url`. Not verified: the production SSO
-client (placeholder).
+How the credentials reach the gateway: the ExternalSecret
+`praxis-egress-ask-red-hat-client` syncs both properties from the Vault record.
+The secret is read by the delegator from an env var. The client ID is written
+into the gateway's `policy.yaml` by an init container at pod start, because
+the delegator's `client_id` is a plain config string. Because both are read
+at pod start, restart the gateway after changing them in Vault.
+
+Steps:
+
+1. **Make the production Vault record real.** As of 2026-11-26,
+   `secret/data/global/acme-agent-redhat-sso-production` still held a
+   placeholder (`client-id: fake-client`). Load the real production client:
+   `client-id` (must match `[A-Za-z0-9._-]`) and `client-secret` (must be
+   **alphanumeric**: the delegator sends HTTP Basic without URL-encoding).
+   ACME's production mode reads the same record.
+2. **Optionally prove it by hand** from a cluster pod: a `client_credentials`
+   request to the production token endpoint (HTTP Basic, `audience=api.ask_red_hat`,
+   `scope=openid api.ask_red_hat`) must return a token whose `scope` contains
+   both, and a `message/send` to `https://access.redhat.com/api/ask/v1/a2a/`
+   with it must be answered.
+3. **Switch the file.** In `variants/standalone/values-standalone.yaml`, under
+   the praxis-proxy app's `extraValueFiles`, replace
+   `/variants/standalone/praxis-egress-ask-red-hat-stage.yaml` with
+   `/variants/standalone/praxis-egress-ask-red-hat-production.yaml`. Commit
+   and sync. The ConfigMap change rolls the gateway automatically. (If only
+   the Vault record changed, run
+   `oc -n praxis-proxy rollout restart deploy/praxis-egress-ask-red-hat`
+   once the ExternalSecret has synced.)
+4. **Check:** the gateway's ConfigMap shows `access.redhat.com:443` as the
+   endpoint, the pod's `render-config` init container exited 0, and ACME
+   answers a Red Hat question. Going back to stage is the same swap in
+   reverse.
+
+Verified 2026-11-26: the production upstream path, that the production card
+equals the stage card apart from `url`, and (on stage) the whole Vault ->
+init container -> `client_id` path end to end. Not verified: the production
+SSO client itself (placeholder in Vault).
 
 ## Rollout
 

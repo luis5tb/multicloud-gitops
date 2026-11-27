@@ -282,6 +282,21 @@ re-check each when the image is bumped.
   upstream's A2A card through with its `url` swapped. The egress gateways
   serve a configured copy instead (`agentCard`), the one deliberate exception
   to the no-hand-maintained-card rule above. *(source, Core v0.7.0)*
+- **The delegator's `client_id` is a literal string.** Only the client
+  *secret* has `env_var`/`file`/`literal` sources (praxis-policy 0.3.1
+  `OAuthDelegatorConfig`), and neither Core nor the policy loader expands
+  environment variables. To keep a client ID in Vault next to its secret, the
+  egress gateways render it into `policy.yaml` with an init container in the
+  same pinned image (it is Alpine, with `sh` and `sed`). *(source + live,
+  2026-11-27)*
+- **The main gateway's Deployment selector also matches the spoke read
+  gateways.** `oc exec deploy/praxis-proxy` landed in a `praxis-spoke-hub`
+  pod and failed with `container praxis-proxy is not valid`: both use
+  `app.kubernetes.io/name: praxis-proxy` plus the instance label. The main
+  Service still only reaches the main pods (its named `http` target port
+  exists only there), but address the main pod by name when exec'ing, and
+  give new gateway kinds their own app label, as the egress gateways do.
+  *(live 2026-11-27)*
 - **Never serve a hand-maintained agent card.** The static card advertised A2A
   `protocolVersion: "1.0"`, so MAS (a2a-sdk 1.1.5) called
   `SendStreamingMessage` against the 0.3-only adapter (a2a-go v0.3.15

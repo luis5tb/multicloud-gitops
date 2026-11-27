@@ -24,7 +24,7 @@ stage + Ask Red Hat stage (2026-11-26); see docs/EXTERNAL_IDP_EGRESS.md.
 {{- if not $.Values.policy.caBundleConfigMap.name }}
 {{- fail (printf "egressGateways.%s requires policy.caBundleConfigMap.name: the external upstream and token endpoint are verified against that bundle, which must carry public roots (policy.caBundleSync.includeSystemRoots)" $key) }}
 {{- end }}
-{{- range $field := list "upstreamURL" "tokenUrl" "clientId" "audience" }}
+{{- range $field := list "upstreamURL" "tokenUrl" "audience" }}
 {{- if not (index $cfg $field) }}
 {{- fail (printf "egressGateways.%s.%s is required" $key $field) }}
 {{- end }}
@@ -180,7 +180,7 @@ data:
 {{- with $cfg.allowedCallers }}
 {{- $_ := set $egressValues.policy "allowedCallers" . }}
 {{- end }}
-{{- $_ := set $egressValues "__delegation" (dict "plugin" "egress-delegator" "target" "egress-upstream" "audience" $cfg.audience "clientId" $cfg.clientId "secretEnv" "PRAXIS_EGRESS_CLIENT_SECRET" "tokenUrl" $cfg.tokenUrl "subject" "this_workload" "permissions" ($cfg.scopes | default list)) }}
+{{- $_ := set $egressValues "__delegation" (dict "plugin" "egress-delegator" "target" "egress-upstream" "audience" $cfg.audience "clientId" ($cfg.clientId | default "__PRAXIS_EGRESS_CLIENT_ID__") "secretEnv" "PRAXIS_EGRESS_CLIENT_SECRET" "tokenUrl" $cfg.tokenUrl "subject" "this_workload" "permissions" ($cfg.scopes | default list)) }}
 {{- $_ := set $egressValues "__publicGetPaths" (list $cardPath) }}
 {{ tpl ($.Files.Get "files/policy.yaml") (dict "Values" $egressValues "Chart" $.Chart "Release" $.Release "Template" $.Template) | indent 4 }}
 {{- end }}
