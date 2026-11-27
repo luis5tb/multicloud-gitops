@@ -221,10 +221,11 @@ spec:
     # events as the authoritative record of every token grant in the chain.
     # Without eventsEnabled the feed is structurally empty (the monitor's
     # kc_probe says so). jboss-logging also keeps grants in the Keycloak log.
-    eventsConfig:
-      eventsEnabled: true
-      eventsListeners:
-        - jboss-logging
+    # Top-level RealmRepresentation fields: the CRD prunes anything else (an
+    # earlier `eventsConfig:` block was silently dropped).
+    eventsEnabled: true
+    eventsListeners:
+      - jboss-logging
     {{- end }}
     groups:
       {{- $groupNames := list }}

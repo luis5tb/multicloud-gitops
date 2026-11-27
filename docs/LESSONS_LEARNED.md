@@ -51,6 +51,21 @@ caught by rendering/validation, not at runtime.
   rejected a non-allow-listed `azp` with 403 -- but routed a request carrying
   one valid and one bogus duplicate header (see the multi-valued-header entry
   in §5). *(pinned image, 2026-10-01)*
+- **Removing a field or object can leave an app stuck, and a restart does not
+  help.** Turning `auth.redhatSso` off removed nine env vars and one
+  ExternalSecret from the acme-agent render, yet nothing changed on the
+  cluster. Two causes combined. The acme-agent Deployment had no
+  `kubectl.kubernetes.io/last-applied-configuration` (created by a manual UI
+  sync on 2026-11-23), so ArgoCD treated the extra live env vars as someone
+  else's and reported the Deployment `Synced`. The only diff it did see was
+  the ExternalSecret to prune, and these apps auto-sync without prune: the
+  controller logged `Skipping auto-sync: need to prune extra resources only
+  but automated prune is disabled`. Fix by hand: remove the env vars first
+  (the `secretKeyRef`s are not optional, so pruning the Secret first breaks
+  the next pod start), then delete the ExternalSecret; or sync once from the
+  UI with Prune + Replace. Check `oc get deploy <name> -o yaml` for the
+  last-applied annotation before trusting `Synced` after a removal.
+  *(live 2026-11-27)*
 
 ## 2. Keycloak: realm import and clients
 
@@ -60,6 +75,16 @@ caught by rendering/validation, not at runtime.
   Delete it and let ArgoCD recreate it (never patch its status, never re-import
   a live realm to fix a client). Now automated by the `realm-import-healer`
   CronJob (`realmImport.selfHeal.enabled`). *(live)*
+- **The `KeycloakRealmImport` CRD silently drops unknown realm keys.** A
+  `realm.eventsConfig: {eventsEnabled, eventsListeners}` block (added
+  2026-11-25 for the monitor's `--kc` feed) is not a RealmRepresentation
+  field, so the API server pruned it: the keycloak-oidc app stayed OutOfSync
+  for two days (the only diff was that block), and a fresh realm would have
+  had no events. The live realm only had events because they had been
+  enabled out of band. Use the top-level `eventsEnabled` / `eventsListeners`
+  fields. Nothing caught it because `helm template` and the chart tests
+  never see CRD pruning; compare a new realm key against
+  `oc get crd keycloakrealmimports.k8s.keycloak.org` first. *(live 2026-11-27)*
 - **Realm-import placeholders are `${NAME}`, not `$(NAME)`.** Older chart
   versions used `$(...)` (the syntax people expected from the docs), and
   Keycloak stored the literal string as the real credential while still
