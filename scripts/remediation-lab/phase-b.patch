@@ -1,0 +1,51 @@
+--- a/variants/standalone/values-standalone.yaml
++++ b/variants/standalone/values-standalone.yaml
+@@ -367,22 +367,32 @@
+         # Before enabling on this already-imported realm, create/configure the
+         # execution exchanger and audience/role mappers through the Keycloak
+         # Admin API as documented in charts/all/keycloak-oidc/README.md.
+-        # - name: keycloak.hubExchange.executionTokenAudience
+-        #   value: praxis-spoke-gateway-exec
+-        # - name: keycloak.spokeGatewayExecExchanger.enabled
+-        #   value: "true"
+-        # - name: keycloak.spokeGatewayExecExchanger.vaultKey
+-        #   value: secret/data/global/praxis-spoke-gateway-exec
+-        # Keep this list exactly aligned with spokeGatewayExchanger.spokeAudiences.
+-        # - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[0]
+-        #   value: praxis-spoke-hub
+-        # - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[1]
+-        #   value: praxis-spoke-mario-ipi
+-        # This group must be a real, deliberately restricted approval group.
+-        # Its members also need ordinary exchangeRoles.groups membership if
+-        # Execution should retain the reader permissions alongside writer.
+-        # - name: keycloak.exchangeRoles.remediation.groups[0]
+-        #   value: cluster-admins
++        # ENABLED for the shared-ACME-principal lab (mario-ipi/payments).
++        # The live realm was configured through the Admin API first; these
++        # values only drive the ExternalSecrets/secret reconciler and render
++        # guards. In the LIVE realm, `writer` is mapped to the remediation
++        # group on praxis-spoke-mario-ipi ONLY (not praxis-spoke-hub).
++        - name: keycloak.hubExchange.executionTokenAudience
++          value: praxis-spoke-gateway-exec
++        - name: keycloak.spokeGatewayExecExchanger.enabled
++          value: "true"
++        - name: keycloak.spokeGatewayExecExchanger.vaultKey
++          value: secret/data/global/praxis-spoke-gateway-exec
++        # Must stay exactly aligned with spokeGatewayExchanger.spokeAudiences
++        # (render guard); the per-spoke writer scope lives in the realm's
++        # group-role mapping, not in this list.
++        - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[0]
++          value: praxis-spoke-hub
++        - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[1]
++          value: praxis-spoke-mario-ipi
++        # Dedicated, restricted lab group (a fresh import creates it empty).
++        # In the LIVE realm the Admin API creates it, maps agenticrun-approver
++        # (lightspeed-hub-a2a) and writer (praxis-spoke-mario-ipi ONLY), and
++        # adds ACME's Keycloak service account as its only member (shared
++        # principal: ACME can remediate payments on mario-ipi). Remove that
++        # membership after testing.
++        - name: keycloak.exchangeRoles.remediation.groups[0]
++          value: acme-remediation-mario-ipi
+     praxis-proxy:
+       name: praxis-proxy
+       namespace: praxis-proxy

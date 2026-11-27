@@ -1,0 +1,95 @@
+# Apply ON mario-ipi only. Writer rules come from the lightspeed-hub chart
+# (spokeExecutorRBAC.rules); bound only in namespace payments to the
+# audience-scoped group from U_exec. Delete after the lab.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lightspeed-hub-spoke-executor
+  labels:
+    app.kubernetes.io/name: lightspeed-hub
+    app.kubernetes.io/component: remediation-lab-writer
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - services
+  - configmaps
+  - persistentvolumeclaims
+  - endpoints
+  - replicationcontrollers
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods/eviction
+  verbs:
+  - create
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - deployments/scale
+  - replicasets
+  - replicasets/scale
+  - statefulsets
+  - statefulsets/scale
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  - cronjobs
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  - ingresses
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lightspeed-hub-spoke-executor
+  namespace: payments
+  labels:
+    app.kubernetes.io/name: lightspeed-hub
+    app.kubernetes.io/component: remediation-lab-writer
+subjects:
+- kind: Group
+  apiGroup: rbac.authorization.k8s.io
+  name: keycloak:praxis-spoke-mario-ipi:writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lightspeed-hub-spoke-executor
