@@ -248,7 +248,8 @@ IPv4-only clusters"):
 1. **Caller allow-list.** A Red Hat SSO caller token is issued by an external
    issuer with `azp` = ACME's confidential SSO client, not `acme-agent`, so the
    `azp` allow-list would reject it. Fixed by adding that SSO client's `azp` to
-   `policy.allowedCallers` alongside `acme-agent`.
+   `policy.allowedCallers` alongside `acme-agent`. (Historical: the standalone
+   variant no longer accepts SSO callers, so only `acme-agent` is listed.)
 2. **External JWKS fetch over IPv4.** The pinned Praxis image's Rust HTTP client
    resolves the external SSO hosts to **IPv6** and does not fall back to IPv4;
    this cluster has IPv4-only egress, so Praxis's own JWKS fetch for
@@ -273,6 +274,14 @@ per-issuer audiences tight (`api.ask_red_hat` for the Red Hat SSO issuers,
 `mas-a2a` for the local Keycloak issuer) and the `allowedCallers` list minimal.
 
 ## ACME IdP selection and token debugging
+
+> **Standalone variant status (2026-11-27):** Red Hat SSO is **off**. ACME
+> mints only the local Token A (Keycloak + SPIFFE), and MAS and every Praxis
+> gateway trust only the local Keycloak issuer. External agents such as Ask
+> Red Hat are reached through the Praxis egress gateways, which mint the SSO
+> token themselves (`docs/EXTERNAL_IDP_EGRESS.md`). With no SSO environment
+> configured, the UI hides the provider selector and keeps the pasted-token
+> override. The rest of this section describes the optional mode.
 
 ACME's outbound Token A can now be minted from either the local Keycloak realm
 or Red Hat SSO production/stage. The choice is **request-scoped**, not a

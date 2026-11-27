@@ -144,6 +144,10 @@ Application).
   configured credential mints Token A; MAS and OLS independently validate the
   resulting JWT's issuer, audience, signature, and principal. Red Hat SSO
   user-token login is a documented TODO, not a partially trusted shortcut.
+  The standalone variant now runs with Red Hat SSO off: ACME mints only the
+  local Token A, and MAS and Praxis trust only the local Keycloak, because
+  external agents are reached through the Praxis egress gateways
+  (`docs/EXTERNAL_IDP_EGRESS.md`).
 - **On `a2a-split`, Praxis is the A2A caller allow-list.** OLS reuses its
   configured OIDC module to validate the JWT's signature, issuer and audience;
   it no longer checks a separate `A2A_INBOUND_AZP` allow-list. The same OIDC

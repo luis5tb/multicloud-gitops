@@ -181,8 +181,9 @@ the hop this gateway protects: the standalone variant sets
 `hubExchange.subjectTokenAudienceMapper`). It used to be `mas-a2a`, left over
 from when ACME called Praxis directly; MAS validates `mas-a2a` itself and no
 Praxis fronts MAS (see `docs/ARCHITECTURE.md` "Current (Task B) request
-path"). The Red Hat SSO issuers (`api.ask_red_hat`) stay so SSO callers that
-MAS forwards are admitted. The backend's Service coordinates and TLS trust
+path"). The standalone variant no longer trusts the Red Hat SSO issuers
+(hub, spoke and egress gateways): external agents are reached through the
+egress gateways, so every caller sends the local Token A. The backend's Service coordinates and TLS trust
 come from operator-controlled values (`a2aUpstream.*`), never caller input.
 
 The pinned Praxis AI 0.4.1 build only provides the filter-wide

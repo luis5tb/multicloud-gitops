@@ -1129,7 +1129,7 @@ parse_praxis() {
       fi
       if [[ "$p_filter" == "policy" && "$who" == hub ]]; then
         printf "${R}│${N} ${D}policy filter denied — caller JWT invalid/expired, or azp${N}\n"
-        printf "${R}│${N} ${D}not in policy.allowedCallers (acme-agent + Red Hat SSO client)${N}\n"
+        printf "${R}│${N} ${D}not in policy.allowedCallers (azp must be acme-agent)${N}\n"
         printf "${R}│${N} ${D}(note: an exchanged token's azp is the EXCHANGER; A is untouched)${N}\n"
       elif [[ "$p_filter" == "policy" ]]; then
         printf "${R}│${N} ${D}policy filter denied at spoke ${W}${hop#spoke/}${N} ${D}— R invalid/expired,${N}\n"

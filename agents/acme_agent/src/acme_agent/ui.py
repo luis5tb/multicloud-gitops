@@ -66,8 +66,9 @@ UI_HTML = r"""<!doctype html>
       Use a pasted token for the next request (testing)</label>
     <textarea id="override-token" placeholder="Paste a bearer token, e.g. one copied from an earlier answer" hidden></textarea>
     <div>The pasted token replaces Token A for the first downstream call only.
-      If a downstream agent asks for renewal, ACME mints a fresh token with the
-      identity provider selected above, so paste a token from that same provider.</div>
+      If a downstream agent asks for renewal, ACME mints a fresh token itself
+      (with the identity provider selected above, when there is a choice), so
+      paste a token from that same provider.</div>
   </div>
   <main id="messages" aria-live="polite"></main>
   <form id="chat-form">

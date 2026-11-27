@@ -143,8 +143,8 @@ is in <a href="agentic-e2e-token-flow.html">agentic-e2e-token-flow.html</a>.</p>
   <text x="1176" y="102" class="s">used only by the egress gateways,</text>
   <text x="1176" y="120" class="s">each with its own client</text>
   <text x="1176" y="138" class="s">(client_credentials); never by Keycloak</text>
-  <text x="1176" y="162" class="xs muted">transitional: the hub gateway still trusts SSO</text>
-  <text x="1176" y="176" class="xs muted">issuers until rollout step 4 removes them</text>
+  <text x="1176" y="162" class="xs muted">MAS and every Praxis gateway trust only</text>
+  <text x="1176" y="176" class="xs muted">the local Keycloak (rollout step 4)</text>
 
   <!-- ===== Middle row ===== -->
   <rect x="30" y="250" width="240" height="170" rx="12" class="box"/>
@@ -470,7 +470,7 @@ don't carry the caller at all: they belong to the gateway's client account at th
   <tr><td><span class="tok tH">H</span></td><td>hub gateway exchange as <code>mas-a2a</code></td><td>same as A<br><span style="color:var(--muted);font-size:12px">kube user <code>keycloak:&lt;sub&gt;</code></span></td><td>mas-a2a</td><td>lightspeed-hub-a2a</td><td>lightspeed-hub-a2a:agenticrun-creator</td><td>300 s</td><td>adapter, hub kube API</td></tr>
   <tr><td><span class="tok tR">R</span></td><td>adapter exchange as <code>lightspeed-hub-a2a</code></td><td>same as A</td><td>lightspeed-hub-a2a</td><td>praxis-spoke-gateway</td><td>none</td><td>1800 s</td><td>only the spoke gateway (401 at every kube API)</td></tr>
   <tr><td><span class="tok tU">U</span></td><td>spoke gateway exchange as <code>praxis-spoke-gateway</code>, per call</td><td>same as A</td><td>praxis-spoke-gateway</td><td>praxis-spoke-hub</td><td>praxis-spoke-hub:reader</td><td>300 s</td><td>spoke kube API</td></tr>
-  <tr><td><span class="tok tS">S</span></td><td>Red Hat SSO, for the ask-red-hat gateway's client (<code>client_credentials</code>, per call)</td><td>that client's service account<br><span style="color:var(--muted);font-size:12px">identical to the token ACME used to mint itself</span></td><td>the SSO client (stage: <code>ff524661-…</code>)</td><td>api.ask_red_hat</td><td>none</td><td>900 s (stage)</td><td>Ask Red Hat only</td></tr>
+  <tr><td><span class="tok tS">S</span></td><td>Red Hat SSO, for the ask-red-hat gateway's client (<code>client_credentials</code>, per call)</td><td>that client's service account<br><span style="color:var(--muted);font-size:12px">the same client ACME used before the egress gateways</span></td><td>the SSO client (stage: <code>ff524661-…</code>)</td><td>api.ask_red_hat</td><td>none</td><td>900 s (stage)</td><td>Ask Red Hat only</td></tr>
   <tr><td><span class="tok tP">P</span></td><td>partner IdP, for the partner gateway's client (<code>client_credentials</code>, per call)</td><td>the partner client's account</td><td>the partner client</td><td>the partner's audience</td><td>IdP-defined</td><td>IdP-defined</td><td>the partner agent only</td></tr>
 </table>
 

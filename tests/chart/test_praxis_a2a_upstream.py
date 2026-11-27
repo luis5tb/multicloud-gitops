@@ -237,12 +237,15 @@ def test_variant_has_no_static_card_overrides() -> None:
     assert values["a2aUpstream.enabled"] == "true"
     # The praxis HUB gateway receives Token A and exchanges it A -> H as
     # client mas-a2a, so it validates A's (only) audience mas-a2a; the
-    # adapter never sees A. Red Hat SSO issuers stay for SSO callers.
+    # adapter never sees A. Only the local Keycloak is trusted: external
+    # agents are reached through the egress gateways, so no Red Hat SSO
+    # issuer or SSO client azp remains.
     assert values["identity.keycloak.audience"] == "mas-a2a"
     assert values["a2aUpstream.exchangeAtPraxis"] == "true"
     assert values["a2aUpstream.exchange.clientId"] == "mas-a2a"
     assert values["a2aUpstream.exchange.audience"] == "lightspeed-hub-a2a"
-    assert values["identity.oidcIssuers[0].audience"] == "api.ask_red_hat"
+    assert not [n for n in names if n.startswith("identity.oidcIssuers")]
+    assert [values[n] for n in names if n.startswith("policy.allowedCallers")] == ["acme-agent"]
 
 
 @pytest.mark.skipif(

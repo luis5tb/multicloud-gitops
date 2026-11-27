@@ -267,6 +267,14 @@ SSO client itself (placeholder in Vault).
 4. Once no caller sends SSO tokens to MAS anymore: drop the SSO issuers from
    `mao-a2a identity.oidcIssuers` and the hub gateway's `identity.oidcIssuers`
    / `allowedCallers`, and disable `token-exchange-external-internal:v2`.
+   **Done in the standalone variant (2026-11-27)** for MAS (issuers and the SSO
+   principal in `a2a.allowedPrincipals`), every Praxis gateway (issuers and the
+   SSO client's `azp`), and ACME (`auth.redhatSso` off; the UI hides the
+   provider selector once the image carries that change, and the pasted-token
+   override stays). Push this together with, or after, step 2: before it, the
+   SSO token was the only way to reach Ask Red Hat. Still pending: Keycloak's
+   `externalOidcProviders` (the `red-hat-sso-*` IdPs) and the token-exchange
+   feature flag. The Vault records stay; the egress gateways read them.
 
 ## Adding a new external agent (new IdP)
 

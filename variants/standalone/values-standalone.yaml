@@ -404,40 +404,38 @@ clusterGroup:
         # global.keycloakRealm (https://keycloak.apps.<base>/realms/<realm>);
         # override here only to diverge.
         # Run Praxis WITH policy enforcement (caller JWT validation + azp
-        # allow-list): only tokens whose azp is allow-listed below pass the
-        # gateway. The two IPv4-only-cluster blockers that previously forced
-        # router-only are handled here (see agents/AUTHENTICATION.md and
-        # charts/all/praxis-proxy/README.md):
-        #   1. the UI's Red Hat SSO token has azp != acme-agent, so its azp is
-        #      added to policy.allowedCallers below; and
-        #   2. Praxis's Rust client cannot fetch the external SSO JWKS over IPv6
-        #      on this IPv4-egress cluster, so dnsIPv4Only (below) strips AAAA.
+        # allow-list): only local-Keycloak tokens whose azp is allow-listed
+        # below pass the gateway. Red Hat SSO caller tokens are no longer
+        # accepted: external agents are reached through the egress gateways
+        # (docs/EXTERNAL_IDP_EGRESS.md), so every caller sends the local Token
+        # A. Praxis's Rust client cannot reach IPv6 endpoints on this
+        # IPv4-egress cluster, so dnsIPv4Only (below) strips AAAA.
         - name: policy.enabled
           value: "true"
         # Callers allowed past the policy filter, matched on the token's azp.
-        # acme-agent is the local Keycloak client; the UUID is ACME's confidential
-        # Red Hat SSO client (the azp of the UI's SSO prod/stage tokens).
+        # acme-agent is the local Keycloak client. The egress gateways inherit
+        # this list (egressGateways.<key>.allowedCallers overrides it).
         - name: policy.allowedCallers[0]
           value: acme-agent
-        - name: policy.allowedCallers[1]
-          value: ff524661-b74a-4e10-bc24-4e71322e0852
         # The pinned Praxis AI 0.4.1 policy filter only has a filter-wide private
-        # IdP egress switch. Configured callouts are the static Keycloak JWKS and
-        # the Red Hat SSO JWKS (identity.oidcIssuers below); do not add
+        # IdP egress switch. The configured callout is the static Keycloak JWKS
+        # (plus each egress gateway's token endpoint); do not add
         # user-controlled URLs here.
         - name: policy.allowPrivateIdp
           value: "true"
         # Praxis's policy transport uses OpenSSL's trust file (SSL_CERT_FILE),
         # which REPLACES the default store. Sync the managed ingress CA (for the
-        # Keycloak Route) AND append public roots (for the Red Hat SSO JWKS).
+        # Keycloak Route) AND append public roots (for the egress gateways'
+        # external IdPs and agents, e.g. Red Hat SSO and access.redhat.com).
         - name: policy.caBundleConfigMap.name
           value: praxis-keycloak-ca
         - name: policy.caBundleSync.enabled
           value: "true"
         - name: policy.caBundleSync.includeSystemRoots
           value: "true"
-        # IPv4-only JWKS fix: a CoreDNS sidecar strips AAAA so the IPv6-preferring,
-        # no-fallback Praxis client reaches sso.redhat.com over IPv4. Validated
+        # IPv4-only fix: a CoreDNS sidecar strips AAAA so the IPv6-preferring,
+        # no-fallback Praxis client reaches external hosts (the egress
+        # gateways' sso.redhat.com / access.redhat.com) over IPv4. Validated
         # live; see charts/all/praxis-proxy/README.md "IPv4-only clusters".
         - name: dnsIPv4Only.enabled
           value: "true"
@@ -468,41 +466,18 @@ clusterGroup:
         # /a2a/.well-known/agent-card.json too (lightspeed-hub
         # adapter.image.tag) and a card url pointing at Praxis (derived by
         # the lightspeed-hub chart).
-        # Trusted issuers the policy filter validates caller tokens against
-        # (policy.enabled=true above): Red Hat SSO production and stage, plus the
-        # local Keycloak issuer (which the chart appends automatically).
-        # SSO audience is api.ask_red_hat -- verified from a real sso.stage
-        # token whose aud array is
-        # ["cloud-services","api.graphql","api.ask_red_hat","api.console"];
-        # api.ask_red_hat is the narrowest value that fits the assistant use case.
+        # Trusted issuers: only the local Keycloak issuer (the chart appends it
+        # automatically; no identity.oidcIssuers). The Red Hat SSO issuers were
+        # removed once external agents moved behind the egress gateways.
         # Audience on local-Keycloak caller tokens at THIS gateway -- the
         # praxis HUB gateway (MAS -> praxis-proxy -> lightspeed-hub adapter).
         # It receives the caller's Token A (MAS forwards it verbatim) and
         # EXCHANGES it (a2aUpstream.exchangeAtPraxis below) as client
         # mas-a2a, which Keycloak only allows when A carries mas-a2a -- so
         # that is the audience it validates. ACME therefore requests ONLY
-        # mas-a2a (MAS validates the same audience itself). The Red Hat SSO
-        # issuers below stay (api.ask_red_hat) but an SSO token cannot be
-        # exchanged here yet (the Praxis delegator sends no subject_issuer).
-        # Required even with identity.oidcIssuers set.
+        # mas-a2a (MAS validates the same audience itself).
         - name: identity.keycloak.audience
           value: mas-a2a
-        - name: identity.oidcIssuers[0].name
-          value: red-hat-sso-prod
-        - name: identity.oidcIssuers[0].issuerUrl
-          value: https://sso.redhat.com/auth/realms/redhat-external
-        - name: identity.oidcIssuers[0].jwksUrl
-          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        - name: identity.oidcIssuers[0].audience
-          value: api.ask_red_hat
-        - name: identity.oidcIssuers[1].name
-          value: red-hat-sso-stage
-        - name: identity.oidcIssuers[1].issuerUrl
-          value: https://sso.stage.redhat.com/auth/realms/redhat-external
-        - name: identity.oidcIssuers[1].jwksUrl
-          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        - name: identity.oidcIssuers[1].audience
-          value: api.ask_red_hat
         # PHASE 2 B1 (ACTIVATED): per-spoke Praxis spoke-gateways. The
         # kube-API pass-through and oauth-delegator spikes PASSED on the
         # pinned image (local podman runtime verification -- see
@@ -699,20 +674,14 @@ clusterGroup:
         # trust domain (see the zero-trust-workload-identity-manager application's
         # comment above); override only to diverge.
 
-        # Optional Red Hat IdP agent-token mode. Uncomment only after creating
-        # confidential SSO clients in both environments and storing both their
-        # client IDs and secrets in Vault (see values-secret.yaml.template).
-        # Add each token's sub/user_id to MAS's
-        # a2a.allowedPrincipals before enabling it. User-token mode is a TODO.
-        #
-        - name: auth.redhatSso.enabled
-          value: "true"
-        - name: auth.redhatSso.scope
-          value: openid api.ask_red_hat
-        - name: auth.redhatSso.production.tokenUrl
-          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
-        - name: auth.redhatSso.stage.tokenUrl
-          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token
+        # Red Hat IdP agent-token mode stays OFF (chart default): ACME only
+        # mints the local Token A (Keycloak client_credentials + SPIFFE
+        # JWT-SVID). External agents are reached through the Praxis egress
+        # gateways, which mint the Red Hat SSO token themselves
+        # (docs/EXTERNAL_IDP_EGRESS.md); MAS and the hub gateway no longer
+        # accept SSO tokens, so enabling this would only produce 401s. The UI's
+        # pasted-token override (auth.tokenOverride.enabled) stays available for
+        # testing expiry and renewal.
         - name: route.enabled
           value: "true"
         # Allow the browser's A2A request to survive the long-running analysis.
@@ -797,22 +766,22 @@ clusterGroup:
           value: "a6674f23f9d0"
         - name: image.pullPolicy
           value: Always
-        # No public Route: inbound MAS A2A (mao-a2a) is active, and the mas-a2a
-        # chart README forbids leaving the mas-api Route reachable while it still
-        # runs the development identity mode (dev mode admits every request as the
-        # admin user "dev"). The runtime investigation flow does not use this API
-        # (it goes through mao-a2a + mao-worker), so the control-plane API is kept
-        # cluster-internal only. For blueprint setup, port-forward the Service and
-        # set MAS_API_URL (see setup-mas-blueprint.sh). For an internet-facing
-        # deployment, re-enable the Route only after switching identity.providerMode
-        # to keycloak with a dedicated audience (mas-api) and a real
-        # identity.adminAllowedUsers list.
+        # TEMPORARY public Route, re-enabled for blueprint setup (9f2f5687):
+        # setup-mas-blueprint.sh defaults MAS_API_URL to it. While it exists the
+        # dev-mode API below is reachable from the ingress and admits every
+        # request as the admin user "dev", which the mas-a2a chart README
+        # forbids while inbound MAS A2A (mao-a2a) is active. The runtime flow
+        # does not use this API (it goes through mao-a2a + mao-worker). Delete
+        # condition: set this to "false" once the blueprint is pinned, and use
+        # `oc -n mao port-forward svc/mas-api 8002:8002` with
+        # MAS_API_URL=http://localhost:8002 for later blueprint runs; or keep a
+        # Route only after switching identity.providerMode to keycloak with a
+        # dedicated audience (mas-api) and a real identity.adminAllowedUsers.
         - name: route.enabled
           value: "true"
         # DEV MODE: Accept any token without validation (for testing/blueprint setup)
         # WARNING: Do not use in production - no authentication security!
-        # Only acceptable here because route.enabled=false keeps the API off the
-        # public ingress; do not re-enable the Route without leaving dev mode.
+        # Only acceptable without the public Route above (see its comment).
         - name: identity.providerMode
           value: dev
         # MAS API validates A2A Agent Card URLs over HTTPS; trust the cluster's
@@ -889,17 +858,12 @@ clusterGroup:
         # id is realm-import-specific and changes if the service account is
         # recreated; re-fetch after a realm re-import.
         #
-        # For Red Hat SSO client credentials, `sub` is the service-account
-        # principal and can differ from `azp`/`client_id`. Decode a real token
-        # and use its `sub`; do not copy the OAuth client UUID from the secret.
         - name: a2a.allowedPrincipals[0]
           #value: "14a43a22-01f8-4fe3-81fd-f34cce3d745f"
           #value: "409d044c-4119-430b-9ec8-9388d127210b"
           #value: "94510bf9-b826-402b-a242-d4547e948d76"
           #value: "bb366787-080c-4d98-b69e-2774e15855cb"
           value: "bae292cb-d792-4bb1-a1b4-8e18fbaad924"
-        - name: a2a.allowedPrincipals[1]
-          value: "b6daf56c-157a-418a-b6bf-7a6c18c667a7"
         - name: route.enabled
           value: "true"
         # - name: route.host
@@ -922,31 +886,18 @@ clusterGroup:
         - name: route.timeoutSeconds
           value: "1260"
 
-        # Multi-issuer OIDC: accept tokens from Red Hat SSO and Keycloak
-        # Keycloak is NOT auto-appended; include it explicitly
+        # Accepted issuers: the local Keycloak only (Token A, aud mas-a2a).
+        # Kept as a one-entry multi-issuer list -- the validator path verified
+        # live -- rather than switching to providerMode keycloak. The Red Hat
+        # SSO issuers were removed once external agents moved behind the
+        # Praxis egress gateways (docs/EXTERNAL_IDP_EGRESS.md, Rollout).
         - name: identity.oidcIssuers[0].issuer_url
-          value: https://sso.redhat.com/auth/realms/redhat-external
-        - name: identity.oidcIssuers[0].jwks_url
-          value: https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        - name: identity.oidcIssuers[0].audience
-          value: api.ask_red_hat
-        - name: identity.oidcIssuers[0].username_claim
-          value: preferred_username
-        - name: identity.oidcIssuers[1].issuer_url
-          value: https://sso.stage.redhat.com/auth/realms/redhat-external
-        - name: identity.oidcIssuers[1].jwks_url
-          value: https://sso.stage.redhat.com/auth/realms/redhat-external/protocol/openid-connect/certs
-        - name: identity.oidcIssuers[1].audience
-          value: api.ask_red_hat
-        - name: identity.oidcIssuers[1].username_claim
-          value: preferred_username
-        - name: identity.oidcIssuers[2].issuer_url
           value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca
-        - name: identity.oidcIssuers[2].jwks_url
+        - name: identity.oidcIssuers[0].jwks_url
           value: https://keycloak.apps.bm-cluster.e2e.bos.redhat.com/realms/rca/protocol/openid-connect/certs
-        - name: identity.oidcIssuers[2].audience
+        - name: identity.oidcIssuers[0].audience
           value: mas-a2a
-        - name: identity.oidcIssuers[2].username_claim
+        - name: identity.oidcIssuers[0].username_claim
           value: preferred_username
         - name: identity.oidcVerifySsl
           value: "true"

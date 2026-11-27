@@ -146,6 +146,10 @@ stage environments and currently mints an **agent token** with
 `grant_type=client_credentials`. The UI also shows a **user token** selector,
 but selecting it fails closed with a clear message; authorization-code/PKCE
 login is intentionally documented as TODO rather than partially implemented.
+When no Red Hat SSO environment is configured (`auth.redhatSso.enabled:
+false`, as in the standalone variant), there is nothing to choose: the UI hides
+the selector and every request uses the Keycloak Token A. The pasted-token
+override (`auth.tokenOverride.enabled`) is independent of the selector.
 Non-UI A2A clients can make the same per-request choice with:
 
 * `X-ACME-Auth-Provider: keycloak` or `redhat`

@@ -414,3 +414,23 @@ def test_override_header_is_bound_when_enabled(monkeypatch: pytest.MonkeyPatch) 
     assert status == 200
     assert override == TokenOverride(token="pasted-token")
     assert settings.ui_options()["tokenOverrideEnabled"] is True
+
+
+def test_ui_hides_provider_selection_without_red_hat_sso(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keycloak alone is not a choice: the UI hides the selector, keeps the override."""
+    _settings(monkeypatch, ACME_ALLOW_TOKEN_OVERRIDE="true")
+    for key in ("REDHAT_SSO_STAGE_TOKEN_URL", "REDHAT_SSO_STAGE_CLIENT_ID",
+                "REDHAT_SSO_STAGE_CLIENT_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    settings = AuthSettings.from_env()
+
+    options = settings.ui_options()
+    assert options["selectionEnabled"] is False
+    assert options["redHatEnabled"] is False
+    assert options["tokenOverrideEnabled"] is True
+
+
+def test_ui_offers_provider_selection_with_red_hat_sso(monkeypatch: pytest.MonkeyPatch) -> None:
+    options = _settings(monkeypatch).ui_options()
+    assert options["selectionEnabled"] is True
+    assert options["redHatEnabled"] is True

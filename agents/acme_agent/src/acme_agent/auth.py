@@ -271,12 +271,15 @@ class AuthSettings:
             }
             for environment in ("production", "stage")
         ]
+        red_hat_enabled = any(item["available"] for item in environments)
         return {
-            "selectionEnabled": self.mode == "keycloak",
+            # Nothing to choose without a configured Red Hat SSO environment:
+            # the UI then hides the selector and ACME mints the local Token A.
+            "selectionEnabled": self.mode == "keycloak" and red_hat_enabled,
             "defaultProvider": self.default_provider,
             "defaultEnvironment": self.redhat_default_environment,
             "defaultTokenType": self.redhat_default_token_type,
-            "redHatEnabled": any(item["available"] for item in environments),
+            "redHatEnabled": red_hat_enabled,
             "environments": environments,
             "tokenDebugEnabled": self.token_debug_enabled,
             "tokenOverrideEnabled": self.token_override_enabled
