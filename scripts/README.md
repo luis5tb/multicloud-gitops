@@ -542,3 +542,16 @@ chart-side explanations are in `charts/all/mao/mas-a2a/README.md`,
 - [charts/all/praxis-proxy/README.md](../charts/all/praxis-proxy/README.md) — Praxis `logLevel` / JWT enforcement quirks (hub gateway + spoke gateways)
 - [charts/all/lightspeed-hub/README.md](../charts/all/lightspeed-hub/README.md) — adapter/operator wiring the monitor `--hub` hop reads
 - [docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md](../docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md) — the per-hop exchange chain and why each `aud` is what it is
+
+# Remediation helpers
+
+`scripts/remediation/` holds the operator-side helpers for the
+approval-gated execution path (see the
+[deployment runbook](../docs/lightspeed-hub-deployment-runbook.md) A4 d and
+B3). All use only the standard library and `oc`.
+
+| Script | Purpose |
+| --- | --- |
+| `spoke-writer-rbac.sh <spoke> <ns>...` | Prints the writer ClusterRole (the lightspeed-hub chart's `spokeExecutorRBAC.rules`) and namespaced RoleBindings for `keycloak:praxis-spoke-<spoke>:writer`, to apply **on that spoke**. |
+| `capture_exec_claims.py <secret> <run> <timeout>` | Token-separation gate: decodes `aud`/`azp`/`sub`/`exp`/`groups` of a run's R and R_exec from one Secret read; never prints a token; fails closed. |
+| `keycloak_execution_brownfield.py` | **Brownfield only**: adds the execution client, roles, group, scopes and mappers to an already-imported realm (`--dry-run`, `--grant-acme-membership`); `--verify` checks the groups issued to ACME's service account on any realm. See [brownfield upgrade](../docs/A2A_REMEDIATION_BROWNFIELD.md). |

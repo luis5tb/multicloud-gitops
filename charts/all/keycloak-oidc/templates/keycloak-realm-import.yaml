@@ -169,6 +169,7 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
       client that may carry (and projects) those roles. */}}
 {{- $er := .Values.keycloak.exchangeRoles }}
 {{- $audRoles := dict }}
+{{- $writerAudiences := list }}
 {{- if $er.enabled }}
 {{- if .Values.keycloak.hubExchange.enabled }}
 {{- $hubAudienceRoles := $er.hubRoles }}
@@ -182,9 +183,17 @@ is an in-cluster Service URL, not domain-derived, so it still must be set.
 {{- if .Values.keycloak.spokeGatewayExecExchanger.enabled }}
 {{- $allSpokeAudiences = concat $allSpokeAudiences .Values.keycloak.spokeGatewayExecExchanger.spokeAudiences }}
 {{- end }}
+{{- /* remediation.spokeAudiences limits where the writer role exists and is
+       granted/scoped; empty keeps the previous behavior (every spoke). */}}
+{{- $writerAudiences = $er.remediation.spokeAudiences | default (uniq $allSpokeAudiences) }}
+{{- range $er.remediation.spokeAudiences }}
+{{- if not (has . $allSpokeAudiences) }}
+{{- fail (printf "keycloak.exchangeRoles.remediation.spokeAudiences entry %q is not a registered spoke audience (%s)" . (join ", " (uniq $allSpokeAudiences))) }}
+{{- end }}
+{{- end }}
 {{- range $aud := uniq $allSpokeAudiences }}
 {{- $spokeAudienceRoles := $er.spokeRoles }}
-{{- if and $er.remediation.groups $er.remediation.spokeRole }}{{- $spokeAudienceRoles = uniq (concat $spokeAudienceRoles (list $er.remediation.spokeRole)) }}{{- end }}
+{{- if and $er.remediation.groups $er.remediation.spokeRole (has $aud $writerAudiences) }}{{- $spokeAudienceRoles = uniq (concat $spokeAudienceRoles (list $er.remediation.spokeRole)) }}{{- end }}
 {{- $_ := set $audRoles $aud $spokeAudienceRoles }}
 {{- end }}
 {{- if not $audRoles }}
@@ -337,7 +346,7 @@ spec:
           {{- if has $g $er.remediation.groups }}
             {{- if eq $aud $.Values.keycloak.hubExchange.hubAudience }}
               {{- $roles = append $roles $er.remediation.hubRole }}
-            {{- else }}
+            {{- else if has $aud $writerAudiences }}
               {{- $roles = append $roles $er.remediation.spokeRole }}
             {{- end }}
           {{- end }}
@@ -377,7 +386,11 @@ spec:
           {{- end }}
           {{- if $.Values.keycloak.spokeGatewayExecExchanger.enabled }}
         - client: {{ $.Values.keycloak.spokeGatewayExecExchanger.clientId | quote }}
+          {{- if has $aud $writerAudiences }}
           roles: {{ toJson (uniq (concat $.Values.keycloak.exchangeRoles.spokeRoles (list $.Values.keycloak.exchangeRoles.remediation.spokeRole))) }}
+          {{- else }}
+          roles: {{ toJson (without $.Values.keycloak.exchangeRoles.spokeRoles $.Values.keycloak.exchangeRoles.remediation.spokeRole) }}
+          {{- end }}
           {{- end }}
         {{- end }}
       {{- end }}
@@ -890,6 +903,14 @@ spec:
         enabled: true
         groups:
           - {{ printf "/%s" .Values.keycloak.acmeGroupName | quote }}
+          {{- if and $er.enabled (eq (toString $er.remediation.includeAcmeServiceAccount) "true") }}
+          {{- /* Shared-principal opt-in: ACME itself may approve and remediate. */}}
+          {{- range $er.remediation.groups }}
+          {{- if ne . $.Values.keycloak.acmeGroupName }}
+          - {{ printf "/%s" . | quote }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
       {{- if .Values.keycloak.consoleAdminUser.enabled }}
       # Human user in adminGroupName (-> cluster-admin, see that value's
       # comment), so the console has at least one working login once

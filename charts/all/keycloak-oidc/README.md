@@ -784,12 +784,19 @@ must have both the ordinary group (for creator/reader) and an explicitly
 approved remediation group. A remediation group that is not the ACME/admin
 group is created **empty** by a fresh import; membership is always a separate
 admin action. Do not add the automation service account to the remediation
-group as a shortcut, except in an explicitly scoped shared-principal lab.
+group as a shortcut, except in an explicitly scoped shared-principal lab:
+`exchangeRoles.remediation.includeAcmeServiceAccount: true` is that explicit
+opt-in (ACME's own token can then approve and write). By default `writer`
+exists on every registered spoke audience;
+`exchangeRoles.remediation.spokeAudiences` limits the role, its group grant
+and the execution exchanger's writer scope to the listed spokes.
 
 **Existing live realm: one-shot import means the chart will not add clients,
 audience mappers, roles, group-role mappings, or exchange scopes.** The
-PostSync reconciler only aligns client secrets. Before enabling the commented
-variant switch, apply these narrow changes through the Keycloak Admin API
+PostSync reconciler only aligns client secrets.
+`scripts/remediation/keycloak_execution_brownfield.py` applies the changes
+below idempotently (see `docs/A2A_REMEDIATION_BROWNFIELD.md`). Manually,
+apply these narrow changes through the Keycloak Admin API
 (realm `rca`; use the existing Vault secret value in memory, never in shell
 history/logs):
 

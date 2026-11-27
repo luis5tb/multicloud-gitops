@@ -146,12 +146,12 @@ ACME from these tested working trees, including their new untracked source
 files. The adapter build uses the sibling operator API checkout. Use the same
 MAS image for API, worker, and inbound A2A; also provide a compatible tested
 sandbox image reference (the operator build does not build the sandbox).
-[Runbook section 2](A2A_REMEDIATION_E2E.md#2-build-and-push-the-four-application-images)
+[Deployment runbook A1](lightspeed-hub-deployment-runbook.md#a1-build-and-push-images-record-the-digests)
 documents build contexts and digest pinning. Image construction does not
 authorize execution enablement; identity/gateway/RBAC changes and positive and
-negative live tests remain separate gates. Inspect/sanitize build contexts first:
-MAS currently copies its whole context and has no repository `.dockerignore`;
-local credential files must not be sent into the image build.
+negative live tests remain separate gates. MAS copies its whole build context;
+its repository `.dockerignore` keeps local credentials, virtualenvs and caches
+out of the image.
 
 The selected later lab uses the existing ACME credentials as a **shared
 principal**, with writer authorization restricted to `payments` on `mario-ipi`.

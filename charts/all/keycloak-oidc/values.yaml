@@ -425,6 +425,15 @@ keycloak:
       groups: []
       hubRole: agenticrun-approver
       spokeRole: writer
+      # Spoke audiences where spokeRole (writer) exists, is granted to the
+      # remediation groups and is scoped on the execution exchanger. Empty =
+      # every registered spoke. Entries must be registered spoke audiences.
+      spokeAudiences: []
+      # SHARED-PRINCIPAL OPT-IN: put acme-agent's service-account user into the
+      # remediation groups, so ACME's own token can approve and remediate
+      # (approval is then not attributable to a person). Keep false unless
+      # that is an explicit, scoped decision.
+      includeAcmeServiceAccount: false
 
 openshiftOIDC:
   enabled: false

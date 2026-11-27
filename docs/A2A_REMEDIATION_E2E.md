@@ -1,5 +1,11 @@
 # Remediation end-to-end lab runbook
 
+**For a new deployment use the [deployment runbook](lightspeed-hub-deployment-runbook.md);
+for an existing one, the [brownfield steps](A2A_REMEDIATION_BROWNFIELD.md).**
+This page keeps the background, the alternative human-token tests and extra
+diagnostics; its phased enablement predates the standalone values enabling
+the execution path directly.
+
 Source/configuration checkpoint: **2026-11-26**. These are instructions, not a
 record of a successful deployment. No build, push, sync, or live validation was
 performed while writing them. Use an isolated, disposable test environment.
@@ -62,9 +68,11 @@ authenticated person. Grant namespaced writer RBAC only in `payments` **on
 Workload writes in that namespace can mount Secrets or use ServiceAccounts;
 the namespace must be a disposable/trusted lab boundary. Restrict who can reach
 ACME's chat and approval endpoints, record the shared identity in evidence, and
-remove its temporary grants after testing. Step-by-step commands for this lab
-(image builds, per-phase values patches, Keycloak Admin API, `mario-ipi` RBAC,
-ACME tests): [lab deployment](A2A_REMEDIATION_LAB_DEPLOY.md).
+remove its temporary grants after testing. The standalone values now enable
+this lab scope directly: deploy it with the greenfield
+[deployment runbook](lightspeed-hub-deployment-runbook.md) (B3 has the token
+gate, `mario-ipi` RBAC and ACME tests), or upgrade an existing environment
+with the [brownfield steps](A2A_REMEDIATION_BROWNFIELD.md).
 
 The detailed backend examples below retain the alternative **human-token,
 hub/remediation-e2e** fixture. They are not instructions to grant hub write
