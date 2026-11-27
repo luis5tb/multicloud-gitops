@@ -282,9 +282,10 @@ only when the request completes.
 
 | Command | What it tails |
 | --- | --- |
-| `bash scripts/monitor.sh` / `--join` | ACME, MAS A2A, worker, Praxis (hub+spokes), adapter, operator, Keycloak events |
+| `bash scripts/monitor.sh` / `--join` | ACME, MAS A2A, worker, Praxis (hub+spokes), Praxis egress gateways, adapter, operator, Keycloak events |
 | `--acme` / `--mas` / `--worker` | that hop only |
 | `--praxis` | hub gateway + every spoke gateway |
+| `--egress` | every Praxis egress gateway (external agents: Ask Red Hat, partners) |
 | `--hub` | lightspeed-hub adapter + agentic operator + the `ls-run-token-*` Secret watch |
 | `--kc` | Keycloak realm events only (authoritative exchanges) |
 | `--api` | OCP API server rejects (cluster-admin; not in the default join) |
@@ -310,6 +311,7 @@ fingerprint, `sub`, and time; `--kc` records the exchanges independently.
 | MAO A2A endpoint | `mao` | `app.kubernetes.io/name=mas-a2a` | `NS_MAS`, `SEL_MAS` |
 | MAS orchestrator | `mao` | `app.kubernetes.io/name=mas-worker` | `NS_WORKER`, `SEL_WORKER` |
 | Praxis hub + spokes | `praxis-proxy` | `app.kubernetes.io/name=praxis-proxy` | `NS_PRAXIS`, `SEL_PRAXIS` |
+| Praxis egress gateways | `praxis-proxy` | `app.kubernetes.io/name=praxis-egress-gateway` (key from the pod name) | `NS_EGRESS`, `SEL_EGRESS` |
 | lightspeed-hub adapter | `lightspeed-hub` | `app.kubernetes.io/name=lightspeed-hub` | `NS_HUB`, `SEL_HUB` |
 | agentic operator | `lightspeed-hub` | `app.kubernetes.io/name=lightspeed-hub-agentic-operator` | `NS_OPERATOR`, `SEL_OPERATOR` |
 | Keycloak events | `keycloak-system` | Secret `keycloak-admin-user` → Admin REST `admin-events` (realm `rca`) | `KC_REALM`, `KC_ADMIN_SECRET`, `KC_URL`, `KC_CA` |
@@ -408,9 +410,28 @@ oc logs -n lightspeed-hub -l app.kubernetes.io/name=lightspeed-hub-agentic-opera
 ```
 
 Then tighten the matching block in `scripts/monitor-lib.sh` (`parse_mas`,
-`parse_worker`, `parse_praxis`, `parse_adapter`, `parse_operator`,
-`parse_kc_event`), add the line to `tests/scripts/test_monitor.py`, and —
-per the repo convention — replace the guess immediately.
+`parse_worker`, `parse_praxis`, `parse_egress`, `parse_adapter`,
+`parse_operator`, `parse_kc_event`), add the line to
+`tests/scripts/test_monitor.py`, and — per the repo convention — replace the
+guess immediately.
+
+**Prefix formats.** `oc logs -l … --prefix` prints `[pod/<pod>/<container>]` on
+oc 4.19 (live 2026-11-27); older clients printed `[<ns>/<pod>:<container>]`.
+`parse_line` accepts both. Before 2026-11-27 it took the 4.19 container name
+for the pod, so spoke gateways were labelled spoke "gateway" and DNS-sidecar
+errors were never carded.
+
+**Egress gateways** (`parse_egress`, patterns confirmed live 2026-11-27 and
+replayed from `tests/scripts/fixtures/egress-gateway-live-2026-11-27.log`):
+
+- The pinned Praxis logs **no successful mint**. `route matched` followed by
+  `upstream selected` is the proof, because `delegate()` runs in the policy
+  filter before routing and a failed mint denies.
+- A deny logs only `filter="policy" status=401|403`. The reason
+  (`delegation.idp_rejected`, `scope_too_broad`, `not an allow-listed caller`)
+  is in the response body MAS receives, not in the log.
+- Neither the caller's `sub` nor the agent's response status is logged.
+  Correlate with the MAS worker cards by time.
 
 Routine noise that is deliberately **not** carded:
 

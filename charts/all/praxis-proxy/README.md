@@ -551,6 +551,8 @@ Rules:
 - **Stage to production is a values change only** (`upstreamURL`,
   `tokenUrl`, the Vault record, plus `agentCard` if the cards differ). Callers keep `base_url` = the gateway. The standalone variant puts
   each environment in its own `extraValueFiles` file.
+- **Monitoring:** `bash scripts/monitor.sh --egress`. The gateway logs no mint
+  line and no deny reason; the monitor explains what each card proves.
 - **The PostSync `enforcement-check` Job does not cover egress gateways.** It
   tests only the main gateway. The egress allow-list is rendered by the same
   template, but the `azp` deny on an egress gateway has not been exercised

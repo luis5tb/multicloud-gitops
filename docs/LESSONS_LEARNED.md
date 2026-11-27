@@ -289,6 +289,22 @@ re-check each when the image is bumped.
   egress gateways render it into `policy.yaml` with an init container in the
   same pinned image (it is Alpine, with `sh` and `sed`). *(source + live,
   2026-11-27)*
+- **Assertions work on the pinned image; `iss`/`jti` are not sources.** A
+  route-level `assertions.request.headers` block on `ai:0.4.1` delivered
+  `subject.id`/`claim.azp` of the inbound token to the upstream next to the
+  delegated `Authorization`, and replaced a client-sent copy of the same
+  header (echo upstream, 2026-11-27). `claim.jti` rendered nothing: the
+  claim mapper keeps reserved claims out of the bag (same as `iss`).
+  Evaluated for caller-attribution headers on the egress gateways and not
+  adopted. *(live 2026-11-27)*
+- **A delegation deny is not explained in the gateway's log.** A wrong client
+  secret returned `403 delegation.idp_rejected: token exchange rejected:
+  unauthorized_client` to the caller, but the log line was only
+  `request rejected by filter filter="policy" status=403`, the same as an
+  allow-list deny. A successful mint logs nothing either. Diagnose from the
+  caller's response body; in logs, "route matched -> upstream selected" is the
+  proof of a successful mint. Found while building the monitor's egress hop.
+  *(live 2026-11-27)*
 - **The main gateway's Deployment selector also matches the spoke read
   gateways.** `oc exec deploy/praxis-proxy` landed in a `praxis-spoke-hub`
   pod and failed with `container praxis-proxy is not valid`: both use
@@ -586,6 +602,13 @@ re-check each when the image is bumped.
   `oc get secrets -w` in the hub namespace: a new `ls-run-token-*` row cards
   the store AND records the H→R exchange. When a hop's log level cannot be
   raised (pinned image), find the other witness — the kube API often is one.
+- **`oc logs -l --prefix` changed format.** oc 4.19 prints
+  `[pod/<pod>/<container>]`; the monitor parsed `[<ns>/<pod>:<container>]`
+  and took the container for the pod name, so every spoke gateway was carded
+  as spoke "gateway", and the DNS-sidecar check (looking for the
+  already-stripped prefix) never fired. Nothing caught it because every
+  replay test used the old format. `parse_line` now accepts both, and the
+  egress fixtures use the live format. *(live 2026-11-27)*
 
 ## 10. Documentation process
 

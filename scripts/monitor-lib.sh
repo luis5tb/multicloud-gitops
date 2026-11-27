@@ -23,6 +23,7 @@
 #   bash scripts/monitor.sh --mas          # MAO A2A endpoint only (mao ns)
 #   bash scripts/monitor.sh --worker       # MAS orchestrator (Temporal worker)
 # bash scripts/monitor.sh --praxis # Praxis: hub gateway + spoke gateways
+# bash scripts/monitor.sh --egress # Praxis egress gateways (external agents)
 # bash scripts/monitor.sh --hub # lightspeed-hub adapter + agentic operator
 # bash scripts/monitor.sh --kc # Keycloak realm events only (AUTHORITATIVE)
 #   bash scripts/monitor.sh --api          # OCP API server token rejects
@@ -115,6 +116,11 @@ NS_API="${NS_API:-openshift-kube-apiserver}"
 
 SEL_ACME="${SEL_ACME:-app.kubernetes.io/name=acme-agent}"
 SEL_PRAXIS="${SEL_PRAXIS:-app.kubernetes.io/name=praxis-proxy}"
+# External-IdP egress gateways (praxis-proxy egressGateways, one per external
+# agent). They carry their own app label, so the praxis follower never sees
+# them; the gateway key is taken from the pod name (praxis-egress-<key>-…).
+NS_EGRESS="${NS_EGRESS:-praxis-proxy}"
+SEL_EGRESS="${SEL_EGRESS:-app.kubernetes.io/name=praxis-egress-gateway}"
 # Verified live (bm-cluster): charts/all/mao render
 # app.kubernetes.io/name=<chart>.
 # mas-a2a renders no pods at all until a2a.enabled=true -- a missing hop is
@@ -384,7 +390,7 @@ print_diagram() {
   ┌─ ACME-AGENT ────────────────────────────────────────────────────────────┐
   │  1. MINT TOKEN A — Keycloak client_credentials + SPIFFE JWT-SVID        │
   │     azp=acme-agent  aud=mas-a2a  groups=acme-agent-rca                  │
-  │     (or a Red Hat SSO agent token, aud=api.ask_red_hat)                 │
+  │     (one A for every destination; no Red Hat SSO token needed)          │
   │  2. POST to MAO A2A endpoint  Bearer A  (+ X-Request-Id)                │
   │  2b. On 401 / AUTH_REQUIRED: mint a fresh A and resend THE SAME task    │
   └─────────────────────────────────────────────────────────────────────────┘
@@ -397,7 +403,7 @@ print_diagram() {
        ▼  A
   ┌─ MAS ORCHESTRATOR (mao/mas-worker via Temporal) ────────────────────────┐
   │  6. LLM plans; the delegated A2A call forwards A verbatim               │
-  │     (Ask Red Hat is a direct branch: same A, no Praxis, no exchange)    │
+  │     (external agents: the same A goes to praxis-egress-<agent>)         │
   └─────────────────────────────────────────────────────────────────────────┘
        ▼  A
   ┌─ PRAXIS HUB GATEWAY (praxis-proxy) ─────────────────────────────────────┐
@@ -425,6 +431,15 @@ print_diagram() {
   ┌─ SPOKE KUBE API ────────────────────────────────────────────────────────┐
   │  13. user keycloak:<sub>, group keycloak:praxis-spoke-<id>:reader       │
   │      → cluster-reader / cluster-monitoring-view  (or 403)               │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+        ▲  A   (external agents — Ask Red Hat, partners — reached from MAS)
+  ┌─ PRAXIS EGRESS GATEWAY (praxis-egress-<agent>, from MAS) ───────────────┐
+  │  E1. VALIDATE A (local Keycloak only) + azp allow-list                  │
+  │  E2. SERVE the agent card from config (url → the gateway itself)        │
+  │  E3. MINT the agent's IdP token as the gateway's own client             │
+  │      (client_credentials: it speaks for that client, not the caller)    │
+  │  E4. FORWARD to the fixed agent endpoint (Host rewritten)               │
   └─────────────────────────────────────────────────────────────────────────┘
 
   Cards carry the token they observed (A/H/R/U) and, for exchanges, the
@@ -501,12 +516,28 @@ parse_line() {
   # and it contains the pod name (the ONLY way to tell the hub gateway from a
   # spoke gateway when both share one selector). Strip it here, once, so no
   # matcher below has to know about it.
-  local pod="" hop=""
+  local pod="" hop="" container=""
   if [[ "$line" =~ ^\[([^][]*)\][[:space:]]?(.*)$ ]]; then
     local tag="${BASH_REMATCH[1]}"
     line="${BASH_REMATCH[2]}"
-    pod="${tag##*/}"          # "ns/pod:container" -> "pod:container"
-    pod="${pod%%:*}"          # -> "pod"
+    if [[ "$tag" == pod/*/* ]]; then
+      # `oc logs -l … --prefix` on oc 4.19 prints "pod/<pod>/<container>"
+      # (verified live 2026-11-27). The old split below then took the
+      # CONTAINER for the pod, so every spoke read as spoke "gateway".
+      local rest="${tag#pod/}"
+      pod="${rest%%/*}"
+      container="${rest#*/}"
+    else
+      pod="${tag##*/}"          # "ns/pod:container" -> "pod:container"
+      [[ "$pod" == *:* ]] && container="${pod#*:}"
+      pod="${pod%%:*}"          # -> "pod"
+    fi
+  fi
+  # The container a prefixed line came from (the prefix itself is stripped
+  # here, so matchers that care -- the DNS sidecar -- read this instead).
+  PFX_CONTAINER="$container"
+  if [[ "$src" == "egress" && -n "$pod" ]]; then
+    hop=$(egress_key_from_pod "$pod")
   fi
   if [[ "$src" == "praxis" ]]; then
     if [[ "$pod" == praxis-spoke-* ]]; then
@@ -563,6 +594,7 @@ parse_line() {
   local hsrc="$src"
   case "$src" in
     praxis) [[ "$hop" == spoke/* ]] && hsrc="spoke" || hsrc="hubgw" ;;
+    egress) hsrc="egress" ;;
     hub)    hsrc="adapter" ;;
     api)    case "$pod" in *kube-apiserver*) hsrc="kubeapi-hub" ;; esac ;;
   esac
@@ -606,6 +638,12 @@ parse_line() {
   # ── Praxis: the hub gateway exchanges A→H, spoke gateways exchange R→U ───
   if [[ "$src" == "praxis" ]]; then
     parse_praxis "$line" "$ts" "$hop"
+    return 0
+  fi
+
+  # ── Praxis egress gateways: Token A in, the agent's own IdP token out ─────
+  if [[ "$src" == "egress" ]]; then
+    parse_egress "$line" "$ts" "$hop"
     return 0
   fi
 
@@ -929,10 +967,14 @@ parse_worker() {
     printf "${Y}│${N} ${D}WHO     :${N} mas-worker acting for the caller, wearing ${W}A${N}\n"
     printf "${Y}│${N} ${D}agent=${t_agent}  auth=${t_auth}${N}\n"
     printf "${Y}│${N} ${D}url=${t_url}${N}\n"
-    if grep -qi 'praxis' <<<"$t_url"; then
-      printf "${Y}└─ next hop exchanges A→H (hub gateway); Ask Red Hat is direct${N}\n"
+    if grep -q 'praxis-egress-' <<<"$t_url"; then
+      local e_key
+      e_key=$(grep -oP 'praxis-egress-\K[a-z0-9-]+?(?=\.)' <<<"$t_url" || true)
+      printf "${Y}└─ next hop: egress gateway ${W}${e_key:-?}${Y} mints the agent's own IdP token (A stops there)${N}\n"
+    elif grep -qi 'praxis' <<<"$t_url"; then
+      printf "${Y}└─ next hop exchanges A→H (hub gateway)${N}\n"
     else
-      printf "${Y}└─ direct to Ask Red Hat / another agent: same A, no Praxis exchange${N}\n"
+      printf "${Y}└─ DIRECT to the agent: it receives A itself (no egress gateway in between)${N}\n"
     fi
     return 0
   fi
@@ -1004,7 +1046,9 @@ parse_praxis() {
   # The dnsIPv4Only CoreDNS sidecar shares this pod. Surface only its errors
   # (a failing AAAA-strip/forward resolver breaks the Keycloak/JWKS fetch that
   # the exchange needs); skip its routine output.
-  if grep -q '/dns-ipv4only' <<<"$line"; then
+  # The sidecar is recognised by the prefix's container (parse_line strips the
+  # prefix, so the old in-line '/dns-ipv4only' test never matched).
+  if [[ "${PFX_CONTAINER:-}" == dns-ipv4only ]] || grep -q '/dns-ipv4only' <<<"$line"; then
     if grep -qE '\[ERROR\]|SERVFAIL|plugin/errors' <<<"$line"; then
       printf "\n${R}┌─ PRAXIS DNS SIDECAR ERROR [${ts}] ${D}(${who})${N}\n"
       printf "${R}│${N} ${D}AAAA-strip/forward resolver failing — SSO JWKS lookups at risk${N}\n"
@@ -1149,6 +1193,110 @@ parse_praxis() {
   if [[ "$who" != hub && -n "${SPOKE_FP:-}" ]]; then
     check_ip spoke "$ts" "$SPOKE_FP"
     flag_identity spoke "$ts" "$SPOKE_FP" "$IP_STATUS"
+  fi
+  return 0
+}
+
+# ── Praxis egress gateways (external agents: Ask Red Hat, partners) ─────────
+# Patterns CONFIRMED LIVE (bm-cluster, 2026-11-27, ai:0.4.1, the chart's
+# logLevel info,praxis_filter=debug,…); replayed from
+# tests/scripts/fixtures/egress-gateway-live-2026-11-27.log. What the gateway
+# logs, and what it does not:
+#  - no "minted" line: the pinned delegator logs no successful mint. But
+#    delegate() runs inside the policy filter BEFORE routing and a failed mint
+#    denies, so "route matched → upstream selected" proves validate + allow-
+#    list + mint all succeeded;
+#  - a deny logs only `filter="policy" status=401|403`: the reason
+#    (auth.*, not an allow-listed caller, delegation.idp_rejected,
+#    delegation.scope_too_broad) is in the response BODY, which the caller
+#    (MAS) sees -- never in this log;
+#  - neither the caller's sub nor the agent's response status is logged.
+#
+# Gateway key from the pod name: praxis-egress-<key>-<rs hash>-<pod hash>.
+egress_key_from_pod() {
+  local pod="${1#praxis-egress-}"
+  if [[ "$pod" =~ ^(.+)-[a-z0-9]{6,10}-[a-z0-9]{5}$ ]]; then
+    pod="${BASH_REMATCH[1]}"
+  fi
+  printf '%s' "$pod"
+}
+
+parse_egress() {
+  local line="$1" ts="$2" key="${3:-?}"
+  if [[ "${PFX_CONTAINER:-}" == dns-ipv4only ]]; then
+    if grep -qE '\[ERROR\]|SERVFAIL|plugin/errors' <<<"$line"; then
+      printf "\n${R}┌─ EGRESS DNS SIDECAR ERROR [${ts}] ${D}(${key})${N}\n"
+      printf "${R}│${N} ${D}AAAA-strip/forward resolver failing — JWKS, IdP and agent lookups at risk${N}\n"
+      printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
+      printf "${R}└─${N}\n"
+    fi
+    return 0
+  fi
+  if grep -qE 'path="?/readiness|/healthy' <<<"$line"; then
+    return 0
+  fi
+  # The public card GET is answered from config (static_response 200): that
+  # is what keeps MAS on the gateway, so it is worth one dim line.
+  if grep -q 'filter="static_response" status=200' <<<"$line"; then
+    if grep -q 'agent-card' <<<"$line"; then
+      printf "${D}┄─ egress %s: agent card served from config (url = the gateway) [${ts}]${N}\n" "$key"
+    fi
+    return 0
+  fi
+  if grep -q 'no route matched' <<<"$line"; then
+    local n_path
+    n_path=$(grep -oP 'no route matched path=\K\S+' <<<"$line" || true)
+    printf "\n${Y}┌─ EGRESS NO ROUTE [${ts}] ${D}(${key})${N}\n"
+    printf "${Y}│${N} ${D}path=${n_path} is outside the agent's path prefix — Core 404${N}\n"
+    printf "${Y}└─ Token A was valid and a token was minted; nothing was forwarded${N}\n"
+    return 0
+  fi
+  if grep -q 'filter="router" status=404' <<<"$line"; then
+    return 0
+  fi
+  if grep -q 'route matched' <<<"$line"; then
+    kv_set "egress_path_${key}" "$(grep -oP 'route matched path=\K\S+' <<<"$line" || true)"
+    return 0
+  fi
+  if grep -q 'upstream selected' <<<"$line"; then
+    local u_up u_path
+    u_up=$(grep -oP 'upstream=\K\S+' <<<"$line" || true)
+    u_path=$(kv_get "egress_path_${key}")
+    printf "\n${M}┌─ EGRESS MINT + FORWARD [${ts}]${N} ${D}$(token_tag A) → agent token (${key})${N}\n"
+    printf "${M}│${N} ${D}WHO     :${N} MAS acting for the caller, wearing ${W}A${N} ${D}(sub not logged by Praxis)${N}\n"
+    printf "${M}│${N} ${D}VERIFY  :${N} ${D}A validated against the local Keycloak + azp allow-list${N}\n"
+    printf "${M}│${N} ${D}MINT    :${N} ${D}client_credentials at the agent's IdP as the gateway's client${N}\n"
+    printf "${M}│${N} ${D}          → the agent sees ONE account, not the caller${N}\n"
+    printf "${M}│${N} ${D}FORWARD :${N} ${W}${u_up}${N}${D}${u_path}${N}\n"
+    printf "${M}└─ routing only runs after the policy filter passed: validate + mint succeeded${N}\n"
+    return 0
+  fi
+  if grep -q 'request rejected by filter' <<<"$line"; then
+    local r_filter r_status
+    r_filter=$(grep -oP 'request rejected by filter filter="\K[^"]+' <<<"$line" || true)
+    r_status=$(grep -oP 'status=\K[0-9]+' <<<"$line" || true)
+    [[ "$r_status" =~ ^[45] ]] || return 0
+    printf "\n${R}┌─ EGRESS REJECT [${ts}] ${R}${r_status}${N} ${D}(${key})${N}\n"
+    if [[ "$r_filter" == policy && "$r_status" == 401 ]]; then
+      printf "${R}│${N} ${D}Token A missing, malformed or expired — nothing minted${N}\n"
+    elif [[ "$r_filter" == policy && "$r_status" == 403 ]]; then
+      printf "${R}│${N} ${D}either A's azp is not allow-listed, OR the MINT failed at the agent's IdP${N}\n"
+      printf "${R}│${N} ${D}(delegation.idp_rejected: wrong client/secret; delegation.scope_too_broad)${N}\n"
+      printf "${R}│${N} ${D}the reason is only in the response body: see the MAS worker's error,${N}\n"
+      printf "${R}│${N} ${D}or replay the call (docs/ADDING_AN_EXTERNAL_AGENT.md troubleshooting)${N}\n"
+    else
+      printf "${R}│${N} ${D}filter=${r_filter} — request denied before the agent${N}\n"
+    fi
+    printf "${R}└─${N}\n"
+    return 0
+  fi
+  if grep -qiE 'refreshed JWKS|claim map: no candidate|praxis_policy_plugin_identity_jwt::|body done' <<<"$line"; then
+    return 0
+  fi
+  if grep -qE '(^|[[:space:]])(ERROR)([[:space:]]|:)' <<<"$line"; then
+    printf "\n${R}┌─ EGRESS ERROR [${ts}] ${D}(${key})${N}\n"
+    printf "${R}│${N} %s\n" "$(trunc "$line" 160)"
+    printf "${R}└─${N}\n"
   fi
   return 0
 }
@@ -1716,6 +1864,7 @@ while [[ $# -gt 0 ]]; do
     --mas)    MODE=mas; shift ;;
     --worker) MODE=worker; shift ;;
     --praxis) MODE=praxis; shift ;;
+    --egress) MODE=egress; shift ;;
     --hub)    MODE=hub; shift ;;
     --kc)     MODE=kc; shift ;;
     --api)    MODE=api; shift ;;

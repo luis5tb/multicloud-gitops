@@ -8,6 +8,8 @@
 #   acme-agent ─A─▶ MAO A2A endpoint ─A─▶ MAS orchestrator ─A─▶ praxis HUB gateway
 #     ─H─▶ lightspeed-hub A2A adapter ──▶ hub kube API (AgenticRun as the caller)
 #     ─R─▶ praxis SPOKE gateway ─U─▶ spoke kube API
+#   MAS ─A─▶ praxis EGRESS gateway ─(agent IdP token, minted as the
+#     gateway's own client)─▶ external agent (Ask Red Hat, partners)
 #
 #   Token chain (see agents/AUTHENTICATION.md):
 #     A  acme-agent           → aud=mas-a2a               MAS + hub gateway
@@ -22,6 +24,7 @@
 #   bash scripts/monitor.sh --mas           # MAO A2A endpoint only (mas-a2a)
 #   bash scripts/monitor.sh --worker        # MAS orchestrator (Temporal worker)
 #   bash scripts/monitor.sh --praxis        # Praxis hub gateway + spoke gateways
+#   bash scripts/monitor.sh --egress        # Praxis egress gateways (external agents)
 #   bash scripts/monitor.sh --hub           # lightspeed-hub adapter + agentic operator
 #   bash scripts/monitor.sh --kc            # Keycloak realm events only (AUTHORITATIVE)
 #   bash scripts/monitor.sh --api           # OCP API server token rejects (cluster-admin)
@@ -208,6 +211,8 @@ mas        ${NS_MAS}  ${SEL_MAS}
 worker     ${NS_WORKER}  ${SEL_WORKER}
 praxis     ${NS_PRAXIS}  ${SEL_PRAXIS}
            (hub = the praxis-proxy pod; spokes = praxis-spoke-<id>)
+egress     ${NS_EGRESS}  ${SEL_EGRESS}
+           (one per external agent: praxis-egress-<key>; key from the pod name)
 hub        ${NS_HUB}  ${SEL_HUB}
 operator   ${NS_OPERATOR}  ${SEL_OPERATOR}
 runcred    ${NS_HUB}  Secret watch: ls-run-token-* (creation has no log line)
@@ -224,7 +229,7 @@ ENDPOINTS
 # --endpoint / --help are how you debug an empty stream, so they work without
 # a cluster (print_endpoints needs no oc call).
 case "$MODE" in
-  help)     sed -n '2,53p' "$0"; exit 0 ;;
+  help)     sed -n '2,/^$/p' "$0" | sed '$d'; exit 0 ;;
   endpoint) print_endpoints; exit 0 ;;
 esac
 require_oc
@@ -246,6 +251,7 @@ case "$MODE" in
   mas)    follow mas    "$NS_MAS"    "$SEL_MAS" ;;
   worker) follow worker "$NS_WORKER" "$SEL_WORKER" ;;
   praxis) follow praxis "$NS_PRAXIS" "$SEL_PRAXIS" ;;
+  egress) follow egress "$NS_EGRESS" "$SEL_EGRESS" ;;
   hub)    follow hub      "$NS_HUB"      "$SEL_HUB" &
           follow operator "$NS_OPERATOR" "$SEL_OPERATOR" &
           watch_run_secrets &
@@ -259,6 +265,7 @@ case "$MODE" in
     follow mas    "$NS_MAS"    "$SEL_MAS"    &
     follow worker "$NS_WORKER" "$SEL_WORKER" &
     follow praxis "$NS_PRAXIS" "$SEL_PRAXIS" &
+    follow egress "$NS_EGRESS" "$SEL_EGRESS" &
     follow hub      "$NS_HUB"      "$SEL_HUB" &
     follow operator "$NS_OPERATOR" "$SEL_OPERATOR" &
     watch_run_secrets &

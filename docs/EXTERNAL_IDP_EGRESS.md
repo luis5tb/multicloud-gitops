@@ -115,6 +115,63 @@ whenever the node has no stored card, which is the case for nodes that
 gateway exempts exactly that GET from authentication; it is answered from
 config and mints nothing.
 
+## Caller attribution: can the agent know who asked?
+
+No. On the hub path the caller's `sub` survives every exchange (A -> H -> R ->
+U), because Keycloak exchanges keep the subject. On the egress path it can't
+ride in the token:
+
+- The minted token is the external IdP's `client_credentials` token for the
+  gateway's client. Its claims are set by that IdP (Red Hat SSO, a partner),
+  not by us: we can't add a claim, and the grant has no user in it.
+- RFC 8693 `act` (actor) needs a token-exchange grant the IdP must support and
+  trust our tokens for. Keycloak's Standard Token Exchange drops the actor, and
+  Praxis only sends `actor` with `subject: user` or `client`, not
+  `this_workload`.
+- Federating the IdP with our realm (so it could exchange our token) is the
+  external-to-internal problem in reverse, and needs the external IdP's
+  cooperation.
+
+So the agent sees the gateway's client account, and attribution of which caller
+asked stays on our side: ACME's `acme_audit` lines and MAS's task records,
+lined up with the gateway's cards in `scripts/monitor.sh --egress` by time.
+Today even Token A is a `client_credentials` token of `acme-agent`, so this is
+ACME's service account on both paths; per-user attribution needs ACME to
+obtain a token for the end user first.
+
+Sending caller attributes next to the token, as gateway-asserted headers, was
+evaluated (it works on the pinned image, see `LESSONS_LEARNED.md` section 5)
+and deliberately **not** adopted.
+
+## Monitoring
+
+`bash scripts/monitor.sh --egress` (also part of the default `--join`) follows
+every egress gateway pod (`app.kubernetes.io/name=praxis-egress-gateway`) and
+names the gateway from the pod (`praxis-egress-<key>-…`). Cards, built from
+lines captured live 2026-11-27 (`tests/scripts/fixtures/egress-gateway-live-2026-11-27.log`):
+
+| Card | Meaning |
+|---|---|
+| `EGRESS MINT + FORWARD` | Token A validated, allow-listed, a token minted and the call forwarded to the named upstream |
+| `┄─ agent card served from config` | the card GET MAS makes before a call; proves MAS was pointed at the gateway |
+| `EGRESS REJECT 401` | Token A missing, malformed or expired; nothing minted |
+| `EGRESS REJECT 403` | `azp` not allow-listed **or** the mint failed at the IdP |
+| `EGRESS NO ROUTE` | a path outside the agent's prefix |
+| `MAS OUTBOUND A2A … next hop: egress gateway <key>` | the worker sent the call to a gateway, not directly to the agent |
+
+What the gateway's logs **can't** show (the pinned image doesn't log it): a
+successful mint as such, the reason for a 403, the caller's `sub`, and the
+agent's response status.
+
+- **Mint:** `delegate()` runs in the policy filter before routing, and a failed
+  mint denies, so "route matched -> upstream selected" proves the mint
+  succeeded.
+- **Reason for a 403:** only the caller (MAS) sees it, in the response body.
+- **`sub`:** correlate with the MAS cards by time.
+
+The external IdP's mint events are not visible to us at all (unlike Keycloak's
+`--kc` feed for the hub path).
+
 ## Transport
 
 Internal ClusterIP Service, TLS on 8443 with an OpenShift service-serving

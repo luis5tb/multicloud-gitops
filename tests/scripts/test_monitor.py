@@ -526,6 +526,124 @@ class MonitorReplayTest(unittest.TestCase):
         self.assertIn("adapter.keycloak.caTrust", out)
 
 
+EGRESS_FIXTURE = ROOT / "tests" / "scripts" / "fixtures" / "egress-gateway-live-2026-11-27.log"
+
+
+def _egress_lines(*needles: str) -> list[tuple[str, str]]:
+    """Live egress-gateway lines (oc 4.19 prefix, ANSI intact) containing any needle."""
+    out = []
+    for line in EGRESS_FIXTURE.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#") or not line:
+            continue
+        if not needles or any(n in ANSI.sub("", line) for n in needles):
+            out.append(("egress", line))
+    return out
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required to replay the monitor")
+class EgressMonitorTest(unittest.TestCase):
+    """Praxis egress gateways, replayed from lines captured live on 2026-11-27."""
+
+    def setUp(self) -> None:
+        self.monitor = MonitorHarness()
+
+    def tearDown(self) -> None:
+        self.monitor.close()
+
+    def test_successful_call_cards_mint_and_forward_once_per_request(self) -> None:
+        out = self.monitor.run(_egress_lines("route matched path=/api", "upstream selected",
+                                             "claim map", "body done"))
+        self.assertEqual(out.count("EGRESS MINT + FORWARD"), 2)  # message/send + message/stream
+        self.assertIn("EGRESS MINT + FORWARD [09:59:35]", out)
+        self.assertIn("(ask-red-hat)", out)
+        self.assertIn("FORWARD : access.stage.redhat.com:443/api/ask/v1/a2a/", out)
+        self.assertIn("as the gateway's client", out)
+        self.assertIn("the agent sees ONE account, not the caller", out)
+        self.assertIn("sub not logged by Praxis", out)
+
+    def test_card_served_from_config_is_one_dim_line(self) -> None:
+        out = self.monitor.run(_egress_lines('filter="static_response"'))
+        self.assertEqual(out.count("agent card served from config"), 2)
+        self.assertNotIn("┌─", out)
+
+    def test_rejections_explain_what_the_log_cannot_say(self) -> None:
+        out = self.monitor.run(_egress_lines('status=401', 'status=403'))
+        self.assertEqual(out.count("EGRESS REJECT"), 3)
+        self.assertIn("Token A missing, malformed or expired — nothing minted", out)
+        self.assertIn("OR the MINT failed at the agent's IdP", out)
+        self.assertIn("(ask-red-hat)", out)  # key from praxis-egress-ask-red-hat-<rs>-<pod>
+
+    def test_path_outside_the_prefix_is_a_single_no_route_card(self) -> None:
+        out = self.monitor.run(_egress_lines("/nope", 'filter="router"'))
+        self.assertEqual(out.count("EGRESS NO ROUTE"), 1)
+        self.assertNotIn("EGRESS MINT + FORWARD", out)  # "no route matched" ⊃ "route matched"
+        self.assertNotIn("EGRESS REJECT", out)
+
+    def test_whole_live_capture_never_prints_noise_or_tokens(self) -> None:
+        out = self.monitor.run(_egress_lines())
+        self.assertNotIn("claim map", out)
+        self.assertNotIn("GOMAXPROCS", out)
+        self.assertNotIn("Bearer ", out)
+        self.assertNotIn("eyJ", out)
+
+    def test_key_strips_the_pod_hashes(self) -> None:
+        out = self.monitor.run([
+            ("egress", "[pod/praxis-egress-foo-bar-6f7c9d8b5d-x2k9q/praxis-egress-gateway] "
+                       '2026-11-27T10:00:00Z WARN request rejected by filter filter="policy" status=401'),
+        ])
+        self.assertIn("EGRESS REJECT [10:00:00] 401 (foo-bar)", out)
+
+    def test_egress_dns_sidecar_error_surfaces(self) -> None:
+        out = self.monitor.run([
+            ("egress", "[pod/praxis-egress-ask-red-hat-54d56d97bf-5slqq/dns-ipv4only] "
+                       "[ERROR] plugin/errors: 2 sso.stage.redhat.com. A: read udp: i/o timeout"),
+        ])
+        self.assertIn("EGRESS DNS SIDECAR ERROR", out)
+
+    def test_worker_names_the_egress_gateway_as_next_hop(self) -> None:
+        out = self.monitor.run([
+            ("worker", "2026-11-27 10:00:01,000 INFO [mas.a2a] A2A stream_message to "
+                       "agent=Ask_Red_Hat_Agent url=https://praxis-egress-ask-red-hat.praxis-proxy.svc:8443"
+                       "/api/ask/v1/a2a/ auth=bearer"),
+            ("worker", "2026-11-27 10:00:02,000 INFO [mas.a2a] A2A stream_message to "
+                       "agent=Foo url=https://foo.example.com/a2a/ auth=bearer"),
+        ])
+        self.assertIn("next hop: egress gateway ask-red-hat mints the agent's own IdP token", out)
+        self.assertIn("DIRECT to the agent: it receives A itself", out)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required to replay the monitor")
+class OcPrefixFormatTest(unittest.TestCase):
+    """oc 4.19 prefixes `oc logs -l` lines as "[pod/<pod>/<container>]" (live
+    2026-11-27); the monitor used to take the container for the pod name."""
+
+    def setUp(self) -> None:
+        self.monitor = MonitorHarness()
+
+    def tearDown(self) -> None:
+        self.monitor.close()
+
+    def test_spoke_is_named_from_the_pod_not_the_container(self) -> None:
+        out = self.monitor.run([
+            ("praxis", "[pod/praxis-spoke-mario-ipi-69fd9dfc74-f4sgb/praxis-spoke-gateway] "
+                       "2026-11-27T10:00:12Z DEBUG praxis_filter: route matched "
+                       "path=/api/v1/pods cluster=spoke-api"),
+            ("praxis", "[pod/praxis-proxy-6848f5db5c-mp8hl/praxis-proxy] 2026-11-27T10:00:08Z "
+                       "DEBUG praxis_filter: route matched path=/a2a cluster=hub-adapter"),
+        ])
+        self.assertIn("PRAXIS SPOKE ROUTE [10:00:12] (spoke:mario-ipi-69fd9dfc74-f4sgb)", out)
+        self.assertNotIn("spoke:gateway", out)
+        self.assertIn("PRAXIS HUB ROUTE", out)
+
+    def test_praxis_dns_sidecar_error_is_recognised_in_both_formats(self) -> None:
+        for prefix in ("[pod/praxis-proxy-6848f5db5c-mp8hl/dns-ipv4only] ",
+                       "[praxis-proxy/praxis-proxy-6848f5db5c-mp8hl:dns-ipv4only] "):
+            with self.subTest(prefix=prefix):
+                out = self.monitor.run([("praxis", prefix + "[ERROR] plugin/errors: 2 "
+                                         "keycloak.apps.example. A: i/o timeout")])
+                self.assertIn("PRAXIS DNS SIDECAR ERROR", out)
+
+
 class KeycloakFeedTest(unittest.TestCase):
     """The HTTP side of --kc, driven by a fake curl/oc on PATH.
 
@@ -622,7 +740,7 @@ class MonitorEntryPointTest(unittest.TestCase):
         endpoints = subprocess.run(["bash", str(MAIN), "--endpoint"],
                                    capture_output=True, text=True, env=env, check=True)
         for needle in ("lightspeed-hub", "praxis-proxy", "keycloak-admin-user",
-                       "praxis-spoke"):
+                       "praxis-spoke", "praxis-egress-gateway"):
             self.assertIn(needle, endpoints.stdout)
 
     def test_shell_syntax(self) -> None:

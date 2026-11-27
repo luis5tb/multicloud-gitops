@@ -71,7 +71,10 @@ spec:
               esac
               cp /etc/praxis/config-template/praxis.yaml /etc/praxis/config/praxis.yaml
               sed "s|__PRAXIS_EGRESS_CLIENT_ID__|$CLIENT_ID|" /etc/praxis/config-template/policy.yaml > /etc/praxis/config/policy.yaml
-              grep -q "client_id: \"$CLIENT_ID\"" /etc/praxis/config/policy.yaml
+              if grep -q "__PRAXIS_EGRESS_CLIENT_ID__" /etc/praxis/config/policy.yaml \
+                 || ! grep -qF "$CLIENT_ID" /etc/praxis/config/policy.yaml; then
+                echo "could not write the client ID into policy.yaml" >&2; exit 1
+              fi
           env:
             - name: CLIENT_ID
               valueFrom:

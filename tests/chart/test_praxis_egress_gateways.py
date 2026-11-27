@@ -369,3 +369,10 @@ def test_client_id_from_existing_secret_key() -> None:
     )
     init = _get(res, "Deployment")["spec"]["template"]["spec"]["initContainers"][0]
     assert init["env"][0]["valueFrom"]["secretKeyRef"] == {"name": "my-sso", "key": "id"}
+
+
+def test_init_container_check_is_quote_agnostic_and_loud() -> None:
+    script = _get(_resources(*_vault_id_args()), "Deployment")["spec"]["template"]["spec"]["initContainers"][0]["args"][0]
+    assert 'grep -q "__PRAXIS_EGRESS_CLIENT_ID__"' in script
+    assert 'grep -qF "$CLIENT_ID"' in script
+    assert "could not write the client ID into policy.yaml" in script

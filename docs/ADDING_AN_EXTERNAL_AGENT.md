@@ -210,6 +210,8 @@ After the sync, from a pod the gateway's NetworkPolicy admits (`mas-worker` or
    is answered.
 3. The same Token A sent **directly** to the agent is refused. That proves the
    gateway replaced it.
+4. `bash scripts/monitor.sh --egress` shows an `EGRESS MINT + FORWARD` card
+   for `foo` per call, and an `EGRESS REJECT` card for each refused one.
 
 ### 7. Add the agent to the MAS blueprint
 
@@ -286,3 +288,4 @@ differs, give it its own card file too.
 | The agent answers 401 | it wants a different `audience` or `scopes`, or the token is valid but the account lacks access |
 | MAS calls the agent directly (gateway bypassed) | the node has a stored `agent_card`, or the gateway has no `agentCard` and passes the upstream's card through |
 | 404 from the gateway | path outside the `upstreamURL` prefix |
+| `EGRESS REJECT 403` in the monitor, reason unknown | the gateway doesn't log it: read the 403 body MAS received (`delegation.idp_rejected`, `delegation.scope_too_broad`, or `not an allow-listed caller`) |
