@@ -176,6 +176,58 @@ def test_keycloak_creates_dedicated_empty_remediation_group():
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required")
+def test_keycloak_writer_limited_to_listed_spokes_and_acme_membership_opt_in():
+    def without(args: list[str], *keys: str) -> list[str]:
+        pairs = zip(args[::2], args[1::2])
+        return [part for flag, value in pairs if not value.startswith(keys) for part in (flag, value)]
+
+    two_spokes = without(
+        KEYCLOAK_EXEC,
+        "keycloak.adminGroupName=", "keycloak.exchangeRoles.remediation.groups[0]=",
+    ) + _sets(
+        ("keycloak.spokeGatewayExchanger.spokeAudiences[1]", "praxis-spoke-west"),
+        ("keycloak.spokeGatewayExecExchanger.spokeAudiences[1]", "praxis-spoke-west"),
+        ("keycloak.exchangeRoles.remediation.groups[0]", "acme-remediation-east"),
+        ("keycloak.exchangeRoles.remediation.spokeAudiences[0]", "praxis-spoke-east"),
+    )
+
+    def realm_for(*extra: str) -> dict:
+        docs = _docs(_render(KEYCLOAK, "keycloak-oidc", *two_spokes, *extra).stdout)
+        return next(d["spec"]["realm"] for d in docs if d["kind"] == "KeycloakRealmImport")
+
+    realm = realm_for()
+    roles = {aud: [r["name"] for r in items] for aud, items in realm["roles"]["client"].items()}
+    assert roles["praxis-spoke-east"] == ["reader", "writer"]
+    assert roles["praxis-spoke-west"] == ["reader"]
+    groups = {g["name"]: g.get("clientRoles") for g in realm["groups"]}
+    assert groups["acme-remediation-east"] == {
+        "lightspeed-hub-a2a": ["agenticrun-approver"],
+        "praxis-spoke-east": ["writer"],
+    }
+    scopes = realm["clientScopeMappings"]
+    assert {"client": "praxis-spoke-gateway-exec", "roles": ["reader", "writer"]} in scopes["praxis-spoke-east"]
+    assert {"client": "praxis-spoke-gateway-exec", "roles": ["reader"]} in scopes["praxis-spoke-west"]
+
+    def acme_groups(realm_doc: dict) -> list[str]:
+        return next(u for u in realm_doc["users"] if u.get("serviceAccountClientId") == "acme-agent")["groups"]
+
+    flag = "keycloak.exchangeRoles.remediation.includeAcmeServiceAccount"
+    assert acme_groups(realm) == ["/acme-agent-rca"]  # opt-in is off by default
+    for off in (["--set", f"{flag}=false"], ["--set-string", f"{flag}=false"], ["--set-string", f"{flag}="]):
+        assert acme_groups(realm_for(*off)) == ["/acme-agent-rca"], off
+    for on in (["--set", f"{flag}=true"], ["--set-string", f"{flag}=true"]):
+        assert acme_groups(realm_for(*on)) == ["/acme-agent-rca", "/acme-remediation-east"], on
+
+    unknown = _render(
+        KEYCLOAK, "keycloak-oidc", *two_spokes,
+        *_sets(("keycloak.exchangeRoles.remediation.spokeAudiences[1]", "praxis-spoke-north")),
+        check=False,
+    )
+    assert unknown.returncode != 0
+    assert "not a registered spoke audience" in unknown.stderr
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is required")
 def test_keycloak_rejects_execution_audience_without_matching_exchange():
     orphan = _render(
         KEYCLOAK,
@@ -543,12 +595,12 @@ def test_lightspeed_hub_execution_dependencies_fail_closed():
     assert "spokeExecutorRBAC.namespaces contains forbidden namespace" in blocked_release_namespace.stderr
 
 
-def test_standalone_variant_execution_rollout_is_ordered_and_scoped():
-    """Execution switches may be enabled phase by phase, never out of order.
+def test_standalone_variant_enables_a_consistent_scoped_execution_path():
+    """Greenfield: one values file enables Keycloak, Praxis and Hub together.
 
-    Keycloak first, then the Praxis execution gateways, then the Hub path.
     The lab grants write access only on the remote target (mario-ipi), so
-    the hub chart must not render spoke writer bindings.
+    the hub chart must not render spoke writer bindings, and ACME's token
+    debug/override must be off once its account may approve and write.
     """
     variant = yaml.safe_load(VARIANT.read_text())
     applications = variant["clusterGroup"]["applications"]
@@ -559,54 +611,53 @@ def test_standalone_variant_execution_rollout_is_ordered_and_scoped():
     keycloak = overrides("keycloak-oidc")
     praxis = overrides("praxis-proxy")
     hub = overrides("lightspeed-hub")
+    acme = overrides("acme-agent")
     keycloak_on = keycloak.get("keycloak.spokeGatewayExecExchanger.enabled") == "true"
     praxis_on = praxis.get("spokeGatewayConfig.execution.enabled") == "true"
     hub_on = "adapter.executionTokenAudience" in hub
-
+    assert keycloak_on == praxis_on == hub_on, "enable the execution path in all three charts together"
     assert keycloak_on == ("keycloak.hubExchange.executionTokenAudience" in keycloak)
     assert hub_on == ("agenticOperator.config.gatewayExecutionServerURLTemplate" in hub)
-    assert not praxis_on or keycloak_on, "enable Keycloak execution exchange before Praxis execution gateways"
-    assert not hub_on or praxis_on, "enable Praxis execution gateways before the Hub execution path"
-    if keycloak_on:
-        # ACME's token may become the shared remediation principal: its
-        # token debug/override must already be off.
-        acme = overrides("acme-agent")
-        assert acme.get("auth.tokenDebug.enabled") != "true"
-        assert acme.get("auth.tokenOverride.enabled") != "true"
-        remediation = keycloak["keycloak.exchangeRoles.remediation.groups[0]"]
-        ordinary = {value for key, value in keycloak.items() if key.startswith("keycloak.exchangeRoles.groups[")}
-        assert remediation not in ordinary | {keycloak.get("keycloak.adminGroupName")}
-    if hub_on:
-        assert hub["adapter.hubRunApproversGroup"] == "keycloak:lightspeed-hub-a2a:agenticrun-approver"
     assert "spokeExecutorRBAC.enabled" not in hub
+    if not keycloak_on:
+        return
+
+    assert acme.get("auth.tokenDebug.enabled") != "true"
+    assert acme.get("auth.tokenOverride.enabled") != "true"
+    remediation = keycloak["keycloak.exchangeRoles.remediation.groups[0]"]
+    ordinary = {value for key, value in keycloak.items() if key.startswith("keycloak.exchangeRoles.groups[")}
+    assert remediation not in ordinary | {keycloak.get("keycloak.adminGroupName")}
+    writer = {value for key, value in keycloak.items()
+              if key.startswith("keycloak.exchangeRoles.remediation.spokeAudiences[")}
+    spokes = {value for key, value in keycloak.items()
+              if key.startswith("keycloak.spokeGatewayExecExchanger.spokeAudiences[")}
+    assert writer and writer <= spokes, "list the writer spokes explicitly"
+    assert hub["adapter.hubRunApproversGroup"] == "keycloak:lightspeed-hub-a2a:agenticrun-approver"
 
 
-LAB = ROOT / "scripts/remediation-lab"
+SPOKE_WRITER_RBAC = ROOT / "scripts/remediation/spoke-writer-rbac.sh"
 
 
-def test_remediation_lab_phase_patches_apply_in_order(tmp_path):
-    """The committed lab patches still apply to the committed values file."""
-    target = tmp_path / "variants/standalone/values-standalone.yaml"
-    target.parent.mkdir(parents=True)
-    target.write_text(VARIANT.read_text())
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    for phase in "abcd":
-        patch = LAB / f"phase-{phase}.patch"
-        subprocess.run(["git", "apply", "--check", str(patch)], cwd=tmp_path, check=True)
-        subprocess.run(["git", "apply", str(patch)], cwd=tmp_path, check=True)
-        yaml.safe_load(target.read_text())
-
-
-def test_remediation_lab_writer_rbac_matches_chart_rules():
-    """mario-ipi's hand-applied writer RBAC mirrors the chart's reviewed rules."""
-    docs = {d["kind"]: d for d in yaml.safe_load_all((LAB / "mario-ipi-writer-rbac.yaml").read_text()) if d}
+def test_spoke_writer_rbac_script_mirrors_chart_rules():
+    """The spoke-side writer RBAC uses the chart's reviewed rules only."""
+    out = subprocess.run(
+        ["bash", str(SPOKE_WRITER_RBAC), "mario-ipi", "payments", "payments-canary"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    docs = [d for d in yaml.safe_load_all(out) if d]
     chart_rules = yaml.safe_load((HUB / "values.yaml").read_text())["spokeExecutorRBAC"]["rules"]
-    assert docs["ClusterRole"]["rules"] == chart_rules
-    binding = docs["RoleBinding"]
-    assert binding["metadata"]["namespace"] == "payments"
-    assert binding["subjects"] == [{
-        "kind": "Group", "apiGroup": "rbac.authorization.k8s.io",
-        "name": "keycloak:praxis-spoke-mario-ipi:writer",
-    }]
-    assert binding["roleRef"]["name"] == docs["ClusterRole"]["metadata"]["name"]
-    assert set(docs) == {"ClusterRole", "RoleBinding"}
+    role = next(d for d in docs if d["kind"] == "ClusterRole")
+    bindings = [d for d in docs if d["kind"] == "RoleBinding"]
+    assert role["rules"] == chart_rules
+    assert [b["metadata"]["namespace"] for b in bindings] == ["payments", "payments-canary"]
+    for binding in bindings:
+        assert binding["subjects"] == [{
+            "kind": "Group", "apiGroup": "rbac.authorization.k8s.io",
+            "name": "keycloak:praxis-spoke-mario-ipi:writer",
+        }]
+        assert binding["roleRef"]["name"] == role["metadata"]["name"]
+    assert {d["kind"] for d in docs} == {"ClusterRole", "RoleBinding"}
+    for forbidden in ("default", "openshift-config", "kube-system", "lightspeed-hub"):
+        refused = subprocess.run(["bash", str(SPOKE_WRITER_RBAC), "mario-ipi", forbidden],
+                                 capture_output=True, text=True)
+        assert refused.returncode != 0

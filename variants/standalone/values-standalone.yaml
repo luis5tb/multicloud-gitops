@@ -359,30 +359,39 @@ clusterGroup:
           value: "true"
         - name: keycloak.exchangeRoles.groups[0]
           value: acme-agent-rca
-        # REMEDIATION EXECUTION PATH (DISABLED, COMMENTED OUT): keep the
-        # read-only run token (aud praxis-spoke-gateway) separate from R_exec
-        # (aud praxis-spoke-gateway-exec). Only the explicitly approved
-        # remediation group receives agenticrun-approver and writer roles;
-        # the normal acme-agent-rca group remains read/creator-only.
-        # Before enabling on this already-imported realm, create/configure the
-        # execution exchanger and audience/role mappers through the Keycloak
-        # Admin API as documented in charts/all/keycloak-oidc/README.md.
-        # - name: keycloak.hubExchange.executionTokenAudience
-        #   value: praxis-spoke-gateway-exec
-        # - name: keycloak.spokeGatewayExecExchanger.enabled
-        #   value: "true"
-        # - name: keycloak.spokeGatewayExecExchanger.vaultKey
-        #   value: secret/data/global/praxis-spoke-gateway-exec
-        # Keep this list exactly aligned with spokeGatewayExchanger.spokeAudiences.
-        # - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[0]
-        #   value: praxis-spoke-hub
-        # - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[1]
-        #   value: praxis-spoke-mario-ipi
-        # This group must be a real, deliberately restricted approval group.
-        # Its members also need ordinary exchangeRoles.groups membership if
-        # Execution should retain the reader permissions alongside writer.
-        # - name: keycloak.exchangeRoles.remediation.groups[0]
-        #   value: cluster-admins
+        # REMEDIATION EXECUTION PATH (ENABLED): the read-only run token (aud
+        # praxis-spoke-gateway) stays separate from R_exec (aud
+        # praxis-spoke-gateway-exec). Lab scope: ACME's service
+        # account is a SHARED principal that both starts and approves runs;
+        # it may write only on mario-ipi (namespace payments, bound on that
+        # spoke). A fresh realm import creates everything below; an
+        # already-imported realm needs scripts/remediation/
+        # keycloak_execution_brownfield.py first (see
+        # docs/A2A_REMEDIATION_BROWNFIELD.md).
+        - name: keycloak.hubExchange.executionTokenAudience
+          value: praxis-spoke-gateway-exec
+        - name: keycloak.spokeGatewayExecExchanger.enabled
+          value: "true"
+        - name: keycloak.spokeGatewayExecExchanger.vaultKey
+          value: secret/data/global/praxis-spoke-gateway-exec
+        # Must stay exactly aligned with spokeGatewayExchanger.spokeAudiences
+        # (render guard); remediation.spokeAudiences below limits writer.
+        - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[0]
+          value: praxis-spoke-hub
+        - name: keycloak.spokeGatewayExecExchanger.spokeAudiences[1]
+          value: praxis-spoke-mario-ipi
+        # Dedicated group receiving agenticrun-approver (hub) and writer
+        # (only the spokes listed next). The normal acme-agent-rca group
+        # stays creator/reader-only.
+        - name: keycloak.exchangeRoles.remediation.groups[0]
+          value: acme-remediation-mario-ipi
+        - name: keycloak.exchangeRoles.remediation.spokeAudiences[0]
+          value: praxis-spoke-mario-ipi
+        # Shared-principal opt-in: ACME's own service account joins the
+        # remediation group, so ACME can approve and remediate. Approval is
+        # not attributable to a person; restrict who can reach ACME's UI.
+        - name: keycloak.exchangeRoles.remediation.includeAcmeServiceAccount
+          value: "true"
     praxis-proxy:
       name: praxis-proxy
       namespace: praxis-proxy
@@ -545,20 +554,20 @@ clusterGroup:
         # acme-agent -- the spoke gateways must allow-list THAT client.
         - name: spokeGatewayConfig.allowedCallers[0]
           value: lightspeed-hub-a2a
-        # REMEDIATION EXECUTION GATEWAY (DISABLED, COMMENTED OUT). Read
-        # gateways above remain praxis-spoke-<key>; execution gets the distinct
-        # praxis-spoke-<key>-exec Service and accepts only the R_exec audience.
-        # Keycloak creates this client/secret and its target-namespace copy.
-        # - name: spokeGatewayConfig.execution.enabled
-        #   value: "true"
-        # - name: spokeGatewayConfig.execution.exchangeClient.clientId
-        #   value: praxis-spoke-gateway-exec
-        # - name: spokeGatewayConfig.execution.exchangeClient.secretName
-        #   value: praxis-spoke-gateway-exec-client
-        # - name: spokeGatewayConfig.execution.inboundAudience
-        #   value: praxis-spoke-gateway-exec
-        # - name: spokeGatewayConfig.execution.allowedCallers[0]
-        #   value: lightspeed-hub-a2a
+        # REMEDIATION EXECUTION GATEWAYS (ENABLED). Read gateways above remain
+        # praxis-spoke-<key>; execution gets the distinct praxis-spoke-<key>-exec
+        # Service and accepts only the R_exec audience. Writes still need a
+        # writer RoleBinding on the target spoke (only mario-ipi/payments).
+        - name: spokeGatewayConfig.execution.enabled
+          value: "true"
+        - name: spokeGatewayConfig.execution.exchangeClient.clientId
+          value: praxis-spoke-gateway-exec
+        - name: spokeGatewayConfig.execution.exchangeClient.secretName
+          value: praxis-spoke-gateway-exec-client
+        - name: spokeGatewayConfig.execution.inboundAudience
+          value: praxis-spoke-gateway-exec
+        - name: spokeGatewayConfig.execution.allowedCallers[0]
+          value: lightspeed-hub-a2a
         # 32 MiB response ceiling (Praxis default 10 MiB): a full
         # `kubectl logs` of the demo payments-api pod is ~12.4 MB.
         - name: spokeGatewayConfig.maxResponseBytes
@@ -661,9 +670,10 @@ clusterGroup:
           # it became "3.425697e+07", which then fails to parse as an image
           # reference -- InvalidImageName). Always quote tags that could be
           # all-digits.
-          # Post-Task-A rebuild (OLS/cluster-routing code removed): built
-          # from agents/acme_agent at git short SHA ea132e00.
-          value: "ea132e00"
+          # A2A remediation build (approval lifecycle fixes, pinned ADK
+          # 2.10.0 / A2A SDK 1.2.1); built from agents/acme_agent. This chart
+          # supports tags only: use a unique, never-reused tag.
+          value: "a2a-rem-20261126"
         # Trust the cluster's managed ingress CA for the HTTPS Praxis route
         # and Keycloak token endpoint, keeping certificate verification on.
         - name: auth.caBundleConfigMap.name
@@ -689,15 +699,18 @@ clusterGroup:
         # Debug-only: the UI generates a private, unguessable nonce and can
         # retrieve the selected outbound bearer token once from that request.
         # Disable this when not actively inspecting tokens.
+        # Kept OFF: ACME's token can approve and remediate (shared principal
+        # above), so anyone reaching the UI could otherwise copy a
+        # write-capable token.
         - name: auth.tokenDebug.enabled
-          value: "true"
+          value: "false"
         - name: auth.tokenDebug.ttlSeconds
           value: "300"
         # Test-only: paste a token (e.g. one copied from the debug view above)
         # for the next request, to exercise expiry and renewal paths. Disable
         # outside test environments.
         - name: auth.tokenOverride.enabled
-          value: "true"
+          value: "false"
         # auth.keycloak.issuerUrl and .tokenUrl derive from
         # global.clusterBaseDomain + global.keycloakRealm (the token URL is the
         # issuer + /protocol/openid-connect/token); override only to diverge.
@@ -761,8 +774,11 @@ clusterGroup:
         # A2A-capable MAS build.
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
+        # A2A remediation build (outbound HITL, strict option validation).
+        # Same image for mao-api, mao-worker and mao-a2a. Optionally pin
+        # image.digest (sha256:...) from the push; the chart prefers it.
         - name: image.tag
-          value: "a6674f23f9d0"
+          value: "a2a-rem-20261126"
         - name: image.pullPolicy
           value: Always
         # DEBUG temporarily to capture the orchestrator's planning LLM
@@ -800,8 +816,11 @@ clusterGroup:
       overrides:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
+        # A2A remediation build (outbound HITL, strict option validation).
+        # Same image for mao-api, mao-worker and mao-a2a. Optionally pin
+        # image.digest (sha256:...) from the push; the chart prefers it.
         - name: image.tag
-          value: "a6674f23f9d0"
+          value: "a2a-rem-20261126"
         - name: image.pullPolicy
           value: Always
         # TEMPORARY public Route, re-enabled for blueprint setup (9f2f5687):
@@ -816,7 +835,7 @@ clusterGroup:
         # Route only after switching identity.providerMode to keycloak with a
         # dedicated audience (mas-api) and a real identity.adminAllowedUsers.
         - name: route.enabled
-          value: "true"
+          value: "false"
         # DEV MODE: Accept any token without validation (for testing/blueprint setup)
         # WARNING: Do not use in production - no authentication security!
         # Only acceptable without the public Route above (see its comment).
@@ -851,8 +870,11 @@ clusterGroup:
       overrides:
         - name: image.repository
           value: quay.io/ltomasbo/mas-api
+        # A2A remediation build (outbound HITL, strict option validation).
+        # Same image for mao-api, mao-worker and mao-a2a. Optionally pin
+        # image.digest (sha256:...) from the push; the chart prefers it.
         - name: image.tag
-          value: "a6674f23f9d0"
+          value: "a2a-rem-20261126"
         - name: image.pullPolicy
           value: Always
         # PHASE 2: Enable after creating blueprint and obtaining ACME's principal
@@ -996,13 +1018,12 @@ clusterGroup:
           value: "true"
         - name: adapter.runTokenAudience
           value: praxis-spoke-gateway
-        # REMEDIATION EXECUTION PATH (DISABLED, COMMENTED OUT). The adapter
-        # requests this audience only for approved Execution; Analysis and
-        # Verification keep using the ordinary run token above. The two token
-        # audiences must remain distinct and live aud/group claims must be
-        # verified before enabling.
-        # - name: adapter.executionTokenAudience
-        #   value: praxis-spoke-gateway-exec
+        # REMEDIATION EXECUTION PATH (ENABLED). The adapter requests this
+        # audience only for approved Execution; Analysis and Verification keep
+        # using the ordinary run token above. The two audiences must stay
+        # distinct; the runbook's token gate checks the live claims.
+        - name: adapter.executionTokenAudience
+          value: praxis-spoke-gateway-exec
         # adapter.keycloak.issuerUrl/tokenUrl derive from
         # global.clusterBaseDomain + global.keycloakRealm; override only to
         # diverge.
@@ -1014,8 +1035,9 @@ clusterGroup:
           value: quay.io/ltomasbo/lightspeed-hub-a2a-adapter
         # poc4: --inbound-hub-token and --run-token-audience (hub-gateway
         # exchange chain); also serves the agent card under /a2a (poc3).
+        # A2A remediation build: execution approvals, R_exec, per-run locking.
         - name: adapter.image.tag
-          value: "poc4"
+          value: "a2a-rem-20261126"
         # Repo C operator image pin (built from the
         # lightspeed-agentic-operator repo, branch a2a-support).
         # a2a-gw: gateway credential mode does no spoke management (no
@@ -1023,12 +1045,16 @@ clusterGroup:
         # docs/GATEWAY_MODE_SCOPED_TOKEN_EXCHANGE.md s3.2.
         - name: agenticOperator.image.repository
           value: quay.io/ltomasbo/lightspeed-agentic-operator
+        # A2A remediation build: Execution gateway credential mode,
+        # selector-aware credential pause, Verification resume fix.
         - name: agenticOperator.image.tag
-          value: "a2a-gw"
+          value: "a2a-rem-20261126"
         # Sandbox image the operator runs each step in (same image as the
         # earlier mao-poc-rca setup; Konflux floating tag -- upstream has no
         # versioned release yet). Without a sandbox-pod-spec every run failed
         # with `base PodSpec with at least one container is required`.
+        # REPLACE with a tested sandbox build pinned BY DIGEST: it must support
+        # Execution and Verification with the gateway kubeconfig.
         - name: agenticOperator.sandbox.image
           value: quay.io/redhat-user-workloads/crt-nshift-lightspeed-tenant/lightspeed-agentic-sandbox:main
         # Agent configuration (LLMProvider + Agent named adapter.runAgent +
@@ -1061,8 +1087,8 @@ clusterGroup:
         # Optional Execution-only endpoint; the operator selects this URL and
         # token-execution only for the Execution stage. Analysis/Verification
         # continue using gatewayServerURLTemplate and token-a.
-        # - name: agenticOperator.config.gatewayExecutionServerURLTemplate
-        #   value: https://praxis-spoke-{targetCluster}-exec.praxis-proxy.svc.cluster.local:8443
+        - name: agenticOperator.config.gatewayExecutionServerURLTemplate
+          value: https://praxis-spoke-{targetCluster}-exec.praxis-proxy.svc.cluster.local:8443
         - name: agenticOperator.config.gatewayCASecret
           value: praxis-spoke-gateway-ca
         # Fail-fast allow-list of target clusters (the adapter's
@@ -1099,19 +1125,21 @@ clusterGroup:
           value: "true"
         - name: spokeReaderRBAC.groups[0]
           value: keycloak:praxis-spoke-hub:reader
-        # REMEDIATION EXECUTION AUTHORIZATION (DISABLED, COMMENTED OUT).
-        # H's audience-scoped approver role authorizes decisions on
-        # AgenticRunApprovals; the R_exec->U_exec role group is separately
-        # bound to the enumerated writer ClusterRole by namespaced RoleBindings
-        # only in this explicit workload-namespace allow-list. `payments` is
-        # the demo app namespace from agenticrun_test.yaml, not enabled here.
+        # REMEDIATION EXECUTION AUTHORIZATION. H's audience-scoped approver
+        # role authorizes decisions on AgenticRunApprovals (enabled below);
+        # the R_exec->U_exec role group is separately bound to the enumerated
+        # writer ClusterRole by namespaced RoleBindings only in an explicit
+        # workload-namespace allow-list.
         # The default rules omit Secrets and pods/exec, pods/attach, and
         # pods/portforward, but within an allowed namespace they can still run
         # workloads as any ServiceAccount and mount its Secrets (similar to
         # Kubernetes edit). Keep privileged SAs out or add admission policy.
         # For a separate spoke, create the RoleBindings on that spoke cluster.
-        # - name: adapter.hubRunApproversGroup
-        #   value: keycloak:lightspeed-hub-a2a:agenticrun-approver
+        # Lab target is mario-ipi/payments: its writer RoleBinding is applied
+        # ON mario-ipi (scripts/remediation/spoke-writer-rbac.sh), so
+        # spokeExecutorRBAC stays disabled here (no hub write grants).
+        - name: adapter.hubRunApproversGroup
+          value: keycloak:lightspeed-hub-a2a:agenticrun-approver
         # - name: spokeExecutorRBAC.enabled
         #   value: "true"
         # - name: spokeExecutorRBAC.groups[0]
