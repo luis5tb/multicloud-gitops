@@ -191,6 +191,13 @@ bootstrap Job and rotation CronJob publish the `keycloak-oidc-ca` ConfigMap in
 `identity.keycloakCaTrust.configMapName`/`configMapKey` only when the Keycloak
 chart uses a different name/key.
 
+`identity.serviceCaTrust.enabled: true` additionally appends the OpenShift
+service CA (the auto-injected `openshift-service-ca.crt` ConfigMap) for
+in-cluster TLS Services such as the praxis-proxy egress gateways. mas-a2a
+needs it whenever a blueprint node points at one, because it builds the plan
+and fetches the node's card itself; it requires `keycloakCaTrust.enabled` and
+`providerMode: keycloak`. The gateway's NetworkPolicy must admit mas-a2a too.
+
 Each MAS pod mounts that ConfigMap read-only. An init container using the exact
 runtime image validates the image's existing system/public CA bundle and the
 mounted private CA, then appends the private CA to the existing roots in a

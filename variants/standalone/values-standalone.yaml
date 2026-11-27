@@ -906,6 +906,12 @@ clusterGroup:
           value: "30"
         - name: identity.keycloakCaTrust.enabled
           value: "true"
+        # ...and the OpenShift service CA: this service builds the plan and
+        # fetches each A2A node's card itself, including the internal
+        # praxis-egress-ask-red-hat gateway (seen live 2026-11-27: the first
+        # Ask Red Hat request failed here before the worker ever ran).
+        - name: identity.serviceCaTrust.enabled
+          value: "true"
       # PHASE 1: Dormant by default (a2a.enabled=false)
       # See README.md "Phase 2: Enable MAS A2A Routing" for activation steps
     lightspeed-hub:

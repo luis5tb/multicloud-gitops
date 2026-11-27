@@ -157,6 +157,16 @@ identity:
       limits:
         cpu: 100m
         memory: 128Mi
+  # Also trust the OpenShift service CA (the openshift-service-ca.crt ConfigMap
+  # OpenShift injects into every namespace), for in-cluster TLS Services signed
+  # by it -- e.g. praxis-proxy's egress gateways: this service builds the plan
+  # and fetches each A2A node's card itself (A2AAgentNodeFactory), before the
+  # worker runs it. Appended to the bundle the keycloakCaTrust init container
+  # builds, so it requires keycloakCaTrust.enabled (and providerMode keycloak).
+  serviceCaTrust:
+    enabled: false
+    configMapName: openshift-service-ca.crt
+    configMapKey: service-ca.crt
 
 langfuse:
   enabled: "false"

@@ -417,6 +417,18 @@ re-check each when the image is bumped.
 
 ## 7. MAS (orchestrator, inbound A2A, worker)
 
+- **The inbound A2A service (mas-a2a) calls A2A nodes too, not only the
+  worker.** It builds the plan in-process, and `A2AAgentNodeFactory.create`
+  fetches each node's agent card before any Temporal activity runs. The first
+  real Ask Red Hat request through the egress gateway failed in the mao-a2a
+  pod with `Network communication error fetching agent card from
+  https://praxis-egress-ask-red-hat.praxis-proxy.svc:8443/...` (an empty
+  message: a TCP timeout). The gateway's NetworkPolicy admitted only
+  mas-worker and mas-api, and mas-a2a's CA bundle lacked the service CA.
+  Nothing caught it sooner because the live verification used a test pod
+  labelled `mas-worker` and the blueprint save (mas-api); nobody had sent a
+  request through mao-a2a. Any in-cluster dependency of an A2A node must
+  admit and be trusted by all three MAS pods. *(live 2026-11-27)*
 - **An LLM must never spell a transport header.** The planning LLM emitted
   `X_OLS_Cluster` instead of `X-OLS-Cluster` in 3 of 5 delegations; Praxis has
   no default route, so each miss became a silent `no route matched` 404 and the

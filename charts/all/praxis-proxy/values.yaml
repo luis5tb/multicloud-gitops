@@ -508,7 +508,7 @@ a2aUpstream:
 #
 # Callers reach it at https://praxis-egress-<key>.<namespace>.svc:8443<path>
 # (internal TLS, OpenShift service-serving cert; callers must trust the
-# service CA -- mas-worker/mas-api identity.serviceCaTrust). Because the
+# service CA -- mas-a2a/mas-worker/mas-api identity.serviceCaTrust). Because the
 # pinned image cannot rewrite paths, the gateway serves the upstream's own
 # path. For A2A upstreams set agentCard: the gateway serves that card itself
 # with every interface URL forced to its own address (the upstream's card
@@ -583,13 +583,15 @@ egressGatewayConfig:
     # Namespaces whose pods may call the egress gateways.
     ingressFromNamespaces:
       - mao
-    # ANDed with each namespace above. MAS calls from mas-worker (node
-    # execution) and mas-api (the node validator's unauthenticated card GET
-    # when a blueprint is saved). Non-empty by design.
+    # ANDed with each namespace above. MAS calls from mas-a2a (the inbound
+    # A2A service builds the plan and fetches each node's card itself),
+    # mas-worker (node execution) and mas-api (the node validator's
+    # unauthenticated card GET when a blueprint is saved). Non-empty by design.
     ingressPodSelector:
       matchExpressions:
         - key: app.kubernetes.io/name
           operator: In
           values:
+            - mas-a2a
             - mas-worker
             - mas-api

@@ -176,9 +176,10 @@ The external IdP's mint events are not visible to us at all (unlike Keycloak's
 
 Internal ClusterIP Service, TLS on 8443 with an OpenShift service-serving
 cert (the same scheme as the spoke gateways), and no Route. A NetworkPolicy
-admits only `mas-worker` (runtime) and `mas-api` (the save-time validator)
-pods from `mao`. MAS trusts the service CA through
-`identity.serviceCaTrust.enabled` on both charts: the auto-injected
+admits only `mas-a2a` (the inbound A2A service builds the plan and fetches
+each node's card), `mas-worker` (runtime) and `mas-api` (the save-time
+validator) pods from `mao`. MAS trusts the service CA through
+`identity.serviceCaTrust.enabled` on all three charts: the auto-injected
 `openshift-service-ca.crt` ConfigMap is appended to the bundle the existing
 `keycloakCaTrust` init container builds.
 
@@ -249,8 +250,8 @@ SSO client itself (placeholder in Vault).
 
 ## Rollout
 
-1. Sync: praxis-proxy renders `praxis-egress-ask-red-hat`; mas-worker and
-   mas-api roll to pick up the service CA.
+1. Sync: praxis-proxy renders `praxis-egress-ask-red-hat`; mas-a2a,
+   mas-worker and mas-api roll to pick up the service CA.
 2. Point the MAS node at the gateway (one time, against the MAS API as an
    admin user):
 

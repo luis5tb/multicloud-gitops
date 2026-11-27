@@ -1,6 +1,8 @@
-"""mas-worker / mas-api identity.serviceCaTrust: also trust the OpenShift
-service CA (for the internal praxis-proxy egress gateways). Off by default,
-in which case the render must not change at all."""
+"""mas-a2a / mas-worker / mas-api identity.serviceCaTrust: also trust the
+OpenShift service CA (for the internal praxis-proxy egress gateways). Off by
+default, in which case the render must not change at all. mas-a2a is included
+because it builds the plan and fetches each A2A node's card itself (found live
+2026-11-27: the first Ask Red Hat request failed there)."""
 
 from __future__ import annotations
 
@@ -12,12 +14,29 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CHARTS = ["mas-worker", "mas-api"]
-BASE = [
+CHARTS = ["mas-a2a", "mas-worker", "mas-api"]
+COMMON = [
     "--set", "runCredentials.secretName=run-creds",
-    "--set", "identity.providerMode=dev",
     "--set", "identity.keycloakCaTrust.enabled=true",
 ]
+BASE = {
+    "mas-worker": [*COMMON, "--set", "identity.providerMode=dev"],
+    "mas-api": [*COMMON, "--set", "identity.providerMode=dev"],
+    # mas-a2a renders nothing unless enabled, and only builds the CA bundle in
+    # keycloak mode.
+    "mas-a2a": [
+        *COMMON,
+        "--set", "identity.providerMode=keycloak",
+        "--set", "identity.keycloakIssuerUri=https://kc.example/realms/r",
+        "--set", "identity.keycloakAudience=mas-a2a",
+        "--set", "a2a.enabled=true",
+        "--set", "a2a.blueprintId=b",
+        "--set", "a2a.publicBaseUrl=https://mas.example",
+        "--set", "a2a.allowedPrincipals[0]=p",
+        "--set", "image.repository=quay.io/example/mas",
+        "--set", "image.tag=v1",
+    ],
+}
 
 pytestmark = pytest.mark.skipif(
     shutil.which("helm") is None, reason="helm is required to render chart"
@@ -26,7 +45,7 @@ pytestmark = pytest.mark.skipif(
 
 def _render(chart: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["helm", "template", chart, str(REPO_ROOT / "charts/all/mao" / chart), *BASE, *args],
+        ["helm", "template", chart, str(REPO_ROOT / "charts/all/mao" / chart), *BASE[chart], *args],
         check=check, capture_output=True, text=True,
     )
 

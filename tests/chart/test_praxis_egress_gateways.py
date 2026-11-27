@@ -207,7 +207,8 @@ def test_networkpolicy() -> None:
     np = _get(_resources(*EGRESS), "NetworkPolicy")
     peer = np["spec"]["ingress"][0]["from"][0]
     assert peer["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": "mao"}
-    assert peer["podSelector"]["matchExpressions"][0]["values"] == ["mas-worker", "mas-api"]
+    # mas-a2a builds the plan and fetches the card itself (live 2026-11-27).
+    assert peer["podSelector"]["matchExpressions"][0]["values"] == ["mas-a2a", "mas-worker", "mas-api"]
     assert np["spec"]["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8443}]
     https = np["spec"]["egress"][1]
     assert https["ports"] == [{"protocol": "TCP", "port": 443}]

@@ -513,7 +513,7 @@ individual users.
 | `ConfigMap praxis-egress-<key>` | TLS listener (8443), `policy` (local Keycloak only + `azp` allow-list + delegator), `headers` (`Host` = upstream host), the agent card from `agentCard`, router for the upstream's own path prefix, upstream cluster verified with `policy.caBundleConfigMap` |
 | `Deployment praxis-egress-<key>` | same pinned image, DNS sidecar and trust store as the other gateways; app label `praxis-egress-gateway`, so the main Service never selects it |
 | `Service praxis-egress-<key>` | ClusterIP 8443 with an OpenShift service-serving cert; no Route |
-| `NetworkPolicy praxis-egress-<key>` | ingress only from `egressGatewayConfig.networkPolicy` namespaces and pods (default: `mas-worker`, `mas-api` in `mao`); egress DNS + TCP 443 |
+| `NetworkPolicy praxis-egress-<key>` | ingress only from `egressGatewayConfig.networkPolicy` namespaces and pods (default: `mas-a2a`, `mas-worker`, `mas-api` in `mao`); egress DNS + TCP 443 |
 | `ExternalSecret praxis-egress-<key>-client` | only with `clientSecret.vaultKey`; reads the same Vault record the caller-side client uses |
 
 Rules:
@@ -548,7 +548,8 @@ Rules:
   the pinned image. Keep the copy current
   (`docs/EXTERNAL_IDP_EGRESS.md`, "Keeping the card current").
 - **Callers must trust the OpenShift service CA.** Set
-  `identity.serviceCaTrust.enabled` on mas-worker and mas-api.
+  `identity.serviceCaTrust.enabled` on mas-a2a, mas-worker and mas-api. All
+  three call the gateway: mas-a2a fetches the card when it builds the plan.
 - **Stage to production is a values change only** (`upstreamURL`,
   `tokenUrl`, the Vault record, plus `agentCard` if the cards differ). Callers keep `base_url` = the gateway. The standalone variant puts
   each environment in its own `extraValueFiles` file.

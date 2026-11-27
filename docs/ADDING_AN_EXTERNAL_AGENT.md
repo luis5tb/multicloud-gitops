@@ -200,8 +200,9 @@ run `make run-ci-tests`.
 
 ### 6. Sync and smoke-test the gateway
 
-After the sync, from a pod the gateway's NetworkPolicy admits (`mas-worker` or
-`mas-api` in `mao`, with a bundle that includes the service CA):
+After the sync, from a pod the gateway's NetworkPolicy admits (`mas-a2a`,
+`mas-worker` or `mas-api` in `mao`, with a bundle that includes the service
+CA):
 
 1. `GET https://praxis-egress-foo.praxis-proxy.svc:8443/a2a/.well-known/agent-card.json`
    returns your card with `url` = the gateway.
@@ -278,7 +279,8 @@ differs, give it its own card file too.
 | Pod stuck in `CreateContainerConfigError` | the client secret's Secret doesn't exist: ExternalSecret not synced (Vault key or property wrong) |
 | `render-config` init container fails | the Vault record's `client-id` is empty or contains characters outside `[A-Za-z0-9._-]` |
 | Old credentials still used after a Vault change | they are read at pod start: `oc rollout restart` the gateway |
-| MAS: TLS / certificate error to the gateway | mas-worker or mas-api without `identity.serviceCaTrust.enabled` |
+| MAS: TLS / certificate error to the gateway | mas-a2a, mas-worker or mas-api without `identity.serviceCaTrust.enabled` |
+| mao-a2a: `Network communication error fetching agent card` from the gateway URL | the gateway's NetworkPolicy does not admit the calling pod (mas-a2a fetches the card itself when it builds the plan) |
 | MAS: connection timeout to the gateway | caller not admitted by the gateway's NetworkPolicy (`egressGatewayConfig.networkPolicy`) |
 | `401 auth.malformed_header` / `auth.token_expired` | no or expired Token A reached the gateway |
 | `403 ... not an allow-listed caller` | Token A's `azp` isn't in the gateway's allow-list |
