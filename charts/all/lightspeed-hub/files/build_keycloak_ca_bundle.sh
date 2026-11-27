@@ -30,17 +30,48 @@ fi
 [ -f "$KEYCLOAK_CA_BUNDLE" ] && [ -s "$KEYCLOAK_CA_BUNDLE" ] ||
     fail "mounted Keycloak CA bundle is missing or empty"
 
-# Catch absent PEM data without adding an openssl/Python runtime dependency.
-# Actual chain/signature/hostname verification remains with Go's TLS client.
+# The adapter image is intentionally minimal; do not assume grep or cat are
+# installed. Actual chain/signature/hostname verification remains with Go's
+# TLS client.
+has_pem_markers() {
+    file=$1
+    has_begin=0
+    has_end=0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            *"-----BEGIN CERTIFICATE-----"*) has_begin=1 ;;
+            *"-----END CERTIFICATE-----"*) has_end=1 ;;
+        esac
+    done < "$file"
+
+    [ "$has_begin" -eq 1 ] && [ "$has_end" -eq 1 ]
+}
+
 for bundle in "$public_bundle" "$KEYCLOAK_CA_BUNDLE"; do
-    grep -q -- '-----BEGIN CERTIFICATE-----' "$bundle" &&
-        grep -q -- '-----END CERTIFICATE-----' "$bundle" ||
+    has_pem_markers "$bundle" ||
         fail "public or Keycloak CA bundle contains no complete PEM certificates"
 done
 
-# No pipeline: set -e must notice a failed read or write of either input.
-# A newline between files also handles a source without a trailing newline.
+append_file() {
+    file=$1
+    while :; do
+        if IFS= read -r line; then
+            printf '%s\n' "$line"
+        else
+            if [ -n "$line" ]; then
+                printf '%s' "$line"
+            fi
+            break
+        fi
+    done < "$file"
+}
+
+# Preserve each input exactly and insert a newline between them, including
+# when the public bundle has no trailing newline.
 umask 022
-cat "$public_bundle" > "$COMBINED_CA_BUNDLE"
-printf '\n' >> "$COMBINED_CA_BUNDLE"
-cat "$KEYCLOAK_CA_BUNDLE" >> "$COMBINED_CA_BUNDLE"
+{
+    append_file "$public_bundle"
+    printf '\n'
+    append_file "$KEYCLOAK_CA_BUNDLE"
+} > "$COMBINED_CA_BUNDLE"

@@ -215,6 +215,11 @@ def bundle_builder(tmp_path):
             KEYCLOAK_CA_BUNDLE=str(private_path),
             COMBINED_CA_BUNDLE=str(output),
         )
+        # The init image is minimal: the script must work without external
+        # grep/cat utilities being available on PATH.
+        empty_path = tmp_path / "empty-path"
+        empty_path.mkdir(exist_ok=True)
+        env["PATH"] = str(empty_path)
         result = subprocess.run(
             [*init["command"], *init["args"]],
             env=env,

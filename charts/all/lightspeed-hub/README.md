@@ -116,13 +116,15 @@ HTTPS client uses this file; no adapter binary change or new image is needed.
 This extends default outbound trust; Kubernetes clients with their explicitly
 configured API CA continue using that CA. TLS/hostname verification stays on.
 
-The image needs `/bin/sh`, `cat`, `grep` and public PEM roots (the UBI-minimal
-adapter has them). Fail-closed by design: a wrong `publicBundlePath`, missing
-or empty inputs, or a bundle without PEM markers stops init; the source
-ConfigMap and key are required projections; there is never a private-CA-only
-fallback. Go still performs the real chain/signature/hostname checks. The init
-container is non-root, read-only rootfs, all capabilities dropped, writing only
-the shared `emptyDir`; no adapter RBAC changes are needed.
+The image needs `/bin/sh` and public PEM roots at the configured path. The
+bundle script uses shell built-ins for PEM-marker checks and concatenation; it
+does not depend on `grep`, `cat`, OpenSSL, or Python being installed in the
+adapter image. Fail-closed by design: a wrong `publicBundlePath`, missing or
+empty inputs, or a bundle without PEM markers stops init; the source ConfigMap
+and key are required projections; there is never a private-CA-only fallback.
+Go still performs the real chain/signature/hostname checks. The init container
+is non-root, read-only rootfs, all capabilities dropped, writing only the
+shared `emptyDir`; no adapter RBAC changes are needed.
 
 ### Initial deployment (GitOps, no manual CA patch)
 

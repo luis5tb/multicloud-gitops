@@ -527,6 +527,14 @@ re-check each when the image is bumped.
 
 ## 8. lightspeed-hub / agentic operator
 
+- **The CA-bundle init script cannot assume utilities in the adapter image.**
+  During the 2026-11-27 remediation rollout, the adapter image pulled
+  successfully and `/bin/sh` started, but init exited because `grep` was not
+  present; its follow-up error misleadingly suggested malformed PEM. The
+  namespace-local CA ConfigMap did contain the expected PEM markers. The chart
+  test had executed the script with the workstation's `PATH`, so it did not
+  reproduce the image's minimal runtime. Keep the script shell-builtin-only
+  and run its test with an empty `PATH`. *(live 2026-11-27)*
 - **A successful CSV is not "done reconciling".** Pausing the operator as soon
   as the CSV reported `Succeeded` froze it before it created the postgres
   bootstrap Secret: postgres stuck `ContainerCreating`, the app-server init
